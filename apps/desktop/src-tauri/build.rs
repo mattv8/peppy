@@ -40,6 +40,7 @@ const COMMANDS: &[&str] = &[
     "dismiss_all_notifications",
     "set_app_muted",
     "set_conversation_pinned",
+    "set_conversation_tone",
     "mark_notifications_seen",
     "set_notification_preferences",
     "set_notification_context",

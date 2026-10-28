@@ -1350,4 +1350,16 @@ describe("ContactsView", () => {
     });
 
   });
+
+  it("persists the saved contact number tone without using a draft phone", async () => {
+    const onSelectTone = vi.fn();
+    render(<ContactsView toneOverrides={{ "+12025550123": 61 }} onSelectTone={onSelectTone} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+    fireEvent.click(screen.getByLabelText("Edit contact"));
+    fireEvent.change(screen.getByLabelText("Phone 1 number"), { target: { value: "+12025550999" } });
+    fireEvent.click(screen.getByRole("button", { name: "Conversation color: Rose" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Automatic" }));
+    expect(onSelectTone).toHaveBeenCalledWith("+12025550123", null);
+    expect(screen.getByText(/Tied to the saved number/)).toBeVisible();
+  });
 });

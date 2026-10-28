@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn handles(command: &str) -> bool {
-    command == "set_conversation_pinned"
+    matches!(command, "set_conversation_pinned" | "set_conversation_tone")
 }
 
 impl BrowserCore {
@@ -25,6 +25,18 @@ impl BrowserCore {
                     .set_conversation_pinned(conversation_id, input.pinned)
                     .map_err(core)?;
             }
+            "set_conversation_tone" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Input {
+                    seed: String,
+                    palette_index: Option<u8>,
+                }
+                let input: Input = serde_json::from_value(args).map_err(|_| invalid())?;
+                self.client()?
+                    .set_conversation_tone(&input.seed, input.palette_index)
+                    .map_err(core)?;
+            }
             _ => return Err(unknown_command()),
         }
         Ok(json!({}))
@@ -43,8 +55,9 @@ mod tests {
     }
 
     #[test]
-    fn exposes_only_the_conversation_pin_command() {
+    fn exposes_only_the_conversation_commands() {
         assert!(handles("set_conversation_pinned"));
+        assert!(handles("set_conversation_tone"));
         assert!(!handles("set_conversation_pin"));
     }
 
@@ -58,6 +71,11 @@ mod tests {
             &mut core,
             "open",
             json!({"vaultId": vault, "deviceId": device, "databaseKey": vec![1; 32], "origin": "https://peppy.test", "deviceRole": "device"}),
+        );
+        assert!(
+            response(&mut core, "snapshot", json!({}))["value"]
+                .get("toneOverrides")
+                .is_none()
         );
         let conversation = ConversationId::new();
         assert_eq!(
@@ -106,5 +124,31 @@ mod tests {
             response(&mut core, "snapshot", json!({}))["value"]["conversations"][0]["pinned"],
             true
         );
+        assert_eq!(
+            response(
+                &mut core,
+                "set_conversation_tone",
+                json!({"seed": "contact:+15555550100", "paletteIndex": 60}),
+            )["ok"],
+            true
+        );
+        assert_eq!(
+            response(&mut core, "snapshot", json!({}))["value"]["toneOverrides"],
+            json!({"contact:+15555550100": 60})
+        );
+    }
+
+    #[test]
+    fn tone_mutation_rejects_invalid_json_palette_indexes_without_wrapping() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(directory.path().to_owned());
+
+        let response = response(
+            &mut core,
+            "set_conversation_tone",
+            json!({"seed": "contact:+15555550100", "paletteIndex": 256}),
+        );
+
+        assert_eq!(response["error"]["code"], "invalid-request");
     }
 }

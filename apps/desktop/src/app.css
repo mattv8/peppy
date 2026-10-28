@@ -246,6 +246,9 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   background: var(--peppy-surface-chrome);
   overflow: hidden;
 }
+#thread-contact-avatar { width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+#thread-contact-avatar:hover { box-shadow: 0 0 0 2px var(--peppy-focus-ring-alpha); }
+#thread-contact-avatar:focus-visible { outline-offset: 2px; }
 #notifications-dismiss-all { flex: 0 0 auto; white-space: nowrap; }
 .server-offline-banner {
   display: flex;
@@ -483,9 +486,17 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   color: var(--peppy-text-primary);
 }
 .message-bubble.self {
-  background: var(--peppy-accent);
-  color: var(--peppy-accent-text);
-  border-color: var(--peppy-accent);
+  background: var(--peppy-bubble-self-surface);
+  color: var(--peppy-bubble-self-text);
+  border-color: var(--peppy-bubble-self-border);
+}
+.message-bubble[data-peppy-tone] {
+  --peppy-tone-surface: var(--peppy-tone);
+  --peppy-tone-on-surface: var(--peppy-tone-text);
+  --peppy-tone-border: var(--peppy-tone);
+  background: var(--peppy-tone-surface);
+  color: var(--peppy-tone-on-surface);
+  border-color: var(--peppy-tone-border);
 }
 .message-bubble p {
   margin: 0 0 6px;
@@ -522,6 +533,10 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   font-size: 11px;
 }
 .message-bubble.self .message-subject { color: var(--peppy-accent-text); }
+.message-bubble[data-peppy-tone] .message-subject { color: inherit; }
+@media (forced-colors: active) {
+  .message-bubble[data-peppy-tone] { background: Canvas; color: CanvasText; border-color: CanvasText; }
+}
 @media (forced-colors: active) {
   .message-meta[data-status="failed-before-submit"],
   .message-meta[data-status="failed-confirmed"],
@@ -551,6 +566,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   border: 1px solid var(--peppy-border);
   border-radius: 4px;
   background: var(--peppy-surface-editor);
+  color: var(--peppy-text-primary);
 }
 .file-card img {
   width: 28px;
@@ -559,6 +575,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 }
 .file-card small {
   margin-left: auto;
+  color: var(--peppy-text-secondary);
 }
 .file-card > span {
   min-width: 0;
@@ -569,7 +586,10 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   display: grid;
   gap: 4px;
   width: 100%;
+  color: var(--peppy-text-primary);
 }
+.message-bubble [data-inline-media],
+.message-bubble [data-media-play-trigger] { color: var(--peppy-text-primary); }
 .public-copy label {
   display: grid;
   gap: 4px;

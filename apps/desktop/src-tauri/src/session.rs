@@ -1472,7 +1472,7 @@ impl Session {
             .status
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let (encryption_state, _) = encryption_state(
+        let (encryption_state, unlocked) = encryption_state(
             self.mismatch.load(Ordering::Relaxed),
             status.vault.as_ref(),
             &keys,
@@ -1493,6 +1493,9 @@ impl Session {
                 profile_fingerprint: None,
             },
         };
+        let tone_overrides = unlocked
+            .then(|| self.client.conversation_tones().map_err(core_error))
+            .transpose()?;
         let connection = if status.revoked {
             dto::Connection {
                 state: "error",
@@ -1560,6 +1563,7 @@ impl Session {
             contact_books: contacts.books,
             contacts_pending_count: contacts.pending_count,
             contact_sync: contacts.sync,
+            tone_overrides,
         };
         Ok((snapshot, hydration))
     }
@@ -1665,7 +1669,7 @@ mod tests {
         tests::{fixture_at, gateway, input, routed, PHRASE},
     };
     use peppy_client_core::IncomingSms;
-    use std::sync::atomic::AtomicUsize;
+    use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
 
     #[test]
     fn encryption_state_preserves_snapshot_precedence() {
@@ -1714,6 +1718,76 @@ mod tests {
             .0,
             EncryptionState::Locked
         );
+    }
+
+    #[test]
+    fn snapshots_omit_tone_overrides_until_the_active_epoch_is_unlocked() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        assert!(session
+            .snapshot(
+                None,
+                None,
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap()
+            .0
+            .tone_overrides
+            .is_none());
+
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        session
+            .client
+            .set_conversation_tone("contact:+15555550100", Some(60))
+            .unwrap();
+        assert_eq!(
+            session
+                .snapshot(
+                    None,
+                    None,
+                    crate::head(),
+                    None,
+                    NotificationPreferences::default(),
+                )
+                .unwrap()
+                .0
+                .tone_overrides,
+            Some(BTreeMap::from([("contact:+15555550100".into(), 60)]))
+        );
+
+        drop(session);
+        let locked = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        assert!(locked
+            .snapshot(
+                None,
+                None,
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap()
+            .0
+            .tone_overrides
+            .is_none());
     }
 
     #[test]

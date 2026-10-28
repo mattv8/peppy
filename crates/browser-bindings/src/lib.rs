@@ -593,6 +593,9 @@ impl BrowserCore {
             contact_books: None,
             contacts_pending_count: None,
             contact_sync: None,
+            tone_overrides: unlocked
+                .then(|| client.conversation_tones().map_err(core))
+                .transpose()?,
         })
         .map_err(|_| core(CoreError::Database))
     }

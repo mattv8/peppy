@@ -45,6 +45,31 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
 - Bundle fonts and assets locally. The CSP stays `default-src 'self'`; add no
   remote sources. Treat display timestamps as opaque strings.
 
+## Conversation tone contract
+
+- Conversation identity uses the existing normalized seed and 120-slot palette.
+  Manual choices override a slot for that seed; Automatic removes the active
+  override through a retained encrypted sync record. Neither choice edits a
+  phone's contact book.
+- Incoming 1:1 bubbles match the conversation avatar's tone. Group bubbles use
+  the sender's normalized address, with the group seed as fallback. Outgoing
+  bubbles use the self-bubble theme tokens, which default to the coral accent.
+- `packages/desktop-ui/src/tone.tsx` owns tone resolution. Theme palettes retain
+  stable slot identities and supply matching foreground colors with at least
+  4.5:1 text contrast. Do not resample the existing avatar palette to add a preset.
+- `--peppy-tone` and `--peppy-tone-text` are element-local base values. Derive
+  bubble surface, foreground and border tokens on the colored element, where
+  CSS variable references can resolve its seed-specific values. Set an explicit
+  foreground on neutral attachment surfaces nested inside colored bubbles.
+- The contact editor's color preference targets the saved primary number and
+  saves immediately, independently of contact Save/Cancel. Unsaved number edits
+  must not silently retarget the color preference. Disable the picker when no
+  saved number is available.
+- Color preferences are vault-scoped. Locked snapshots omit the override map;
+  absence of the optional map alone is not a lock signal. Use explicit session
+  and app-lock guards for mutations, and discard stale UI completion state
+  when the session or target changes.
+
 ## Titlebar status and chrome
 
 - Main `Panel.status` carries sync, carrier disclosure, and connection state.

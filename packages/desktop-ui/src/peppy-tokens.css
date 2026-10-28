@@ -35,6 +35,9 @@
   --peppy-accent: #ff8a73;
   --peppy-accent-hover: #ff9d89;
   --peppy-accent-text: #1a1a1a;
+  --peppy-bubble-self-surface: var(--peppy-accent);
+  --peppy-bubble-self-text: var(--peppy-accent-text);
+  --peppy-bubble-self-border: var(--peppy-accent);
   --peppy-success: #89d185;
   --peppy-error: #f48771;
   --peppy-warning-text: #f2cc60;
@@ -102,6 +105,9 @@
   --peppy-accent: #c9422d;
   --peppy-accent-hover: #b23a27;
   --peppy-accent-text: #fff;
+  --peppy-bubble-self-surface: var(--peppy-accent);
+  --peppy-bubble-self-text: var(--peppy-accent-text);
+  --peppy-bubble-self-border: var(--peppy-accent);
   --peppy-success: #2e7d32;
   --peppy-error: #c72e0f;
   --peppy-warning-text: #7a5200;

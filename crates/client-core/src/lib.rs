@@ -31,6 +31,7 @@ mod contact_sync_requests;
 mod contacts;
 mod conversation_match;
 mod conversation_pinning;
+mod conversation_tones;
 mod deferred_media;
 mod gateway_settings;
 mod history_import;
@@ -102,7 +103,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 37;
+const SCHEMA_VERSION: i64 = 38;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 
@@ -375,6 +376,12 @@ pub enum PrivatePayload {
     ConversationPin {
         conversation_id: ConversationId,
         pinned: bool,
+        logical_revision: u64,
+        writer_device_id: String,
+    },
+    ConversationTone {
+        seed: String,
+        palette_index: Option<u8>,
         logical_revision: u64,
         writer_device_id: String,
     },
@@ -4729,6 +4736,11 @@ CREATE TABLE IF NOT EXISTS conversation_pins(conversation_id TEXT PRIMARY KEY, p
   logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
   producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
 ";
+const MIGRATION_38: &str = "
+CREATE TABLE IF NOT EXISTS conversation_tones(seed TEXT PRIMARY KEY, palette_index INTEGER,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
+  producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
+";
 
 fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
     let column = definition
@@ -4745,9 +4757,9 @@ fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Re
     }
     Ok(())
 }
-/// Decoder revision five replays applied conversation-pin events per epoch, restoring LWW state
-/// and compaction frontiers after older clients recorded them as unknown.
-const DECODER_REVISION: &str = "5";
+/// Decoder revision six replays applied conversation pin/tone events per epoch, restoring LWW
+/// state and compaction frontiers after older clients recorded them as unknown.
+const DECODER_REVISION: &str = "6";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -4837,6 +4849,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_35)?;
             apply_migration_36(&tx)?;
             tx.execute_batch(MIGRATION_37)?;
+            tx.execute_batch(MIGRATION_38)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4845,7 +4858,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=36)) => {
+        Some(version @ (4..=37)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4944,6 +4957,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 36 {
                 tx.execute_batch(MIGRATION_37)?;
+            }
+            if version <= 37 {
+                tx.execute_batch(MIGRATION_38)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -5052,13 +5068,16 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
             let payload = match serde_json::from_slice::<PrivatePayload>(&plain) {
                 Ok(payload) => payload,
                 Err(_) => {
-                    let is_malformed_pin = serde_json::from_slice::<serde_json::Value>(&plain)
-                        .ok()
-                        .is_some_and(|value| {
-                            value.get("kind").and_then(|kind| kind.as_str())
-                                == Some("conversation_pin")
-                        });
-                    if status == "applied" && is_malformed_pin {
+                    let is_malformed_tone_or_pin =
+                        serde_json::from_slice::<serde_json::Value>(&plain)
+                            .ok()
+                            .is_some_and(|value| {
+                                matches!(
+                                    value.get("kind").and_then(|kind| kind.as_str()),
+                                    Some("conversation_pin" | "conversation_tone")
+                                )
+                            });
+                    if status == "applied" && is_malformed_tone_or_pin {
                         conn.execute(
                             "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
                             params![cursor],
@@ -5144,6 +5163,43 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                     learn_compaction(
                         conn,
                         Some(&format!("conversation-pin:{conversation_id}")),
+                        &producer,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::ConversationTone {
+                        seed,
+                        palette_index,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) => {
+                    let producer = envelope.producer_device_id.to_string();
+                    if !conversation_tones::valid_event(
+                        &seed,
+                        palette_index,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                    ) {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                        continue;
+                    }
+                    conversation_tones::apply(
+                        conn,
+                        &seed,
+                        palette_index,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                        envelope.producer_sequence.0,
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("conversation-tone:{seed}")),
                         &producer,
                         to_i64(envelope.producer_sequence.0)?,
                         envelope.compaction.as_ref(),
@@ -5326,6 +5382,7 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "notification_dismiss"
             | "app_filter"
             | "conversation_pin"
+            | "conversation_tone"
             | "mms_own_address"
             | "contact_book_state"
             | "contact_upserted"
@@ -5581,6 +5638,35 @@ fn apply_record(
                 conn,
                 conversation_id,
                 pinned,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+                envelope.producer_sequence.0,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::ConversationTone {
+                seed,
+                palette_index,
+                logical_revision,
+                writer_device_id,
+            },
+        ) => {
+            let producer = producer.to_string();
+            if !conversation_tones::valid_event(
+                &seed,
+                palette_index,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            conversation_tones::apply(
+                conn,
+                &seed,
+                palette_index,
                 logical_revision,
                 &writer_device_id,
                 &producer,
@@ -6515,6 +6601,9 @@ fn compaction_group(
             vec![conversation_id.to_string().into_bytes()],
             false,
         ),
+        PrivatePayload::ConversationTone { seed, .. } => {
+            (b"conversation-tone", vec![seed.as_bytes().to_vec()], false)
+        }
         PrivatePayload::ContactBookState { book } => {
             (b"contact-book", vec![text(book, "id")?], false)
         }
@@ -6615,6 +6704,7 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
         PrivatePayload::ConversationPin {
             conversation_id, ..
         } => Some(format!("conversation-pin:{conversation_id}")),
+        PrivatePayload::ConversationTone { seed, .. } => Some(format!("conversation-tone:{seed}")),
         PrivatePayload::ContactBookState { book } => book
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -9504,7 +9594,7 @@ mod tests {
         apply_database_key(&conn, &key()).unwrap();
         conn.execute_batch(
             "DROP INDEX outbox_queued_priority;
-               UPDATE schema_meta SET version=38;",
+               UPDATE schema_meta SET version=39;",
         )
         .unwrap();
         drop(conn);
@@ -9519,7 +9609,7 @@ mod tests {
             conn.query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            38
+            39
         );
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM drafts", [], |row| row

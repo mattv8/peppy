@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ContactAvatar, Modal, Plus, X, contactSeed } from "@peppy/desktop-ui";
+import { ContactAvatar, Modal, Plus, TonePicker, X, contactSeed, paletteIndex, seedKey } from "@peppy/desktop-ui";
 import {
   type ContactView,
   type ContactPhone,
@@ -72,6 +72,8 @@ export function ContactForm({
   validationError,
   busy,
   bookCapabilities,
+  toneControl,
+  savedToneSeed,
 }: {
   initial?: ContactView;
   onCancel(): void;
@@ -81,6 +83,8 @@ export function ContactForm({
   validationError?: string;
   busy?: boolean;
   bookCapabilities?: { canWrite: boolean; supportsNotes: boolean; supportsPhoto: boolean; supportsBirthday?: boolean };
+  toneControl?: { value?: number; pending?: boolean; error?: string; disabled?: boolean; onSelect(index: number | null): void };
+  savedToneSeed?: string;
 }) {
   const rowSequence = useRef(0);
   // Existing domain IDs win; new unsaved rows get a stable form-local allocation ID.
@@ -136,6 +140,8 @@ export function ContactForm({
     [draft.givenName, draft.familyName].filter(Boolean).join(" ") ||
     draft.nickname ||
     "#";
+  const savedPhone = initial?.phones.find((phone) => Boolean(seedKey(phone.number)));
+  const draftPrimarySeed = draft.phones.find((phone) => Boolean(seedKey(phone.number)))?.number;
 
   const handlePhoneChange = (index: number, field: "label" | "number", value: string) => {
     setDraft(prev => ({
@@ -512,6 +518,11 @@ export function ContactForm({
           ) : (
             <p id="contact-form-phones-empty">No phone numbers added yet</p>
           )}
+        </section>
+        <section data-form-section="tone">
+          <header id="contact-form-tone-header"><h3>Conversation color</h3></header>
+          <TonePicker id="contact-form-tone-picker" variant="field" seed={savedToneSeed ?? `contact:${initial?.id ?? "new"}`} value={toneControl?.value} automaticIndex={paletteIndex(savedToneSeed ?? `contact:${initial?.id ?? "new"}`)} disabled={!savedToneSeed || !toneControl || toneControl.disabled} disabledReason={!savedToneSeed ? "Save a phone number to choose a color." : undefined} pending={toneControl?.pending} error={toneControl?.error} describedBy="contact-form-tone-note" onSelect={(index) => toneControl?.onSelect(index)} />
+          <p id="contact-form-tone-note">{savedPhone && savedToneSeed ? <>Saved immediately for {savedPhone.number}. Contact Save and Cancel don&apos;t affect it.{draftPrimarySeed && seedKey(draftPrimarySeed) !== savedToneSeed && <><br />Tied to the saved number, not the number being edited.</>}</> : "Save a phone number to choose a color."}</p>
         </section>
 
         <section data-form-section="emails">

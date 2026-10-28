@@ -117,6 +117,7 @@ describe("bridge subscriptions", () => {
     await tauriBridge.reveal_vault_secret();
     await tauriBridge.mark_all_read();
     await tauriBridge.set_conversation_pinned("conversation-id", true);
+    await tauriBridge.set_conversation_tone("contact:+15555550100", null);
     await tauriBridge.get_history_search();
     await tauriBridge.start_history_search({ operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2", query: "must not cross the bridge" } as never);
     await tauriBridge.cancel_history_search({ attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2", query: "must not cross the bridge" } as never);
@@ -132,9 +133,10 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(9, "reveal_vault_secret", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(10, "mark_all_read", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(11, "set_conversation_pinned", { conversationId: "conversation-id", pinned: true });
-    expect(invokeMock).toHaveBeenNthCalledWith(12, "get_history_search", undefined);
-    expect(invokeMock).toHaveBeenNthCalledWith(13, "start_history_search", { input: { operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
-    expect(invokeMock).toHaveBeenNthCalledWith(14, "cancel_history_search", { input: { attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
+    expect(invokeMock).toHaveBeenNthCalledWith(12, "set_conversation_tone", { seed: "contact:+15555550100", paletteIndex: null });
+    expect(invokeMock).toHaveBeenNthCalledWith(13, "get_history_search", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(14, "start_history_search", { input: { operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
+    expect(invokeMock).toHaveBeenNthCalledWith(15, "cancel_history_search", { input: { attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
   });
 });
 
@@ -158,6 +160,14 @@ describe("fixture draft saves", () => {
 
     expect((await fixtureBridge.load_state()).conversations.find(conversation => conversation.id === "conv-aurora")?.pinned).toBe(true);
     await expect(fixtureBridge.set_conversation_pinned("missing", true)).rejects.toMatchObject({ code: "not-found" });
+  });
+
+  it("persists fixture tone overrides and clears them with automatic", async () => {
+    await fixtureBridge.set_conversation_tone("contact:+15555550100", 60);
+    expect((await fixtureBridge.load_state()).toneOverrides).toEqual({ "contact:+15555550100": 60 });
+
+    await fixtureBridge.set_conversation_tone("contact:+15555550100", null);
+    expect((await fixtureBridge.load_state()).toneOverrides).toEqual({});
   });
 
   it("reuses one blank draft without overwriting its content", async () => {

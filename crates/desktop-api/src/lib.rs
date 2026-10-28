@@ -6,6 +6,7 @@ use peppy_client_core::{
     MirroredNotification, SendState, Transport,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub mod avatar;
 pub mod compose;
@@ -83,6 +84,9 @@ pub struct Snapshot {
     /// `{repairRequired, projection?: {state, reason?}}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contact_sync: Option<serde_json::Value>,
+    /// Active conversation tone presets. Omitted until vault keys are unlocked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tone_overrides: Option<BTreeMap<String, u8>>,
 }
 
 #[derive(Clone, Serialize)]
