@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS contact_photo_attachments(attachment_id TEXT PRIMARY 
 CREATE TABLE IF NOT EXISTS contact_photo_references(holder_kind TEXT NOT NULL, book_id TEXT NOT NULL, holder_id TEXT NOT NULL, attachment_id TEXT NOT NULL, retain_until INTEGER, PRIMARY KEY(holder_kind,book_id,holder_id));
 CREATE INDEX IF NOT EXISTS contact_photo_references_attachment ON contact_photo_references(attachment_id);
 CREATE TABLE IF NOT EXISTS contact_photo_registrations(envelope_id TEXT NOT NULL, attachment_id TEXT NOT NULL, remote_object_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(envelope_id,attachment_id));
+CREATE INDEX IF NOT EXISTS contact_photo_registrations_unacknowledged ON contact_photo_registrations(envelope_id) WHERE acknowledged=0;
 CREATE TABLE IF NOT EXISTS contact_photo_reclaims(attachment_id TEXT PRIMARY KEY, remote_object_id TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_due_at INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS contact_photo_aliases(old_id TEXT PRIMARY KEY, new_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contact_photo_unavailable(outbox_sequence INTEGER PRIMARY KEY, attachment_id TEXT, reason TEXT NOT NULL);

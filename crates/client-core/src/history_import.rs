@@ -83,14 +83,118 @@ pub(crate) fn history_import_gate_open(conn: &Connection, now_ms: i64) -> Result
 /// Returns whether imported history must yield to locally outstanding event publication. This is
 /// intentionally a plan-time decision: a page admitted immediately before the threshold may
 /// finish, but no durable history pause is recorded and live/recheck work remains available.
-pub(crate) fn outbox_backpressures_history(conn: &Connection) -> Result<bool, Error> {
-    let query = format!(
+fn outbox_backpressure_query() -> String {
+    format!(
         "SELECT COUNT(*) FROM (SELECT 1 FROM outbox WHERE purpose='event' \
          AND state IN ('unsealed','queued') AND {} LIMIT ?)",
         outbox_upload_eligible_predicate()
-    );
+    )
+}
+
+pub(crate) fn outbox_backpressures_history(conn: &Connection) -> Result<bool, Error> {
+    let query = outbox_backpressure_query();
     let count: i64 = conn.query_row(&query, params![MAX_PENDING_HISTORY_OUTBOX_EVENTS], |row| {
         row.get(0)
     })?;
     Ok(count >= MAX_PENDING_HISTORY_OUTBOX_EVENTS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Client, ClientConfig, DatabaseKey, DeviceId, VaultId};
+    use rusqlite::{Connection, StatementStatus};
+
+    fn cache_misses(conn: &Connection, reset: bool) -> i32 {
+        let mut current = 0;
+        let mut high_water = 0;
+        let status = unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                conn.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                &mut current,
+                &mut high_water,
+                i32::from(reset),
+            )
+        };
+        assert_eq!(status, rusqlite::ffi::SQLITE_OK);
+        current
+    }
+
+    #[test]
+    fn history_backpressure_query_uses_covering_indexes_for_large_ineligible_backlog() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("history-backpressure.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        drop(Client::open(config.clone(), DatabaseKey::new(&[9; 32]).unwrap()).unwrap());
+
+        let conn = Connection::open(&config.database_path).unwrap();
+        conn.execute_batch(
+            "PRAGMA key = \"x'0909090909090909090909090909090909090909090909090909090909090909'\"; \
+             PRAGMA cache_size = -64; \
+             WITH RECURSIVE series(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM series WHERE value < 5000) \
+             INSERT INTO outbox(seq,envelope_id,purpose,state,plain,wire) \
+             SELECT value, 'pending-' || value, 'event', 'queued', zeroblob(16384), zeroblob(32768) FROM series; \
+             WITH RECURSIVE series(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM series WHERE value < 4500) \
+             INSERT INTO outbox_conflicts(envelope_id,cursor) \
+             SELECT 'pending-' || value, value FROM series; \
+             WITH RECURSIVE series(value) AS (SELECT 4501 UNION ALL SELECT value + 1 FROM series WHERE value < 4700) \
+             INSERT INTO contact_photo_registrations(envelope_id,attachment_id,remote_object_id,producer_sequence,acknowledged) \
+             SELECT 'pending-' || value, 'attachment-' || value, 'remote-' || value, value, 1 FROM series; \
+             WITH RECURSIVE series(value) AS (SELECT 5001 UNION ALL SELECT value + 1 FROM series WHERE value < 15000) \
+             INSERT INTO outbox(seq,envelope_id,purpose,state,plain,wire) \
+             SELECT value, 'acknowledged-' || value, 'event', 'acknowledged', zeroblob(16384), randomblob(32768) FROM series; \
+             PRAGMA shrink_memory;",
+        )
+        .unwrap();
+
+        let acknowledged_history_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outbox WHERE purpose='event' AND state='acknowledged' AND length(wire)=32768",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            acknowledged_history_rows >= 10_000,
+            "fixture must retain acknowledged event history with 32KB wire blobs: {acknowledged_history_rows}"
+        );
+
+        let query = outbox_backpressure_query();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+            .unwrap()
+            .query_map([MAX_PENDING_HISTORY_OUTBOX_EVENTS], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            plan.contains("USING COVERING INDEX outbox_pending_events_history"),
+            "{plan}"
+        );
+        assert!(
+            plan.contains("USING COVERING INDEX contact_photo_registrations_unacknowledged"),
+            "{plan}"
+        );
+
+        cache_misses(&conn, true);
+        let mut statement = conn.prepare(&query).unwrap();
+        let count: i64 = statement
+            .query_row([MAX_PENDING_HISTORY_OUTBOX_EVENTS], |row| row.get(0))
+            .unwrap();
+        let steps = statement.get_status(StatementStatus::VmStep);
+        assert_eq!(count, MAX_PENDING_HISTORY_OUTBOX_EVENTS);
+        assert!(steps <= 40_000, "history backpressure VM steps: {steps}");
+        assert!(
+            cache_misses(&conn, false) <= 128,
+            "history backpressure cache misses exceeded covering-index budget"
+        );
+        assert!(outbox_backpressures_history(&conn).unwrap());
+    }
 }

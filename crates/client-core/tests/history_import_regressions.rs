@@ -120,6 +120,72 @@ fn eligible_history_events_backpressure_sms_import_at_the_threshold() {
 }
 
 #[test]
+fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
+    let directory = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "history-backpressure-index-reinstall", &vault);
+    let client = unlocked(&config, &vault);
+    drop(client);
+
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    let version: i64 = connection
+        .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 36);
+    let outbox_index: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        outbox_index.contains("(envelope_id,compaction,purpose,state)"),
+        "{outbox_index}"
+    );
+    connection
+        .execute_batch(
+            "DROP INDEX outbox_pending_events_history; DROP INDEX contact_photo_registrations_unacknowledged;",
+        )
+        .unwrap();
+    drop(connection);
+
+    drop(open(&config));
+    drop(open(&config));
+
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    let index_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('outbox_pending_events_history','contact_photo_registrations_unacknowledged')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index_count, 2);
+    let outbox_index: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        outbox_index.contains("(envelope_id,compaction,purpose,state)"),
+        "{outbox_index}"
+    );
+}
+
+#[test]
 fn conflict_contact_registration_and_unsupported_compaction_rows_do_not_backpressure_history() {
     for (name, exclusion) in [
         (
