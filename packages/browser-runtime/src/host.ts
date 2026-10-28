@@ -307,6 +307,10 @@ type MediaLeases = {
 
 export async function dispatchBrowserRpc(session: HostSession, request: unknown, legacySettings?: LegacyNotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases, syncProgress?: SchedulerSyncProgress): Promise<RpcResponse> {
   if (!validRequest(request)) return { id: requestId(request), ok: false, error: { code: "invalid-request", message: "The request is invalid." } };
+  return dispatchValidatedBrowserRpc(session, request, legacySettings, publisher, mediaLeases, syncProgress);
+}
+
+async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcRequest, legacySettings?: LegacyNotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases, syncProgress?: SchedulerSyncProgress): Promise<RpcResponse> {
   const { id, command, args } = request;
   try {
     if (command === "load_state" && session.phase !== "ready") return { id, ok: true, value: safeSnapshot(session.phase) };
@@ -736,11 +740,15 @@ export class BrowserWorkerHost {
 
   private async handle(port: BrowserPort, request: unknown): Promise<void> {
     if (!this.owner || this.stopping) return;
-    if (validRequest(request) && request.command === "lock_sync") {
+    if (!validRequest(request)) {
+      port.postMessage({ id: requestId(request), ok: false, error: { code: "invalid-request", message: "The request is invalid." } });
+      return;
+    }
+    if (request.command === "lock_sync") {
       await this.stop("locked", () => port.postMessage({ id: request.id, ok: true, value: undefined }));
       return;
     }
-    if (validRequest(request) && request.command === "disconnect") {
+    if (request.command === "disconnect") {
       try { await this.releasePortMedia(port); } catch {} finally {
         this.ports.delete(port);
         this.mediaLeases.delete(port);
@@ -751,7 +759,7 @@ export class BrowserWorkerHost {
       }
       return;
     }
-    if (validRequest(request) && request.command === "set_notification_context") {
+    if (request.command === "set_notification_context") {
       const context = notificationContext(request.args);
       if (!context) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
       this.presentationPort = port;
@@ -760,19 +768,19 @@ export class BrowserWorkerHost {
       this.drainPresentation();
       return;
     }
-    if (validRequest(request) && request.command === "display_ack") {
+    if (request.command === "display_ack") {
       const ids = request.args.ids;
       if (port !== this.presentationPort || !Array.isArray(ids) || ids.some(id => typeof id !== "string")) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
       try { await this.presenter?.acknowledgeDisplayed(ids); port.postMessage({ id: request.id, ok: true, value: undefined }); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
       return;
     }
-    if (validRequest(request) && request.command === "unlock" && this.owner.owner.phase === "ready") {
+    if (request.command === "unlock" && this.owner.owner.phase === "ready") {
       const passphrase = secretString(request.args, "passphrase");
       if (!passphrase || !this.dependencies.network?.unlockNewEpoch) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
       try { await this.dependencies.network.unlockNewEpoch(passphrase); void this.startSearchIndexWhenReady(); port.postMessage({ id: request.id, ok: true, value: undefined }); this.changed(); this.dependencies.network.wake?.(); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
       return;
     }
-    if (validRequest(request) && request.command.startsWith("enrollment_")) {
+    if (request.command.startsWith("enrollment_")) {
       const response = await this.enrollment(request);
       port.postMessage(response);
       if (response.ok && ENROLLMENT_MUTATIONS.has(request.command)) {
@@ -785,28 +793,28 @@ export class BrowserWorkerHost {
       if (this.owner.owner.phase === "closed") await this.stop("closed");
       return;
     }
-    if (validRequest(request) && (request.command === "list_devices" || request.command === "revoke_device")) {
+    if (request.command === "list_devices" || request.command === "revoke_device") {
       const response = await this.deviceManagement(request);
       port.postMessage(response);
       if (response.ok && request.command === "revoke_device") this.changed();
       return;
     }
-    if (validRequest(request) && request.command === "advance_search_index") {
+    if (request.command === "advance_search_index") {
       const response = await this.explicitSearchIndexAdvance(request);
       if (this.ports.has(port)) port.postMessage(response);
       return;
     }
-    if (validRequest(request) && HISTORY_COMMANDS.has(request.command)) {
+    if (HISTORY_COMMANDS.has(request.command)) {
       const response = await this.historySearch(port, request);
       if (this.ports.has(port)) port.postMessage(response);
       return;
     }
     const generation = this.visibleGeneration();
-    const command = validRequest(request) ? request.command : undefined;
+    const command = request.command;
     let response: RpcResponse;
     this.dispatchesInFlight += 1;
     try {
-      response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.legacySettings, this.dependencies.publisher, this.portMediaLeases(port), this.dependencies.network?.syncProgress?.());
+      response = await dispatchValidatedBrowserRpc(this.owner.owner, request, this.dependencies.legacySettings, this.dependencies.publisher, this.portMediaLeases(port), this.dependencies.network?.syncProgress?.());
     } finally {
       this.dispatchesInFlight -= 1;
     }
@@ -833,7 +841,7 @@ export class BrowserWorkerHost {
         void this.startSearchIndexWhenReady();
       }
       if (command === "load_state" && generationChanged) this.dependencies.network?.wake?.();
-      if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));
+      if (command === "retry_attachment") this.dependencies.network?.retryAttachment?.(requiredId(request.args));
       if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync" || command === "request_attachment_download" || command === "media_sync_request" || command === "load_media" || command === "save_attachment") this.dependencies.network?.wake?.();
     }
     if (response.ok && command === "search_local") {
@@ -1222,6 +1230,7 @@ async function browserOrigins(): Promise<{ logicalOrigin: string; fetchBase: str
 
 export function browserHostDependencies(locks: OwnerLockManager | undefined, terminate: () => void): BrowserHostDependencies {
   let enrollment: BrowserEnrollment | undefined;
+  let enrollmentAbort: AbortController | undefined;
   let scheduler: BrowserScheduler | undefined;
   let publicTransport: OriginTransport | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1235,8 +1244,8 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     if (pollTimer !== undefined) clearTimeout(pollTimer);
     pollTimer = undefined;
     scheduler?.stop();
+    enrollmentAbort?.abort();
     await pollPromise?.catch(() => undefined);
-    enrollment?.cancel();
   };
   const schedulePoll = () => {
     if (!polling || !scheduler) return;
@@ -1303,7 +1312,8 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       const module = await modulePromise as EmscriptenCoreModule & { FS: EmscriptenFilesystem };
       const origins = await browserOrigins();
       const session = await BrowserSession.boot({ origin: origins.logicalOrigin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), onFatal });
-        enrollment = new BrowserEnrollment(core, session, origins.logicalOrigin, undefined, origins.fetchBase);
+        enrollmentAbort = new AbortController();
+        enrollment = new BrowserEnrollment(core, session, origins.logicalOrigin, undefined, origins.fetchBase, enrollmentAbort.signal);
       publicTransport = new OriginTransport({ origin: self.location.origin, deviceToken: () => session.tokenForTransport() });
       scheduler = new BrowserScheduler(
         session,

@@ -17,6 +17,7 @@ use crate::{Provider, ProviderError, PushProvider};
 const APNS_URL: &str = "https://api.push.apple.com/3/device/";
 const APNS_SANDBOX_URL: &str = "https://api.sandbox.push.apple.com/3/device/";
 const FCM_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const FCM_API_URL: &str = "https://fcm.googleapis.com";
 const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -26,6 +27,7 @@ pub struct ConfiguredProvider {
     apns: Option<ApnsConfig>,
     fcm: Option<FcmConfig>,
     fcm_priority: FcmPriority,
+    fcm_endpoint: &'static str,
     apns_token: Arc<Mutex<Option<CachedToken>>>,
     fcm_token: Arc<Mutex<Option<CachedToken>>>,
 }
@@ -164,6 +166,7 @@ impl ConfiguredProvider {
             apns,
             fcm,
             fcm_priority,
+            fcm_endpoint: FCM_API_URL,
             apns_token: Arc::new(Mutex::new(None)),
             fcm_token: Arc::new(Mutex::new(None)),
         })
@@ -249,6 +252,20 @@ impl ConfiguredProvider {
         kind: &str,
         value: &str,
     ) -> Result<(), ProviderError> {
+        // Bind the clone in its own statement so the cache lock is released before the network
+        // call; fcm_message re-locks the cache when FCM rejects the token.
+        let cached = self
+            .fcm_token
+            .lock()
+            .await
+            .as_ref()
+            .filter(|token| token.expires_at > SystemTime::now())
+            .cloned();
+        if let Some(cached) = cached {
+            return self
+                .fcm_message(c, token.to_owned(), cached, kind, value)
+                .await;
+        }
         #[derive(Serialize)]
         struct Claims<'a> {
             iss: &'a str,
@@ -274,18 +291,6 @@ impl ConfiguredProvider {
                 .map_err(|_| ProviderError::Unavailable)?,
         )
         .map_err(|_| ProviderError::Unavailable)?;
-        if let Some(cached) = self
-            .fcm_token
-            .lock()
-            .await
-            .as_ref()
-            .filter(|token| token.expires_at > SystemTime::now())
-            .cloned()
-        {
-            return self
-                .fcm_message(c, token.to_owned(), cached, kind, value)
-                .await;
-        }
         #[derive(Deserialize)]
         struct Token {
             access_token: String,
@@ -324,8 +329,8 @@ impl ConfiguredProvider {
         let response = self
             .client
             .post(format!(
-                "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-                c.project_id
+                "{}/v1/projects/{}/messages:send",
+                self.fcm_endpoint, c.project_id
             ))
             .bearer_auth(access.value)
             .json(&fcm_payload(token, self.fcm_priority, kind, value))
@@ -428,6 +433,10 @@ impl PushProvider for ConfiguredProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
 
     #[test]
@@ -462,6 +471,162 @@ mod tests {
         assert_eq!(FcmPriority::parse(None), Ok(FcmPriority::High));
         assert_eq!(FcmPriority::parse(Some("normal")), Ok(FcmPriority::Normal));
         assert!(FcmPriority::parse(Some("urgent")).is_err());
+    }
+
+    /// An FCM provider whose key cannot sign and whose Google hosts resolve to a closed loopback
+    /// port, so the test never reaches the network and every signing attempt is observable.
+    fn unsignable_fcm_provider(cached: Option<CachedToken>) -> (ConfiguredProvider, FcmConfig) {
+        let closed = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
+        let config = FcmConfig {
+            project_id: "fixture-project".into(),
+            client_email: "relay@fixture-project.iam.example".into(),
+            private_key: Arc::new("not a PEM private key".into()),
+        };
+        let provider = ConfiguredProvider {
+            client: Client::builder()
+                .resolve("fcm.googleapis.com", closed)
+                .resolve("oauth2.googleapis.com", closed)
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            apns: None,
+            fcm: Some(config.clone()),
+            fcm_priority: FcmPriority::High,
+            fcm_endpoint: FCM_API_URL,
+            apns_token: Arc::new(Mutex::new(None)),
+            fcm_token: Arc::new(Mutex::new(cached)),
+        };
+        (provider, config)
+    }
+
+    /// Serves canned FCM responses on loopback HTTP, one per connection, and counts requests.
+    async fn fake_fcm(status: u16, requests: Arc<AtomicUsize>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let reason = StatusCode::from_u16(status)
+            .unwrap()
+            .canonical_reason()
+            .unwrap_or("");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                requests.fetch_add(1, Ordering::SeqCst);
+                read_http_request(&mut stream).await;
+                let body = r#"{"error":{"status":"FIXTURE"}}"#;
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.ok();
+            }
+        });
+        format!("http://{address}")
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) {
+        let mut received = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                return;
+            }
+            received.extend_from_slice(&chunk[..read]);
+            if let Some(head_end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&received[..head_end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if received.len() >= head_end + 4 + length {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_fcm_access_token_skips_assertion_signing() {
+        let (provider, config) = unsignable_fcm_provider(Some(CachedToken {
+            value: "cached-access-token".into(),
+            expires_at: SystemTime::now() + Duration::from_secs(600),
+        }));
+        // A cache hit goes straight to delivery; the closed port makes that retryable. Signing
+        // first would fail on the invalid key as Unavailable.
+        assert_eq!(
+            provider
+                .fcm_send(&config, "device-token", "wake", "nonce")
+                .await,
+            Err(ProviderError::Retryable)
+        );
+
+        let (expired, config) = unsignable_fcm_provider(Some(CachedToken {
+            value: "expired-access-token".into(),
+            expires_at: SystemTime::now() - Duration::from_secs(1),
+        }));
+        assert_eq!(
+            expired
+                .fcm_send(&config, "device-token", "wake", "nonce")
+                .await,
+            Err(ProviderError::Unavailable)
+        );
+    }
+
+    /// A provider whose cached access token the fake FCM answers with `status`.
+    async fn cached_fcm_provider(status: u16) -> (ConfiguredProvider, FcmConfig, Arc<AtomicUsize>) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let base = fake_fcm(status, Arc::clone(&requests)).await;
+        let (mut provider, config) = unsignable_fcm_provider(Some(CachedToken {
+            value: "cached-access-token".into(),
+            expires_at: SystemTime::now() + Duration::from_secs(600),
+        }));
+        provider.fcm_endpoint = Box::leak(base.into_boxed_str());
+        (provider, config, requests)
+    }
+
+    #[tokio::test]
+    async fn fcm_401_on_cached_token_clears_cache_without_deadlock() {
+        let (provider, config, requests) = cached_fcm_provider(401).await;
+
+        let first = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.fcm_send(&config, "device-token", "wake", "nonce"),
+        )
+        .await
+        .expect("cached-token rejection must not deadlock");
+        assert_eq!(first, Err(ProviderError::Retryable));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(provider.fcm_token.lock().await.is_none());
+
+        // The cache is cleared, so the next send re-enters the signing path and fails fast on
+        // the synthetic key instead of waiting on the lock held by the previous send.
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.fcm_send(&config, "device-token", "wake", "nonce"),
+        )
+        .await
+        .expect("second send must not deadlock");
+        assert_eq!(second, Err(ProviderError::Unavailable));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn fcm_403_on_cached_token_is_permanent_and_does_not_deadlock() {
+        let (provider, config, requests) = cached_fcm_provider(403).await;
+
+        // 403 stays Permanent and keeps the cache, as before; the point is that the send returns.
+        for attempt in 1..=2 {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                provider.fcm_send(&config, "device-token", "wake", "nonce"),
+            )
+            .await
+            .expect("cached-token 403 must not deadlock");
+            assert_eq!(result, Err(ProviderError::Permanent));
+            assert_eq!(requests.load(Ordering::SeqCst), attempt);
+        }
+        assert!(provider.fcm_token.lock().await.is_some());
     }
 
     #[test]

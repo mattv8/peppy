@@ -11,6 +11,8 @@ struct ServerContextInput {
     connection: String,
     devices: Option<Value>,
     capabilities: Option<Value>,
+    #[serde(default)]
+    outbox_rejected: bool,
 }
 
 impl BrowserCore {
@@ -64,6 +66,7 @@ impl BrowserCore {
         }
         let views = gateways::gateway_views(&devices, &capabilities);
         self.context.connection = Some(input.connection);
+        self.context.outbox_rejected = input.outbox_rejected;
         self.context.device_role = Some(role.clone());
         self.context.gateways = Some(views.clone());
         self.context.revoked_device_ids = devices
@@ -292,6 +295,61 @@ mod tests {
             assert_eq!(connection["state"], expected["state"]);
             assert_eq!(connection["errorCode"], expected["errorCode"]);
         }
+    }
+
+    #[test]
+    fn outbox_rejection_is_visible_only_on_a_connected_context() {
+        let (_root, mut core, device) = unlocked_core();
+        let connected = |rejected: Value| {
+            let mut args = context(
+                json!({"devices":[{"device_id":device,"role":"device","revoked":false}]}),
+                json!({"capabilities":[]}),
+            );
+            args["outboxRejected"] = rejected;
+            args
+        };
+        let snapshot =
+            |core: &mut BrowserCore| response(core, "snapshot", json!({}))["connection"].clone();
+
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            connected(json!(true)),
+        );
+        assert_eq!(
+            snapshot(&mut core),
+            json!({"state":"connected", "origin":"https://peppy.test", "errorCode":"outbox-rejected"})
+        );
+
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            connected(json!(false)),
+        );
+        assert_eq!(snapshot(&mut core)["errorCode"], json!(null));
+
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            connected(json!(true)),
+        );
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            json!({"connection":"offline","devices":null,"capabilities":null,"outboxRejected":true}),
+        );
+        assert_eq!(snapshot(&mut core)["state"], "offline");
+        assert_eq!(snapshot(&mut core)["errorCode"], "offline");
+
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            json!({"connection":"error","devices":null,"capabilities":null}),
+        );
+        assert_eq!(snapshot(&mut core)["errorCode"], json!(null));
+
+        let rejected = error(&mut core, connected(json!("yes")));
+        assert_eq!(rejected["code"], "invalid-request");
     }
 
     #[test]

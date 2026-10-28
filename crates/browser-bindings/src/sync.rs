@@ -345,22 +345,27 @@ mod tests {
     use super::*;
     use peppy_crypto::{create_vault_check_header, derive_root_key};
 
-    fn open_core() -> BrowserCore {
-        let root = tempfile::tempdir().unwrap().keep();
+    struct CoreFixture {
+        _root: tempfile::TempDir,
+        core: BrowserCore,
+    }
+
+    fn open_core() -> CoreFixture {
+        let root = tempfile::tempdir().unwrap();
         let vault = peppy_client_core::VaultId::new();
         let device = peppy_client_core::DeviceId::new();
         let client = Client::open(
             ClientConfig {
-                database_path: root.join("client.db"),
+                database_path: root.path().join("client.db"),
                 vault_id: vault,
                 device_id: device,
             },
             DatabaseKey::new(&[7; 32]).unwrap(),
         )
         .unwrap();
-        let mut core = BrowserCore::new(root);
+        let mut core = BrowserCore::new(root.path().to_owned());
         core.client = Some(client);
-        core
+        CoreFixture { _root: root, core }
     }
 
     fn response(core: &mut BrowserCore, command: &str, args: Value) -> Value {
@@ -370,36 +375,34 @@ mod tests {
 
     #[test]
     fn rejects_lossy_sync_numbers_and_oversized_batches() {
-        let mut core = open_core();
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
         for cursor in [json!(1), json!("01"), json!("18446744073709551616")] {
-            let result = response(
-                &mut core,
-                "ingest",
-                json!({"cursor": cursor, "envelope": {}}),
-            );
+            let result = response(core, "ingest", json!({"cursor": cursor, "envelope": {}}));
             assert_eq!(result["error"]["code"], "invalid-request");
         }
-        let result = response(&mut core, "pending_outbox", json!({"limit": 1001}));
+        let result = response(core, "pending_outbox", json!({"limit": 1001}));
         assert_eq!(result["error"]["code"], "invalid-request");
     }
 
     #[test]
     fn raw_malformed_records_quarantine_without_blocking_contiguous_cursor() {
-        let mut core = open_core();
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
         assert_eq!(
-            response(&mut core, "ingest", json!({"cursor": "2", "envelope": {}}))["value"]["state"],
+            response(core, "ingest", json!({"cursor": "2", "envelope": {}}))["value"]["state"],
             "quarantined"
         );
         assert_eq!(
-            response(&mut core, "receive_cursor", json!({}))["value"]["cursor"],
+            response(core, "receive_cursor", json!({}))["value"]["cursor"],
             "0"
         );
         assert_eq!(
-            response(&mut core, "ingest", json!({"cursor": "1", "envelope": {}}))["value"]["state"],
+            response(core, "ingest", json!({"cursor": "1", "envelope": {}}))["value"]["state"],
             "quarantined"
         );
         assert_eq!(
-            response(&mut core, "receive_cursor", json!({}))["value"]["cursor"],
+            response(core, "receive_cursor", json!({}))["value"]["cursor"],
             "2"
         );
     }
@@ -506,26 +509,27 @@ mod tests {
 
     #[test]
     fn stages_raw_snapshot_records_and_preserves_restore_guard_on_rejection() {
-        let mut core = open_core();
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
         let started = response(
-            &mut core,
+            core,
             "begin_snapshot",
             json!({"highWater": "1", "recordCount": "1", "purpose": "bootstrap"}),
         );
         assert_eq!(started["value"]["generation"], "1");
         let appended = response(
-            &mut core,
+            core,
             "append_snapshot_page",
             json!({"generation": "1", "records": [{"cursor": "1", "envelope": {}}]}),
         );
         assert_eq!(appended["value"]["receivedRecords"], "1");
         assert_eq!(
-            response(&mut core, "finish_snapshot", json!({"generation": "1"}))["ok"],
+            response(core, "finish_snapshot", json!({"generation": "1"}))["ok"],
             true
         );
         assert_eq!(
             response(
-                &mut core,
+                core,
                 "append_snapshot_page",
                 json!({"generation": "1", "records": [{"cursor": "1", "envelope": {}}]})
             )["error"]["code"],
@@ -533,7 +537,7 @@ mod tests {
         );
 
         let rejected = response(
-            &mut core,
+            core,
             "begin_snapshot",
             json!({"highWater": "0", "recordCount": "1", "purpose": "restore"}),
         );
@@ -543,10 +547,10 @@ mod tests {
 
     #[test]
     fn sealed_outbox_retries_are_stable_until_acknowledged() {
-        let root = tempfile::tempdir().unwrap().keep();
+        let root = tempfile::tempdir().unwrap();
         let vault = peppy_client_core::VaultId::new();
         let device = peppy_client_core::DeviceId::new();
-        let mut core = BrowserCore::new(root);
+        let mut core = BrowserCore::new(root.path().to_owned());
         assert_eq!(
             response(
                 &mut core,
@@ -608,23 +612,24 @@ mod tests {
 
     #[test]
     fn compaction_adapter_records_server_state_and_exposes_bounded_backfill() {
-        let mut core = open_core();
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
         let state = response(
-            &mut core,
+            core,
             "set_server_compaction_support",
             json!({"supported": true, "active": true}),
         );
         assert_eq!(state["ok"], true);
-        assert!(response(&mut core, "compaction_status", json!({}))["value"].is_object());
+        assert!(response(core, "compaction_status", json!({}))["value"].is_object());
         assert_eq!(
-            response(&mut core, "sync_work_status", json!({}))["value"]["pendingApply"],
+            response(core, "sync_work_status", json!({}))["value"]["pendingApply"],
             false
         );
-        let step = response(&mut core, "compaction_backfill_step", json!({"limit": 1}));
+        let step = response(core, "compaction_backfill_step", json!({"limit": 1}));
         assert_eq!(step["ok"], true);
         assert!(step["value"].get("backfill_complete").is_some());
         assert_eq!(
-            response(&mut core, "compaction_backfill_step", json!({"limit": 0}))["error"]["code"],
+            response(core, "compaction_backfill_step", json!({"limit": 0}))["error"]["code"],
             "invalid-request"
         );
     }

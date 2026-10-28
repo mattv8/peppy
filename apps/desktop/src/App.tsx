@@ -205,6 +205,7 @@ export async function searchRecipientSuggestions(query: string, sourceDeviceId?:
   const found = await bridge.search_contact_recipients(query, sourceDeviceId);
   return found.map((match) => ({
     id: match.address,
+    rowId: JSON.stringify([match.bookId, match.contactId, match.phoneId]),
     label: match.displayName,
     detail: [match.label, match.normalized ? formatPhoneNumber(match.address) : match.number].filter(Boolean).join(" · "),
     avatarUrl: match.avatarUrl,
@@ -379,9 +380,13 @@ function gatewayAvailability(gateway: GatewayView): GatewayAvailability { return
 function formatAge(seconds: number): string { return seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`; }
 function simLabels(gateways: GatewayView[]): Map<string, string> {
   const labels = new Map<string, string>();
-  gateways.filter((gateway) => gateway.simId).forEach((gateway, index) => {
+  const simCounts = new Map<string, number>();
+  gateways.filter((gateway) => gateway.simId).forEach((gateway) => {
     const key = routeKey(gateway.id, gateway.simId);
-    if (!labels.has(key)) labels.set(key, `SIM ${index + 1}`);
+    if (labels.has(key)) return;
+    const simCount = (simCounts.get(gateway.id) ?? 0) + 1;
+    simCounts.set(gateway.id, simCount);
+    labels.set(key, `SIM ${simCount}`);
   });
   return labels;
 }
@@ -641,6 +646,7 @@ function MessageList({
   hasOlderMessages,
   historyLoading,
   historyError,
+  historyErrorDirection,
   onLoadOlder,
   suppressHistoryAnnouncements,
   historyExhausted,
@@ -678,6 +684,7 @@ function MessageList({
   historyLoading: boolean;
   historyError: string | null;
   onLoadOlder(control: HTMLElement): void;
+  historyErrorDirection: "older" | "newer";
   suppressHistoryAnnouncements: boolean;
   historyExhausted: boolean;
   onStartConversation?: () => void;
@@ -690,7 +697,7 @@ function MessageList({
   onOpenExternal?: (url: string) => Promise<void>;
   searchTargetId?: string;
   detachedHistory?: DetachedHistory;
-  onLoadNewer(): void;
+  onLoadNewer(control: HTMLElement): void;
   onGoToLatest(): void;
   compactTimestamps: boolean;
   showReactions: boolean;
@@ -776,12 +783,13 @@ function MessageList({
       {searchTargetId && <span id="search-result-message-hint" className="sr-only">Search result message</span>}
       {detachedHistory && <section id="detached-history-status" aria-label="Search history position">
         <span role="status">Viewing messages near a search result.</span>
-        {detachedHistory.hasNewer && <button id="history-load-newer-button" className="secondary-button" type="button" disabled={Boolean(detachedHistory.pendingLoad)} onClick={onLoadNewer}>Load newer messages</button>}
+        {detachedHistory.hasNewer && <button id="history-load-newer-button" className="secondary-button" type="button" disabled={Boolean(detachedHistory.pendingLoad)} onClick={(event) => onLoadNewer(event.currentTarget)}>Load newer messages</button>}
         <button id="history-go-latest-button" className="secondary-button" type="button" disabled={Boolean(detachedHistory.pendingLoad)} onClick={onGoToLatest}>Go to latest</button>
       </section>}
-      {(historyLoading || historyError || hasOlderMessages) && <div id="history-load-band" className="history-load-band" tabIndex={-1} data-history-state={historyLoading ? "loading" : historyError ? "error" : "idle"}>
+      {(historyLoading || historyError || hasOlderMessages || detachedHistory?.pendingLoad === "newer") && <div id="history-load-band" className="history-load-band" tabIndex={-1} data-history-state={historyLoading || detachedHistory?.pendingLoad === "newer" ? "loading" : historyError ? "error" : "idle"}>
         {historyLoading && !historyError && <span id="history-load-indicator" className="history-load-indicator" role="status">Loading older messages…</span>}
-        {historyError && <div id="history-load-error" className="history-load-error" role="alert">Couldn&apos;t load older messages. <button id="history-retry-button" className="history-divider-action" type="button" aria-label="Retry loading older messages" disabled={historyLoading} onClick={(event) => onLoadOlder(event.currentTarget)}>Retry</button></div>}
+        {detachedHistory?.pendingLoad === "newer" && <span id="history-load-newer-indicator" className="history-load-indicator" role="status">Loading newer messages…</span>}
+        {historyError && <div id="history-load-error" className="history-load-error" role="alert">Couldn&apos;t load {historyErrorDirection} messages. <button id="history-retry-button" className="history-divider-action" type="button" aria-label={`Retry loading ${historyErrorDirection} messages`} disabled={historyLoading || Boolean(detachedHistory?.pendingLoad)} onClick={historyErrorDirection === "newer" ? (event) => onLoadNewer(event.currentTarget) : (event) => onLoadOlder(event.currentTarget)}>Retry</button></div>}
         {!historyLoading && !historyError && hasOlderMessages && <button id="history-load-button" className="history-divider-action" type="button" onClick={(event) => onLoadOlder(event.currentTarget)}>Load older messages</button>}
       </div>}
       <div id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined}>
@@ -1319,6 +1327,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyErrorDirection, setHistoryErrorDirection] = useState<"older" | "newer">("older");
   const [suppressHistoryAnnouncements, setSuppressHistoryAnnouncements] = useState(false);
   const [historyExhausted, setHistoryExhausted] = useState(false);
   const [appLock, setAppLock] = useState<AppLockStatus | null>(null);
@@ -1333,7 +1342,45 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [publicCopies, setPublicCopies] = useState<Record<string, PublicCopy>>(
     {},
   );
-  const [theme, setTheme] = useState<Theme>("system");
+  const [theme, setTheme] = useState<Theme>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}");
+      return typeof stored === "object" && stored !== null && !Array.isArray(stored)
+        && ["light", "dark", "system"].includes(stored.theme as string)
+        ? stored.theme as Theme
+        : "system";
+    } catch {
+      return "system";
+    }
+  });
+  const persistedTheme = useRef(theme);
+  useEffect(() => {
+    if (theme === persistedTheme.current) return;
+    persistedTheme.current = theme;
+    persistLayoutPatch({ theme });
+  }, [theme]);
+  useEffect(() => {
+    const themeClasses = ["theme-light", "theme-dark", "theme-system"];
+    document.body.classList.remove(...themeClasses);
+    document.body.classList.add(`theme-${theme}`);
+    return () => document.body.classList.remove(`theme-${theme}`);
+  }, [theme]);
+  useEffect(() => {
+    const syncTheme = (event: StorageEvent) => {
+      if (event.key !== "peppy.layout.v1" || !event.newValue) return;
+      try {
+        const layout = JSON.parse(event.newValue);
+        if (["light", "dark", "system"].includes(layout?.theme)) {
+          persistedTheme.current = layout.theme;
+          setTheme(layout.theme);
+        }
+      } catch {
+        // Ignore another window's malformed optional layout data.
+      }
+    };
+    window.addEventListener("storage", syncTheme);
+    return () => window.removeEventListener("storage", syncTheme);
+  }, []);
   const [navigationPosition, setNavigationPosition] = useState<NavigationPosition>(() => {
     try {
       const stored = JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}");
@@ -1462,6 +1509,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const historySequence = useRef(0);
   const historyLoadingRef = useRef(false);
   const historyErrorRef = useRef<string | null>(null);
+  const historyErrorDirectionRef = useRef<"older" | "newer">("older");
   const hasOlderMessagesRef = useRef(false);
   const messageListScrollTopRef = useRef(0);
   const historyFocusPendingRef = useRef(false);
@@ -1538,9 +1586,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     detachedHistoryRef.current = next;
     setDetachedHistory(next);
   };
-  const setHistoryLoadError = (next: string | null) => {
+  const setHistoryLoadError = (next: string | null, direction: "older" | "newer" = "older") => {
+    const nextDirection = next ? direction : "older";
     historyErrorRef.current = next;
+    historyErrorDirectionRef.current = nextDirection;
     setHistoryError(next);
+    setHistoryErrorDirection(nextDirection);
   };
   const clearDetached = () => {
     const detachedConversationId = detachedHistoryRef.current?.conversationId;
@@ -1548,6 +1599,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     navigationGeneration.current += 1;
     loadSequence.current += 1;
     historySequence.current += 1;
+    if (historyErrorRef.current && historyErrorDirectionRef.current === "newer")
+      setHistoryLoadError(null);
     setDetached(undefined);
     setSearchTargetId(undefined);
     searchReadGate.current = false;
@@ -2448,7 +2501,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       }
     }
   }, []);
-  const loadNewerMessages = useCallback(async () => {
+  const loadNewerMessages = useCallback(async (control?: HTMLElement) => {
     const detached = detachedHistoryRef.current;
     const conversationId = selectedRef.current;
     const existing = snapshotRef.current?.conversations.find(item => item.id === conversationId)?.messages ?? [];
@@ -2456,7 +2509,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (!detached || detached.conversationId !== conversationId || !detached.hasNewer || detached.pendingLoad || !afterMessageId) return;
     const sequence = ++historySequence.current;
     loadSequence.current += 1;
+    historyFocusPendingRef.current = control?.id === "history-retry-button" && document.activeElement === control;
     setDetached({ ...detached, pendingLoad: "newer" });
+    setHistoryLoadError(null);
     try {
       const window = await bridge.load_message_window({ direction: "newer", conversationId, messageId: afterMessageId });
       if (!mountedRef.current || sequence !== historySequence.current || selectedRef.current !== conversationId || window.conversationId !== conversationId || detached.generation !== detachedHistoryRef.current?.generation || detached.sessionKey !== currentSearchSessionKey()) return;
@@ -2470,7 +2525,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     } catch (error) {
       if (sequence === historySequence.current) {
         setDetached(detached);
-        setHistoryLoadError(errorText(error));
+        setHistoryLoadError(errorText(error), "newer");
       }
     }
   }, []);
@@ -3652,7 +3707,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const toGalleryItem = (item: Awaited<ReturnType<typeof bridge.media_page>>["items"][number]): GalleryMediaPageItem => {
     const message = active?.messages.find((candidate) => candidate.id === item.messageId) ?? { id: item.messageId, revision: item.cursor.localOrder, sender: item.senderAddress ? "other" : "self", senderAddress: item.senderAddress, body: "", timestamp: item.timestamp, attachments: [] };
     const mediaMeta = item.attachment.mediaMeta ?? item.mediaMeta;
-    return { attachment: { ...item.attachment, mediaMeta, durationMs: mediaMeta?.durationMs ? Number(mediaMeta.durationMs) : undefined }, message, cursor: item.cursor };
+    return { attachment: { ...item.attachment, mediaMeta }, message, cursor: item.cursor };
   };
   const openGalleryItem = async (item: GalleryMediaPageItem) => {
     const conversationId = active?.id;
@@ -3701,6 +3756,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       hasOlderMessages={hasOlderMessages}
       historyLoading={historyLoading}
       historyError={historyError}
+      historyErrorDirection={historyErrorDirection}
       onLoadOlder={loadOlderFromManualControl}
       suppressHistoryAnnouncements={suppressHistoryAnnouncements}
       historyExhausted={historyExhausted}
@@ -3714,7 +3770,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onOpenExternal={browserHost ? undefined : bridge.open_external_url}
       searchTargetId={searchTargetId}
       detachedHistory={detachedHistory?.conversationId === active?.id ? detachedHistory : undefined}
-      onLoadNewer={() => void loadNewerMessages()}
+      onLoadNewer={(control) => void loadNewerMessages(control)}
       onGoToLatest={() => active?.id && void loadLatest(active.id).catch(reportAction("Could not load the latest messages: "))}
       compactTimestamps={compactTimestamps}
       showReactions={showReactions}

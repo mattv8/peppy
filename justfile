@@ -18,6 +18,7 @@ release-test:
     infra/release/test-compute-version.sh
     infra/release/test-release-scripts.sh
     infra/release/test-android-signing.sh
+    infra/release/linux-repository/test-linux-repository.sh
 
 doctor:
     @command -v cargo >/dev/null || { echo "cargo is required; install the pinned Rust toolchain" >&2; exit 1; }
@@ -171,6 +172,7 @@ server-test:
 contracts-check:
     cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
+    cargo run --locked -p peppy-hosted-api --bin export-web-schema -- --check
 
 desktop-build:
     pnpm --filter @peppy/desktop build

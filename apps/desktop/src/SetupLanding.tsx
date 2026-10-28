@@ -145,6 +145,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const [account, setAccount] = useState<HostedAccountView | null>(null);
   const [accountLoading, setAccountLoading] = useState(!fixedOrigin && mode === "hosted" && !enrolledWithoutPhone);
   const [accountError, setAccountError] = useState(false);
+  const [signOutError, setSignOutError] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   const [signInError, setSignInError] = useState(false);
   const [recoveryPending, setRecoveryPending] = useState(false);
   const [hostedPath, setHostedPath] = useState<HostedPath>("chooser");
@@ -327,6 +329,18 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
         setAccountLoading(false);
         setHostedOperation(null);
       }
+    }
+  };
+  const signOut = async () => {
+    setSignOutError(false);
+    setSigningOut(true);
+    try {
+      await bridge.hosted_sign_out();
+      await refreshAccount();
+    } catch {
+      setSignOutError(true);
+    } finally {
+      setSigningOut(false);
     }
   };
 
@@ -1228,7 +1242,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       {route === "chooser" && <div id="hosted-path-chooser">{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}<div className="chooser-buttons"><button ref={choice} id="hosted-choice-existing" className="chooser-button" onClick={chooseExisting}><span className="chooser-button-label">{copy("setup_choice_existing")}</span><span className="chooser-button-hint">{copy("setup_choice_existing_hint")}</span></button><button id="hosted-choice-new" className="chooser-button" onClick={chooseNew}><span className="chooser-button-label">{copy("setup_choice_new")}</span><span className="chooser-button-hint">{copy("setup_choice_new_hint")}</span></button></div></div>}
       {route === "new" && <section id="hosted-signin-panel" data-section="signin"><h2 tabIndex={-1}>Sign in to your Peppy account</h2><p>{copy("hosted_sign_in_body")} Signing in does not unlock your vault.</p><button id="hosted-signin-google-button" className="primary-button" disabled={!account?.available || busy} onClick={() => void signIn()}>{copy("hosted_sign_in_google")}</button>{account && !account.available && <p id="hosted-signin-unavailable" role="alert">{copy("production_hosted_unavailable")}</p>}{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}{signInError && <p id="hosted-signin-error" role="alert">{copy("production_signin_failed")} <button className="secondary-button" onClick={() => void signIn()}>{copy("try_again")}</button></p>}<button id="setup-back-button" className="secondary-button" onClick={backToChooser}>{copy("back")}</button></section>}
       {route === "enrollment" && <div id="enrollment-panel">{renderEnrollment()}</div>}
-      {route === "lapsed" && <section id="hosted-lapsed-card"><h2 tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" onClick={() => void bridge.hosted_sign_out()}>{copy("settings_server_sign_out")}</button></section>}
+      {route === "lapsed" && <section id="hosted-lapsed-card"><h2 tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" disabled={signingOut} onClick={() => void signOut()}>{copy("settings_server_sign_out")}</button>{signOutError && <p id="hosted-signout-error" role="alert">{copy("hosted_account_check_failed")}</p>}</section>}
       {route === "billing" && <section id="hosted-billing-card"><h2 tabIndex={-1}>{copy("hosted_subscribe_headline")}</h2><p>{copy("production_billing_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button></section>}
       {route === "provisioning" && <section id="hosted-provisioning-card"><h2 tabIndex={-1}>{copy("provisioning_headline")}</h2><div role="progressbar" aria-label={copy("provisioning_headline")} /><p>{copy("setup_provisioning_body")}</p>{provisionError !== null && <p id="hosted-provision-error" role="alert">{copy("production_provision_retry")}</p>}{provisionError !== null && <p id="hosted-provision-error-code" className="setup-hint" data-error-code={provisionError}>Error code: {provisionError}</p>}{provisionError !== null && <button id="hosted-provision-retry-button" className="secondary-button" disabled={busy} onClick={startProvisioning}>{copy("production_provision_resume")}</button>}</section>}
       {route === "passphrase" && <section id="hosted-passphrase-card"><h2 tabIndex={-1}>{copy("hosted_create_vault_headline")}</h2><p>{copy("hosted_create_vault_body")}</p><button id="passphrase-native-cta-button" className="primary-button" disabled={busy} onClick={startProvisioning}>{copy(provisionError === null ? "production_create_vault" : "try_again")}</button>{provisionError !== null && <p id="hosted-passphrase-error" role="alert">{copy("hosted_create_vault_error")}</p>}{provisionError !== null && <p id="hosted-passphrase-error-code" className="setup-hint" data-error-code={provisionError}>Error code: {provisionError}</p>}</section>}

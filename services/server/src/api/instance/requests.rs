@@ -5,7 +5,6 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_hosted_api::enrollment::{
     CreateVaultRequest, SubmitVaultRequest, VaultRequestCreated, VaultRequestState,
     VaultRequestStatus, VaultRequestSummary, VaultSummary,
@@ -313,6 +312,8 @@ async fn create_vault(
     {
         return Err(ApiError(StatusCode::FORBIDDEN, "invalid_origin"));
     }
+    let (admission_public_key, credential_digest, check_header) =
+        super::super::validate_owner_material(&request.material, &request.credential_digest)?;
     super::super::instance_account_admission(&state, peer, b"create-vault", "create_vault_limited")
         .await?;
     let digest = request_digest(&request, &["admin_password", "request_secret"])?;
@@ -351,8 +352,6 @@ async fn create_vault(
     let username = normalize_username(&request.username)?;
     crate::instance::validate_password(&request.admin_password)
         .map_err(|code| ApiError(StatusCode::UNPROCESSABLE_ENTITY, code))?;
-    let (admission_public_key, credential_digest) =
-        super::super::validate_owner_material(&request.material, &request.credential_digest)?;
     let signing_public_key = super::super::validate_proposed_device(&request.device)?;
     let password_hash = super::super::hash_admin_password(
         state.instance_password_slots.clone(),
@@ -365,9 +364,7 @@ async fn create_vault(
             vault_id,
             device_id: request.device.device_id,
             public_key_profile: request.material.profile.clone(),
-            encrypted_vault_check_header: URL_SAFE_NO_PAD
-                .decode(&request.material.check_header)
-                .expect("validated"),
+            encrypted_vault_check_header: check_header,
             profile_fingerprint: request.material.fingerprint.clone(),
             key_epoch: request.material.key_epoch,
             credential_digest,

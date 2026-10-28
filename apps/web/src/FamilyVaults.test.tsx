@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FamilyVaults, type FamilyVaultsBridge } from "./FamilyVaults";
+import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 
 vi.mock("qrcode", () => ({ default: { toDataURL: vi.fn(async () => "data:image/png;base64,qr") } }));
 
@@ -15,17 +16,21 @@ class FakeEventSource {
 }
 
 const sources: FakeEventSource[] = [];
-vi.stubGlobal("EventSource", class extends FakeEventSource { public constructor() { super(); sources.push(this); } });
 
 const bridge = () => ({
   enrollment_list_vaults: vi.fn<FamilyVaultsBridge["enrollment_list_vaults"]>(async () => []), enrollment_create_invite: vi.fn(), enrollment_list_invites: vi.fn(async () => []), enrollment_revoke_invite: vi.fn(),
   enrollment_list_vault_requests: vi.fn(async () => []), enrollment_approve_vault_request: vi.fn(), enrollment_deny_vault_request: vi.fn(),
 });
 
-afterEach(() => { cleanup(); sources.splice(0); });
+afterEach(() => { cleanup(); sources.splice(0); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+function installEventSource() {
+  vi.stubGlobal("EventSource", class extends FakeEventSource { public constructor() { super(); sources.push(this); } });
+}
 
 describe("FamilyVaults", () => {
   it("renders live snapshots and closes its stream on unmount", async () => {
+    installEventSource();
     const view = render(<FamilyVaults bridge={bridge()} />);
     await waitFor(() => expect(sources).toHaveLength(1));
     sources[0]?.snapshot(JSON.stringify({ type: "snapshot", requests: [{ request_id: "request-1", display_name: "Avery", client: "browser", state: "pending", created_at: "2026-01-01T00:00:00Z", expires_in_seconds: 60 }] }));
@@ -35,6 +40,7 @@ describe("FamilyVaults", () => {
   });
 
   it("pauses after an SSE error only after checking the request list", async () => {
+    installEventSource();
     const mockedBridge = bridge();
     render(<FamilyVaults bridge={mockedBridge} />);
     sources[0]?.onerror?.();
@@ -43,6 +49,7 @@ describe("FamilyVaults", () => {
   });
 
   it("creates only one invite while the create request is pending", async () => {
+    installEventSource();
     let resolveInvite!: (value: { inviteId: string; inviteLink: string; expiresInSeconds: number }) => void;
     const invite = new Promise<{ inviteId: string; inviteLink: string; expiresInSeconds: number }>((resolve) => { resolveInvite = resolve; });
     const mockedBridge = bridge();
@@ -60,6 +67,7 @@ describe("FamilyVaults", () => {
   });
 
   it("shows an em dash when a vault creation timestamp is nonpositive", async () => {
+    installEventSource();
     const mockedBridge = bridge();
     mockedBridge.enrollment_list_vaults.mockResolvedValue([{
       vaultId: "vault-1",
@@ -72,5 +80,103 @@ describe("FamilyVaults", () => {
     render(<FamilyVaults bridge={mockedBridge} />);
     const vault = await screen.findByText("Avery");
     expect(vault.closest("tr")?.textContent).toContain("—");
+  });
+
+  describe("SSE reconnect backoff (M22)", () => {
+    const flush = () => act(async () => { for (let tick = 0; tick < 5; tick += 1) await Promise.resolve(); });
+    const advance = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
+    const failSource = async (index: number) => {
+      act(() => sources[index]?.onerror?.());
+      await flush();
+    };
+
+    async function renderLive(mockedBridge = bridge()) {
+      installEventSource();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const view = render(<FamilyVaults bridge={mockedBridge} />);
+      await flush();
+      expect(sources).toHaveLength(1);
+      return { view, mockedBridge };
+    }
+
+    it("pauses, reports, and still reconnects after the fallback request refresh fails", async () => {
+      const { mockedBridge } = await renderLive();
+      mockedBridge.enrollment_list_vault_requests.mockRejectedValueOnce(new Error("offline"));
+
+      await failSource(0);
+
+      expect(screen.getByRole("status")).toBeTruthy();
+      expect(screen.getByRole("alert")).toBeTruthy();
+      expect(sources[0]?.closed).toBe(true);
+      await advance(1_999);
+      expect(sources).toHaveLength(1);
+      await advance(1);
+      expect(sources).toHaveLength(2);
+    });
+
+    it("reconnects after a successful fallback refresh with a doubled backoff", async () => {
+      await renderLive();
+
+      await failSource(0);
+      await advance(2_000);
+      expect(sources).toHaveLength(2);
+      await failSource(1);
+      await advance(3_999);
+      expect(sources).toHaveLength(2);
+      await advance(1);
+      expect(sources).toHaveLength(3);
+    });
+
+    it("keeps reconnecting after the live effect re-runs while a backoff is pending", async () => {
+      const { view } = await renderLive();
+      await failSource(0);
+
+      view.rerender(<FamilyVaults bridge={bridge()} />);
+      await flush();
+      expect(sources).toHaveLength(2);
+      await failSource(1);
+      await advance(60_000);
+
+      expect(sources).toHaveLength(3);
+    });
+
+    it("keeps reconnecting after a manual refresh replaces a pending backoff", async () => {
+      await renderLive();
+      await failSource(0);
+
+      fireEvent.click(screen.getByRole("button", { name: peppyCopy.family_vaults_live_refresh }));
+      await flush();
+      expect(sources).toHaveLength(2);
+      await failSource(1);
+      await advance(60_000);
+
+      expect(sources).toHaveLength(3);
+    });
+
+    it("cancels a pending reconnect on unmount", async () => {
+      const { view } = await renderLive();
+      await failSource(0);
+      expect(vi.getTimerCount()).toBe(1);
+
+      view.unmount();
+      await advance(60_000);
+
+      expect(vi.getTimerCount()).toBe(0);
+      expect(sources).toHaveLength(1);
+    });
+
+    it("schedules no reconnect when the fallback response arrives after unmount", async () => {
+      let resolveLate!: (requests: never[]) => void;
+      const { view, mockedBridge } = await renderLive();
+      mockedBridge.enrollment_list_vault_requests.mockReturnValueOnce(new Promise((resolve) => { resolveLate = resolve; }));
+      act(() => sources[0]?.onerror?.());
+
+      view.unmount();
+      await act(async () => resolveLate([]));
+      await advance(60_000);
+
+      expect(vi.getTimerCount()).toBe(0);
+      expect(sources).toHaveLength(1);
+    });
   });
 });

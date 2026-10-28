@@ -9,13 +9,40 @@
 use crate::{Error, contact_resolution};
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
 const MAX_QUERY_CHARS: usize = 128;
-/// Rows gathered before ranking; bounds work on very broad queries.
+/// Best rows kept while enumerating; bounds memory on very broad queries.
 const MAX_CANDIDATES: usize = 500;
+
+/// A candidate row ordered by rank, source, name, then enumeration sequence (a stable tiebreak).
+struct Ranked {
+    key: (usize, usize, String, usize),
+    item: Value,
+}
+
+impl PartialEq for Ranked {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for Ranked {}
+
+impl PartialOrd for Ranked {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Ranked {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key.cmp(&other.key)
+    }
+}
 
 fn invalid() -> Error {
     Error::InvalidRequest("invalid contact search request")
@@ -83,16 +110,14 @@ pub(crate) fn search(conn: &Connection, input: &str) -> Result<String, Error> {
         books.insert(id, (owner, contact_resolution::region(&body)));
     }
 
-    let mut rows = Vec::new();
+    let mut best = BinaryHeap::new();
+    let mut sequence = 0_usize;
     let mut statement = conn.prepare(
         "SELECT c.book_id,c.id,c.body FROM contacts c JOIN contact_books b ON b.id=c.book_id AND b.forgotten=0 \
          WHERE c.deleted_at IS NULL ORDER BY c.book_id,c.id",
     )?;
     let mut scan = statement.query([])?;
     while let Some(row) = scan.next()? {
-        if rows.len() >= MAX_CANDIDATES {
-            break;
-        }
         let (book_id, contact_id, body): (String, String, String) =
             (row.get(0)?, row.get(1)?, row.get(2)?);
         // Cheap prefilter on the raw text; the real match below only reads displayable values.
@@ -169,14 +194,21 @@ pub(crate) fn search(conn: &Connection, input: &str) -> Result<String, Error> {
             }
             // Same-source books sort first when the host knows the route's phone.
             let source_rank = usize::from(source.is_some_and(|s| s != owner));
-            rows.push(((rank, source_rank, display_name.to_lowercase()), item));
+            sequence += 1;
+            best.push(Ranked {
+                key: (rank, source_rank, display_name.to_lowercase(), sequence),
+                item,
+            });
+            if best.len() > MAX_CANDIDATES {
+                best.pop();
+            }
         }
     }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    let results = rows
+    let results = best
+        .into_sorted_vec()
         .into_iter()
         .take(limit)
-        .map(|(_, item)| item)
+        .map(|ranked| ranked.item)
         .collect::<Vec<_>>();
     Ok(json!({"schema_version": 1, "results": results}).to_string())
 }
@@ -250,6 +282,33 @@ mod tests {
         let rows = run(&conn, "555-01");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["phone_id"], "p1");
+    }
+
+    #[test]
+    fn best_match_after_the_first_500_enumerated_rows_still_ranks_first() {
+        let conn = db();
+        // Five hundred earlier contacts match only as a substring. Enumeration order puts the
+        // prefix match `c500` after all of them, so a first-N cut would drop it.
+        for index in 0..500 {
+            conn.execute(
+                "INSERT INTO contacts(id,book_id,revision,body,deleted_at) VALUES(?,'b1',1,?,NULL)",
+                rusqlite::params![
+                    format!("c{index:03}"),
+                    json!({"id":format!("c{index:03}"),"display_name":format!("Zed Match {index}"),"phones":[{"id":format!("q{index:03}"),"value":format!("+1202555{index:04}")}]}).to_string(),
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO contacts(id,book_id,revision,body,deleted_at) VALUES('c500','b1',1,?,NULL)",
+            [json!({"id":"c500","display_name":"Match Best","phones":[{"id":"p500","value":"+12025559999"}]}).to_string()],
+        )
+        .unwrap();
+
+        let rows = run(&conn, "match");
+        assert_eq!(rows.len(), DEFAULT_LIMIT);
+        assert_eq!(rows[0]["contact_id"], "c500");
+        assert_eq!(rows[0]["phone_id"], "p500");
     }
 
     #[test]

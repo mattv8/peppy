@@ -87,7 +87,7 @@ export type ContactEditStatus = { requestId: string; bookId: string; state: "pen
 /** Contact projection health: a failed or pending rebuild means contacts may be stale. */
 export type ContactSyncStatus = { repairRequired: boolean; projection?: { state: "current" | "rebuilding" | "failed"; reason?: string }; readiness?: { state: "server_unsupported" | "needs_unlock" | "backfill_pending" | "ready"; contacts_ready: boolean; server_active: boolean; backfill_unreadable: number } };
 /** A phone number of a matching contact; `address` (never the contact ID) is the recipient. `normalized` is false for numbers kept as entered (e.g. short codes). */
-export type RecipientSuggestion = { address: string; displayName: string; number: string; label?: string; normalized: boolean; contactId: string; phoneId: string; avatarUrl?: string };
+export type RecipientSuggestion = { address: string; bookId: string; displayName: string; number: string; label?: string; normalized: boolean; contactId: string; phoneId: string; avatarUrl?: string };
 export type RestorableContact = { id: string; bookId: string; displayName: string; deletedAt: string; photoDataUrl?: string };
 export type ResolvedContact = { contactId: string; bookId: string; displayName: string; photoDataUrl?: string };
 export type ContactResolutionMap = Record<string, ResolvedContact>;

@@ -2434,4 +2434,48 @@ describe("SetupLanding", () => {
       expect(screen.queryByText(/usually six words/i)).not.toBeInTheDocument();
     });
   });
+
+  describe("lapsed hosted sign-out (L12)", () => {
+    const lapsed = () => account({ signedIn: true, classification: "lapsed", hasVault: true, resumable: false });
+    const lapsedCard = async () => {
+      await waitFor(() => expect(document.getElementById("hosted-lapsed-card")).toBeInTheDocument());
+      return document.getElementById("hosted-lapsed-card")!;
+    };
+
+    it("awaits sign-out once, disables repeats, then refreshes the account route", async () => {
+      const signOut = deferred<void>();
+      vi.spyOn(bridge, "hosted_account").mockResolvedValueOnce(lapsed()).mockResolvedValue(account());
+      vi.spyOn(bridge, "hosted_sign_out").mockReturnValue(signOut.promise);
+      renderLanding();
+      const card = await lapsedCard();
+      const button = within(card).getByRole("button", { name: peppyCopy.settings_server_sign_out });
+
+      fireEvent.click(button);
+      fireEvent.click(button);
+
+      expect(button).toBeDisabled();
+      expect(bridge.hosted_sign_out).toHaveBeenCalledOnce();
+      expect(bridge.hosted_account).toHaveBeenCalledOnce();
+      await act(async () => signOut.resolve());
+
+      await waitFor(() => expect(document.getElementById("hosted-lapsed-card")).not.toBeInTheDocument());
+      expect(bridge.hosted_account).toHaveBeenCalledTimes(2);
+      expect(document.getElementById("hosted-path-chooser")).toBeInTheDocument();
+    });
+
+    it("keeps the lapsed route with a visible error and a re-enabled action when sign-out fails", async () => {
+      vi.spyOn(bridge, "hosted_account").mockResolvedValue(lapsed());
+      vi.spyOn(bridge, "hosted_sign_out").mockRejectedValue(new Error("offline"));
+      renderLanding();
+      const card = await lapsedCard();
+      const button = within(card).getByRole("button", { name: peppyCopy.settings_server_sign_out });
+
+      fireEvent.click(button);
+
+      expect(await within(card).findByRole("alert")).toBeInTheDocument();
+      expect(button).toBeEnabled();
+      expect(bridge.hosted_account).toHaveBeenCalledOnce();
+      expect(document.getElementById("hosted-lapsed-card")).toBe(card);
+    });
+  });
 });

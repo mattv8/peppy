@@ -12,6 +12,7 @@ import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -55,16 +56,35 @@ class MmsCaptureOrchestrationTest {
         assertTrue(events.none { it.contains("private subject") || it.contains("private body") || it.contains("991") || it.contains("77") })
     }
 
+    @Test fun nullHighWaterFailsBeforeTheCorePlansOrCheckpoints() {
+        val core = FakeCore()
+        val provider = FakeProvider(emptyList(), failHighWater = true)
+
+        assertThrows(MmsProviderException::class.java) { MmsCapture.run(plan().copy(manualRecheck = true), core, provider, temp()) }
+
+        assertEquals(0, core.migrations)
+        assertTrue(core.advanced.isEmpty())
+        assertEquals(null, core.manualRecheckLimit)
+    }
+
     @Test fun corePlanDrivesLiveAndHistoryProviderScansWithoutPreferenceCheckpoints() {
         val core = FakeCore()
-        val provider = FakeProvider(listOf(record(1), record(2)))
 
-        val result = MmsCapture.run(plan(), core, provider, temp())
+        // First plan freezes the baseline at 2: rows 1..2 are history only, live starts above it.
+        val first = MmsCapture.run(plan(), core, FakeProvider(listOf(record(1), record(2))), temp())
 
         assertEquals(1, core.migrations)
-        assertEquals(listOf(MmsBackfillPhase.LIVE to "2", MmsBackfillPhase.HISTORY to "2"), core.advanced)
+        assertEquals(listOf(MmsBackfillPhase.HISTORY to "2"), core.advanced)
+        assertTrue("existing rows are first seen as history", core.inputs.first().imported)
+        assertTrue("settling rows keep history open", core.finished.isEmpty())
+        assertEquals("the pass's recheck phase completes the settled rows", 2, first.captured)
+
+        val second = MmsCapture.run(plan(), core, FakeProvider((1L..3L).map(::record)), temp())
+
+        assertEquals(listOf(MmsBackfillPhase.HISTORY to "2", MmsBackfillPhase.LIVE to "3"), core.advanced)
+        assertFalse(core.inputs.first { it.source.providerMessageId == "3" }.imported)
         assertEquals(listOf("2"), core.finished)
-        assertEquals(2, result.captured)
+        assertEquals(1, second.captured)
     }
 
     @Test fun unknownProviderDatesReachCoreAsUnknownSentinel() {
@@ -119,11 +139,26 @@ class MmsCaptureOrchestrationTest {
         assertTrue(core.inputs.none { it.source.providerMessageId == "3" })
     }
 
-    @Test fun partialLivePageWithMissingSubscriptionIsExhaustedWithoutAContinuationLoop() {
+    @Test fun partialLivePageWithMissingSubscriptionIsDurablyUnavailableAndAdvances() {
         val core = FakeCore(historyUpperBound = "0")
         val result = MmsCapture.run(plan(), core, FakeProvider(listOf(record(1).copy(subscriptionId = null))), temp())
 
         assertFalse(result.more)
+        assertEquals(1, result.unavailable)
+        assertTrue(core.advanced.contains(MmsBackfillPhase.LIVE to "1"))
+        assertTrue(core.inputs.any { it.source.providerMessageId == "1" && it.source.subscriptionId == "android-mms-unknown-subscription" })
+    }
+
+    @Test fun livePageAdvancesPastAnInvalidSimOnRowTwoWithoutSkippingLaterRows() {
+        val core = FakeCore(historyUpperBound = "0")
+        val records = (1L..60L).map(::record).toMutableList()
+        records[1] = records[1].copy(subscriptionId = null)
+
+        MmsCapture.run(plan(), core, FakeProvider(records), temp())
+
+        assertTrue(core.advanced.contains(MmsBackfillPhase.LIVE to "50"))
+        assertTrue(core.inputs.any { it.source.providerMessageId == "2" && it.source.subscriptionId == "android-mms-unknown-subscription" })
+        assertTrue(core.inputs.any { it.source.providerMessageId == "50" })
     }
 
     @Test fun mappedOriginalPartIsNotCopiedAgainWhenOptionalMetadataIsAbsent() {
@@ -206,7 +241,7 @@ class MmsCaptureOrchestrationTest {
     }
 
     @Test fun typedQuarantineIsDurableAndDoesNotPinRowsPastAPage() {
-        val core = FakeCore(quarantinedProviderIds = setOf("1"))
+        val core = FakeCore(historyUpperBound = "0", quarantinedProviderIds = setOf("1"))
         val provider = FakeProvider((1L..51L).map(::record))
 
         MmsCapture.run(plan(), core, provider, temp())
@@ -556,10 +591,14 @@ class MmsCaptureOrchestrationTest {
         private val imageBytes: ByteArray? = null,
         private val failCopy: Boolean = false,
         private val previewLimit: Int = MmsMediaPreview.MAX_JPEG_BYTES,
+        private val failHighWater: Boolean = false,
     ) : MmsCaptureProvider {
         var copyCount = 0
         override fun inspectMedia(file: File, contentType: String?) = MmsMediaPreview(previewLimit).inspect(file, contentType)
-        override fun highWater() = records.maxOfOrNull { it.id } ?: 0
+        override fun highWater(): Long {
+            if (failHighWater) throw MmsProviderException("MMS provider returned no high-water cursor")
+            return records.maxOfOrNull { it.id } ?: 0
+        }
         override fun page(afterId: Long, limit: Int) = MmsProviderPage(records.filter { it.id > afterId }.take(limit), afterId)
         override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): MmsProviderPage {
             val ceiling = cursor ?: upperBound
@@ -577,9 +616,15 @@ class MmsCaptureOrchestrationTest {
         }
     }
 
+    /**
+     * Plans like `plan_mms_backfill_scans`: the first plan freezes the history baseline at the
+     * observed maximum (unless [historyUpperBound] supplies an existing one) and starts live just
+     * above it, so live and history never overlap. Each pass also gets a recheck phase over the
+     * pending acquisitions. The completed-row recheck partition and its cursors are not modelled.
+     */
     private class FakeCore(
-        initialLiveCursor: String = "0",
-        private val historyUpperBound: String? = null,
+        initialLiveCursor: String? = null,
+        historyUpperBound: String? = null,
         private val historyDescending: Boolean = false,
         private val historyFloor: String? = null,
         private val mappedParts: Map<String, String> = emptyMap(),
@@ -603,29 +648,51 @@ class MmsCaptureOrchestrationTest {
         private val previewStates = initialPreviewStates.toMutableMap()
         private val acquisitions = mutableMapOf<String, NativeMmsAcquisition>()
         private var liveCursor = initialLiveCursor
+        private var baseline = historyUpperBound
+        private var historyCursor: String? = null
+        private var historyComplete = false
         override fun migrate(generation: String, scope: String, legacy: MmsLegacyBackfillState) { migrations++ }
-        override fun plans(generation: String, scope: String, observedMaxId: String) = if (recheckRequests.isNotEmpty()) {
-            listOf(MmsBackfillScanPlan(MmsBackfillPhase.RECHECK, null, null, false, false, 50))
-        } else {
-            listOf(
-                MmsBackfillScanPlan(MmsBackfillPhase.LIVE, liveCursor, historyUpperBound ?: observedMaxId, false, false, 50),
-                MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, if (historyDescending) null else "0", historyUpperBound ?: observedMaxId, false, false, 50, historyDescending, historyFloor),
+        override fun plans(generation: String, scope: String, observedMaxId: String): List<MmsBackfillScanPlan> {
+            val bound = baseline ?: observedMaxId.also { baseline = it }
+            if (liveCursor == null) liveCursor = bound
+            if (recheckRequests.isNotEmpty()) return listOf(MmsBackfillScanPlan(MmsBackfillPhase.RECHECK, null, null, false, false, 50))
+            return listOf(
+                MmsBackfillScanPlan(MmsBackfillPhase.LIVE, liveCursor, bound, historyComplete, false, 50),
+                MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, historyCursor, bound, historyComplete, false, 50, historyDescending, historyFloor),
+                MmsBackfillScanPlan(MmsBackfillPhase.RECHECK, null, null, historyComplete, false, 50),
             )
         }
         override fun advance(generation: String, scope: String, phase: MmsBackfillPhase, providerId: String) {
             advanced += phase to providerId
-            if (phase == MmsBackfillPhase.LIVE) liveCursor = providerId
+            when (phase) {
+                MmsBackfillPhase.LIVE -> liveCursor = providerId
+                MmsBackfillPhase.HISTORY -> historyCursor = providerId
+                MmsBackfillPhase.RECHECK -> error("recheck has no page checkpoint")
+            }
         }
-        override fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean): Boolean { if (exhausted) finished += bound; return exhausted }
+        override fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean): Boolean {
+            if (!exhausted) return false
+            finished += bound
+            historyComplete = bound == baseline && pendingAcquisitions().isEmpty()
+            return historyComplete
+        }
         val dueConditions = mutableListOf<MmsBackfillRecheckConditions>()
         val recheckOutcomes = mutableListOf<MmsBackfillRecheckOutcome>()
         override fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions): MmsBackfillRecheck {
             dueConditions += conditions
-            return MmsBackfillRecheck(recheckRequests, 50, continuationDue = recheckRequests.isNotEmpty())
+            val requests = recheckRequests.ifEmpty {
+                pendingAcquisitions().map { MmsBackfillRecheckRequest(it.input.source.providerMessageId, it.input.incoming) }
+            }
+            return MmsBackfillRecheck(requests, 50, continuationDue = requests.isNotEmpty())
         }
         override fun recordRecheckOutcome(acquisitionId: String, nowMs: Long, outcome: MmsBackfillRecheckOutcome, conditions: MmsBackfillRecheckConditions) {
             recheckOutcomes += outcome
         }
+        /** Quarantined identities never become acquisitions in the core, although this fake records them. */
+        private fun pendingAcquisitions() = acquisitions
+            .filterKeys { it !in quarantinedProviderIds }
+            .values
+            .filter { it.state == NativeMmsAcquisitionState.PENDING }
         override fun begin(input: NativeMmsAcquisitionInput): NativeMmsBeginOutcome {
             inputs += input
             if (input.source.providerMessageId in failBeginProviderIds) error("core unavailable")

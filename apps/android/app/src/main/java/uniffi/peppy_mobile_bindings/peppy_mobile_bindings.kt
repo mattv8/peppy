@@ -703,6 +703,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning_for_identity(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_vault_profile_fingerprint(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_new_native_enrollment_client(
@@ -1595,6 +1597,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_restore_hosted_provisioning(`checkpointBytes`: RustBuffer.ByValue,`expectedOrigin`: RustBuffer.ByValue,`expectedAccountId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_restore_hosted_provisioning_for_identity(`checkpointBytes`: RustBuffer.ByValue,`expectedOrigin`: RustBuffer.ByValue,`expectedVaultId`: RustBuffer.ByValue,`expectedDeviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_vault_profile_fingerprint(`profileJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_new_native_enrollment_client(`origin`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`deviceName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1766,6 +1770,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning() and 0xFFFF) != 44262) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning_for_identity() and 0xFFFF) != 33969) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_vault_profile_fingerprint() and 0xFFFF) != 3664) {
@@ -13710,6 +13717,26 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
         FfiConverterByteArray.lower(`checkpointBytes`),
         FfiConverterString.lower(`expectedOrigin`),
         FfiConverterString.lower(`expectedAccountId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Restores a protected local hosted checkpoint for an exact canonical identity.
+         * This is structural validation only; hosts must keep checkpoint bytes in protected
+         * local storage and verify recovered secrets against the current vault header.
+         */
+    @Throws(MobileBindingsException::class) fun `restoreHostedProvisioningForIdentity`(`checkpointBytes`: kotlin.ByteArray, `expectedOrigin`: kotlin.String, `expectedVaultId`: kotlin.String, `expectedDeviceId`: kotlin.String): NativeHostedProvisioning {
+            return FfiConverterTypeNativeHostedProvisioning.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_restore_hosted_provisioning_for_identity(
+    
+        
+        FfiConverterByteArray.lower(`checkpointBytes`),
+        FfiConverterString.lower(`expectedOrigin`),
+        FfiConverterString.lower(`expectedVaultId`),
+        FfiConverterString.lower(`expectedDeviceId`),_status)
 }
     )
     }

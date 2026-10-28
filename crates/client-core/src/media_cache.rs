@@ -5,7 +5,7 @@
 //! host must not pin ciphertext forever after reopening the store.
 
 use crate::{AttachmentId, AttachmentState, Client, Error, Store, media};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 use std::collections::HashMap;
 
 /// Maximum retained verified downloaded ciphertext, independent of plaintext limits.
@@ -651,75 +651,55 @@ fn locally_readable_state(
     }
 }
 
+/// Evicts least-recently-used unleased candidates until unleased retained bytes fit the budget.
+///
+/// Eligibility is read once, in LRU order, and the statement is dropped before any eviction.
+/// Leases cannot change while the Store lock is held, so the snapshot stays valid.
 fn trim_store(store: &mut Store, budget: u64) -> Result<(), Error> {
-    while retained_bytes(store)? > budget {
-        let Some(candidate) = least_recent_evictable(store)? else {
-            break;
-        };
-        if !evict_store(store, candidate)? {
+    let candidates = evictable_candidates(store)?;
+    let mut retained = 0_u64;
+    for (attachment_id, bytes) in &candidates {
+        if !store.media_cache.leases.contains_key(attachment_id) {
+            retained = retained.checked_add(*bytes).ok_or(Error::Database)?;
+        }
+    }
+    for (attachment_id, bytes) in candidates {
+        if retained <= budget {
             break;
         }
+        if store.media_cache.leases.contains_key(&attachment_id) {
+            continue;
+        }
+        if !evict_store(store, attachment_id)? {
+            break;
+        }
+        retained = retained.checked_sub(bytes).ok_or(Error::Database)?;
     }
     Ok(())
 }
 
-fn retained_bytes(store: &Store) -> Result<u64, Error> {
-    let eligible_bytes: i64 = store.conn.query_row(
-        &format!(
-            r#"
-            SELECT COALESCE(SUM(a.ciphertext_bytes), 0)
-            FROM attachments a
-            JOIN media_cache_entries e ON e.attachment_id = a.attachment_id
-            WHERE {EVICTABLE_AVAILABLE_PREDICATE}
-            "#
-        ),
-        [],
-        |row| row.get(0),
-    )?;
-    let mut eligible_bytes = u64::try_from(eligible_bytes).map_err(|_| Error::Database)?;
-    for attachment_id in store.media_cache.leases.keys() {
-        let leased_bytes: Option<i64> = store
-            .conn
-            .query_row(
-                &format!(
-                    r#"
-                SELECT a.ciphertext_bytes
-                FROM attachments a
-                JOIN media_cache_entries e ON e.attachment_id = a.attachment_id
-                WHERE a.attachment_id = ? AND {EVICTABLE_AVAILABLE_PREDICATE}
-                "#
-                ),
-                [attachment_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(leased_bytes) = leased_bytes {
-            eligible_bytes = eligible_bytes
-                .checked_sub(u64::try_from(leased_bytes).map_err(|_| Error::Database)?)
-                .ok_or(Error::Database)?;
-        }
-    }
-    Ok(eligible_bytes)
-}
-
-fn least_recent_evictable(store: &Store) -> Result<Option<AttachmentId>, Error> {
+/// Every eviction-eligible row with its ciphertext size, least recently used first.
+fn evictable_candidates(store: &Store) -> Result<Vec<(AttachmentId, u64)>, Error> {
     let mut statement = store.conn.prepare(&format!(
         r#"
-        SELECT a.attachment_id
+        SELECT a.attachment_id, a.ciphertext_bytes
         FROM attachments a
         JOIN media_cache_entries e ON e.attachment_id = a.attachment_id
         WHERE {EVICTABLE_AVAILABLE_PREDICATE}
         ORDER BY e.last_access, a.attachment_id
         "#
     ))?;
-    let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
-    for id in ids {
-        let id: AttachmentId = id?.parse().map_err(|_| Error::Database)?;
-        if !store.media_cache.leases.contains_key(&id) {
-            return Ok(Some(id));
-        }
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (id, bytes) = row?;
+        let id: AttachmentId = id.parse().map_err(|_| Error::Database)?;
+        let bytes = u64::try_from(bytes).map_err(|_| Error::Database)?;
+        candidates.push((id, bytes));
     }
-    Ok(None)
+    Ok(candidates)
 }
 
 fn evict_store(store: &mut Store, attachment_id: AttachmentId) -> Result<bool, Error> {
@@ -752,9 +732,13 @@ fn evict_store(store: &mut Store, attachment_id: AttachmentId) -> Result<bool, E
         [attachment_id.to_string()],
     )?;
     tx.commit()?;
-    std::fs::remove_file(media::cipher_path(&store.media_dir, attachment_id))
-        .map_err(|_| Error::Storage)?;
-    Ok(true)
+    // The eviction is already committed, so a ciphertext file that is already gone reaches the
+    // same end state. Other I/O failures still surface as storage errors.
+    match std::fs::remove_file(media::cipher_path(&store.media_dir, attachment_id)) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err(Error::Storage),
+    }
 }
 
 fn is_protected(conn: &Connection, attachment_id: AttachmentId) -> Result<bool, Error> {

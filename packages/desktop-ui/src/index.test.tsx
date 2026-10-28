@@ -1108,6 +1108,42 @@ describe("contact recipient discovery", () => {
     { id: "+12025550160", label: "Sol Rivera", detail: "mobile · (202) 555-0160" },
     { id: "+12025550161", label: "Sol Rivera", detail: "work · (202) 555-0161" },
   ];
+  const duplicateAddressSuggestions = [
+    { id: "+12025550160", rowId: '["book-a","contact-a","phone-a"]', label: "Ada One", detail: "home · (202) 555-0160" },
+    { id: "+12025550160", rowId: '["book-b","contact-b","phone-b"]', label: "Ada Two", detail: "work · (202) 555-0160" },
+  ];
+
+  it("keeps duplicate-address suggestion rows stable across reorders without changing the committed address", async () => {
+    const committed = vi.fn();
+    const chosen = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    let results = duplicateAddressSuggestions;
+    renderRecipientPanel({
+      onCommit: committed,
+      onSuggestionChosen: chosen,
+      searchContacts: async () => results,
+    });
+    const input = screen.getByLabelText("Recipients");
+    fireEvent.change(input, { target: { value: "Ada" } });
+    const firstOptions = await screen.findAllByRole("option");
+    const firstIds = firstOptions.map((option) => option.id);
+    expect(new Set(firstIds).size).toBe(2);
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input).toHaveAttribute("aria-activedescendant", firstIds[1]);
+    fireEvent.mouseDown(firstOptions[1]);
+    expect(chosen).toHaveBeenLastCalledWith(duplicateAddressSuggestions[1]);
+    expect(committed).toHaveBeenLastCalledWith(["+12025550160"]);
+
+    results = [...duplicateAddressSuggestions].reverse();
+    fireEvent.change(input, { target: { value: "Ada" } });
+    const reorderedOptions = await screen.findAllByRole("option");
+    expect(reorderedOptions[0].id).toBe(firstIds[1]);
+    fireEvent.mouseDown(reorderedOptions[1]);
+    expect(chosen).toHaveBeenLastCalledWith(duplicateAddressSuggestions[0]);
+    expect(committed).toHaveBeenLastCalledWith(["+12025550160"]);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
 
   it("offers every phone of a matching contact and commits the chosen phone address", async () => {
     const committed = vi.fn();
@@ -1159,5 +1195,31 @@ describe("contact recipient discovery", () => {
     const option = await screen.findByText("work · (202) 555-0161");
     fireEvent.mouseDown(option.closest("li")!);
     expect(started).toHaveBeenCalledWith("+12025550161");
+  });
+
+  it("uses each contact row identity for duplicate-address picker options", async () => {
+    const started = vi.fn();
+    render(<RecipientPicker recipients={people} onChange={() => {}} onNewRecipient={started} searchContacts={async () => duplicateAddressSuggestions} />);
+    const picker = screen.getByRole("combobox", { name: "Search recipients" });
+    fireEvent.change(picker, { target: { value: "Ada" } });
+    const options = await screen.findAllByRole("option");
+    expect(new Set(options.map((option) => option.id)).size).toBe(2);
+    fireEvent.keyDown(picker, { key: "ArrowDown" });
+    expect(picker).toHaveAttribute("aria-activedescendant", options[1].id);
+    fireEvent.keyDown(picker, { key: "Enter" });
+    expect(started).toHaveBeenCalledWith("+12025550160");
+  });
+
+  it("gives a legacy id-only contact label a whitespace-free option id that matches aria-activedescendant", async () => {
+    const started = vi.fn();
+    const legacy = [{ id: "+12025550160", label: "Sol Rivera", detail: "mobile · (202) 555-0160" }];
+    render(<RecipientPicker recipients={people} onChange={() => {}} onNewRecipient={started} searchContacts={async () => legacy} />);
+    const picker = screen.getByRole("combobox", { name: "Search recipients" });
+    fireEvent.change(picker, { target: { value: "Sol" } });
+    const [option] = await screen.findAllByRole("option");
+    expect(option.id).not.toMatch(/\s/);
+    expect(picker).toHaveAttribute("aria-activedescendant", option.id);
+    fireEvent.keyDown(picker, { key: "Enter" });
+    expect(started).toHaveBeenCalledWith("+12025550160");
   });
 });

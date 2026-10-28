@@ -174,7 +174,7 @@ struct HostedWakeRuntimeTests {
         )
         let origin = try ServerOrigin(canonical: "https://relay.example.test", allowLoopbackHTTP: false)
         let supportsCandidates = try await session.relayWakeSupportsCandidates(origin: origin)
-        #expect(!(supportsCandidates))
+        #expect(!supportsCandidates)
     }
 
     @Test
@@ -245,18 +245,11 @@ extension HostedWakeRuntimeTests {
 
         let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
         await probe.waitForRuns(1)
-        let returned = WakeWorkReturnProbe()
         let joiner = Task { @MainActor in
             await coordinator.run(key: 1) { await probe.run() }
-            await returned.recordReturn()
         }
         joiner.cancel()
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(1))
-        while !(await returned.didReturn), clock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        #expect(await returned.didReturn)
+        #expect(await finishes(joiner, within: .seconds(1)), "cancelled waiter returned")
         let runs = await probe.runCount
         #expect(runs == 1)
 
@@ -373,14 +366,6 @@ extension HostedWakeRuntimeTests {
     }
 }
 
-private actor WakeWorkReturnProbe {
-    private(set) var didReturn = false
-
-    func recordReturn() {
-        didReturn = true
-    }
-}
-
 private actor WakeWorkProbe {
     private var runs = 0
     private var completed = 0
@@ -449,4 +434,25 @@ private final class CleanupTransport: HTTPTransport, @unchecked Sendable {
 private struct NoopPublisher: RelayWakeRoutePublisher {
     func publish(routeId: String, wakeCredential: String) async throws {}
     func remove(routeId: String) async throws {}
+}
+
+/// Waits for `task` at most `timeout` and reports whether it finished, so a regression fails the
+/// expectation instead of hanging the suite. Whichever of completion or deadline comes first wins.
+private func finishes(_ task: Task<Void, Never>, within timeout: Duration) async -> Bool {
+    let pending = Locked<CheckedContinuation<Bool, Never>?>(nil)
+    let settle: @Sendable (Bool) -> Void = { finished in
+        let continuation = pending.withValue { stored in
+            defer { stored = nil }
+            return stored
+        }
+        continuation?.resume(returning: finished)
+    }
+    var deadline: Task<Void, Never>?
+    let finished = await withCheckedContinuation { continuation in
+        pending.withValue { $0 = continuation }
+        Task { await task.value; settle(true) }
+        deadline = Task { try? await Task.sleep(for: timeout); settle(false) }
+    }
+    deadline?.cancel()
+    return finished
 }

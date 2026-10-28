@@ -68,7 +68,8 @@ temporary_out=''
 rpm_db=$(mktemp -d); trap 'rm -rf "$rpm_db" "$temporary_out"' EXIT
 rpm --dbpath "$rpm_db" --initdb
 rpm --dbpath "$rpm_db" --import "$PEPPY_RPM_VERIFY_KEYRING"
-rpm --dbpath "$rpm_db" --checksig "$rpm_file" >/dev/null || fail 'RPM signature is not trusted by the dedicated RPM keyring'
+rpm_signature=$(rpm --dbpath "$rpm_db" --checksig "$rpm_file") || fail 'RPM signature is not trusted by the dedicated RPM keyring'
+grep -Eq '(^|[[:space:]])signatures? OK([[:space:]]|$)' <<<"$rpm_signature" || fail 'RPM is unsigned or its signature is not trusted by the dedicated RPM keyring'
 
 temporary_out=$(mktemp -d "$(dirname "$out_dir")/.peppy-repository.XXXXXX")
 mkdir -p "$temporary_out/apt/pool/$channel" "$temporary_out/rpm/$channel"

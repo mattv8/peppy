@@ -718,3 +718,58 @@ async fn denied_expired_and_wrong_secret_requests_cannot_create_vaults() {
     );
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn create_vault_rejects_invalid_check_headers_before_admission_or_request_use() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let admin = claim(app.clone()).await;
+    let (request_id, secret) = approved_request(app.clone(), &admin, "header-owner").await;
+    let oversized = URL_SAFE_NO_PAD.encode(vec![0_u8; 1_048_577]);
+    let invalid_headers = ["!!", "", oversized.as_str()];
+    // More rejections than the per-source create-vault admission budget (10/minute): if invalid
+    // material consumed admission, the final valid request would be rate-limited.
+    for attempt in 0..12 {
+        let mut create = create_request(request_id, &secret, "header-owner", Uuid::new_v4());
+        create["material"]["check_header"] =
+            json!(invalid_headers[attempt % invalid_headers.len()]);
+        let response = send(
+            app.clone(),
+            Method::POST,
+            "/v1/instance/vaults",
+            Some(&create),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let rejected = body(response).await;
+        assert_eq!(rejected["code"], "invalid_vault_material", "{rejected}");
+    }
+    let (vaults, request_state): (i64, String) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM vault_owners), (SELECT state FROM vault_requests WHERE id=$1)",
+    )
+    .bind(request_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!((vaults, request_state.as_str()), (1, "approved"));
+
+    let created = send(
+        app,
+        Method::POST,
+        "/v1/instance/vaults",
+        Some(&create_request(
+            request_id,
+            &secret,
+            "header-owner",
+            Uuid::new_v4(),
+        )),
+        &[],
+    )
+    .await;
+    let created_status = created.status();
+    let created_body = body(created).await;
+    assert_eq!(created_status, StatusCode::OK, "{created_body}");
+    assert_eq!(created_body["replayed"], false);
+    fixture.cleanup().await;
+}

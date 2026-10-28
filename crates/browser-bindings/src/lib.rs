@@ -182,10 +182,14 @@ struct HostContext {
     gateways: Option<Vec<GatewayView>>,
     #[serde(skip)]
     revoked_device_ids: std::collections::HashSet<String>,
+    /// Set only by the worker context path; never deserialized from renderer host context.
+    #[serde(skip)]
+    outbox_rejected: bool,
 }
 
 fn connection_snapshot(context: &HostContext) -> (&'static str, Option<&'static str>) {
     match context.connection.as_deref() {
+        Some("connected") if context.outbox_rejected => ("connected", Some("outbox-rejected")),
         Some("connected") => ("connected", None),
         Some("offline") => ("offline", Some("offline")),
         Some("revoked") => ("error", Some("revoked")),
@@ -599,8 +603,8 @@ impl BrowserCore {
                 background: false,
             }),
             device_role: self.context.device_role.clone(),
-            pending_count: client.pending_outbox_batch(1000).map_err(core)?.len() as u64,
-            quarantine_count: client.quarantined().map_err(core)?.len() as u64,
+            pending_count: client.pending_outbox_count().map_err(core)? as u64,
+            quarantine_count: client.quarantine_count().map_err(core)? as u64,
             contact_resolution: None,
             contact_books: None,
             contacts_pending_count: None,
@@ -938,7 +942,9 @@ pub unsafe extern "C" fn peppy_browser_free_response(response: *mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peppy_client_core::{ComposeDraftUpdate, DraftId, IncomingSms};
+    use peppy_client_core::{
+        ComposeDraftUpdate, Cursor, DraftId, GatewayRoute, IncomingSms, OutgoingSms,
+    };
     use peppy_crypto::{create_vault_check_header, derive_root_key};
 
     fn value(response: &str) -> Value {
@@ -1444,5 +1450,47 @@ mod tests {
             .unwrap();
         assert_eq!(row["recipientlessDraft"], false);
         assert_eq!(row["draftOnly"], true);
+    }
+
+    #[test]
+    fn snapshot_counts_are_exact_past_the_outbox_batch_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = VaultId::new();
+        let device = DeviceId::new();
+        let mut core = BrowserCore::new(root.path().to_path_buf());
+        open(&mut core, vault, device, [7; 32]);
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        value(&core.dispatch(&json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string()));
+        let conversation = ConversationId::new();
+        for index in 0..1001 {
+            core.client()
+                .unwrap()
+                .queue_send(
+                    OutgoingSms {
+                        conversation_id: conversation,
+                        recipients: vec!["+15555550100".into()],
+                        body: format!("queued {index}"),
+                    },
+                    GatewayRoute {
+                        gateway_device_id: device,
+                        subscription_id: "sim-1".into(),
+                    },
+                )
+                .unwrap();
+        }
+        core.client()
+            .unwrap()
+            .ingest_raw(b"not an envelope", Cursor(1))
+            .unwrap();
+
+        let snapshot = value(&core.dispatch(r#"{"command":"snapshot"}"#));
+        assert_eq!(snapshot["pendingCount"], 1001);
+        assert_eq!(snapshot["quarantineCount"], 1);
+        assert!(!snapshot.to_string().contains("not an envelope"));
     }
 }

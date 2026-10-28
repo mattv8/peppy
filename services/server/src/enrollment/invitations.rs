@@ -940,7 +940,12 @@ fn crypto_role(role: EnrollmentRole) -> CryptoRole {
         EnrollmentRole::Gateway => CryptoRole::Gateway,
     }
 }
-fn database(_: sqlx::Error) -> InvitationError {
+fn database(error: sqlx::Error) -> InvitationError {
+    tracing::warn!(
+        operation = "phone_enrollment",
+        kind = crate::api::database_error_kind(&error),
+        "database operation failed"
+    );
     InvitationError(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable")
 }
 fn bad(code: &'static str) -> InvitationError {
@@ -952,6 +957,10 @@ fn unauthorized(code: &'static str) -> InvitationError {
 struct InvitationError(StatusCode, &'static str);
 impl IntoResponse for InvitationError {
     fn into_response(self) -> axum::response::Response {
-        (self.0, Json(serde_json::json!({"error":self.1}))).into_response()
+        (
+            self.0,
+            Json(serde_json::json!({"error":self.1,"code":self.1})),
+        )
+            .into_response()
     }
 }

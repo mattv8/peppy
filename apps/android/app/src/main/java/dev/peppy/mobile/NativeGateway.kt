@@ -10,6 +10,9 @@ import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeOpenConfig
 import uniffi.peppy_mobile_bindings.openNativeClient
 import uniffi.peppy_mobile_bindings.NativeEnrollmentIdentity
+import uniffi.peppy_mobile_bindings.NativeEnrollmentClientKind
+import uniffi.peppy_mobile_bindings.newNativeExistingOwnerEnrollmentClient
+import uniffi.peppy_mobile_bindings.restoreHostedProvisioningForIdentity
 import java.io.File
 import java.io.IOException
 import java.security.GeneralSecurityException
@@ -118,6 +121,13 @@ object NativeGateway {
     private data class Identity(val origin: String, val vaultId: String, val deviceId: String) {
         fun encode() = "$origin\n$vaultId\n$deviceId"
     }
+
+    private data class HostedRecoveryIdentity(
+        val identity: Identity,
+        val profile: String,
+        val header: String,
+        val generation: Long,
+    )
 
     fun databaseFile(context: Context) = File(context.noBackupFilesDir, DATABASE_NAME)
 
@@ -229,6 +239,7 @@ object NativeGateway {
     internal fun archiveEnrollment(context: Context): Boolean = synchronized(lock) {
         val prefs = prefs(context)
         val identity = identity(prefs) ?: return false
+        if (!ContactSyncPreferences(context).disableForIdentityTeardown()) return false
         val archive = File(context.noBackupFilesDir, "peppy-archives/${archiveId(identity)}")
         val staging = File(archive.parentFile, ".${archive.name}.staging")
         if (staging.exists()) return false
@@ -258,6 +269,7 @@ object NativeGateway {
             // far as each durable store permits.  No old credential remains usable by new work.
             // Capture cleanup under the still-current credential before clearing the enrollment.
             RelayWakeRuntime.archiveEnrollment(context)
+            ContactSyncHost.ensureObserver(context)
             if (!prefs.edit().clear().commit()) return false
             GatewayStateStore(context).resetForNewEnrollment()
             ServerReachabilityState.clear()
@@ -454,6 +466,7 @@ object NativeGateway {
                 }
                 if (!prefs.edit().putString(P_KEY_CACHE, sealed).commit()) return UnlockResult.FAILED
                 sharedKeysReady = true
+                rememberVerifiedSecret(context, identity(prefs) ?: return UnlockResult.SUPERSEDED, passphrase)
             }
             UnlockResult.UNLOCKED
         } catch (_: MobileBindingsException.WrongPassphrase) {
@@ -462,6 +475,121 @@ object NativeGateway {
             UnlockResult.FAILED
         } catch (_: GeneralSecurityException) {
             UnlockResult.FAILED
+        }
+    }
+
+    /**
+     * Lazily repairs a missing hosted binding from protected checkpoint material. This performs only
+     * pure passphrase checks against the checkpoint and current profile/header; it never unlocks the
+     * active client, imports a key cache, activates an epoch, or uses an account session.
+     */
+    internal fun repairHostedVaultSecret(context: Context): Boolean {
+        val recovery = synchronized(lock) {
+            val prefs = prefs(context)
+            val identity = identity(prefs) ?: return false
+            if (identity.origin != HostedAccountClient.ORIGIN) return false
+            HostedRecoveryIdentity(
+                identity,
+                openString(prefs, P_PROFILE) ?: return false,
+                openString(prefs, P_HEADER) ?: return false,
+                generation,
+            )
+        }
+        val store = try {
+            HostedProvisioningStorage.store(context)
+        } catch (_: Exception) {
+            return false
+        }
+        val checkpoint = try {
+            HostedProvisioningStorage.readCheckpoint(store) ?: return false
+        } catch (_: Exception) {
+            return false
+        }
+        try {
+            val provisioning = try {
+                restoreHostedProvisioningForIdentity(
+                    checkpoint,
+                    recovery.identity.origin,
+                    recovery.identity.vaultId,
+                    recovery.identity.deviceId,
+                )
+            } catch (_: Exception) {
+                return false
+            }
+            provisioning.use {
+                val view = it.view()
+                val candidate = try {
+                    HostedProvisioningStorage.candidate(
+                        store,
+                        checkpoint,
+                        recovery.identity.origin,
+                        view.accountId,
+                        recovery.identity.vaultId,
+                        recovery.identity.deviceId,
+                    ) ?: return false
+                } catch (_: Exception) {
+                    return false
+                }
+                try {
+                    val phrase = candidate.concatToString()
+                    if (!it.passphraseMatches(phrase)) return false
+                    val currentMatches = try {
+                        newNativeExistingOwnerEnrollmentClient(
+                            recovery.identity.origin,
+                            NativeEnrollmentClientKind.ANDROID,
+                            "Android phone",
+                            recovery.profile,
+                            recovery.header,
+                        ).use { owner -> owner.ownerPassphraseMatches(phrase) }
+                    } catch (_: Exception) {
+                        false
+                    }
+                    if (!currentMatches) return false
+
+                    return synchronized(lock) {
+                        val prefs = prefs(context)
+                        if (generation != recovery.generation || identity(prefs) != recovery.identity ||
+                            openString(prefs, P_PROFILE) != recovery.profile || openString(prefs, P_HEADER) != recovery.header
+                        ) {
+                            return@synchronized false
+                        }
+                        try {
+                            HostedProvisioningStorage.commitVerified(
+                                store,
+                                checkpoint,
+                                recovery.identity.origin,
+                                view.accountId,
+                                recovery.identity.vaultId,
+                                recovery.identity.deviceId,
+                                candidate,
+                            )
+                        } catch (_: Exception) {
+                            false
+                        }
+                    }
+                } finally {
+                    candidate.fill('\u0000')
+                }
+            }
+        } finally {
+            checkpoint.fill(0)
+        }
+    }
+
+    /** Called only after the core verified this exact phrase and the identity generation fence held. */
+    private fun rememberVerifiedSecret(context: Context, identity: Identity, passphrase: String) {
+        val secret = passphrase.toCharArray()
+        try {
+            HostedProvisioningStorage.withStorageLock {
+                val secrets = VaultSecretStore(HostedProvisioningStorage.store(context))
+                if (secrets.saveAndReadbackIfMissing(identity.vaultId, identity.deviceId, secret)) {
+                    secrets.removeOriginPendingIfMatching(identity.origin, secret)
+                }
+            }
+        } catch (_: Exception) {
+            // Unlock remains valid. Protected recovery material is retained for a later repair.
+        } finally {
+            secret.fill('\u0000')
         }
     }
 

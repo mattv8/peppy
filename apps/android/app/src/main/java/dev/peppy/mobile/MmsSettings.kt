@@ -57,7 +57,10 @@ internal class MmsTransferHealth(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("peppy-mms-transfer-health", Context.MODE_PRIVATE)
 
     fun record(failures: List<MmsTransferFailure>) {
-        if (failures.isEmpty()) return
+        if (failures.isEmpty()) {
+            prefs.edit().remove(ISSUES).apply()
+            return
+        }
         val entries = JSONArray()
         failures.take(MAX_ISSUES).forEach { failure ->
             entries.put(JSONObject().put("attachment", failure.attachmentId).put("operation", failure.operation).put("reason", failure.reason))

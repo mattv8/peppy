@@ -2,7 +2,6 @@ import type { AttachmentView, MessageView } from "@peppy/desktop-ui/bridge-contr
 
 export type GalleryAttachment = AttachmentView & {
   originalUrl?: string;
-  durationMs?: number;
 };
 
 export type GalleryMessage = Omit<MessageView, "attachments"> & {

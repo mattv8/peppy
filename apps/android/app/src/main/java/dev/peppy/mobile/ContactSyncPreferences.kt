@@ -51,6 +51,15 @@ internal class ContactSyncPreferences(context: Context) {
         get() = prefs.getBoolean(RETIRE_PENDING, false)
         set(value) { check(prefs.edit().putBoolean(RETIRE_PENDING, value).commit()) }
 
+    /** Identity teardown must not carry one person's local contacts consent into another's vault. */
+    fun disableForIdentityTeardown(): Boolean =
+        prefs.edit()
+                .putBoolean(ENABLED, false)
+                .remove(LEGACY_START_AFTER_READ_GRANT)
+                .putBoolean(READ_ACCESS_GRANTED, false)
+                .putBoolean(RETIRE_PENDING, false)
+                .commit()
+
     private companion object {
         const val NAME = "peppy-contact-sync"
         const val ENABLED = "enabled"

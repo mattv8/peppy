@@ -24,6 +24,11 @@ body {
 }
 html[data-window-rounded="false"] #desktop-shell,
 html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
+@media (max-width: 640px) {
+  #desktop-titlebar:has(#titlebar-search) > .window-controls-macos {
+    height: var(--peppy-titlebar-height);
+  }
+}
 .desktop-layout {
   display: flex;
   flex: 1;

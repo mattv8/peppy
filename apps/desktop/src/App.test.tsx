@@ -11,7 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
-import { App, DraftStore, shouldConfirmPostFlushDelete } from "./App";
+import { App, DraftStore, searchRecipientSuggestions, shouldConfirmPostFlushDelete } from "./App";
 import {
   bridge,
   fixtureBridge,
@@ -1923,7 +1923,6 @@ describe("lazy conversation history", () => {
     conversation.hasOlderMessages = true;
     const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
     vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { unmount } = render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
     unmount();
@@ -1934,7 +1933,8 @@ describe("lazy conversation history", () => {
       hasMore: false,
     }));
 
-    expect(consoleError).not.toHaveBeenCalled();
+    expect(screen.queryByText("Stale after unmount")).not.toBeInTheDocument();
+    expect(bridge.load_history).toHaveBeenCalledOnce();
   });
 
   it("shows a visible error when a history page belongs to another conversation", async () => {
@@ -3325,6 +3325,34 @@ describe("composer window", () => {
     expect(pill.querySelector("[aria-hidden]")).not.toBeInTheDocument();
     expect(document.getElementById("head-panel-route-description")).toHaveTextContent("Phone, SIM 2. Phone and SIM are selected in the main window.");
     expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
+  });
+  it("numbers one SIM per gateway independently in route controls and the head pill", async () => {
+    const backupGateway = { ...SMS_ONLY, id: "gw-backup", name: "Backup phone" };
+    host.gateways = [SMS_ONLY, backupGateway];
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("combobox", { name: "Phone" }));
+    const options = await screen.findAllByRole("option");
+    for (const gateway of host.gateways) {
+      const option = options.find((candidate) => candidate.getAttribute("data-gateway-choice") === routeValue(gateway));
+      expect(option).toHaveTextContent("SIM 1");
+    }
+
+    cleanup();
+    host.drafts.set("aurora", {
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "",
+      recipientIds: [],
+      attachmentIds: [],
+      gatewayId: backupGateway.id,
+      simId: backupGateway.simId,
+      revision: "1",
+    });
+    openComposerWindow("aurora", true);
+    render(<App />);
+
+    await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("SIM 1"));
   });
   it("points no-route and stale head recovery to the main window", async () => {
     openComposerWindow("aurora", true);
@@ -5324,8 +5352,8 @@ describe("display-only contact names", () => {
 
   it("starts a message to a contact phone that has no conversation, using the phone address", async () => {
     vi.spyOn(bridge, "search_contact_recipients").mockResolvedValue([
-      { address: "+12025550160", displayName: "Sol Rivera", number: "+12025550160", label: "mobile", normalized: true, contactId: "c-sol", phoneId: "p1" },
-      { address: "+12025550161", displayName: "Sol Rivera", number: "+12025550161", label: "work", normalized: true, contactId: "c-sol", phoneId: "p2" },
+      { address: "+12025550160", bookId: "book-phone", displayName: "Sol Rivera", number: "+12025550160", label: "mobile", normalized: true, contactId: "c-sol", phoneId: "p1" },
+      { address: "+12025550161", bookId: "book-phone", displayName: "Sol Rivera", number: "+12025550161", label: "work", normalized: true, contactId: "c-sol", phoneId: "p2" },
     ]);
     const save = vi.mocked(bridge.save_draft);
     render(<App />);
@@ -5339,6 +5367,18 @@ describe("display-only contact names", () => {
     fireEvent.mouseDown(work.closest("li")!);
     await waitFor(() => expect(save).toHaveBeenCalled());
     expect(save.mock.calls[0][0].recipientIds).toEqual(["+12025550161"]);
+  });
+
+  it("maps each contact result to its book, contact, and phone row identity", async () => {
+    vi.spyOn(bridge, "search_contact_recipients").mockResolvedValue([
+      { address: "+12025550160", bookId: "book-a", displayName: "Ada", number: "+12025550160", normalized: true, contactId: "contact-a", phoneId: "phone-a" },
+      { address: "+12025550160", bookId: "book-b", displayName: "Ada", number: "+12025550160", normalized: true, contactId: "contact-b", phoneId: "phone-b" },
+    ]);
+
+    await expect(searchRecipientSuggestions("Ada")).resolves.toEqual([
+      expect.objectContaining({ id: "+12025550160", rowId: '["book-a","contact-a","phone-a"]' }),
+      expect.objectContaining({ id: "+12025550160", rowId: '["book-b","contact-b","phone-b"]' }),
+    ]);
   });
 
   it("resolves phone-number notification titles in the feed only for display", async () => {
@@ -5573,5 +5613,79 @@ describe("vault shared secret reveal", () => {
     );
     expect(reveal).toHaveBeenCalledOnce();
     expect(screen.queryByText(/raw keychain detail/)).not.toBeInTheDocument();
+  });
+});
+
+describe("theme persistence and window sync (M26)", () => {
+  const LAYOUT_KEY = "peppy.layout.v1";
+  const shell = () => document.getElementById("desktop-shell");
+  const chooseTheme = (theme: "light" | "dark" | "system") => {
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.change(screen.getByLabelText("Theme"), { target: { value: theme } });
+  };
+  const storedLayout = () => JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}") as Record<string, unknown>;
+  const otherWindowWrites = (newValue: string | null) => act(() => {
+    window.dispatchEvent(new StorageEvent("storage", { key: LAYOUT_KEY, newValue }));
+  });
+
+  it("keeps a chosen Light theme, its body portal class, and sibling layout keys across remount", async () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ composerHeight: 128 }));
+    const first = render(<App />);
+    await screen.findByText("Hello from Aurora");
+
+    chooseTheme("light");
+
+    expect(shell()).toHaveClass("theme-light");
+    expect(document.body).toHaveClass("theme-light");
+    expect(storedLayout()).toMatchObject({ theme: "light", composerHeight: 128 });
+    first.unmount();
+    expect(document.body).not.toHaveClass("theme-light");
+
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    expect(shell()).toHaveClass("theme-light");
+    expect(document.body).toHaveClass("theme-light");
+  });
+
+  it("follows another window's theme change without writing it back", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const setItem = vi.spyOn(localStorage, "setItem");
+
+    otherWindowWrites(JSON.stringify({ theme: "dark", composerHeight: 140 }));
+
+    expect(shell()).toHaveClass("theme-dark");
+    expect(document.body).toHaveClass("theme-dark");
+    expect(setItem.mock.calls.filter(([key]) => key === LAYOUT_KEY)).toEqual([]);
+  });
+
+  it.each([
+    ["an unknown theme", JSON.stringify({ theme: "purple" })],
+    ["a non-string theme", JSON.stringify({ theme: 1 })],
+    ["corrupt layout JSON", "not-json"],
+  ])("defaults to the system theme for %s", async (_description, layout) => {
+    localStorage.setItem(LAYOUT_KEY, layout);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+
+    expect(shell()).toHaveClass("theme-system");
+    expect(document.body).toHaveClass("theme-system");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByLabelText("Theme")).toHaveValue("system");
+  });
+
+  it.each([
+    ["an unknown theme", JSON.stringify({ theme: "neon" })],
+    ["corrupt layout JSON", "{"],
+    ["a cleared layout", null],
+  ])("keeps the current theme when another window writes %s", async (_description, newValue) => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    chooseTheme("dark");
+
+    otherWindowWrites(newValue);
+
+    expect(shell()).toHaveClass("theme-dark");
+    expect(screen.getByLabelText("Theme")).toHaveValue("dark");
   });
 });

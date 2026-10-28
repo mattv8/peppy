@@ -29,7 +29,7 @@ public actor HostedAccountClient {
         self.transport = transport; self.secureStore = secureStore
         self.origin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: false)
         sessionKey = "hosted-account-session:\(self.origin.serialized)"
-        checkpointKey = "hosted-provisioning:\(self.origin.serialized)"
+        checkpointKey = HostedProvisioningStorage.checkpointAccount(origin: self.origin.serialized)
     }
 
     public func availableProviders() async throws -> [String] {
@@ -100,7 +100,7 @@ public actor HostedAccountClient {
     }
 
     public func pendingProvisioning() async throws -> NativeHostedProvisioning? {
-        guard let data = try secureStore.read(checkpointKey) else { return nil }
+        guard let data = try HostedProvisioningStorage.withLock({ try secureStore.read(checkpointKey) }) else { return nil }
         let session = try loadSession()
         do { return try restoreHostedProvisioning(checkpointBytes: data, expectedOrigin: origin.serialized, expectedAccountId: session.accountID) }
         catch { throw HostedAccountClientError.wrongAccount }
@@ -116,6 +116,7 @@ public actor HostedAccountClient {
             guard expected == generation else { throw CancellationError() }
             guard existing.view().accountId == account.accountId else { throw HostedAccountClientError.wrongAccount }
             guard try existing.passphraseMatches(passphrase: passphrase) else { throw HostedAccountClientError.wrongPassphrase }
+            try retainPendingSecret(passphrase, accountID: account.accountId)
             return existing.view()
         }
         guard account.access == "read_write" else { throw HostedAccountClientError.entitlementRequired }
@@ -129,7 +130,13 @@ public actor HostedAccountClient {
             deviceName: "Peppy iOS"
         )
         try Task.checkCancellation()
-        try secureStore.upsert(checkpointKey, try item.checkpoint())
+        // The secret is retained only after every prepare/entitlement gate passed, immediately
+        // before its durable checkpoint. A failed prepare cannot orphan a blocking secret.
+        let checkpoint = try item.checkpoint()
+        try HostedProvisioningStorage.withLock {
+            try retainPendingSecretLocked(passphrase, accountID: account.accountId)
+            try secureStore.upsert(checkpointKey, checkpoint)
+        }
         return item.view()
     }
 
@@ -138,8 +145,10 @@ public actor HostedAccountClient {
         provisioning = true; defer { provisioning = false }
         let expected = generation
         guard let item = try await pendingProvisioning() else { throw HostedAccountClientError.wrongAccount }
+        let session = try loadSession()
         guard try item.passphraseMatches(passphrase: passphrase) else { throw HostedAccountClientError.wrongPassphrase }
-        let view = item.view(); let session = try loadSession()
+        try retainPendingSecret(passphrase, accountID: session.accountID)
+        let view = item.view()
         guard view.accountId == session.accountID else { throw HostedAccountClientError.wrongAccount }
         func stillCurrent() throws {
             try Task.checkCancellation()
@@ -150,7 +159,8 @@ public actor HostedAccountClient {
             try stillCurrent()
             guard grant.status == 200 || grant.status == 201 else { throw failure(grant) }
             try item.acceptGrant(responseJson: try json(grant.body)); try stillCurrent()
-            try secureStore.upsert(checkpointKey, try item.checkpoint())
+            let checkpoint = try item.checkpoint()
+            try HostedProvisioningStorage.withLock { try secureStore.upsert(checkpointKey, checkpoint) }
         }
         let body = try item.completeRequest()
         var complete = try await request("POST", "/hosted/v1/provisioning/complete", body: body, bearer: session.bearer)
@@ -164,7 +174,8 @@ public actor HostedAccountClient {
             try stillCurrent()
             guard fresh.status == 200 || fresh.status == 201 else { throw failure(fresh) }
             try item.acceptGrant(responseJson: try json(fresh.body)); try stillCurrent()
-            try secureStore.upsert(checkpointKey, try item.checkpoint())
+            let checkpoint = try item.checkpoint()
+            try HostedProvisioningStorage.withLock { try secureStore.upsert(checkpointKey, checkpoint) }
             complete = try await request("POST", "/hosted/v1/provisioning/complete", body: try item.completeRequest(), bearer: session.bearer)
             try stillCurrent()
         }
@@ -174,10 +185,33 @@ public actor HostedAccountClient {
         return Data(credential.utf8)
     }
 
-    public func acknowledgeEnrollment(vaultID: String, deviceID: String) async throws {
-        guard let item = try await pendingProvisioning() else { return }
-        let view = item.view(); guard view.vaultId == vaultID && view.deviceId == deviceID else { throw HostedAccountClientError.wrongAccount }
-        try secureStore.delete(checkpointKey)
+    /// Removes the checkpoint only once the verified binding for its vault and device holds the
+    /// passphrase. It never writes a pending secret: the binding already consumed that copy, and
+    /// a missing or conflicting binding fails closed with the checkpoint kept for recovery.
+    public func acknowledgeEnrollment(identity: EnrollmentIdentity, passphrase: String) async throws {
+        guard let checkpoint = try HostedProvisioningStorage.withLock({ try secureStore.read(checkpointKey) }) else { return }
+        let session = try loadSession()
+        let item: NativeHostedProvisioning
+        do {
+            item = try restoreHostedProvisioning(
+                checkpointBytes: checkpoint,
+                expectedOrigin: origin.serialized,
+                expectedAccountId: session.accountID
+            )
+        } catch {
+            throw HostedAccountClientError.wrongAccount
+        }
+        let view = item.view()
+        guard view.vaultId == identity.vaultId, view.deviceId == identity.deviceId,
+              identity.origin == origin.serialized else { throw HostedAccountClientError.wrongAccount }
+        try HostedProvisioningStorage.withLock {
+            guard try secureStore.read(checkpointKey) == checkpoint else { throw HostedAccountClientError.wrongAccount }
+            guard let bound = try VaultSecretStore(secure: secureStore).read(identity) else {
+                throw HostedAccountClientError.unavailable
+            }
+            guard bound == passphrase else { throw HostedAccountClientError.wrongPassphrase }
+            try secureStore.delete(checkpointKey)
+        }
     }
 
     private func account(using session: StoredSession, expectedGeneration: Int) async throws -> NativeHostedAccount {
@@ -243,6 +277,44 @@ public actor HostedAccountClient {
         try Self.sessionMutationLock.withLock {
             guard expectedGeneration == generation, try rawSession() == session else { throw CancellationError() }
             try secureStore.delete(sessionKey)
+        }
+    }
+
+    /// The account's pending secret from an interrupted new-vault prepare (for example a failed
+    /// checkpoint write). The UI reuses it rather than generating a phrase that would fail closed.
+    /// Storage errors throw; nothing is written.
+    func candidatePendingSecret() throws -> String? {
+        let session = try loadSession()
+        return try HostedProvisioningStorage.withLock {
+            try VaultSecretStore(secure: secureStore).pendingSecret(origin: pendingSecretScope(session.accountID))
+        }
+    }
+    func bindVerifiedEnrollmentSecret(_ passphrase: String, identity: EnrollmentIdentity) throws {
+        let session = try loadSession()
+        let scope = pendingSecretScope(session.accountID)
+        try HostedProvisioningStorage.withLock {
+            try retainPendingSecretLocked(passphrase, accountID: session.accountID)
+            guard VaultSecretStore(secure: secureStore).storeBinding(passphrase, for: identity, origin: scope) else {
+                throw HostedAccountClientError.unavailable
+            }
+        }
+    }
+    private func pendingSecretScope(_ accountID: String) -> String {
+        HostedProvisioningStorage.pendingScope(origin: origin.serialized, accountID: accountID)
+    }
+    /// Preserves a matching protected value and fails closed on a conflicting nonempty value.
+    private func retainPendingSecret(_ secret: String, accountID: String) throws {
+        try HostedProvisioningStorage.withLock {
+            try retainPendingSecretLocked(secret, accountID: accountID)
+        }
+    }
+    private func retainPendingSecretLocked(_ secret: String, accountID: String) throws {
+        let secrets = VaultSecretStore(secure: secureStore)
+        let scope = pendingSecretScope(accountID)
+        if let existing = try secrets.pendingSecret(origin: scope) {
+            guard existing == secret else { throw HostedAccountClientError.wrongPassphrase }
+        } else {
+            try secrets.savePending(secret, origin: scope)
         }
     }
     private func request(_ method: String, _ path: String, body: String? = nil, bearer: String? = nil) async throws -> HTTPResponse {

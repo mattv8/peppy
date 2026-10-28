@@ -11,6 +11,7 @@ type LayoutPatch = {
   navigationPosition?: NavigationPosition;
   contactsDetailWidth?: number;
   compactTimestamps?: boolean;
+  theme?: "light" | "dark" | "system";
 };
 
 type StoredLayout = Record<string, unknown>;

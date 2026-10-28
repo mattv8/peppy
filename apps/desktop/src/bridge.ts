@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 /**
  * UI-only native boundary. These DTOs intentionally contain no credentials,
  * cryptographic material, device tokens, or raw filesystem paths.
@@ -442,7 +444,7 @@ export const fixtureBridge: DesktopBridge = {
     const digits = needle.replace(/\D/g, "");
     return people.flatMap(person => person.phones
       .filter(phone => person.name.toLowerCase().includes(needle) || (digits.length >= 2 && phone.number.includes(digits)))
-      .map(phone => ({ address: phone.number, displayName: person.name, number: phone.number, label: phone.label, normalized: true, contactId: person.contactId, phoneId: phone.id })));
+      .map(phone => ({ address: phone.number, bookId: "book-pixel8", displayName: person.name, number: phone.number, label: phone.label, normalized: true, contactId: person.contactId, phoneId: phone.id })));
   },
   request_contact_repair: async () => ({ repairRequired: true }),
   request_contact_sync: async bookId => {
@@ -567,8 +569,7 @@ const subscribeWindowEvent = (event: string, listener: (payload: unknown) => voi
 const missingHost = (method: keyof DesktopBridge) => async () => { throw { code: "missing-native-host", message: `Native host is required for ${String(method)}.` } satisfies BridgeError; };
 export const missingHostBridge: DesktopBridge = Object.fromEntries((Object.keys(fixtureBridge) as (keyof DesktopBridge)[]).map(key => [key, key === "subscribe" || key === "subscribe_drafts" || key === "subscribe_lifecycle" || key === "subscribe_lifecycle_finished" ? (() => () => undefined) : missingHost(key)])) as unknown as DesktopBridge;
 /** Fixtures are development/test-only and are never chosen after a native error. */
-const environment = (import.meta as unknown as { env?: { DEV?: boolean; MODE?: string } }).env;
-export let bridge: DesktopBridge = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window ? tauriBridge : (environment?.DEV || environment?.MODE === "test" ? fixtureBridge : missingHostBridge);
+export let bridge: DesktopBridge = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window ? tauriBridge : (import.meta.env.DEV || import.meta.env.MODE === "test" ? fixtureBridge : missingHostBridge);
 
 /** Installs a non-native host before the shared UI is rendered. */
 export function installBrowserBridge(browserBridge: DesktopBridge): void {

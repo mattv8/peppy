@@ -443,7 +443,7 @@ async fn run(dir: PathBuf) -> Result<(), String> {
                         .pending_commands()
                         .map_err(|_| "SIMULATED command lookup failed")?
                         .into_iter()
-                        .next()
+                        .find(|command| command.subscription_id == route.subscription_id)
                         && matches!(
                             client
                                 .begin_send_attempt(command.command_id)

@@ -41,6 +41,11 @@ The dispatcher is **worker-internal**, not a UI permission boundary. Raw open,
 unlock, transport, and file-transfer operations are test-only and refused in
 production when invoked through renderer ports. They are not forwarding candidates.
 
+For phone approval, `_worker_enrollment_phone_status` returns the locally
+validated owner invitation ID, SAS, and transcript-bound claim digest. Hosts
+must pin that digest after display and compare it again before sealing approval;
+the renderer-facing verification-code DTO remains unchanged.
+
 The production host (see `packages/browser-runtime/src/host.ts`) enforces an explicit
 RPC allowlist and routes only safe commands through renderer ports. Sensitive commands
 like unlock receive passphrase through imperative browser APIs outside React state,

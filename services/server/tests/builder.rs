@@ -189,3 +189,58 @@ async fn builder_rejects_inconsistent_push_configuration() {
 
     assert!(error.to_string().contains("push configuration"));
 }
+
+async fn challenge_route_status(server: peppy_server::Server) -> StatusCode {
+    server
+        .router()
+        .oneshot(
+            Request::post("/v1/enrollment/challenges")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn builder_rejects_a_non_loopback_http_enrollment_origin_and_mounts_https() {
+    let mut insecure = config("insecure-enrollment-origin");
+    insecure.public_api_url = Some(Url::parse("http://lan-host.example.test").unwrap());
+    let error = ServerBuilder::community(insecure, pool())
+        .setup_token("builder-test-token-at-least-32-bytes")
+        .build()
+        .await
+        .err()
+        .expect("an enrollment origin the routers reject must fail assembly");
+    let error = error
+        .downcast_ref::<std::io::Error>()
+        .expect("assembly configuration faults are io errors");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("PUBLIC_API_URL"));
+    assert!(!error.to_string().contains("lan-host"));
+
+    let without_origin = ServerBuilder::community(config("no-enrollment-origin"), pool())
+        .setup_token("builder-test-token-at-least-32-bytes")
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        challenge_route_status(without_origin).await,
+        StatusCode::NOT_FOUND
+    );
+
+    let mut secure = config("https-enrollment-origin");
+    secure.public_api_url = Some(Url::parse("https://api.example.test").unwrap());
+    let mounted = ServerBuilder::community(secure, pool())
+        .setup_token("builder-test-token-at-least-32-bytes")
+        .build()
+        .await
+        .unwrap();
+    // Only the mounted enrollment router reaches JSON extraction for this incomplete body.
+    assert_eq!(
+        challenge_route_status(mounted).await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}

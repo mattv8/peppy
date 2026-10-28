@@ -342,6 +342,22 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
         assertEquals(1, os.creates)
     }
 
+    @Test fun createWhoseRawIsMissingFromTheReturnedAggregateIsUnknownAndNeverRecreated() {
+        val (gateway, bookId) = setUpBook()
+        val create = createRequest(bookId)
+        deliverFromDesktop(gateway, create)
+        os.createdRawLookupAnswer = 1 // Ada's aggregate, which does not contain the created raw
+
+        assertEquals(1, coordinator(gateway).run(charging = false).outcomeUnknown)
+        assertEquals("outcome_unknown", request(gateway, create.getString("request_id"))!!.getString("state"))
+        assertEquals(1, os.creates)
+
+        // Evidence recovery sees the same unattributable aggregate: still unknown, no second create.
+        coordinator(gateway).run(charging = false)
+        assertEquals("outcome_unknown", request(gateway, create.getString("request_id"))!!.getString("state"))
+        assertEquals(1, os.creates)
+    }
+
     @Test fun writeWithoutWritePermissionIsRefusedBeforeAnyOsEffect() {
         val (gateway, bookId) = setUpBook()
         access = ContactsAccess(read = true, write = false)
@@ -567,7 +583,10 @@ internal class FakeContactsOs : ContactsOs {
     var createMode = CreateMode.APPLY
     /** When set, a created raw is auto-joined into this existing contact. */
     var autoJoinInto: Long? = null
+    /** When set, a raw this fake created is looked up as this contact's aggregate, which omits that raw. */
+    var createdRawLookupAnswer: Long? = null
     var creates = 0
+    private val createdRaws = mutableSetOf<Long>()
     private val updated = mutableMapOf<Long, Long>()
     private var nextData = 1000L
     private var nextContact = 100L
@@ -639,8 +658,10 @@ internal class FakeContactsOs : ContactsOs {
     }
     override fun contactByLookup(lookupKey: String): Lookup =
         contacts.values.firstOrNull { it.lookupKey == lookupKey }?.let { Lookup.Found(it) } ?: Lookup.Missing
-    override fun contactByRawContact(rawContactId: Long): Lookup =
-        raws[rawContactId]?.let { Lookup.Found(aggregate(it.contactId)!!) } ?: Lookup.Missing
+    override fun contactByRawContact(rawContactId: Long): Lookup {
+        createdRawLookupAnswer?.takeIf { rawContactId in createdRaws }?.let { return Lookup.Found(aggregate(it)!!) }
+        return raws[rawContactId]?.let { Lookup.Found(aggregate(it.contactId)!!) } ?: Lookup.Missing
+    }
     override fun deletedSince(sinceMillis: Long) = 0
     override fun readPhoto(contactId: Long): PhotoRead = PhotoRead.None
 
@@ -672,6 +693,7 @@ internal class FakeContactsOs : ContactsOs {
         writes += "create"
         if (createMode == CreateMode.NOT_COMMITTED_UNKNOWN) return WriteResult.OutcomeUnknown
         val raw = nextRaw++
+        createdRaws += raw
         val contactId = autoJoinInto ?: nextContact++
         raws[raw] = Raw(contactId, account, 0, fields.map { Field(nextData++, raw, it.kind, it.values, false, false, 0) }.toMutableList())
         return if (createMode == CreateMode.COMMITTED_BUT_UNKNOWN) WriteResult.OutcomeUnknown else WriteResult.Applied(raw)

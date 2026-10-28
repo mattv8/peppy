@@ -1,5 +1,20 @@
 import Foundation
 
+/// Process-wide serialization for hosted provisioning records that share the native secure store.
+/// Callers must never hold this lock across network work or passphrase verification.
+enum HostedProvisioningStorage {
+    private static let lock = NSLock()
+
+    static func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        try lock.withLock(body)
+    }
+
+    static func checkpointAccount(origin: String) -> String { "hosted-provisioning:\(origin)" }
+    static func pendingScope(origin: String, accountID: String) -> String {
+        "\(origin)|hosted-account|\(accountID)"
+    }
+}
+
 /// Per-binding vault secrets use the shared non-synchronizing, device-only Keychain store.
 public struct VaultSecretStore: Sendable {
     private let secure: any SecureStore
@@ -18,6 +33,21 @@ public struct VaultSecretStore: Sendable {
             guard let existing = try secure.read(account), existing.isEmpty else { return false }
             try secure.upsert(account, Data(secret.utf8)); return true
         } catch { return false }
+    }
+
+    /// Saves a locally verified secret without replacing a non-empty binding, then checks the value.
+    @discardableResult
+    func saveVerifiedBindingIfMissing(_ secret: String, for identity: EnrollmentIdentity) throws(ClientError) -> Bool {
+        guard !secret.isEmpty else { return false }
+        let account = identity.account("vault-secret-v2")
+        if let existing = try secure.read(account), !existing.isEmpty { return existing == Data(secret.utf8) }
+        if try secure.addIfAbsent(account, Data(secret.utf8)) {
+            return try secure.read(account) == Data(secret.utf8)
+        }
+        let existing = try secure.read(account)
+        guard existing?.isEmpty != false else { return existing == Data(secret.utf8) }
+        try secure.upsert(account, Data(secret.utf8))
+        return try secure.read(account) == Data(secret.utf8)
     }
 
     /// Writes the creation-time secret. A non-empty pending value is never overwritten.
@@ -48,13 +78,18 @@ public struct VaultSecretStore: Sendable {
 
     /// Stores a secret that passed verified activation under the device binding. An existing non-empty binding is kept.
     /// The pending copy is removed only when it equals the binding that now holds the secret.
-    public func storeBinding(_ secret: String, for identity: EnrollmentIdentity, origin: String) {
+    @discardableResult public func storeBinding(_ secret: String, for identity: EnrollmentIdentity, origin: String) -> Bool {
         _ = saveIfMissing(secret, for: identity)
-        guard (try? read(identity)) == secret, (try? readPending(origin)) == secret else { return }
+        guard (try? read(identity)) == secret else { return false }
+        guard (try? readPending(origin)) == secret else { return true }
         try? secure.delete(pendingAccount(origin))
+        return (try? readPending(origin)) == nil
     }
 
     public func pendingSecret(origin: String) throws(ClientError) -> String? { try readPending(origin) }
+
+    func pendingData(origin: String) throws(ClientError) -> Data? { try secure.read(pendingAccount(origin)) }
+    func deletePending(origin: String) throws(ClientError) { try secure.delete(pendingAccount(origin)) }
 
     private func readPending(_ origin: String) throws(ClientError) -> String? {
         guard let data = try secure.read(pendingAccount(origin)), !data.isEmpty else { return nil }

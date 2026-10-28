@@ -1,6 +1,7 @@
 use axum::{
     Router,
     body::Body,
+    extract::ConnectInfo,
     http::{Request, StatusCode},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -25,6 +26,7 @@ use peppy_server::{
     enrollment::manual::{EnrollmentRouterState, router},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -128,6 +130,24 @@ async fn call_with_origin(
         )
         .await
         .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (app, status, serde_json::from_slice(&body).unwrap())
+}
+
+async fn call_with_peer(
+    app: Router,
+    path: &str,
+    body: serde_json::Value,
+    peer: SocketAddr,
+) -> (Router, StatusCode, serde_json::Value) {
+    let mut request = Request::post(path)
+        .header("origin", "https://peppy.test")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    request.extensions_mut().insert(ConnectInfo(peer));
+    let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     (app, status, serde_json::from_slice(&body).unwrap())
@@ -442,7 +462,7 @@ async fn manual_challenge_selects_multi_vaults_without_owner_enumeration() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(selected["vault_id"], second.to_string());
 
-    for (request, expected_status, expected_error) in [
+    for (index, (request, expected_status, expected_error)) in [
         (
             challenge_request(Some(Uuid::new_v4()), None),
             StatusCode::NOT_FOUND,
@@ -473,11 +493,15 @@ async fn manual_challenge_selects_multi_vaults_without_owner_enumeration() {
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_username",
         ),
-    ] {
-        let (_, status, body) = call(
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_, status, body) = call_with_peer(
             app.clone(),
             "/v1/enrollment/challenges",
             serde_json::to_value(request).unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], 10_000 + index as u16)),
         )
         .await;
         assert_eq!(status, expected_status);
@@ -504,6 +528,156 @@ async fn manual_challenge_selects_multi_vaults_without_owner_enumeration() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+async fn challenge_from(
+    app: &Router,
+    request: AdmissionChallengeRequest,
+    peer: Option<SocketAddr>,
+) -> (StatusCode, serde_json::Value) {
+    let body = serde_json::to_value(request).unwrap();
+    let (_, status, body) = match peer {
+        Some(peer) => call_with_peer(app.clone(), "/v1/enrollment/challenges", body, peer).await,
+        None => call(app.clone(), "/v1/enrollment/challenges", body).await,
+    };
+    (status, body)
+}
+
+async fn admission_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM device_admissions")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn anonymous_manual_challenges_are_limited_per_source_including_missing_peers() {
+    let (app, pool, schema, vault, _) = app().await;
+    let limited_peer = SocketAddr::from(([192, 0, 2, 10], 4000));
+    let other_peer = SocketAddr::from(([192, 0, 2, 11], 4000));
+
+    // Every anonymous selector shape counts against the same source budget of five.
+    for (attempt, peer) in [Some(limited_peer), None].into_iter().enumerate() {
+        for index in 0..5 {
+            let request = if index % 2 == 0 {
+                challenge_request(None, None)
+            } else {
+                challenge_request(Some(vault), None)
+            };
+            let (status, body) = challenge_from(&app, request, peer).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "source {attempt} request {index}: {body}"
+            );
+            assert_eq!(body["vault_id"], vault.to_string());
+        }
+        let admissions = admission_count(&pool).await;
+        let (status, body) = challenge_from(&app, challenge_request(Some(vault), None), peer).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"], "manual_owner_limited");
+        assert_eq!(body["code"], "manual_owner_limited");
+        assert_eq!(admission_count(&pool).await, admissions);
+    }
+
+    let (status, body) =
+        challenge_from(&app, challenge_request(None, None), Some(other_peer)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["vault_id"], vault.to_string());
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+async fn insert_admission(
+    pool: &PgPool,
+    vault: Uuid,
+    device_id: Uuid,
+    credential_digest: [u8; 32],
+    consumed: bool,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO device_admissions(id,vault_id,device_id,kind,name,requested_role,device_public_key,credential_digest,nonce,origin,expires_at,consumed_at,context_digest) VALUES($1,$2,$3,'desktop','fixture','device',$4,$5,$6,'https://peppy.test',now()-interval '1 hour',CASE WHEN $7 THEN now()-interval '2 hours' END,$8)")
+        .bind(id)
+        .bind(vault)
+        .bind(device_id)
+        .bind(vec![1_u8; 32])
+        .bind(credential_digest.as_slice())
+        .bind(vec![2_u8; 32])
+        .bind(consumed)
+        .bind(vec![3_u8; 32])
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn admission_exists(pool: &PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM device_admissions WHERE id=$1)")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn manual_challenges_purge_expired_unconsumed_admissions_in_bounded_vault_batches() {
+    let (app, pool, schema, vault, _) = app().await;
+    let other_vault = add_vault(&pool, "other").await;
+    let mut expired = Vec::new();
+    for index in 0..65_u8 {
+        expired.push(insert_admission(&pool, vault, Uuid::new_v4(), [index; 32], false).await);
+    }
+    let foreign_expired =
+        insert_admission(&pool, other_vault, Uuid::new_v4(), [90; 32], false).await;
+    let consumed_device = Uuid::new_v4();
+    let consumed_digest = [91_u8; 32];
+    let consumed = insert_admission(&pool, vault, consumed_device, consumed_digest, true).await;
+
+    let (status, body) = challenge_from(
+        &app,
+        challenge_request(Some(vault), None),
+        Some(SocketAddr::from(([192, 0, 2, 20], 4000))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut remaining = 0;
+    for id in &expired {
+        remaining += usize::from(admission_exists(&pool, *id).await);
+    }
+    assert_eq!(remaining, 1, "one challenge purges at most 64 expired rows");
+    assert!(admission_exists(&pool, foreign_expired).await);
+    assert!(admission_exists(&pool, consumed).await);
+
+    let (status, body) = challenge_from(
+        &app,
+        challenge_request(Some(vault), None),
+        Some(SocketAddr::from(([192, 0, 2, 21], 4000))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for id in &expired {
+        assert!(!admission_exists(&pool, *id).await);
+    }
+    assert!(admission_exists(&pool, consumed).await);
+
+    let mut replay = challenge_request(Some(vault), None);
+    replay.device.device_id = consumed_device;
+    replay.credential_digest = hex::encode(consumed_digest);
+    let (status, body) = challenge_from(
+        &app,
+        replay,
+        Some(SocketAddr::from(([192, 0, 2, 22], 4000))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "challenge_already_consumed");
+    assert_eq!(body["code"], "challenge_already_consumed");
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&pool)
         .await

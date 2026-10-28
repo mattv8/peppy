@@ -74,6 +74,7 @@ export function ContactForm({
   bookCapabilities,
   toneControl,
   savedToneSeed,
+  saveDisabled = false,
 }: {
   initial?: ContactView;
   onCancel(): void;
@@ -85,6 +86,7 @@ export function ContactForm({
   bookCapabilities?: { canWrite: boolean; supportsNotes: boolean; supportsPhoto: boolean; supportsBirthday?: boolean };
   toneControl?: { value?: number; pending?: boolean; error?: string; disabled?: boolean; onSelect(index: number | null): void };
   savedToneSeed?: string;
+  saveDisabled?: boolean;
 }) {
   const rowSequence = useRef(0);
   // Existing domain IDs win; new unsaved rows get a stable form-local allocation ID.
@@ -291,7 +293,7 @@ export function ContactForm({
         <button
           data-action="save-edit"
           className="primary-button"
-          disabled={!displayName.trim() || displayName === "#" || busy || fieldReadOnly}
+          disabled={!displayName.trim() || displayName === "#" || busy || fieldReadOnly || saveDisabled}
           onClick={() => onSave({
             ...draft,
             phones: draft.phones.map(({ editorKey: _key, ...value }) => value),

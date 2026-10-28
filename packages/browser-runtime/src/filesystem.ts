@@ -178,10 +178,10 @@ export async function captureFilesystemCheckpoint(options: CaptureFilesystemChec
   for (const id of ids) {
     const path = cipherPath(id);
     const name = `${id}.ppss`;
-    if (cipherEntries?.has(name)) {
-      files.push({ path, bytes: readStableFile(options.fs, child(ROOT, path)) });
-    } else if (previousFiles.has(path)) {
+    if (previousFiles.has(path)) {
       retainedCipherPaths.push(path);
+    } else if (cipherEntries?.has(name)) {
+      files.push({ path, bytes: readStableFile(options.fs, child(ROOT, path)) });
     } else {
       throw invalid();
     }

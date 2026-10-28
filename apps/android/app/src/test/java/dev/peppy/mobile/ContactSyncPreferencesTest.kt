@@ -67,6 +67,22 @@ class ContactSyncPreferencesTest {
         assertEquals(ContactSyncIntent.STOPPED, preferences.intent)
     }
 
+    @Test fun identityTeardownStopsTheOldIdentityAndTheNextIdentityRequiresAnExplicitOptIn() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val preferences = freshPreferences()
+        preferences.enabled = true
+        preferences.readAccessGranted = true
+        preferences.retirePending = true
+        context.getSharedPreferences("peppy-contact-sync", android.content.Context.MODE_PRIVATE)
+            .edit().putBoolean("start-after-read-grant", true).commit()
+
+        assertEquals(true, preferences.disableForIdentityTeardown())
+        assertEquals(ContactSyncIntent.STOPPED, preferences.intent)
+        assertEquals(false, preferences.readAccessGranted)
+        assertEquals(false, context.getSharedPreferences("peppy-contact-sync", android.content.Context.MODE_PRIVATE)
+            .contains("start-after-read-grant"))
+    }
+
     private fun freshPreferences(): ContactSyncPreferences {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         context.getSharedPreferences("peppy-contact-sync", android.content.Context.MODE_PRIVATE).edit().clear().commit()

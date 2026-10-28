@@ -937,6 +937,36 @@ fn contact_edit_invalidates_conversation_cursor() {
 }
 
 #[test]
+fn malformed_non_ascii_cursors_are_rejected_and_client_stays_usable() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&directory, "cursor-non-ascii", &vault), &vault);
+    client
+        .capture_incoming(incoming("needle body", "non-ascii-cursor"))
+        .unwrap();
+    // "a€" has an even byte length, so byte-pair slicing would split the euro sign and panic.
+    // "+1" parses as hex through from_str_radix but is not an ASCII hex digit pair.
+    for cursor in [
+        "a€:message:0:00",
+        "é:message:0:00",
+        "00:message:0:é€",
+        "00:message:0:+1",
+    ] {
+        let mut malformed = request("needle");
+        malformed.cursor = Some(cursor.into());
+        assert!(
+            matches!(
+                client.search_local(malformed),
+                Err(Error::InvalidRequest("search cursor"))
+            ),
+            "cursor {cursor:?} must be rejected"
+        );
+    }
+    let page = client.search_local(request("needle")).unwrap();
+    assert_eq!(page.items.len(), 1);
+}
+
+#[test]
 fn message_query_treats_fts_syntax_literally_and_does_not_search_json_keys() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();

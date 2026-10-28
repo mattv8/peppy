@@ -52,6 +52,16 @@ private struct ContactsConsentSheet: View {
 }
 
 extension AppModel {
+    /// Contact opt-in belongs to the enrolled identity. Teardown stops local work and records an
+    /// explicit stopped state so a different enrollment must opt in again.
+    func stopContactsForIdentityTeardown() async {
+        await contactPasses.cancel()
+        contactsPreferences.save(ContactsPreferences(intent: .stopped))
+        contacts.enabled = false
+        contacts.intent = .stopped
+        contacts.lastReport = nil
+    }
+
     /// Reconciles local contact access and runs one bounded foreground pass when access starts.
     func refreshContacts() async {
         let previousAccess = contacts.access

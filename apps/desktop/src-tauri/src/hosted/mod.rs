@@ -1410,65 +1410,131 @@ impl Loopback {
         })
     }
     async fn receive(self, expected: &str) -> BridgeResult<Zeroizing<String>> {
-        let (mut stream, _) =
-            tokio::time::timeout(Duration::from_secs(300), self.listener.accept())
-                .await
-                .map_err(|_| {
-                    BridgeError::new("hosted-sign-in-timeout", "Google sign-in timed out.")
-                })?
-                .map_err(|_| {
-                    BridgeError::new("hosted-sign-in", "Could not receive the sign-in callback.")
-                })?;
-        let mut request = [0u8; 4096];
-        let length = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut request))
+        const CALLBACK_DEADLINE: Duration = Duration::from_secs(300);
+        const REQUEST_LINE_DEADLINE: Duration = Duration::from_secs(10);
+        const MAX_REQUEST_LINE_BYTES: usize = 4096;
+        let deadline = tokio::time::Instant::now() + CALLBACK_DEADLINE;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let Ok(accepted) = tokio::time::timeout(remaining, self.listener.accept()).await else {
+                return Err(BridgeError::new(
+                    "hosted-sign-in-timeout",
+                    "Google sign-in timed out.",
+                ));
+            };
+            let Ok((mut stream, _)) = accepted else {
+                return Err(BridgeError::new(
+                    "hosted-sign-in",
+                    "Could not receive the sign-in callback.",
+                ));
+            };
+            let line = match read_callback_request_line(
+                &mut stream,
+                REQUEST_LINE_DEADLINE.min(remaining),
+                MAX_REQUEST_LINE_BYTES,
+            )
             .await
-            .map_err(|_| BridgeError::new("hosted-sign-in", "The sign-in callback timed out."))?
-            .map_err(|_| {
-                BridgeError::new("hosted-sign-in", "Could not read the sign-in callback.")
-            })?;
-        let line = std::str::from_utf8(&request[..length])
-            .ok()
-            .and_then(|v| v.split("\r\n").next())
-            .ok_or_else(|| {
-                BridgeError::new("hosted-sign-in", "The sign-in callback was invalid.")
-            })?;
-        let target = line.split_whitespace().nth(1).ok_or_else(|| {
-            BridgeError::new("hosted-sign-in", "The sign-in callback was invalid.")
-        })?;
-        let url = url::Url::parse(&format!("http://127.0.0.1{target}"))
-            .map_err(|_| BridgeError::new("hosted-sign-in", "The sign-in callback was invalid."))?;
-        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-        let cancelled = query.contains_key("error");
-        let outcome = if cancelled {
-            callback_page::CallbackOutcome::Cancelled
-        } else {
-            callback_page::CallbackOutcome::Received
-        };
-        let _ = stream
-            .write_all(callback_page::response(outcome).as_bytes())
-            .await;
-        if cancelled {
-            return Err(BridgeError::new(
-                "hosted-sign-in-cancelled",
-                "Google sign-in was cancelled.",
-            ));
+            {
+                Ok(line) => line,
+                // Browsers and local software can connect before the callback; do not let one
+                // malformed, fragmented, or oversized request consume the sign-in listener.
+                Err(()) => continue,
+            };
+            let (page, result) = match classify_callback_request(&line, expected) {
+                // Probes, favicon fetches and stale or forged callbacks must not end the sign-in.
+                CallbackRequest::Unrelated => continue,
+                CallbackRequest::Cancelled => (
+                    callback_page::CallbackOutcome::Cancelled,
+                    Err(BridgeError::new(
+                        "hosted-sign-in-cancelled",
+                        "Google sign-in was cancelled.",
+                    )),
+                ),
+                CallbackRequest::Code(code) => (callback_page::CallbackOutcome::Received, Ok(code)),
+                CallbackRequest::MissingCode => (
+                    callback_page::CallbackOutcome::Received,
+                    Err(BridgeError::new(
+                        "hosted-sign-in",
+                        "Google did not return a sign-in code.",
+                    )),
+                ),
+            };
+            let _ = stream
+                .write_all(callback_page::response(page).as_bytes())
+                .await;
+            return result;
         }
-        let state = query.get("state").ok_or_else(|| {
-            BridgeError::new("hosted-sign-in", "The sign-in callback was invalid.")
-        })?;
-        if !constant_time_eq(state.as_bytes(), expected.as_bytes()) {
-            return Err(BridgeError::new(
-                "hosted-sign-in",
-                "The sign-in callback did not match this request.",
-            ));
+    }
+}
+
+/// What one loopback request line means for the pending sign-in.
+#[derive(Debug, PartialEq, Eq)]
+enum CallbackRequest {
+    /// Not this sign-in's callback: malformed, another path, or without the expected `state`.
+    Unrelated,
+    Cancelled,
+    Code(Zeroizing<String>),
+    MissingCode,
+}
+
+/// Only a request to `/` carrying this sign-in's `state` may finish it, so an unrelated local
+/// connection can neither cancel the sign-in nor substitute a code.
+fn classify_callback_request(line: &str, expected_state: &str) -> CallbackRequest {
+    let Some(target) = line.split_whitespace().nth(1) else {
+        return CallbackRequest::Unrelated;
+    };
+    let Ok(url) = url::Url::parse(&format!("http://127.0.0.1{target}")) else {
+        return CallbackRequest::Unrelated;
+    };
+    if url.path() != "/" {
+        return CallbackRequest::Unrelated;
+    }
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    let state_matches = query
+        .get("state")
+        .is_some_and(|state| constant_time_eq(state.as_bytes(), expected_state.as_bytes()));
+    if !state_matches {
+        return CallbackRequest::Unrelated;
+    }
+    if query.contains_key("error") {
+        return CallbackRequest::Cancelled;
+    }
+    query
+        .get("code")
+        .filter(|value| !value.is_empty() && value.len() <= 8192)
+        .map_or(CallbackRequest::MissingCode, |value| {
+            CallbackRequest::Code(Zeroizing::new(value.to_owned()))
+        })
+}
+
+async fn read_callback_request_line(
+    stream: &mut tokio::net::TcpStream,
+    deadline: Duration,
+    max_bytes: usize,
+) -> Result<String, ()> {
+    let mut request = Vec::with_capacity(256);
+    let expires_at = tokio::time::Instant::now() + deadline;
+    loop {
+        if request.len() >= max_bytes {
+            return Err(());
         }
-        query
-            .get("code")
-            .filter(|value| !value.is_empty() && value.len() <= 8192)
-            .map(|value| Zeroizing::new(value.to_owned()))
-            .ok_or_else(|| {
-                BridgeError::new("hosted-sign-in", "Google did not return a sign-in code.")
-            })
+        let mut byte = [0u8; 1];
+        let remaining = expires_at.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(());
+        }
+        let read = tokio::time::timeout(remaining, stream.read(&mut byte))
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())?;
+        if read == 0 {
+            return Err(());
+        }
+        request.push(byte[0]);
+        if request.ends_with(b"\r\n") {
+            let line = std::str::from_utf8(&request[..request.len() - 2]).map_err(|_| ())?;
+            return Ok(line.to_owned());
+        }
     }
 }
 fn random_b64url(length: usize) -> BridgeResult<String> {
@@ -1534,6 +1600,130 @@ mod tests {
             expires_at_unix: 1,
         };
         assert!(!format!("{session:?}").contains("secret"));
+    }
+
+    const CALLBACK_STATE: &str = "expected-state";
+
+    #[test]
+    fn only_a_root_callback_with_the_expected_state_is_classified() {
+        for unrelated in [
+            "",
+            "GET",
+            "GET :99999/ HTTP/1.1",
+            "GET /favicon.ico HTTP/1.1",
+            "GET / HTTP/1.1",
+            "GET /?error=access_denied HTTP/1.1",
+            "GET /?error=access_denied&state=other HTTP/1.1",
+            "GET /?code=forged&state=other HTTP/1.1",
+            "GET /?code=forged&state=expected-stat HTTP/1.1",
+            "GET /favicon.ico?code=x&state=expected-state HTTP/1.1",
+        ] {
+            assert_eq!(
+                classify_callback_request(unrelated, CALLBACK_STATE),
+                CallbackRequest::Unrelated,
+                "{unrelated:?}"
+            );
+        }
+        assert_eq!(
+            classify_callback_request(
+                "GET /?error=access_denied&state=expected-state HTTP/1.1",
+                CALLBACK_STATE
+            ),
+            CallbackRequest::Cancelled
+        );
+        assert_eq!(
+            classify_callback_request("GET /?state=expected-state HTTP/1.1", CALLBACK_STATE),
+            CallbackRequest::MissingCode
+        );
+        assert_eq!(
+            classify_callback_request(
+                &format!(
+                    "GET /?code={}&state=expected-state HTTP/1.1",
+                    "c".repeat(8193)
+                ),
+                CALLBACK_STATE
+            ),
+            CallbackRequest::MissingCode
+        );
+        assert_eq!(
+            classify_callback_request(
+                "GET /?code=auth-code&state=expected-state HTTP/1.1",
+                CALLBACK_STATE
+            ),
+            CallbackRequest::Code(Zeroizing::new("auth-code".into()))
+        );
+    }
+
+    /// Sends `chunks` on one loopback connection, then waits until the listener closes it.
+    async fn send_callback_connection(address: &str, chunks: &[&[u8]]) -> Vec<u8> {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        for chunk in chunks {
+            // The listener may drop an oversized request before every byte is written.
+            if stream.write_all(chunk).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let _ = stream.shutdown().await;
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response).await;
+        response
+    }
+
+    #[tokio::test]
+    async fn loopback_ignores_unrelated_requests_until_the_fragmented_callback() {
+        let loopback = Loopback::bind().await.unwrap();
+        let address = loopback.uri.trim_start_matches("http://").to_owned();
+        let receiver = tokio::spawn(async move { loopback.receive(CALLBACK_STATE).await });
+
+        let oversized = vec![b'A'; 5000];
+        for unrelated in [
+            &[b"GET /favicon.ico HTTP/1.1\r\n".as_slice()][..],
+            &[b"GET / HTTP/1.1\r\n".as_slice()],
+            &[b"GARBAGE\r\n".as_slice()],
+            &[b"GET :99999/ HTTP/1.1\r\n".as_slice()],
+            &[b"GET /?error=access_denied HTTP/1.1\r\n".as_slice()],
+            &[b"GET /?code=forged&state=other HTTP/1.1\r\n".as_slice()],
+            &[b"GET /?code=cut-off&state=expected-state".as_slice()],
+            &[b"\xff\xfe\r\n".as_slice()],
+            &[oversized.as_slice()],
+        ] {
+            assert!(send_callback_connection(&address, unrelated)
+                .await
+                .is_empty());
+            assert!(!receiver.is_finished());
+        }
+
+        let response = send_callback_connection(
+            &address,
+            &[
+                b"GET /?code=auth-code&st",
+                b"ate=expected-state HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            ],
+        )
+        .await;
+
+        assert!(!response.is_empty());
+        let code = receiver.await.unwrap().unwrap();
+        assert_eq!(code.as_str(), "auth-code");
+    }
+
+    #[tokio::test]
+    async fn loopback_cancels_only_for_an_error_with_the_expected_state() {
+        let loopback = Loopback::bind().await.unwrap();
+        let address = loopback.uri.trim_start_matches("http://").to_owned();
+        let receiver = tokio::spawn(async move { loopback.receive(CALLBACK_STATE).await });
+
+        send_callback_connection(&address, &[b"GET /?error=access_denied HTTP/1.1\r\n"]).await;
+        assert!(!receiver.is_finished());
+        send_callback_connection(
+            &address,
+            &[b"GET /?error=access_denied&state=expected-state HTTP/1.1\r\n"],
+        )
+        .await;
+
+        let error = receiver.await.unwrap().unwrap_err();
+        assert_eq!(error.code, "hosted-sign-in-cancelled");
     }
 }
 

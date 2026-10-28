@@ -176,7 +176,15 @@ class SmsCallbackStore(context: Context, private val now: () -> Long = System::c
             val created = (value as? String)?.let {
                 try { JSONObject(it).optLong("created", 0L) } catch (_: JSONException) { 0L }
             }
-            if (name.startsWith(PREFIX) && (created == null || created < cutoff)) editor.remove(name)
+            val hasOwedResult = (value as? String)?.let {
+                try {
+                    val record = JSONObject(it)
+                    record.has(OWED_PREFIX + SENT) || record.has(OWED_PREFIX + DELIVERED)
+                } catch (_: JSONException) {
+                    false
+                }
+            } == true
+            if (name.startsWith(PREFIX) && !hasOwedResult && (created == null || created < cutoff)) editor.remove(name)
         }
         editor.commit()
     }
@@ -223,9 +231,7 @@ object SmsCallbackReconciler {
             store.settled(commandId, result)
             true
         } catch (error: MobileBindingsException) {
-            // Closed/Database are transient: keep owing. Any other refusal (e.g. an illegal
-            // regression after a later state) is permanent: the core state stands.
-            if (error !is MobileBindingsException.Closed && error !is MobileBindingsException.Database) {
+            if (error is MobileBindingsException.InvalidRequest || error is MobileBindingsException.NotFound) {
                 store.settled(commandId, result)
             }
             false

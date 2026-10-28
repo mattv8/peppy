@@ -125,7 +125,7 @@ function secretDialog(options: { id: string; title: string; description: string;
       const error = document.createElement("p");
       error.id = `${options.id}-error`;
       error.setAttribute("role", "alert");
-      error.style.color = "var(--peppy-text-error, red)";
+      error.style.color = "var(--peppy-error-text, red)";
       error.style.fontSize = "inherit";
       error.textContent = options.errorMessage;
       form.append(error);

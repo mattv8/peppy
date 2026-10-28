@@ -105,6 +105,10 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 const SCHEMA_VERSION: i64 = 39;
+#[cfg(test)]
+thread_local! {
+    static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 
@@ -170,7 +174,7 @@ const BROWSER_LOCAL_IDENTITY_AAD_PREFIX: &[u8] = b"peppy-browser-local-identity-
 const BROWSER_LOCAL_IDENTITY_PLAINTEXT_BYTES: usize = 128;
 const MAX_BROWSER_LOCAL_IDENTITY_AAD_BYTES: usize = 64 * 1024;
 const NEXT_SOURCE_SEQUENCE_SQL: &str = "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')";
-const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
+const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND a.state='pending_upload' AND a.remote_object_id IS NULL) AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos p LEFT JOIN contact_photo_aliases alias ON alias.old_id=p.attachment_id JOIN attachments a ON a.attachment_id=COALESCE(alias.new_id,p.attachment_id) WHERE p.outbox_sequence=outbox.seq AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos other WHERE other.outbox_sequence=p.outbox_sequence AND other.attachment_id<>p.attachment_id) AND NOT EXISTS(SELECT 1 FROM contact_photo_unavailable unavailable WHERE unavailable.outbox_sequence=p.outbox_sequence) AND a.state='pending_upload' AND a.remote_object_id IS NULL AND a.media_type='image/jpeg' AND a.plaintext_bytes<=65536 AND NOT EXISTS(SELECT 1 FROM contact_photo_reclaims reclaim WHERE reclaim.attachment_id=a.attachment_id AND reclaim.state='completed')) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
 const BATTERY_LOOKUP_INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS sms_acquisitions_reserved_sequence ON sms_acquisitions(conversation_id,source_sequence) WHERE state!='complete';
 CREATE INDEX IF NOT EXISTS outbox_unsealed_priority ON outbox(priority,seq) WHERE state='unsealed';
@@ -2506,6 +2510,20 @@ impl Client {
         wires.iter().map(|wire| decode(wire)).collect()
     }
 
+    /// Number of queued envelopes currently eligible for upload without decoding their wires.
+    pub fn pending_outbox_count(&self) -> Result<usize, Error> {
+        let store = self.lock()?;
+        let count: i64 = store.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM outbox WHERE state='queued' AND {}",
+                history_import::outbox_upload_eligible_predicate()
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count).map_err(|_| Error::Database)
+    }
+
     /// Records server acceptance of one sealed outbox envelope. Idempotent.
     pub fn ack_outbox(&self, envelope_id: EnvelopeId) -> Result<(), Error> {
         let mut s = self.lock()?;
@@ -2778,6 +2796,17 @@ impl Client {
             .collect()
     }
 
+    /// Number of journal records quarantined during application.
+    pub fn quarantine_count(&self) -> Result<usize, Error> {
+        let store = self.lock()?;
+        let count: i64 = store.conn.query_row(
+            "SELECT COUNT(*) FROM journal WHERE status='quarantined'",
+            [],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count).map_err(|_| Error::Database)
+    }
+
     /// Ledgered commands for this gateway, active epoch, with no attempt yet.
     pub fn pending_commands(&self) -> Result<Vec<ReceivedCommand>, Error> {
         let s = self.lock()?;
@@ -2931,6 +2960,45 @@ impl Client {
         rows.into_iter()
             .map(|row| message_from_row(&s.conn, row))
             .collect()
+    }
+
+    /// Whether every requested message belongs to the conversation. Empty input is in scope.
+    pub fn messages_belong_to_conversation(
+        &self,
+        conversation_id: ConversationId,
+        ids: &[MessageId],
+    ) -> Result<bool, Error> {
+        let store = self.lock()?;
+        let mut query = store
+            .conn
+            .prepare("SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND conversation_id=?2)")?;
+        for id in ids {
+            let belongs: bool = query.query_row(
+                params![id.to_string(), conversation_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if !belongs {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether an original message attachment belongs to the conversation.
+    pub fn attachment_belongs_to_conversation(
+        &self,
+        conversation_id: ConversationId,
+        attachment_id: AttachmentId,
+    ) -> Result<bool, Error> {
+        let store = self.lock()?;
+        store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages m JOIN message_attachments ma ON ma.message_id=m.id WHERE m.conversation_id=?1 AND ma.attachment_id=?2)",
+                params![conversation_id.to_string(), attachment_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(Error::from)
     }
 
     /// The newest deterministic chronological message in a conversation, if it has one.
@@ -5812,6 +5880,17 @@ fn apply_record(
         Ok(Opened::UnknownEvent) => return Ok(None),
         Err(reason) => return Ok(Some(reason)),
     };
+    // Producer and compaction sequences are persisted as SQLite INTEGER values.
+    if !storage_sequence_fits(envelope.producer_sequence.0)
+        || envelope.compaction.as_ref().is_some_and(|metadata| {
+            metadata
+                .supersedes
+                .iter()
+                .any(|reference| !storage_sequence_fits(reference.producer_sequence.0))
+        })
+    {
+        return Ok(Some(Q::InvalidPayload));
+    }
     let producer = envelope.producer_device_id;
     let record_identity = compaction_identity(&payload);
     // An authenticated checkpoint repeats current state only to fold a frontier: history.
@@ -5998,8 +6077,7 @@ fn apply_record(
                 at_ms,
             },
         ) => {
-            // Statuses are ordered by producer sequence, stored as SQLite INTEGER.
-            if !gateway_reportable(state) || i64::try_from(envelope.producer_sequence.0).is_err() {
+            if !gateway_reportable(state) {
                 return Ok(Some(Q::InvalidPayload));
             }
             upsert_status(
@@ -7284,6 +7362,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
             // MMS rows are held until every object has a remote ID, then media metadata is resolved
             // from SQLCipher at seal time. Contact photo rows are held the same way, per row.
             let mut photo_registrations = contact_media::Registrations::new();
+            note_seal_pending_decode();
             let plain = match decode::<PrivatePayload>(&plain)? {
                 PrivatePayload::MmsMessage { message, .. } => {
                     match resolve_media(conn, &message)? {
@@ -7341,6 +7420,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                 compaction: None,
                 ciphertext: Vec::new(),
             };
+            note_seal_pending_decode();
             let payload: PrivatePayload = decode(&plain)?;
             if let PrivatePayload::ContactScanResult { result } = &payload
                 && contact_scan_result_has_earlier_book_event(conn, sequence, result)?
@@ -7385,6 +7465,14 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
     Ok(count)
 }
 
+#[cfg(test)]
+fn note_seal_pending_decode() {
+    SEAL_PENDING_DECODE_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+fn note_seal_pending_decode() {}
+
 /// A scan result is a book-level completion barrier. It must not overtake an earlier contact
 /// update whose photo is still held and therefore cannot yet be sealed.
 fn contact_scan_result_has_earlier_book_event(
@@ -7396,7 +7484,8 @@ fn contact_scan_result_has_earlier_book_event(
         return Ok(false);
     };
     let rows: Vec<Vec<u8>> = conn
-        .prepare("SELECT plain FROM outbox WHERE state='unsealed' AND seq<? AND plain IS NOT NULL")?
+        // Migration 36 assigned existing contact rows priority 4; preserve their book barrier.
+        .prepare("SELECT plain FROM outbox WHERE state='unsealed' AND priority IN (2,4) AND seq<? AND plain IS NOT NULL")?
         .query_map([sequence], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
     for plain in rows {
@@ -7416,6 +7505,10 @@ fn contact_scan_result_has_earlier_book_event(
         }
     }
     Ok(false)
+}
+
+fn storage_sequence_fits(sequence: u64) -> bool {
+    i64::try_from(sequence).is_ok()
 }
 
 fn next_source_sequence(
@@ -9674,10 +9767,14 @@ mod tests {
             )
             .contains("sms_acquisitions_reserved_sequence")
         );
-        assert!(
-            plan(SEAL_PENDING_SQL, &[&i64::MIN, &i64::MIN, &0_i64])
-                .contains("outbox_unsealed_priority")
-        );
+        let seal_plan = plan(SEAL_PENDING_SQL, &[&i64::MIN, &i64::MIN, &0_i64]);
+        assert!(seal_plan.contains("outbox_unsealed_priority"));
+        for table in ["oa", "p", "alias", "a"] {
+            assert!(
+                !seal_plan.contains(&format!("SCAN {table}")),
+                "seal metadata lookup must stay indexed: {seal_plan}"
+            );
+        }
         assert!(plan(&queued_outbox_sql(), &[&1_i64]).contains("outbox_queued_priority"));
 
         let mut statement = store.conn.prepare(SEAL_PENDING_SQL).unwrap();
@@ -9686,6 +9783,234 @@ mod tests {
             .unwrap()
             .for_each(Result::unwrap);
         assert!(statement.get_status(StatementStatus::VmStep) > 0);
+    }
+
+    #[test]
+    fn seal_pending_skips_held_mms_and_photo_rows_before_sealing_ready_work() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("seal-held-page.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let client = Client::open(config, DatabaseKey::new(&[42; 32]).unwrap()).unwrap();
+        let profile = KeyProfile::new(client.lock().unwrap().config.vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let mut store = client.lock().unwrap();
+        let (conn, ctx) = store.parts();
+        let held_media = AttachmentId::new();
+        let held_media_id = held_media.to_string();
+        conn
+            .execute(
+                "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key,remote_object_id) VALUES(?,'pending_upload','text/plain','held',0,0,'digest',1,X'00',NULL),('pending-photo','pending_upload','image/jpeg','photo',1,1,'digest',1,X'00',NULL),('ready-photo','uploaded','image/jpeg','ready',1,1,'digest',1,X'00','remote')",
+                [&held_media_id],
+            )
+            .unwrap();
+        let media_payload = |attachment_id| PrivatePayload::MmsMessage {
+            message: MessagePayload {
+                record: MessageRecord {
+                    message_id: MessageId::new(),
+                    conversation_id: ConversationId::new(),
+                    source_sequence: SourceSequence(1),
+                    attachments: vec![AttachmentReference {
+                        attachment_id,
+                        pending: false,
+                    }],
+                },
+                source_device_id: ctx.device_id,
+                provider_message_id: None,
+                sender_address: Some("+15555550100".into()),
+                recipients: vec!["+15555550101".into()],
+                subject: None,
+                body: String::new(),
+                transport: Transport::Mms,
+                direction: Direction::Incoming,
+                imported: false,
+                sent_at_ms: None,
+                ordered_at_ms: None,
+                mms_context: None,
+            },
+            media: Vec::new(),
+            media_meta: Vec::new(),
+        };
+        let mut held_sequences = Vec::new();
+        for _ in 0..MAX_SEAL_BATCH {
+            let payload = media_payload(held_media);
+            let (envelope_id, sequence) = insert_outbox(
+                conn,
+                EnvelopePurpose::Event,
+                None,
+                None,
+                &serde_json::to_vec(&payload).unwrap(),
+                None,
+                1,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO outbox_attachments(envelope_id,attachment_id) VALUES(?,?)",
+                params![envelope_id.to_string(), &held_media_id],
+            )
+            .unwrap();
+            held_sequences.push(to_i64(sequence).unwrap());
+        }
+        let photo_payload = PrivatePayload::ContactUpserted {
+            book: serde_json::json!({"id": "book"}),
+            contact: serde_json::json!({"photo": {"attachment_id": "legacy-photo"}}),
+        };
+        let (_, photo_sequence) = insert_outbox(
+            conn,
+            EnvelopePurpose::Event,
+            None,
+            None,
+            &serde_json::to_vec(&photo_payload).unwrap(),
+            None,
+            2,
+        )
+        .unwrap();
+        let photo_sequence = to_i64(photo_sequence).unwrap();
+        conn.execute(
+            "INSERT INTO contact_photo_aliases(old_id,new_id) VALUES('legacy-photo','pending-photo')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outbox_contact_photos(outbox_sequence,attachment_id) VALUES(?,'legacy-photo')",
+            [photo_sequence],
+        )
+        .unwrap();
+        held_sequences.push(photo_sequence);
+        let (_, ready_sequence) = insert_outbox(
+            conn,
+            EnvelopePurpose::Event,
+            None,
+            None,
+            &serde_json::to_vec(&PrivatePayload::ReadState {
+                message_id: MessageId::new(),
+            })
+            .unwrap(),
+            None,
+            1,
+        )
+        .unwrap();
+        let ready_sequence = to_i64(ready_sequence).unwrap();
+        let held_before: Vec<Vec<u8>> = held_sequences
+            .iter()
+            .map(|sequence| {
+                conn.query_row("SELECT plain FROM outbox WHERE seq=?", [sequence], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+            })
+            .collect();
+        SEAL_PENDING_DECODE_COUNT.with(|count| count.set(0));
+        assert_eq!(seal_pending(conn, &ctx, 1).unwrap(), 1);
+        assert_eq!(
+            SEAL_PENDING_DECODE_COUNT.with(|count| count.get()),
+            2,
+            "only the ready row is decoded"
+        );
+        let held_after: Vec<Vec<u8>> = held_sequences
+            .iter()
+            .map(|sequence| {
+                conn.query_row("SELECT plain FROM outbox WHERE seq=?", [sequence], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(held_after, held_before);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM outbox WHERE state='unsealed'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            held_sequences.len() as i64
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM outbox WHERE seq=?",
+                [ready_sequence],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "queued"
+        );
+        let ready_alias_sequence = ready_sequence + 1;
+        conn.execute(
+            "INSERT INTO outbox(seq,envelope_id,purpose,state,plain,priority) VALUES(?,'ready-alias','event','unsealed',X'00',2)",
+            [ready_alias_sequence],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key,remote_object_id) VALUES('ready-legacy','pending_upload','image/jpeg','legacy',1,1,'digest',1,X'00',NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO contact_photo_aliases(old_id,new_id) VALUES('ready-legacy','ready-photo')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outbox_contact_photos(outbox_sequence,attachment_id) VALUES(?,'ready-legacy')",
+            [ready_alias_sequence],
+        )
+        .unwrap();
+        let sealable: Vec<i64> = conn
+            .prepare(SEAL_PENDING_SQL)
+            .unwrap()
+            .query_map(params![i64::MIN, i64::MIN, 0_i64], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            !sealable.contains(&photo_sequence),
+            "a held legacy contact photo must stay out of the sealable page"
+        );
+        assert!(
+            sealable.contains(&ready_alias_sequence),
+            "a ready effective alias must reach the authoritative resolver"
+        );
+    }
+
+    #[test]
+    fn contact_scan_barrier_includes_legacy_priority_four_contact_rows() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("legacy-contact-barrier.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[43; 32]).unwrap(),
+        )
+        .unwrap();
+        let store = client.lock().unwrap();
+        let payload = PrivatePayload::ContactUpserted {
+            book: json!({"id": "legacy-book"}),
+            contact: json!({"id": "contact"}),
+        };
+        store
+            .conn
+            .execute(
+                "INSERT INTO outbox(seq,envelope_id,purpose,state,plain,priority) VALUES(10,'legacy-contact','event','unsealed',?,4)",
+                [serde_json::to_vec(&payload).unwrap()],
+            )
+            .unwrap();
+        assert!(
+            contact_scan_result_has_earlier_book_event(
+                &store.conn,
+                11,
+                &json!({"book_id": "legacy-book"}),
+            )
+            .unwrap()
+        );
     }
 
     #[test]

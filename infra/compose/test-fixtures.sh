@@ -14,7 +14,7 @@ real_docker=$(command -v docker)
 
 cleanup() {
   for project in $created_projects; do
-    docker compose --project-name "$project" --project-directory "$fixture" --env-file "$fixture/.env" -f "$fixture/docker-compose.yml" down -v --remove-orphans >/dev/null 2>&1 || true
+    docker compose --project-name "$project" --project-directory "$fixture" --env-file "$fixture/.env" -f "$fixture/docker-compose.yml" down -v --remove-orphans --rmi local >/dev/null 2>&1 || true
   done
   rm -rf "$fixture"
 }
@@ -25,11 +25,14 @@ POSTGRES_DB=recovery
 POSTGRES_USER=recovery
 POSTGRES_PASSWORD=recovery-fixture-password
 POSTGRES_IMAGE=postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
-SEAWEED_COMMAND=exit 0
-API_COMMAND=exit 0
+SEAWEED_COMMAND="exit 0"
+API_COMMAND="exit 0"
 API_RESTART=no
 ENV
 chmod 600 "$fixture/.env"
+cat > "$fixture/Dockerfile" <<'DOCKERFILE'
+FROM postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
+DOCKERFILE
 printf 'name: %s\n' "$source_project" > "$fixture/docker-compose.yml"
 cat >> "$fixture/docker-compose.yml" <<'YAML'
 services:
@@ -52,7 +55,7 @@ services:
       - seaweed-volume-data:/data
       - seaweed-filer-data:/root/.seaweedfs
   api:
-    image: postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
+    build: .
     command: [sh, -c, '${API_COMMAND}']
     restart: ${API_RESTART}
   migrate:
@@ -69,9 +72,26 @@ set_env() {
   python3 - "$fixture/.env" "$key" "$value" <<'PY'
 from pathlib import Path
 import sys
-p=Path(sys.argv[1]); key=sys.argv[2]; value=sys.argv[3]
-lines=p.read_text().splitlines()
-p.write_text("\n".join(value if line.startswith(key+"=") else line for line in lines).replace(value, key+"="+value, 1)+"\n")
+p = Path(sys.argv[1])
+key, value = sys.argv[2:]
+lines = p.read_text().splitlines()
+replacements = [index for index, line in enumerate(lines) if line.partition("=")[0] == key]
+if len(replacements) != 1:
+    raise SystemExit(f"expected exactly one {key} entry")
+lines[replacements[0]] = f"{key}={value}"
+p.write_text("\n".join(lines) + "\n")
+PY
+}
+
+remove_last_line() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+lines = p.read_text().splitlines()
+if not lines:
+    raise SystemExit("cannot remove a line from an empty file")
+p.write_text("\n".join(lines[:-1]) + ("\n" if len(lines) > 1 else ""))
 PY
 }
 
@@ -91,6 +111,9 @@ set -e
 "${compose[@]}" create api >/dev/null
 "${compose[@]}" up -d --wait postgres >/dev/null
 "${compose[@]}" up -d seaweedfs >/dev/null
+"${compose[@]}" exec -T postgres psql -U recovery -d recovery -c "create table recovery_sentinel (value text); insert into recovery_sentinel values ('backup-sentinel');" >/dev/null
+docker run --rm -v "${source_project}_seaweed-volume-data:/data" postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f sh -c 'printf volume-sentinel > /data/backup-sentinel'
+docker run --rm -v "${source_project}_seaweed-filer-data:/data" postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f sh -c 'printf filer-sentinel > /data/backup-sentinel'
 mkdir "$fixture/accepted backup" "$fixture/just archive" "$fixture/refusal output" "$fixture/cleanup warning"
 
 # Created API and exited SeaweedFS are clean stopped states, and must complete a real backup.
@@ -101,6 +124,37 @@ else
   fail "backup did not accept created/exited clean states (rc=$command_status; $(tail -1 "$fixture/accepted.out"))"
 fi
 archive=$(find "$fixture/accepted backup" -mindepth 1 -maxdepth 1 -type d -print -quit)
+if python3 - "$archive" "$(id -u)" <<'PY'
+from pathlib import Path
+import stat, sys
+archive, owner = Path(sys.argv[1]), int(sys.argv[2])
+files = list(archive.iterdir())
+if stat.S_IMODE(archive.stat().st_mode) != 0o700 or not files:
+    raise SystemExit(1)
+if any(stat.S_IMODE(path.stat().st_mode) != 0o600 or path.stat().st_uid != owner for path in files):
+    raise SystemExit(1)
+PY
+then
+  pass "backup artifacts are private and owned by the invoking operator"
+else
+  fail "backup artifacts are not private and owned by the invoking operator"
+fi
+
+# The effective configuration must retain a caller-selected overlay while the API
+# is build-only and has no explicit image field.
+cat > "$fixture/docker-compose.overlay.yml" <<'YAML'
+services:
+  api:
+    environment:
+      PEPPY_FIXTURE_OVERLAY: "1"
+YAML
+mkdir "$fixture/overlay backup"
+run_capture "$fixture/overlay.out" env COMPOSE_FILE=docker-compose.yml:docker-compose.overlay.yml bash -c 'cd "$1" && "$2" "$3"' _ "$fixture" "$repo/infra/compose/backup.sh" "$fixture/overlay backup"
+if test "$command_status" = 0 && test -f "$(find "$fixture/overlay backup" -name manifest.json -print -quit)"; then
+  pass "backup uses the caller-selected Compose overlay with a build-only API"
+else
+  fail "backup did not accept the effective build-only overlay configuration (rc=$command_status; $(tail -1 "$fixture/overlay.out"))"
+fi
 
 # Just must pass an adversarial path as one literal argument, without command substitution.
 mkdir -p "$fixture/infra/compose"
@@ -112,13 +166,14 @@ run_capture "$fixture/just.out" just --justfile "$repo/justfile" --working-direc
 if test "$command_status" = 0 && test ! -e "$fixture/just-injected" && test -n "$(find "$fixture/$weird" -name manifest.json -print -quit)"; then
   pass "just backup passes shell metacharacters literally"
 else
+  cat "$fixture/just.out" >&2
   fail "just backup argument was not passed literally (rc=$command_status, injected=$(test -e "$fixture/just-injected" && echo yes || echo no))"
 fi
 
 # Restore must reject an incomplete checksum index before creating any target volume.
 truncated="$fixture/truncated archive"
 cp -R "$archive" "$truncated"
-sed -i '' '$d' "$truncated/manifest.sha256"
+remove_last_line "$truncated/manifest.sha256"
 target="recoverytruncated${suffix}"; created_projects="$created_projects $target"
 run_capture "$fixture/truncated.out" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$truncated" "$target"
 if test "$command_status" != 0 && test -z "$(docker volume ls --format '{{.Name}}' | grep "^${target}_" || true)"; then
@@ -130,7 +185,7 @@ fi
 # A duplicate checksum entry must not substitute for a required artifact.
 duplicated="$fixture/duplicated checksum archive"
 cp -R "$archive" "$duplicated"
-sed -i '' '$d' "$duplicated/manifest.sha256"
+remove_last_line "$duplicated/manifest.sha256"
 head -1 "$duplicated/manifest.sha256" >> "$duplicated/manifest.sha256"
 duplicate_target="recoveryduplicate${suffix}"; created_projects="$created_projects $duplicate_target"
 run_capture "$fixture/duplicate.out" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$duplicated" "$duplicate_target"
@@ -145,10 +200,11 @@ restore_weird="restore archive '\";\$(touch restore-injected); echo \""
 cp -R "$archive" "$fixture/$restore_weird"
 restore_quoted="recoveryquoted${suffix}"; created_projects="$created_projects $restore_quoted"
 run_capture "$fixture/just-restore.out" just --justfile "$repo/justfile" --working-directory "$fixture" restore "$restore_weird" "$restore_quoted"
-if test "$command_status" = 0 && test ! -e "$fixture/restore-injected" && test "$(docker inspect --format '{{.State.Status}}' "${restore_quoted}-postgres-1")" = running; then
-  pass "just restore passes shell metacharacters literally"
+if test "$command_status" = 0 && test ! -e "$fixture/restore-injected" && test "$(docker inspect --format '{{.State.Status}}' "${restore_quoted}-postgres-1")" = running && test "$(docker exec "${restore_quoted}-postgres-1" psql -U recovery -d recovery -tAc 'select value from recovery_sentinel')" = backup-sentinel && test "$(docker run --rm -v "${restore_quoted}_seaweed-volume-data:/data" postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f cat /data/backup-sentinel)" = volume-sentinel && test "$(docker run --rm -v "${restore_quoted}_seaweed-filer-data:/data" postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f cat /data/backup-sentinel)" = filer-sentinel; then
+  pass "just restore passes shell metacharacters literally and restores database and volume sentinels"
 else
-  fail "just restore argument was not passed literally (rc=$command_status, injected=$(test -e "$fixture/restore-injected" && echo yes || echo no))"
+  cat "$fixture/just-restore.out" >&2
+  fail "restore did not preserve literal arguments and all storage sentinels (rc=$command_status, injected=$(test -e "$fixture/restore-injected" && echo yes || echo no))"
 fi
 
 # A paused source service must be refused before a backup directory is created.

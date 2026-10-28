@@ -398,6 +398,16 @@ fn incoming_mms_metadata_before_bytes_keeps_unread_stable() {
     server.sync(&desktop);
     assert_eq!(desktop.unread_count(captured.conversation_id).unwrap(), 1);
     let message = only_message(&desktop, captured.conversation_id);
+    assert!(
+        desktop
+            .attachment_belongs_to_conversation(captured.conversation_id, info.attachment_id)
+            .unwrap()
+    );
+    assert!(
+        !desktop
+            .attachment_belongs_to_conversation(ConversationId::new(), info.attachment_id)
+            .unwrap()
+    );
     assert_eq!(
         message.payload.record.attachments,
         vec![AttachmentReference {

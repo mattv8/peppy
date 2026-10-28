@@ -156,6 +156,48 @@ fn mapped_parts_preserve_order_when_retried_as_an_ordered_prefix() {
 }
 
 #[test]
+fn terminal_acquisitions_reject_new_part_mappings_without_consuming_quota() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let blocked = client
+        .begin_mms_acquisition(input("blocked-late-part", Direction::Incoming))
+        .unwrap();
+    let unavailable = client
+        .begin_mms_acquisition(input("unavailable-late-part", Direction::Incoming))
+        .unwrap();
+    client
+        .set_mms_acquisition_state(
+            &blocked.acquisition_id,
+            MmsAcquisitionState::Blocked,
+            Some("policy"),
+        )
+        .unwrap();
+    client
+        .set_mms_acquisition_state(
+            &unavailable.acquisition_id,
+            MmsAcquisitionState::Unavailable,
+            Some("provider missing"),
+        )
+        .unwrap();
+    let before_quota = client.mms_pending_media_bytes().unwrap();
+    let part = attachment(&client, &dir, "late.png");
+    for acquisition in [&blocked, &unavailable] {
+        assert!(matches!(
+            client.set_mms_acquisition_part(&acquisition.acquisition_id, "late-part", part),
+            Err(Error::Conflict)
+        ));
+        assert!(
+            client
+                .mms_acquisition_parts(&acquisition.acquisition_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(client.mms_pending_media_bytes().unwrap(), before_quota);
+}
+
+#[test]
 fn list_matches_repeated_source_lookup_with_state_reason_and_attachments() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -43,6 +43,8 @@ const MAX_FAILED_PROOFS: i32 = 5;
 const MANUAL_OWNER_LIMIT: u8 = 5;
 const MANUAL_OWNER_WINDOW: Duration = Duration::from_secs(60);
 const MAX_MANUAL_OWNER_SOURCES: usize = 1024;
+const UNKNOWN_PEER_SOURCE: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+const EXPIRED_ADMISSION_PURGE_LIMIT: i64 = 64;
 
 /// Dependencies deliberately supplied by the API assembler rather than read
 /// from process configuration. `hosted` means every request requires the
@@ -171,6 +173,12 @@ async fn create_challenge(
     }
 
     let mut transaction = scope::begin(&state.db, vault_id)
+        .await
+        .map_err(database_error)?;
+    sqlx::query("DELETE FROM device_admissions WHERE id IN (SELECT id FROM device_admissions WHERE vault_id=$1 AND consumed_at IS NULL AND expires_at<=now() ORDER BY expires_at LIMIT $2)")
+        .bind(vault_id)
+        .bind(EXPIRED_ADMISSION_PURGE_LIMIT)
+        .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
     let vault = sqlx::query(
@@ -570,10 +578,11 @@ async fn community_vault(
     admit_owner: bool,
 ) -> Result<Uuid, ManualError> {
     let owner = normalize_owner_selector(owner)?;
-    if admit_owner && owner.is_some() {
+    if admit_owner {
         admit_manual_owner_source(
             &state.manual_owner_admissions,
-            peer.map(|peer| resolve_client_ip(peer, headers, &state.trusted_proxy_cidrs)),
+            peer.map(|peer| resolve_client_ip(peer, headers, &state.trusted_proxy_cidrs))
+                .unwrap_or(UNKNOWN_PEER_SOURCE),
         )?;
     }
     let vault_id = if let Some(requested) = requested {
@@ -644,11 +653,8 @@ fn normalize_owner_selector(owner: Option<&str>) -> Result<Option<String>, Manua
 
 fn admit_manual_owner_source(
     admissions: &std::sync::Mutex<HashMap<IpAddr, ManualOwnerAdmission>>,
-    source: Option<IpAddr>,
+    source: IpAddr,
 ) -> Result<(), ManualError> {
-    let Some(source) = source else {
-        return Ok(());
-    };
     let now = Instant::now();
     let mut admissions = admissions
         .lock()
@@ -834,12 +840,21 @@ async fn record_failed_proof(
     .map_err(database_error)?;
     Ok(())
 }
-fn database_error(_: sqlx::Error) -> ManualError {
+fn database_error(error: sqlx::Error) -> ManualError {
+    tracing::warn!(
+        operation = "manual_enrollment",
+        kind = crate::api::database_error_kind(&error),
+        "database operation failed"
+    );
     ManualError(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable")
 }
 struct ManualError(StatusCode, &'static str);
 impl axum::response::IntoResponse for ManualError {
     fn into_response(self) -> axum::response::Response {
-        (self.0, Json(serde_json::json!({"error": self.1}))).into_response()
+        (
+            self.0,
+            Json(serde_json::json!({"error": self.1, "code": self.1})),
+        )
+            .into_response()
     }
 }

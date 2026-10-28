@@ -78,6 +78,7 @@ class MmsMediaTransfer(
         onUploadSucceeded()
         true
     } catch (_: GatewayTransportException) { fail(failures, item.attachmentId, "upload", "transient") }
+          catch (_: java.io.IOException) { fail(failures, item.attachmentId, "upload", "transient") }
           catch (_: IllegalArgumentException) { fail(failures, item.attachmentId, "upload", "permanent") }
           catch (_: Exception) { fail(failures, item.attachmentId, "upload", "permanent") }
     }

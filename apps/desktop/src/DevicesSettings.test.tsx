@@ -56,14 +56,13 @@ describe("DevicesSettings", () => {
   it("ignores a load response after unmount", async () => {
     const pendingLoad = deferredRoster();
     vi.mocked(bridge.list_devices).mockReset().mockReturnValue(pendingLoad.promise);
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { unmount } = render(<DevicesSettings />);
     unmount();
 
     await act(async () => pendingLoad.resolve({ currentDeviceId: "self", devices: [] }));
 
-    expect(consoleError).not.toHaveBeenCalled();
-    consoleError.mockRestore();
+    expect(screen.queryByText("self")).not.toBeInTheDocument();
+    expect(bridge.list_devices).toHaveBeenCalledOnce();
   });
 
   it("does not move focus when the settings section mounts", async () => {

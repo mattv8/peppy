@@ -22,26 +22,49 @@ pub(crate) fn advances_descending_cursor(
     upper: &str,
     candidate: &str,
 ) -> Result<bool, Error> {
-    let candidate = id(candidate)?;
+    let candidate =
+        canonical_provider_id(candidate).ok_or(Error::InvalidRequest("history checkpoint"))?;
     if candidate == 0
-        || candidate > id(upper)?
+        || candidate > stored_provider_id(upper)?
         || floor
-            .map(id)
+            .map(stored_provider_id)
             .transpose()?
             .is_some_and(|value| candidate <= value)
     {
         return Ok(false);
     }
-    Ok(match current.map(id).transpose()? {
+    Ok(match current.map(stored_provider_id).transpose()? {
         Some(value) => candidate < value,
         None => true,
     })
 }
 
-fn id(value: &str) -> Result<u64, Error> {
-    value
-        .parse()
-        .map_err(|_| Error::InvalidRequest("history checkpoint"))
+/// Parses a canonical provider ID. Provider IDs are stored as text and retain the full `u64`
+/// range; signed SQLite local-order columns use the separate helpers below.
+pub(crate) fn canonical_provider_id(value: &str) -> Option<u64> {
+    let parsed = value.parse::<u64>().ok()?;
+    (parsed.to_string() == value).then_some(parsed)
+}
+
+pub(crate) fn normalized_provider_id(value: &str) -> Option<String> {
+    value.parse::<u64>().ok().map(|parsed| parsed.to_string())
+}
+
+pub(crate) fn stored_provider_id(value: &str) -> Result<u64, Error> {
+    value.parse::<u64>().map_err(|_| Error::Database)
+}
+
+pub(crate) fn normalized_local_order(value: &str) -> Option<String> {
+    value.parse::<i64>().ok().map(|parsed| parsed.to_string())
+}
+
+pub(crate) fn stored_local_order(value: &str) -> Result<i64, Error> {
+    value.parse::<i64>().map_err(|_| Error::Database)
+}
+
+pub(crate) fn looks_numeric(value: &str) -> bool {
+    let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub(crate) fn history_import_gate_open(conn: &Connection, now_ms: i64) -> Result<bool, Error> {
@@ -196,5 +219,28 @@ mod tests {
             "history backpressure cache misses exceeded covering-index budget"
         );
         assert!(outbox_backpressures_history(&conn).unwrap());
+    }
+
+    #[test]
+    fn descending_cursor_inputs_must_be_canonical_while_zero_stays_a_caller_rule() {
+        assert!(advances_descending_cursor(None, None, "10", "5").unwrap());
+        for bad in ["+5", "05", "-5", "", "18446744073709551616"] {
+            assert!(
+                advances_descending_cursor(None, None, "10", bad).is_err(),
+                "candidate {bad:?} accepted"
+            );
+        }
+        assert!(advances_descending_cursor(None, None, "+10", "5").unwrap());
+        assert!(advances_descending_cursor(Some("07"), None, "10", "5").unwrap());
+        assert!(
+            advances_descending_cursor(
+                None,
+                None,
+                u64::MAX.to_string().as_str(),
+                "9223372036854775808"
+            )
+            .unwrap()
+        );
+        assert!(!advances_descending_cursor(None, None, "10", "0").unwrap());
     }
 }

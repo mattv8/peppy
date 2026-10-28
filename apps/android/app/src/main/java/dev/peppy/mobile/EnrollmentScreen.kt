@@ -197,8 +197,8 @@ internal fun EnrollmentScreen(
     hasCameraPermission: (android.content.Context) -> Boolean = { context ->
         context.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     },
-    scanner: @Composable (Modifier, (String) -> Unit) -> Unit = { modifier, onCode ->
-        QRScanner(modifier, onCode)
+    scanner: @Composable (Modifier, (String) -> Unit, () -> Unit) -> Unit = { modifier, onCode, onUnavailable ->
+        QRScanner(modifier, onCode, onUnavailable)
     },
 ) {
     val context = LocalContext.current
@@ -250,6 +250,7 @@ internal fun EnrollmentScreen(
     val sasLabel = stringResource(R.string.peppy_production_pairing_sas_label)
     val invalidSetupToken = stringResource(R.string.peppy_enrollment_error_invalid_setup_token)
     val instanceAlreadyClaimed = stringResource(R.string.peppy_enrollment_error_already_claimed)
+    val cameraUnavailable = stringResource(R.string.peppy_enrollment_camera_unavailable)
 
     fun run(label: Int = R.string.peppy_production_pairing_connecting, block: () -> ImportResult) {
         val operation = operations.begin() ?: return
@@ -346,6 +347,7 @@ internal fun EnrollmentScreen(
                         scope.launch(Dispatchers.IO) {
                             val discovery = try { host.discover(canonical)?.let(::parseInstanceDiscovery) } catch (_: Exception) { null }
                             val resume = if (discovery?.claimed == false) host.ownerResumeSecret(canonical) else EnrollmentHost.ResumeSecret.NONE
+                            val pendingRequest = discovery?.claimed == true && host.pendingVaultRequest(canonical)
                             withContext(Dispatchers.Main) {
                                 if (!operations.complete(operation)) return@withContext
                                 busy = false
@@ -356,7 +358,7 @@ internal fun EnrollmentScreen(
                                     origin = canonical
                                     setupToken = ""
                                     setupCodeRequired = discovery.setupCodeRequired
-                                    if (discovery.claimed && host.pendingVaultRequest(canonical)) {
+                                    if (discovery.claimed && pendingRequest) {
                                         stage = EnrollmentStage.INVITE_WAITING
                                     } else if (resume == EnrollmentHost.ResumeSecret.UNAVAILABLE) {
                                         error = importMessage(ImportResult.STORAGE_ERROR)
@@ -587,7 +589,7 @@ internal fun EnrollmentScreen(
                     Button(onClick = { resetPhone() }, modifier = Modifier.testTag("phone-retry")) { Text(stringResource(R.string.peppy_try_again)) }
                 } else if (flow == null) {
                     if (cameraGranted) {
-                        scanner(Modifier.fillMaxWidth().weight(1f).testTag("enrollment-qr-scanner")) { raw ->
+                        scanner(Modifier.fillMaxWidth().weight(1f).testTag("enrollment-qr-scanner"), { raw ->
                             if (scannerActive && !busy && phone == null && phoneTerminal == null && scanGate.tryStart()) {
                                 val operation = operations.begin() ?: return@scanner
                                 busy = true
@@ -635,7 +637,7 @@ internal fun EnrollmentScreen(
                                     }
                                 }
                             }
-                        }
+                        }, { phoneTerminal = cameraUnavailable })
                         if (busy) CircularProgressIndicator(Modifier.testTag("phone-scan-waiting"))
                     } else {
                         Button(onClick = { cameraRequest.launch(Manifest.permission.CAMERA) }, modifier = Modifier.testTag("enrollment-camera-request")) { Text(stringResource(R.string.peppy_enrollment_allow_camera)) }

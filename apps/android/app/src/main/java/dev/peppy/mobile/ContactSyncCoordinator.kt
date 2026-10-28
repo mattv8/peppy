@@ -556,15 +556,17 @@ internal class ContactSyncCoordinator(
      * pre-existing raws, only the created raw's part is observed (its own raw identity), so the
      * request never binds to contacts it did not create.
      */
-    private fun observedRaw(rawContactId: Long, defaultAccountId: String?, writtenPhoto: String? = null): Outcome.Applied? =
-        when (val lookup = os.contactByRawContact(rawContactId)) {
+    private fun observedRaw(rawContactId: Long, defaultAccountId: String?, writtenPhoto: String? = null): Outcome.Applied? {
+        return when (val lookup = os.contactByRawContact(rawContactId)) {
             is Lookup.Found -> {
                 val contact = lookup.contact
+                if (rawContactId !in ContactMapping.rawIds(contact)) return null
                 val scoped = if (ContactMapping.rawIds(contact) == setOf(rawContactId)) contact else ContactMapping.rawScoped(contact, rawContactId)
                 Outcome.Applied(observedEntry(scoped, defaultAccountId, writtenPhoto, rawContactId))
             }
             else -> null
         }
+    }
 
     /** Post-write evidence for an update, re-resolved by the same captured raw set. */
     private fun observedCaptured(captured: Set<Long>, defaultAccountId: String?, writtenPhoto: String?, writtenRaw: Long?): JSONObject? =

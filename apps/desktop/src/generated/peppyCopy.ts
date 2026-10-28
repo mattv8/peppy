@@ -492,6 +492,7 @@ export const peppyCopy = {
   enrollment_admin_password_confirm: "Confirm admin password",
   admin_password_mismatch: "The passwords do not match.",
   enrollment_allow_camera: "Allow camera access",
+  enrollment_camera_unavailable: "Camera is unavailable. Try again or cancel.",
   enrollment_setup_open: "No setup code is required.",
   enrollment_setup_protected: "This server's operator requires a setup code configured with PEPPY_SETUP_TOKEN.",
   enrollment_error_invalid_setup_token: "The setup code is incorrect. Check the code configured with PEPPY_SETUP_TOKEN and try again.",

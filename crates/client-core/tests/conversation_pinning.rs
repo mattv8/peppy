@@ -254,6 +254,109 @@ fn legacy_server_without_compaction_accepts_header_free_pin_and_unpin() {
 }
 
 #[test]
+fn authoritative_snapshot_keeps_retained_legacy_pin_and_applies_newer_compactable_unpin() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let writer = unlocked(
+        &config(&dir, "pin-legacy-projection-writer", &vault),
+        &vault,
+    );
+    let peer = unlocked(&config(&dir, "pin-legacy-projection-peer", &vault), &vault);
+    for client in [&writer, &peer] {
+        client.set_server_compaction_state(false, false).unwrap();
+    }
+    let retained_pin = writer
+        .capture_incoming(incoming_from(
+            "retained",
+            "pin-legacy-projection-retained",
+            "+15555550101",
+        ))
+        .unwrap()
+        .conversation_id;
+    let superseded_pin = writer
+        .capture_incoming(incoming_from(
+            "superseded",
+            "pin-legacy-projection-superseded",
+            "+15555550102",
+        ))
+        .unwrap()
+        .conversation_id;
+    let mut server = Server::default();
+    server.upload(&writer);
+    server.sync(&peer);
+
+    writer.set_conversation_pinned(retained_pin, true).unwrap();
+    writer
+        .set_conversation_pinned(superseded_pin, true)
+        .unwrap();
+    server.upload(&writer);
+    assert!(
+        server
+            .log
+            .iter()
+            .all(|envelope| envelope.compaction.is_none()),
+        "legacy records must be header-free"
+    );
+    server.sync(&peer);
+
+    writer.set_server_compaction_state(true, true).unwrap();
+    writer
+        .set_conversation_pinned(superseded_pin, false)
+        .unwrap();
+    server.upload(&writer);
+    assert!(
+        server.log.last().unwrap().compaction.is_some(),
+        "the newer unpin must be compactable"
+    );
+
+    let records: Vec<SnapshotRecord> = server
+        .log
+        .iter()
+        .enumerate()
+        .map(|(index, envelope)| SnapshotRecord {
+            cursor: Cursor(index as u64 + 1),
+            envelope: envelope.clone(),
+        })
+        .collect();
+    let session = peer
+        .begin_snapshot_with_compaction(
+            Cursor(records.len() as u64),
+            records.len() as u64,
+            SnapshotPurpose::Resync,
+            Some(3),
+        )
+        .unwrap();
+    peer.append_snapshot_page(session.generation, &records)
+        .unwrap();
+    peer.finish_snapshot(session.generation).unwrap();
+    loop {
+        let report = peer.apply_pending(100).unwrap();
+        if report.applied + report.drained + report.quarantined + report.superseded == 0
+            && report.snapshot_remaining == 0
+        {
+            break;
+        }
+    }
+
+    let rows = peer.list_conversations().unwrap();
+    assert!(
+        rows.iter()
+            .find(|row| row.conversation_id == retained_pin)
+            .unwrap()
+            .pinned,
+        "an applied header-free pin retained by the snapshot must survive promotion"
+    );
+    assert!(
+        !rows
+            .iter()
+            .find(|row| row.conversation_id == superseded_pin)
+            .unwrap()
+            .pinned,
+        "a newer staged compactable unpin must beat retained legacy provenance"
+    );
+}
+
+#[test]
 fn nonempty_compaction_snapshot_restores_lww_pins_and_keeps_unsent_local_write() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

@@ -90,9 +90,11 @@ internal class HostedAccountClient(
         try {
             if (key == SESSION_KEY) synchronized(sessionMutationLock) {
                 synchronized(stateLock) { check(stamp); store.write(key, bytes) }
-            } else synchronized(stateLock) { check(stamp); store.write(key, bytes) }
-        }
-        finally { bytes.fill(0) }
+            } else synchronized(stateLock) {
+                check(stamp)
+                HostedProvisioningStorage.withStorageLock { store.write(key, bytes) }
+            }
+        } finally { bytes.fill(0) }
     }
     fun cancelPendingWork() { synchronized(stateLock) { generation++ } }
 
@@ -235,10 +237,23 @@ internal class HostedAccountClient(
     }
 
     private fun pending(session: Session): NativeHostedProvisioning? {
-        val bytes = store.read(CHECKPOINT_KEY) ?: return null
+        val bytes = HostedProvisioningStorage.readCheckpoint(store) ?: return null
         try { return restoreHostedProvisioning(bytes, ORIGIN, session.accountId) }
         catch (_: Exception) { throw HostedFailure(HostedFailure.Kind.WRONG_ACCOUNT) }
         finally { bytes.fill(0) }
+    }
+
+    /**
+     * The phrase an interrupted preparation already made durable for the signed-in account, so a restarted
+     * screen offers it again instead of generating a conflicting one. Throws [HostedFailure.Kind.STORAGE]
+     * when the secure store cannot be read.
+     */
+    suspend fun candidatePendingSecret(): String? = operation { stamp ->
+        val session = session(); check(stamp)
+        when (val pending = readPending(session)) {
+            StoredSecret.Missing -> null
+            is StoredSecret.Present -> try { String(pending.value) } finally { pending.value.fill('\u0000') }
+        }
     }
 
     suspend fun prepareVault(passphrase: String): NativeHostedProvisioningView = operation { stamp ->
@@ -250,6 +265,7 @@ internal class HostedAccountClient(
                 if (!it.passphraseMatches(passphrase)) throw HostedFailure(HostedFailure.Kind.WRONG_PASSPHRASE)
                 val view = it.view()
                 if (account.vaultId != null && account.vaultId != view.vaultId) throw HostedFailure(HostedFailure.Kind.EXISTING_VAULT)
+                persistPending(stamp, session, passphrase)
                 return@operation view
             }
         }
@@ -262,6 +278,7 @@ internal class HostedAccountClient(
             NativeHostedClientKind.ANDROID,
             "Android phone",
         ).use { item ->
+            persistPending(stamp, session, passphrase)
             save(stamp, CHECKPOINT_KEY, item.checkpoint())
             item.view()
         }
@@ -272,6 +289,7 @@ internal class HostedAccountClient(
         val item = pending(session) ?: throw HostedFailure(HostedFailure.Kind.INVALID_RESPONSE)
         item.use {
             if (!it.passphraseMatches(passphrase)) throw HostedFailure(HostedFailure.Kind.WRONG_PASSPHRASE)
+            persistPending(stamp, session, passphrase)
             fun grant() {
                 check(stamp)
                 val response = transport.post("/hosted/v1/provisioning", it.grantRequest(), session.token); check(stamp)
@@ -293,12 +311,69 @@ internal class HostedAccountClient(
         }
     }
 
-    suspend fun acknowledgeEnrollment(vaultId: String, deviceId: String) = operation { stamp ->
-        pending(session())?.use {
-            val view = it.view()
-            if (view.vaultId != vaultId || view.deviceId != deviceId) invalid()
-            synchronized(stateLock) { check(stamp); store.remove(CHECKPOINT_KEY) }
+    /**
+     * Call only after the imported identity unlocked. Verifies the checkpoint's account, vault and device
+     * before moving the pending secret to its binding, and removes the checkpoint only once the binding is
+     * verified. Without a checkpoint nothing is verified, so nothing is bound.
+     */
+    suspend fun bindPendingSecretAndAcknowledge(vaultId: String, deviceId: String) = operation { stamp ->
+        val session = session()
+        val checkpoint = HostedProvisioningStorage.readCheckpoint(store) ?: return@operation
+        try {
+            val provisioning = try {
+                restoreHostedProvisioning(checkpoint, ORIGIN, session.accountId)
+            } catch (_: Exception) {
+                throw HostedFailure(HostedFailure.Kind.WRONG_ACCOUNT)
+            }
+            provisioning.use {
+                val view = it.view()
+                if (view.vaultId != vaultId || view.deviceId != deviceId) invalid()
+                val candidate = HostedProvisioningStorage.candidate(
+                    store, checkpoint, ORIGIN, session.accountId, vaultId, deviceId,
+                ) ?: throw HostedFailure(HostedFailure.Kind.STORAGE)
+                try {
+                    if (!it.passphraseMatches(candidate.concatToString())) {
+                        throw HostedFailure(HostedFailure.Kind.STORAGE)
+                    }
+                    synchronized(stateLock) {
+                        check(stamp)
+                        if (!HostedProvisioningStorage.commitVerified(
+                                store, checkpoint, ORIGIN, session.accountId, vaultId, deviceId, candidate,
+                            )
+                        ) {
+                            throw HostedFailure(HostedFailure.Kind.STORAGE)
+                        }
+                    }
+                } finally {
+                    candidate.fill('\u0000')
+                }
+            }
+        } finally {
+            checkpoint.fill(0)
         }
+    }
+
+    private fun readPending(session: Session): StoredSecret = try {
+        HostedProvisioningStorage.withStorageLock {
+            VaultSecretStore(store).readPending(ORIGIN, session.accountId)
+        }
+    } catch (_: SecureStoreUnavailable) {
+        throw HostedFailure(HostedFailure.Kind.STORAGE)
+    }
+
+    /** Fails closed when the account already holds a different phrase or the store cannot be read or written. */
+    private fun persistPending(stamp: Stamp, session: Session, passphrase: String) {
+        val secret = passphrase.toCharArray()
+        try {
+            synchronized(stateLock) {
+                check(stamp)
+                HostedProvisioningStorage.withStorageLock {
+                    if (!VaultSecretStore(store).savePending(ORIGIN, session.accountId, secret)) {
+                        throw HostedFailure(HostedFailure.Kind.STORAGE)
+                    }
+                }
+            }
+        } finally { secret.fill('\u0000') }
     }
 
     private fun body(response: HttpResult): String {

@@ -58,6 +58,13 @@ internal class MmsCaptureHintScheduler {
     fun requestContinuation(actualMore: Boolean, sink: MmsCaptureScheduleSink) {
         if (actualMore) queue(sink)
     }
+
+    @Synchronized
+    fun resetForTest() {
+        running = false
+        passQueued = false
+        completionFenced = false
+    }
 }
 
 internal fun interface MmsCaptureScheduleSink {

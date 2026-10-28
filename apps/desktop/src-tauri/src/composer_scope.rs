@@ -23,7 +23,8 @@ pub fn effective_conversation(
     (requested == source).then_some(source)
 }
 
-pub fn clear_for_binding(scopes: &mut HashMap<String, MovedScope>, binding: &Binding) {
+/// Retains move scopes belonging to the binding that is about to become active.
+pub fn retain_for_binding(scopes: &mut HashMap<String, MovedScope>, binding: &Binding) {
     scopes.retain(|_, scope| &scope.binding == binding);
 }
 

@@ -499,13 +499,17 @@ impl BrowserCore {
             }
             "_worker_enrollment_phone_status" => {
                 let input: PhoneStatus = serde_json::from_str(raw.get()).map_err(|_| invalid())?;
-                let sas = self
+                let view = self
                     .enrollment
                     .as_ref()
                     .ok_or_else(unavailable)?
-                    .phone_sas(input.status_json)
+                    .owner_phone_view(input.status_json)
                     .map_err(|_| invalid())?;
-                Ok(json!({"sas": sas}))
+                Ok(json!({
+                    "invitationId": view.invitation_id.to_string(),
+                    "sas": view.sas,
+                    "claimDigest": view.claim_digest,
+                }))
             }
             "_worker_enrollment_approve_phone_invitation" => {
                 let input: ApproveInvitation =
@@ -1080,6 +1084,17 @@ mod tests {
             transfer_nonce: None,
             profile: None,
         };
+        let owner_view = value(&dispatch(
+            &mut core,
+            "_worker_enrollment_phone_status",
+            &json!({"statusJson": serde_json::to_string(&claimed).unwrap()}).to_string(),
+        ));
+        assert_eq!(
+            owner_view["invitationId"],
+            "00000000-0000-0000-0000-000000000007"
+        );
+        assert!(owner_view["sas"].as_str().is_some());
+        assert!(owner_view["claimDigest"].as_str().is_some());
         let approval = value(&dispatch(
             &mut core,
             "_worker_enrollment_approve_phone_invitation",

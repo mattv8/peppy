@@ -3,6 +3,7 @@
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  position: relative;
   background: var(--peppy-surface-desk);
 }
 
@@ -62,6 +63,10 @@
 @media (prefers-reduced-motion: reduce) { .contacts-sync-icon { animation: none; } }
 
 #contacts-unsaved-changes,
+#contacts-notice,
+#contacts-error,
+#contacts-target-error,
+#contacts-target-status,
 #contacts-readiness-status,
 #contacts-sync-status,
 #contacts-scan-status,
@@ -76,6 +81,10 @@
 
 #contacts-sync-status,
 #contacts-sync-unavailable { background: var(--peppy-warning-surface); color: var(--peppy-warning-text); }
+#contacts-notice,
+#contacts-target-status { background: var(--peppy-surface-active); color: var(--peppy-text-primary); }
+#contacts-error,
+#contacts-target-error { background: var(--peppy-error-surface); color: var(--peppy-error-text); }
 #contacts-scan-status[data-scan-state="completed"] { background: var(--peppy-surface-active); color: var(--peppy-text-primary); }
 #contacts-scan-status[data-scan-state="blocked"],
 #contacts-scan-status[data-scan-state="failed"] { background: var(--peppy-error-surface); color: var(--peppy-error-text); }
@@ -85,6 +94,25 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+}
+
+#contacts-notice,
+#contacts-error,
+#contacts-target-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+#contacts-notice button,
+#contacts-error button {
+  margin-left: auto;
+  padding: 1px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
 }
 
 .contacts-book-row,
@@ -375,9 +403,24 @@
   font-size: 12px;
 }
 
+#contacts-mobile-book-selector,
+#contacts-detail-back {
+  display: none;
+}
+
 @media (max-width: 700px) {
   #contacts-book-list {
     display: none;
+  }
+  #contacts-mobile-book-selector {
+    display: block;
+    width: 100%;
+    padding: 6px 8px;
+    font-size: 12px;
+    border: 0;
+    border-bottom: 1px solid var(--peppy-border);
+    background: var(--peppy-surface-input);
+    color: var(--peppy-text-primary);
   }
 }
 
@@ -390,6 +433,18 @@
     z-index: 3;
     width: 100%;
     flex-basis: 100%;
+  }
+  #contacts-detail-back {
+    display: inline-block;
+    align-self: flex-start;
+    margin: 8px 12px 0;
+    padding: 4px 8px;
+    font-size: 12px;
+    border: 1px solid var(--peppy-border);
+    border-radius: 4px;
+    background: var(--peppy-surface-input);
+    color: var(--peppy-text-primary);
+    cursor: pointer;
   }
 }
 

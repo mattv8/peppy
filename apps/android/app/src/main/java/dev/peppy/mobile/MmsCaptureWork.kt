@@ -24,6 +24,8 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -41,10 +43,19 @@ import uniffi.peppy_mobile_bindings.NativeMmsLegacyBackfillState
 import uniffi.peppy_mobile_bindings.NativeMmsSource
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 
+/** Binding from scheduled work to one bounded capture pass; replaced only by scheduling tests. */
+internal fun interface MmsCaptureRunner {
+    fun run(context: Context, manualRecheck: Boolean, providerChanged: Boolean): MmsCaptureSummary
+}
+
 /** Offline-only reconciliation for provider rows. Network upload remains GatewayWork's concern. */
 object MmsCaptureWork {
     const val NAME = "peppy-mms-capture"
     const val PERIODIC_NAME = "peppy-mms-capture-periodic"
+
+    @Volatile internal var runner = MmsCaptureRunner { context, manualRecheck, providerChanged ->
+        MmsCapture.run(context, manualRecheck, providerChanged)
+    }
 
     fun enqueue(context: Context) = hintScheduler.requestNormal(scheduleSink(context))
     fun refresh(context: Context) = hintScheduler.replace(scheduleSink(context, manualRecheck = true))
@@ -139,8 +150,11 @@ object MmsCaptureWork {
 class MmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = PASS.withLock {
         withContext(Dispatchers.IO) {
+            val job = currentCoroutineContext()[kotlinx.coroutines.Job]
             MmsCaptureWork.runWorkerPass(applicationContext, inputData) { manualRecheck, providerChanged ->
-                MmsCapture.run(applicationContext, manualRecheck, providerChanged)
+                MmsCaptureWork.runner.run(applicationContext, manualRecheck, providerChanged).also {
+                    job?.ensureActive()
+                }
             }
         }
     }
@@ -302,6 +316,7 @@ internal object MmsCapture {
         }
         val deadline = System.nanoTime() + PASS_BUDGET_NANOS
         return captureMmsPass(diagnostics, { followup }) {
+            val highWater = captureMmsStage(MmsDiagnosticStage.HIGH_WATER) { diagnosticProvider.highWater() }
             if (plan.manualRecheck) {
                 try {
                     core.requestManualRecheck(plan.generation, PROVIDER_SCOPE, MAX_PENDING_RECHECKS)
@@ -314,7 +329,6 @@ internal object MmsCapture {
             val history = (core as? NativeCore)?.let {
                 MessageHistoryRequestCoordinator(it.client, onControlPublished)
             }
-            val highWater = captureMmsStage(MmsDiagnosticStage.HIGH_WATER) { diagnosticProvider.highWater() }
             followup = captureTimed(SyncDiagnosticStage.MMS) {
                 scanner.run(
                     plan.generation,
@@ -438,25 +452,21 @@ internal object MmsCapture {
             processed++
             val subscriptionId = record.subscriptionId?.takeIf { it >= 0 }
             if (subscriptionId == null) {
-                if (descending) {
-                    val outcome = try {
-                        unavailableUnknownSubscription(core, generation, record, imported)
-                    } catch (_: Exception) {
-                        ProcessResult(durable = false)
-                    }
-                    captured += outcome.captured
-                    pending += outcome.pending
-                    unavailable += outcome.unavailable
-                    followup = followup || outcome.followup
-                    if (!outcome.durable) {
-                        checkpointBlocked = true
-                        break
-                    }
-                    if (!checkpointBlocked) lastDurableId = record.id.toString()
-                } else {
-                    pending++
-                    checkpointBlocked = true
+                val outcome = try {
+                    unavailableUnknownSubscription(core, generation, record, imported)
+                } catch (_: Exception) {
+                    ProcessResult(durable = false)
                 }
+                captured += outcome.captured
+                pending += outcome.pending
+                unavailable += outcome.unavailable
+                followup = followup || outcome.followup
+                if (!outcome.durable) {
+                    checkpointBlocked = true
+                    if (descending) break
+                    continue
+                }
+                if (!checkpointBlocked) lastDurableId = record.id.toString()
                 continue
             }
             val routeId = SimRoutes.routeId(subscriptionId)
@@ -717,7 +727,11 @@ internal object MmsCapture {
     private fun granted(context: Context) =
         ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_MMS) == PackageManager.PERMISSION_GRANTED
-    private fun currentHighWater(context: Context): Long = context.contentResolver.query(Uri.parse("content://mms"), arrayOf("_id"), null, null, "_id DESC")?.use { if (it.moveToFirst()) it.getLong(0) else 0L } ?: 0L
+    private fun currentHighWater(context: Context): Long {
+        return context.contentResolver.query(Uri.parse("content://mms"), arrayOf("_id"), null, null, "_id DESC LIMIT 1")?.use {
+            if (it.moveToFirst()) it.getLong(0) else 0L
+        } ?: throw MmsProviderException("MMS provider returned no high-water cursor")
+    }
 
     private const val INBOX = 1
     private const val SENT = 2

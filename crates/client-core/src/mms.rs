@@ -673,7 +673,9 @@ impl Client {
             tx.commit()?;
             return Ok(());
         }
-        if MmsAcquisitionState::parse(&state) == Some(MmsAcquisitionState::Complete) {
+        // Only pending acquisitions accept new part mappings; blocked, unavailable and complete
+        // rows are terminal for mapping (the existing-mapping replay above still succeeds).
+        if MmsAcquisitionState::parse(&state) != Some(MmsAcquisitionState::Pending) {
             return Err(Error::Conflict);
         }
         let mapped_elsewhere: Option<()> = tx
@@ -937,7 +939,7 @@ impl Client {
             params![id, provider_part_id],
             |row| Ok((row.get::<_, String>(0)?, row.get(1)?, (row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))),
         ).optional()?.ok_or(Error::NotFound).and_then(|(original, state, current)| Ok((super::parse(&original)?, state, current)))?;
-        if state == "complete" {
+        if MmsAcquisitionState::parse(&state) != Some(MmsAcquisitionState::Pending) {
             return Err(Error::Conflict);
         }
         let requested = (

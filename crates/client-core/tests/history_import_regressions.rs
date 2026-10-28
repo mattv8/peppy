@@ -334,6 +334,69 @@ fn version_31_upgrade_preserves_partial_floors_completed_scopes_and_descending_p
 }
 
 #[test]
+fn legacy_numeric_sms_and_mms_history_state_normalizes_and_finishes() {
+    let directory = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "legacy-numeric-history", &vault);
+    let client = unlocked(&config, &vault);
+    client.plan_sms_scans("gateway", "sim-1", "100").unwrap();
+    client
+        .plan_mms_backfill_scans("gateway", "sim-1", "100")
+        .unwrap();
+    drop(client);
+
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";
+             UPDATE sms_scan_checkpoints
+             SET provider_message_id='05',history_upper_bound='+100',descending_cursor='05'
+             WHERE source_generation='gateway' AND subscription_id='sim-1' AND imported=1;
+             UPDATE mms_backfill_scopes
+             SET history_upper_bound='+100',history_cursor='05'
+             WHERE source_generation='gateway' AND subscription_id='sim-1';
+             UPDATE mms_scan_checkpoints
+             SET provider_message_id=CASE WHEN imported=0 THEN '+100' ELSE '05' END
+             WHERE source_generation='gateway' AND subscription_id='sim-1';",
+        )
+        .unwrap();
+    drop(connection);
+
+    let client = open(&config);
+    let sms = client.plan_sms_scans("gateway", "sim-1", "101").unwrap();
+    let sms_history = sms.iter().find(|plan| plan.imported).unwrap();
+    assert_eq!(sms_history.history_upper_bound.as_deref(), Some("100"));
+    assert_eq!(sms_history.checkpoint.as_deref(), Some("5"));
+    client
+        .set_sms_scan_checkpoint("gateway", "sim-1", true, "4")
+        .unwrap();
+    client
+        .ack_sms_scan_exhausted("gateway", "sim-1", true, "100")
+        .unwrap();
+    assert!(
+        client
+            .sms_history_status("gateway", "sim-1")
+            .unwrap()
+            .history_complete
+    );
+
+    let mms = client
+        .plan_mms_backfill_scans("gateway", "sim-1", "101")
+        .unwrap();
+    let mms_history = history_plan(&mms);
+    assert_eq!(mms_history.history_upper_bound.as_deref(), Some("100"));
+    assert_eq!(mms_history.cursor.as_deref(), Some("5"));
+    client
+        .advance_mms_backfill_page("gateway", "sim-1", MmsBackfillPhase::History, "4")
+        .unwrap();
+    assert!(
+        client
+            .finish_mms_backfill_phase("gateway", "sim-1", MmsBackfillPhase::History, "100", true,)
+            .unwrap()
+    );
+}
+
+#[test]
 fn pending_uploads_prioritize_live_media_then_contact_photos_then_imported_media() {
     let directory = TempDir::new().unwrap();
     let vault = Vault::new();

@@ -134,12 +134,12 @@ internal fun ObserveServerReachability(enrolled: Boolean, bindingRefresh: Int) {
     }
 
     LaunchedEffect(enrolled, foreground, bindingRefresh) {
-        ServerReachabilityState.bind(if (enrolled) NativeGateway.reachabilityBinding(context) else null)
+        ServerReachabilityState.bind(if (enrolled) withContext(Dispatchers.IO) { NativeGateway.reachabilityBinding(context) } else null)
     }
 
     if (!enrolled || !foreground) return
     LaunchedEffect(reachability, foreground, enrolled) {
-        val binding = NativeGateway.reachabilityBinding(context) ?: return@LaunchedEffect
+        val binding = withContext(Dispatchers.IO) { NativeGateway.reachabilityBinding(context) } ?: return@LaunchedEffect
         ServerReachabilityState.bind(binding)
         var delayMillis = INITIAL_PROBE_DELAY_MS
         do {
@@ -171,7 +171,7 @@ internal fun ObserveServerReachability(enrolled: Boolean, bindingRefresh: Int) {
 private val probeMutex = Mutex()
 
 private suspend fun probeServer(context: Context, binding: GatewayReachabilityBinding) = probeMutex.withLock {
-    if (NativeGateway.reachabilityBinding(context)?.sameBinding(binding) != true) return
+    if (withContext(Dispatchers.IO) { NativeGateway.reachabilityBinding(context) }?.sameBinding(binding) != true) return
     try {
         val response = withContext(Dispatchers.IO) { GatewayHttp(binding.origin, binding.bearerToken).get("/v1/events?after=0&limit=1") }
         if (ServerReachabilityState.recordResponse(binding, response)) GatewayWork.enqueue(context)

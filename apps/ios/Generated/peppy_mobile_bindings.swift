@@ -11073,6 +11073,22 @@ public func restoreHostedProvisioning(checkpointBytes: Data, expectedOrigin: Str
     )
 })
 }
+/**
+ * Restores a protected local hosted checkpoint for an exact canonical identity.
+ * This is structural validation only; hosts must keep checkpoint bytes in protected
+ * local storage and verify recovered secrets against the current vault header.
+ */
+public func restoreHostedProvisioningForIdentity(checkpointBytes: Data, expectedOrigin: String, expectedVaultId: String, expectedDeviceId: String)throws  -> NativeHostedProvisioning  {
+    return try  FfiConverterTypeNativeHostedProvisioning_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_restore_hosted_provisioning_for_identity(
+        FfiConverterData.lower(checkpointBytes),
+        FfiConverterString.lower(expectedOrigin),
+        FfiConverterString.lower(expectedVaultId),
+        FfiConverterString.lower(expectedDeviceId),uniffiCallStatus
+    )
+})
+}
 public func vaultProfileFingerprint(profileJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -11186,6 +11202,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning() != 44262) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning_for_identity() != 33969) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_vault_profile_fingerprint() != 3664) {

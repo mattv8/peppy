@@ -65,6 +65,7 @@ internal fun GatewayAccountSettings(
     var failure by remember { mutableStateOf<String?>(null) }
     var deleteOpen by remember { mutableStateOf(false) }
     var erase by remember { mutableStateOf("") }
+    var deletingVault by remember { mutableStateOf(false) }
     var revokeTarget by remember { mutableStateOf<GatewayAccountDevice?>(null) }
     var devicesOpen by remember { mutableStateOf(false) }
     var notificationConsentOpen by remember { mutableStateOf(false) }
@@ -72,14 +73,16 @@ internal fun GatewayAccountSettings(
     var relayEnabled by remember { mutableStateOf(relayPrefs.getBoolean("relay-enabled.v1", false)) }
     var relayOrigin by remember { mutableStateOf(relayPrefs.getString("relay-origin.v1", "") ?: "") }
     var remoteMessagingEnabled by remember { mutableStateOf(RemoteMessagingPreferences.enabled(context)) }
-    var wakePreference by remember { mutableStateOf(RelayWakeRuntime.preference(context)) }
-    var wakeStatus by remember { mutableStateOf(RelayWakeRuntime.status(context)) }
+    var wakePreference by remember { mutableStateOf<RelayWakePreference?>(null) }
+    var wakeStatus by remember { mutableStateOf(RelayWakeStatus.PENDING) }
+    var relayLoaded by remember { mutableStateOf(false) }
+    var relayWritePending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     DisposableEffect(relayPrefs, context) {
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             when (key) {
-                "hosted-relay-preference.v1" -> wakePreference = RelayWakeRuntime.preference(context)
-                "hosted-relay-status.v1" -> wakeStatus = RelayWakeRuntime.status(context)
+                "hosted-relay-preference.v1" -> scope.launch { wakePreference = withContext(Dispatchers.IO) { RelayWakeRuntime.preference(context) } }
+                "hosted-relay-status.v1" -> scope.launch { wakeStatus = withContext(Dispatchers.IO) { RelayWakeRuntime.status(context) } }
                 "relay-enabled.v1" -> relayEnabled = relayPrefs.getBoolean("relay-enabled.v1", false)
                 "relay-origin.v1" -> relayOrigin = relayPrefs.getString("relay-origin.v1", "") ?: ""
             }
@@ -99,6 +102,11 @@ internal fun GatewayAccountSettings(
         onDispose { onDetailChanged(false) }
     }
     BackHandler(enabled = devicesOpen) { devicesOpen = false }
+    LaunchedEffect(Unit) {
+        wakePreference = withContext(Dispatchers.IO) { RelayWakeRuntime.preference(context) }
+        wakeStatus = withContext(Dispatchers.IO) { RelayWakeRuntime.status(context) }
+        relayLoaded = true
+    }
     // Lock and recovery may change while this screen remains open. This is local state only; the
     // explicit Refresh button remains the only roster/server request.
     LaunchedEffect(Unit) {
@@ -212,7 +220,8 @@ internal fun GatewayAccountSettings(
             }
         }
         if (settingsMode && gatewayStatus?.sharedKeysReady == true) Section("settings-relay-section", stringResource(R.string.peppy_wake_section_title), showDivider = account != null) {
-            val hostedRelay = NativeGateway.accountCredential(context)?.let { hostedWakeRelayUrl(it.origin) }
+            val hostedRelay = gatewayStatus?.origin?.let { hostedWakeRelayUrl(it) }
+            val relayReady = relayLoaded && gatewayStatus != null && !relayWritePending
             if (hostedRelay != null) {
                 val statusText = when (wakeStatus) {
                     RelayWakeStatus.REGISTERED -> stringResource(R.string.peppy_wake_status_registered)
@@ -235,25 +244,50 @@ internal fun GatewayAccountSettings(
                 StatusRow("relay-wake-status", stringResource(R.string.peppy_wake_status_label), statusText)
                 Row(Modifier.fillMaxWidth()) {
                     Text(stringResource(R.string.peppy_wake_updates_toggle_label), Modifier.weight(1f).testTag("relay-wake-toggle-label"))
-                    Switch(wakePreference != RelayWakePreference.PAUSED, { enabled ->
-                        wakePreference = if (enabled) RelayWakePreference.AUTOMATIC else RelayWakePreference.PAUSED
-                        RelayWakeRuntime.setPreference(context, wakePreference)
-                    }, modifier = Modifier.testTag("relay-wake-toggle"))
+                    Switch(
+                        checked = wakePreference.let { it != null && it != RelayWakePreference.PAUSED },
+                        enabled = relayReady,
+                        onCheckedChange = { enabled ->
+                            val next = if (enabled) RelayWakePreference.AUTOMATIC else RelayWakePreference.PAUSED
+                            relayWritePending = true
+                            scope.launch {
+                                try {
+                                    withContext(Dispatchers.IO) { RelayWakeRuntime.setPreference(context, next) }
+                                    wakePreference = withContext(Dispatchers.IO) { RelayWakeRuntime.preference(context) }
+                                } finally {
+                                    relayWritePending = false
+                                }
+                            }
+                        },
+                        modifier = Modifier.testTag("relay-wake-toggle"),
+                    )
                 }
                 Text(stringResource(footer), Modifier.testTag("relay-wake-footer"))
             } else {
-                OutlinedTextField(relayOrigin, { relayOrigin = it }, label = { Text("Relay HTTPS origin") }, modifier = Modifier.testTag("relay-origin-field"))
+                OutlinedTextField(relayOrigin, { relayOrigin = it }, enabled = relayReady, label = { Text("Relay HTTPS origin") }, modifier = Modifier.testTag("relay-origin-field"))
                 Row(Modifier.fillMaxWidth()) {
                     Text("Enable wake relay", Modifier.weight(1f))
-                    Switch(relayEnabled, { enabled ->
-                        relayEnabled = enabled
-                        if (enabled) {
-                            val origin = CredentialParser.canonicalOrigin(relayOrigin, false)
-                            if (origin == null) { relayEnabled = false; failure = "Enter a canonical HTTPS relay origin." } else {
-                                RelayWakeRuntime.setEnabled(context, origin, true)
+                    Switch(
+                        checked = relayEnabled,
+                        enabled = relayReady,
+                        onCheckedChange = { enabled ->
+                            val origin = if (enabled) CredentialParser.canonicalOrigin(relayOrigin, false) else null
+                            if (enabled && origin == null) {
+                                failure = "Enter a canonical HTTPS relay origin."
+                            } else {
+                                relayWritePending = true
+                                scope.launch {
+                                    try {
+                                        withContext(Dispatchers.IO) { RelayWakeRuntime.setEnabled(context, origin, enabled) }
+                                        relayEnabled = withContext(Dispatchers.IO) { relayPrefs.getBoolean("relay-enabled.v1", false) }
+                                    } finally {
+                                        relayWritePending = false
+                                    }
+                                }
                             }
-                        } else { RelayWakeRuntime.setEnabled(context, null, false) }
-                    }, modifier = Modifier.testTag("relay-enable-toggle"))
+                        },
+                        modifier = Modifier.testTag("relay-enable-toggle"),
+                    )
                 }
                 val communityFooter = if (relayEnabled) R.string.peppy_wake_community_relay_enabled else R.string.peppy_wake_community_relay_disabled
                 Text(stringResource(communityFooter), Modifier.testTag("relay-not-configured"))
@@ -276,10 +310,10 @@ internal fun GatewayAccountSettings(
         confirmLabel = stringResource(R.string.peppy_toggle_android_agree),
     )
     if (deleteOpen) AlertDialog(
-        onDismissRequest = { deleteOpen = false }, title = { Text("Type ERASE to confirm") },
-        text = { OutlinedTextField(erase, { erase = it }, label = { Text("Type ERASE") }, modifier = Modifier.testTag("vault-delete-confirm-field")) },
-        confirmButton = { Button(onClick = { scope.launch { val ok = withContext(Dispatchers.IO) { GatewayAccountHost.deleteVault(context) }; if (!ok) failure = "Could not reach the server. The vault was not deleted." else onChanged() }; deleteOpen = false }, enabled = erase == "ERASE", modifier = Modifier.testTag("vault-delete-final-button")) { Text("Delete vault") } },
-        dismissButton = { OutlinedButton(onClick = { deleteOpen = false }) { Text("Keep vault") } },
+        onDismissRequest = { if (!deletingVault) { erase = ""; deleteOpen = false } }, title = { Text("Type ERASE to confirm") },
+        text = { OutlinedTextField(erase, { erase = it }, enabled = !deletingVault, label = { Text("Type ERASE") }, modifier = Modifier.testTag("vault-delete-confirm-field")) },
+        confirmButton = { Button(onClick = { if (deletingVault) return@Button; deletingVault = true; scope.launch { try { val ok = withContext(Dispatchers.IO) { GatewayAccountHost.deleteVault(context) }; if (!ok) failure = "Could not reach the server. The vault was not deleted." else onChanged() } finally { deletingVault = false; erase = ""; deleteOpen = false } } }, enabled = erase == "ERASE" && !deletingVault, modifier = Modifier.testTag("vault-delete-final-button")) { Text("Delete vault") } },
+        dismissButton = { OutlinedButton(onClick = { erase = ""; deleteOpen = false }, enabled = !deletingVault) { Text("Keep vault") } },
     )
     revokeTarget?.let { target ->
         val own = state?.self?.id == target.id

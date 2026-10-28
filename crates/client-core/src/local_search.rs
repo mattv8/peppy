@@ -293,7 +293,8 @@ fn hex(value: &str) -> String {
     output
 }
 fn unhex(value: &str) -> Option<String> {
-    if !value.len().is_multiple_of(2) {
+    // Reject non-hex bytes before slicing: byte offsets can split a multibyte character.
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     let bytes = (0..value.len())

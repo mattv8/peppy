@@ -523,45 +523,49 @@ pub async fn drain_media(
             .as_deref()
             .ok_or(SimulatorError::Response)?;
         let target = download_dir.join(format!("{}.ppss", item.attachment_id.0));
-        let mut output_options = tokio::fs::OpenOptions::new();
-        output_options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            output_options.mode(0o600);
-        }
-        let mut output = output_options
-            .open(&target)
-            .await
-            .map_err(|_| SimulatorError::Io)?;
-        let mut stream = http
-            .get(format!("{api_origin}/v1/attachments/{remote}"))
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|_| SimulatorError::Http)?
-            .error_for_status()
-            .map_err(|_| SimulatorError::Http)?
-            .bytes_stream();
-        let mut total = 0_u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| SimulatorError::Http)?;
-            total = total
-                .checked_add(chunk.len() as u64)
-                .ok_or(SimulatorError::Response)?;
-            if total > item.ciphertext_bytes {
-                return Err(SimulatorError::Response);
+        let download = async {
+            let mut output_options = tokio::fs::OpenOptions::new();
+            output_options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                output_options.mode(0o600);
             }
-            tokio::io::AsyncWriteExt::write_all(&mut output, &chunk)
+            let mut output = output_options
+                .open(&target)
                 .await
                 .map_err(|_| SimulatorError::Io)?;
+            let mut stream = http
+                .get(format!("{api_origin}/v1/attachments/{remote}"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| SimulatorError::Http)?
+                .error_for_status()
+                .map_err(|_| SimulatorError::Http)?
+                .bytes_stream();
+            let mut total = 0_u64;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| SimulatorError::Http)?;
+                total = total
+                    .checked_add(chunk.len() as u64)
+                    .ok_or(SimulatorError::Response)?;
+                if total > item.ciphertext_bytes {
+                    return Err(SimulatorError::Response);
+                }
+                tokio::io::AsyncWriteExt::write_all(&mut output, &chunk)
+                    .await
+                    .map_err(|_| SimulatorError::Io)?;
+            }
+            tokio::io::AsyncWriteExt::flush(&mut output)
+                .await
+                .map_err(|_| SimulatorError::Io)?;
+            client
+                .install_downloaded_attachment(item.attachment_id, &target)
+                .map_err(|_| SimulatorError::Core)
         }
-        tokio::io::AsyncWriteExt::flush(&mut output)
-            .await
-            .map_err(|_| SimulatorError::Io)?;
-        client
-            .install_downloaded_attachment(item.attachment_id, &target)
-            .map_err(|_| SimulatorError::Core)?;
+        .await;
         let _ = tokio::fs::remove_file(target).await;
+        download?;
     }
     Ok(())
 }
@@ -745,5 +749,274 @@ mod tests {
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+}
+
+#[cfg(test)]
+mod fake_http_tests {
+    use std::{
+        net::SocketAddr,
+        sync::{Arc, Mutex},
+    };
+
+    use axum::{
+        Json, Router,
+        body::Bytes,
+        extract::State,
+        http::StatusCode,
+        routing::{get, post, put},
+    };
+    use peppy_client_core::{
+        AttachmentState, ClientConfig, ConversationId, DatabaseKey, GatewayRoute, IncomingMms,
+        KeyProfile, OutgoingSms, VaultCheckHeader, VaultId,
+    };
+    use peppy_crypto::{create_vault_check_header, derive_root_key};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    const PHRASE: &str = "correct horse battery staple";
+    const REMOTE: &str = "6f1d2c3b-4a59-4e7f-8a1b-2c3d4e5f6a7b";
+
+    /// Download behaviour served for each successive GET of the stored ciphertext.
+    #[derive(Clone, Copy)]
+    enum Download {
+        ServerError,
+        Truncated,
+        Complete,
+    }
+
+    #[derive(Default)]
+    struct FakeState {
+        ciphertext: Vec<u8>,
+        events: Vec<serde_json::Value>,
+        downloads: Vec<Download>,
+    }
+
+    type Shared = Arc<Mutex<FakeState>>;
+
+    async fn reserve() -> Json<serde_json::Value> {
+        Json(serde_json::json!({ "attachment_id": REMOTE }))
+    }
+
+    async fn upload(State(state): State<Shared>, body: Bytes) -> StatusCode {
+        state.lock().unwrap().ciphertext = body.to_vec();
+        StatusCode::NO_CONTENT
+    }
+
+    async fn finalize() -> StatusCode {
+        StatusCode::OK
+    }
+
+    async fn event(
+        State(state): State<Shared>,
+        Json(envelope): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        let mut state = state.lock().unwrap();
+        state.events.push(envelope);
+        Json(serde_json::json!({ "cursor": state.events.len().to_string(), "duplicate": false }))
+    }
+
+    async fn download(State(state): State<Shared>) -> (StatusCode, Vec<u8>) {
+        let mut state = state.lock().unwrap();
+        let mode = if state.downloads.is_empty() {
+            Download::Complete
+        } else {
+            state.downloads.remove(0)
+        };
+        match mode {
+            Download::ServerError => (StatusCode::INTERNAL_SERVER_ERROR, Vec::new()),
+            Download::Truncated => (
+                StatusCode::OK,
+                state.ciphertext[..state.ciphertext.len() - 1].to_vec(),
+            ),
+            Download::Complete => (StatusCode::OK, state.ciphertext.clone()),
+        }
+    }
+
+    async fn start_fake(state: Shared) -> String {
+        let router = Router::new()
+            .route("/v1/attachments/reserve", post(reserve))
+            .route("/v1/attachments/{id}/upload", put(upload))
+            .route("/v1/attachments/{id}/finalize", post(finalize))
+            .route("/v1/attachments/{id}", get(download))
+            .route("/v1/events", post(event))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{address}")
+    }
+
+    struct Vault {
+        id: VaultId,
+        profile: KeyProfile,
+        header: VaultCheckHeader,
+    }
+
+    fn vault() -> Vault {
+        let id = VaultId::new();
+        let profile = KeyProfile::new(id.0, 1).unwrap();
+        let root = derive_root_key(PHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        Vault {
+            id,
+            profile,
+            header,
+        }
+    }
+
+    fn client(dir: &Path, name: &str, vault: &Vault, device_id: DeviceId) -> Client {
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.join(format!("{name}.db")),
+                vault_id: vault.id,
+                device_id,
+            },
+            DatabaseKey::new(&[name.as_bytes()[0]; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&vault.profile, &vault.header, PHRASE)
+            .unwrap();
+        client
+    }
+
+    /// Delivers every captured event to `client` in server cursor order.
+    fn deliver(client: &Client, state: &Shared, first_cursor: usize) {
+        let events = state.lock().unwrap().events.clone();
+        for (index, envelope) in events.iter().enumerate().skip(first_cursor - 1) {
+            client
+                .ingest_raw(
+                    &serde_json::to_vec(envelope).unwrap(),
+                    Cursor(index as u64 + 1),
+                )
+                .unwrap();
+        }
+        client.apply_pending(100).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupted_downloads_leave_no_partial_file_and_retry_installs() {
+        let state: Shared = Arc::default();
+        let origin = start_fake(state.clone()).await;
+        let temp = TempDir::new().unwrap();
+        let vault = vault();
+        let gateway = client(temp.path(), "gateway", &vault, DeviceId::new());
+        let desktop = client(temp.path(), "desktop", &vault, DeviceId::new());
+        let png = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/media/valid-1x1.png"),
+        )
+        .unwrap();
+        let source = temp.path().join("incoming.png");
+        fs::write(&source, &png).unwrap();
+        let attachment = gateway
+            .prepare_attachment(&source, "image/png", "incoming.png")
+            .unwrap();
+        gateway
+            .capture_incoming_mms(IncomingMms {
+                conversation_id: None,
+                sender_address: "+15555550100".into(),
+                body: "SIMULATED image".into(),
+                recipients: Vec::new(),
+                subject: None,
+                provider_message_id: Some("fake-mms-1".into()),
+                imported: false,
+                attachment_ids: vec![attachment.attachment_id],
+            })
+            .unwrap();
+        let gateway_dir = temp.path().join("gateway-state");
+        drain_media(&gateway, &origin, "token", &gateway_dir)
+            .await
+            .unwrap();
+        assert_eq!(upload_pending(&gateway, &origin, "token").await.unwrap(), 1);
+        deliver(&desktop, &state, 1);
+        let pending = desktop.pending_downloads().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].remote_object_id.as_deref(), Some(REMOTE));
+
+        let desktop_dir = temp.path().join("desktop-state");
+        let partial = desktop_dir
+            .join("SIMULATED-downloads")
+            .join(format!("{}.ppss", attachment.attachment_id.0));
+        state.lock().unwrap().downloads = vec![Download::ServerError, Download::Truncated];
+        assert!(matches!(
+            drain_media(&desktop, &origin, "token", &desktop_dir).await,
+            Err(SimulatorError::Http)
+        ));
+        assert!(!partial.exists(), "HTTP failure left a partial download");
+        // A leftover partial would make this attempt fail on create_new with Io instead.
+        assert!(matches!(
+            drain_media(&desktop, &origin, "token", &desktop_dir).await,
+            Err(SimulatorError::Core)
+        ));
+        assert!(!partial.exists(), "install failure left a partial download");
+        assert_eq!(
+            desktop
+                .attachment_info(attachment.attachment_id)
+                .unwrap()
+                .state,
+            AttachmentState::PendingDownload
+        );
+
+        drain_media(&desktop, &origin, "token", &desktop_dir)
+            .await
+            .unwrap();
+        assert!(!partial.exists());
+        assert!(desktop.pending_downloads().unwrap().is_empty());
+        let plaintext = desktop
+            .open_native_plaintext(attachment.attachment_id)
+            .unwrap();
+        assert_eq!(fs::read(plaintext.path()).unwrap(), png);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn route_fenced_effect_leaves_a_foreign_sim_command_pending() {
+        let state: Shared = Arc::default();
+        let origin = start_fake(state.clone()).await;
+        let temp = TempDir::new().unwrap();
+        let vault = vault();
+        let gateway_id = DeviceId::new();
+        let gateway = client(temp.path(), "gateway", &vault, gateway_id);
+        let desktop = client(temp.path(), "desktop", &vault, DeviceId::new());
+        let queued = desktop
+            .queue_send(
+                OutgoingSms {
+                    conversation_id: ConversationId::new(),
+                    recipients: vec!["+15555550100".into()],
+                    body: "SIMULATED foreign route".into(),
+                },
+                GatewayRoute {
+                    gateway_device_id: gateway_id,
+                    subscription_id: "sim-foreign".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(upload_pending(&desktop, &origin, "token").await.unwrap(), 1);
+        deliver(&gateway, &state, 1);
+        let effects = effects_path(temp.path());
+
+        assert!(
+            !run_one_carrier_effect_for_route(&gateway, &effects, "sim-active", false).unwrap()
+        );
+        assert!(
+            !effects.exists(),
+            "a foreign route produced a carrier effect"
+        );
+        let pending = gateway.pending_commands().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].command_id, queued.command_id);
+
+        assert!(
+            run_one_carrier_effect_for_route(&gateway, &effects, "sim-foreign", false).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(&effects).unwrap().trim(),
+            queued.command_id.0.to_string()
+        );
+        assert!(gateway.pending_commands().unwrap().is_empty());
     }
 }

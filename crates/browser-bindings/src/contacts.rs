@@ -830,6 +830,7 @@ mod tests {
             object_keys(&recipients[0]),
             BTreeSet::from([
                 "address",
+                "bookId",
                 "contactId",
                 "displayName",
                 "label",
