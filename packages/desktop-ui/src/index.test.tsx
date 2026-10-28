@@ -320,7 +320,6 @@ describe("ConversationList interactions", () => {
     expect(screen.queryByRole("button", { name: /Pin / })).not.toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "Pinned" })).not.toBeInTheDocument();
   });
-
 });
 
 describe("desktop UI controls", () => {
