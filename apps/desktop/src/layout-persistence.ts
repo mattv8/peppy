@@ -9,9 +9,21 @@ type LayoutPatch = {
   headComposerHeight?: number | null;
   recipientPosition?: RecipientPosition;
   navigationPosition?: NavigationPosition;
+  contactsDetailWidth?: number;
 };
 
 type StoredLayout = Record<string, unknown>;
+
+export function readContactsDetailWidth(): number | undefined {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
+    if (typeof stored !== "object" || stored === null || Array.isArray(stored)) return undefined;
+    const value = (stored as StoredLayout).contactsDetailWidth;
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function updateLayout(update: (layout: StoredLayout) => StoredLayout): void {
   try {

@@ -3,6 +3,7 @@ import type { NavigationPosition, RecipientPosition } from "@peppy/desktop-ui";
 import {
   persistLayoutPatch,
   persistRecipientPosition,
+  readContactsDetailWidth,
 } from "./layout-persistence";
 
 const LAYOUT_KEY = "peppy.layout.v1";
@@ -58,6 +59,13 @@ describe("layout persistence", () => {
       sibling: "kept",
       listWidth: 320,
     });
+  });
+
+  it("reads only a finite saved contact detail width", () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ contactsDetailWidth: 360 }));
+    expect(readContactsDetailWidth()).toBe(360);
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ contactsDetailWidth: "360" }));
+    expect(readContactsDetailWidth()).toBeUndefined();
   });
 
   it("re-reads sibling keys before each patch", () => {

@@ -278,7 +278,7 @@ export function ContactForm({
       {...(busy ? { inert: true } : {})}
     >
       <header id="contact-form-header">
-        <button type="button" data-action="cancel-edit" onClick={onCancel} disabled={busy}>
+        <button type="button" className="secondary-button" data-action="cancel-edit" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
         <h2>{initial ? "Edit contact" : "Create contact"}</h2>
@@ -293,7 +293,7 @@ export function ContactForm({
             addresses: draft.addresses.map(({ editorKey: _key, ...value }) => value),
           })}
         >
-          {busy ? "Saving..." : "Save"}
+          {busy ? "Saving…" : "Save"}
         </button>
       </header>
       {error && (

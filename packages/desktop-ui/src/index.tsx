@@ -80,6 +80,7 @@ export {
   ImageDown,
   ImageOff,
   Link,
+  ListFilter,
   Loader2,
   Lock,
   LockKeyhole,
