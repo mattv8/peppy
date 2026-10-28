@@ -14,12 +14,21 @@ import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeSendResult
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class MmsCallbacksTest : GatewayTestBase() {
+
+    private class RecordingMmsCarrier : MmsCarrier {
+        val calls = mutableListOf<Unit>()
+        override fun send(subscriptionId: Int, pdu: android.net.Uri, sent: android.app.PendingIntent) {
+            calls += Unit
+        }
+    }
 
     @Before
     fun clearMmsCallbackAndPduState() {
@@ -30,6 +39,17 @@ class MmsCallbacksTest : GatewayTestBase() {
 
     private fun pdu(id: String) = File(context.filesDir, "mms-pdu/$id.pdu")
     private fun callback(id: String) = Intent(MmsStatusReceiver.ACTION).setData(android.net.Uri.parse("peppy-mms://callback/$id"))
+    private fun pendingResult(code: Int) = android.content.BroadcastReceiver.PendingResult::class.java.declaredConstructors
+        .single { it.parameterCount == 9 }.let { constructor ->
+            constructor.isAccessible = true
+            constructor.newInstance(code, null, null, 0, true, false, null, 0, 0)
+        }
+
+    private fun attachPending(receiver: android.content.BroadcastReceiver, code: Int) {
+        android.content.BroadcastReceiver::class.java
+            .getDeclaredMethod("setPendingResult", android.content.BroadcastReceiver.PendingResult::class.java)
+            .invoke(receiver, pendingResult(code))
+    }
 
     @Test
     fun pendingAndUnknownAttemptsAgeAfterSevenDaysButOwedEvidenceDoesNot() {
@@ -146,20 +166,76 @@ class MmsCallbacksTest : GatewayTestBase() {
         client.recordSendResult(command, NativeSendResult.SUBMITTED)
         assertTrue(MmsCallbackStore(context).register(command))
         val previous: Executor = ReceiverWork.executor
+        val previousEvidence: Executor = ReceiverWork.evidenceExecutor
+        val previousApply: Executor = ReceiverWork.callbackApplyExecutor
         ReceiverWork.executor = Executor { it.run() }
+        ReceiverWork.evidenceExecutor = Executor { it.run() }
+        ReceiverWork.callbackApplyExecutor = Executor { it.run() }
         try {
             val receiver = MmsStatusReceiver()
-            val pending = android.content.BroadcastReceiver.PendingResult::class.java.declaredConstructors.single { it.parameterCount == 9 }.let { constructor ->
-                constructor.isAccessible = true
-                constructor.newInstance(Activity.RESULT_OK, null, null, 0, true, false, null, 0, 0)
-            }
-            android.content.BroadcastReceiver::class.java
-                .getDeclaredMethod("setPendingResult", android.content.BroadcastReceiver.PendingResult::class.java)
-                .invoke(receiver, pending)
+            attachPending(receiver, Activity.RESULT_OK)
             receiver.onReceive(context, callback(command))
         } finally {
             ReceiverWork.executor = previous
+            ReceiverWork.evidenceExecutor = previousEvidence
+            ReceiverWork.callbackApplyExecutor = previousApply
         }
         assertEquals("Sent", client.beginSendAttempt(command).existingSendState)
+    }
+
+    @Test
+    fun asyncReceiverPersistsMmsEvidenceWhenCallbackApplyIsRejectedThenReplayPreventsResend() {
+        val client = enrollAndUnlock()
+        val command = queueCommand(client, SimRoutes.routeId(3), "group", listOf("+15551234567", "+15557654321"))
+        client.beginSendAttempt(command)
+        client.recordSendResult(command, NativeSendResult.SUBMITTED)
+        assertTrue(MmsCallbackStore(context).register(command))
+        val previousEvidence = ReceiverWork.evidenceExecutor
+        val previousApply = ReceiverWork.callbackApplyExecutor
+        val previousSchedule = GatewayScheduler.schedule
+        val recoveryScheduled = CountDownLatch(2)
+        ReceiverWork.evidenceExecutor = Executor { it.run() }
+        ReceiverWork.callbackApplyExecutor = Executor { throw RejectedExecutionException() }
+        GatewayScheduler.schedule = {
+            recoveryScheduled.countDown()
+        }
+        try {
+            val receiver = MmsStatusReceiver()
+            attachPending(receiver, Activity.RESULT_OK)
+            receiver.onReceive(context, callback(command))
+            assertEquals(listOf(command to NativeSendResult.SENT), MmsCallbackStore(context).owed())
+            assertEquals("SubmittedToOs", client.beginSendAttempt(command).existingSendState)
+            assertTrue("the rejected apply recovery reaches the test scheduler", recoveryScheduled.await(2, TimeUnit.SECONDS))
+            val store = MmsCallbackStore(context)
+            assertEquals(1, MmsCallbackReconciler.replay(client, store))
+            assertEquals("Sent", client.beginSendAttempt(command).existingSendState)
+            assertTrue(store.owed().isEmpty())
+            val carrier = RecordingMmsCarrier()
+            MmsDispatcher(context, client, carrier, SimRoutes.current(3), true, true, { MmsLimits(300L * 1024, 20, true, MmsLimits.Source.FALLBACK) }).dispatch()
+            assertTrue("replayed callback never reacquires a carrier send permit", carrier.calls.isEmpty())
+        } finally {
+            ReceiverWork.evidenceExecutor = previousEvidence
+            ReceiverWork.callbackApplyExecutor = previousApply
+            GatewayScheduler.schedule = previousSchedule
+        }
+    }
+
+    @Test
+    fun unknownAsyncMmsCallbackNeverCreatesOwedSentEvidence() {
+        val command = UUID.randomUUID().toString()
+        assertTrue(MmsCallbackStore(context).register(command))
+        val previousEvidence = ReceiverWork.evidenceExecutor
+        val previousApply = ReceiverWork.callbackApplyExecutor
+        ReceiverWork.evidenceExecutor = Executor { it.run() }
+        ReceiverWork.callbackApplyExecutor = Executor { throw RejectedExecutionException() }
+        try {
+            val receiver = MmsStatusReceiver()
+            attachPending(receiver, 12_345)
+            receiver.onReceive(context, callback(command))
+            assertTrue(MmsCallbackStore(context).owed().isEmpty())
+        } finally {
+            ReceiverWork.evidenceExecutor = previousEvidence
+            ReceiverWork.callbackApplyExecutor = previousApply
+        }
     }
 }

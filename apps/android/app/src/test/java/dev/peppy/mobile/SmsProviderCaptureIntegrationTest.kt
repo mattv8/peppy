@@ -79,6 +79,19 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         assertEquals(listOf("first half, second half"), messages(client).map { it.body })
     }
 
+    @Test fun providerInboxWithDifferentDateSentIsNotAssumedToMatchTheReceiverBroadcast() {
+        grant(Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS)
+        val client = enrollAndUnlock()
+        assertTrue(drain(client).none { it.providerError || it.coreError })
+        val smsc = 1_790_879_048_000
+        IncomingCapture.handle(context, listOf(IncomingSmsPart("+15557654321", "same body", smsc)))
+        provider.rows += row(1, 1, "+15557654321", "same body", smsc + 413, smsc + 1, MESSAGES_APP)
+
+        drain(client)
+
+        assertEquals("different SMSC timestamps are distinct provider evidence", 2, messages(client).size)
+    }
+
     @Test fun providerInboxRowThenReceiverBroadcastIsOneMessage() {
         grant(Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS)
         val client = enrollAndUnlock()

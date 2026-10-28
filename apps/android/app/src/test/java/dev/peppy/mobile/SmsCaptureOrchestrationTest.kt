@@ -269,6 +269,20 @@ class SmsCaptureOrchestrationTest {
         assertTrue(calls.contains("state:one:UNAVAILABLE"))
     }
 
+    @Test fun missingProviderRowMakesTheExistingAcquisitionTerminalWithoutInventingADuplicate() {
+        val calls = mutableListOf<String>()
+        val summary = SmsCapture.run(
+            SmsCapturePlan("shared-generation", false, 100),
+            FakeCore(calls, listOf(acquisition("one", 1))),
+            FakeProvider(emptyList()),
+        )
+
+        assertEquals(1, summary.unavailable)
+        assertEquals("one", summary.pendingRecheckCursor)
+        assertTrue(summary.advanced)
+        assertEquals(listOf("state:one:UNAVAILABLE"), calls)
+    }
+
     @Test fun completedHistoryStillRechecksPendingAcquisitions() {
         val calls = mutableListOf<String>()
         val summary = SmsCapture.run(SmsCapturePlan("shared-generation", true, 10, historyComplete = true), FakeCore(calls, listOf(acquisition("one", 1))), FakeProvider(listOf(record(1))))

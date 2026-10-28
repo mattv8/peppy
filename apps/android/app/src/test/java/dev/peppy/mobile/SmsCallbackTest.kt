@@ -13,6 +13,10 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeSendResult
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -20,6 +24,17 @@ class SmsCallbackTest : GatewayTestBase() {
     private val ok = PartOutcome.OK
     private val failed = PartOutcome.FAILED
     private val unknown = PartOutcome.UNKNOWN
+
+    private fun attachPending(receiver: android.content.BroadcastReceiver, code: Int) {
+        val pending = android.content.BroadcastReceiver.PendingResult::class.java.declaredConstructors
+            .single { it.parameterCount == 9 }.let { constructor ->
+                constructor.isAccessible = true
+                constructor.newInstance(code, null, null, 0, true, false, null, 0, 0)
+            }
+        android.content.BroadcastReceiver::class.java
+            .getDeclaredMethod("setPendingResult", android.content.BroadcastReceiver.PendingResult::class.java)
+            .invoke(receiver, pending)
+    }
 
     @Test
     fun outcomeMappingIsConservative() {
@@ -169,5 +184,43 @@ class SmsCallbackTest : GatewayTestBase() {
         val sent = shadowOf(carrier.calls.single().sent.single()).savedIntent
         assertNull(SmsStatusReceiver.handle(context, sent, SmsManager.RESULT_ERROR_GENERIC_FAILURE))
         assertEquals("SubmittedToOs", client.beginSendAttempt(command).existingSendState)
+    }
+
+    @Test
+    fun asyncReceiverPersistsSmsEvidenceWhenCallbackApplyIsRejectedThenReplayPreventsResend() {
+        val client = enrollAndUnlock()
+        val command = queueCommand(client, SimRoutes.routeId(3), "callback")
+        client.beginSendAttempt(command)
+        client.recordSendResult(command, NativeSendResult.SUBMITTED)
+        val identity = CallbackIdentity(CallbackKind.SENT, command, 0, 1)
+        SmsCallbackStore(context).register(command, 1)
+        val previousEvidence = ReceiverWork.evidenceExecutor
+        val previousApply = ReceiverWork.callbackApplyExecutor
+        val previousSchedule = GatewayScheduler.schedule
+        val recoveryScheduled = CountDownLatch(2)
+        ReceiverWork.evidenceExecutor = Executor { it.run() }
+        ReceiverWork.callbackApplyExecutor = Executor { throw RejectedExecutionException() }
+        GatewayScheduler.schedule = {
+            recoveryScheduled.countDown()
+        }
+        try {
+            val receiver = SmsStatusReceiver()
+            attachPending(receiver, Activity.RESULT_OK)
+            receiver.onReceive(context, Intent(SmsStatusReceiver.ACTION).setData(identity.uri()))
+            assertEquals(listOf(command to NativeSendResult.SENT), SmsCallbackStore(context).owed())
+            assertEquals("SubmittedToOs", client.beginSendAttempt(command).existingSendState)
+            assertTrue("the rejected apply recovery reaches the test scheduler", recoveryScheduled.await(2, TimeUnit.SECONDS))
+            val store = SmsCallbackStore(context)
+            assertEquals(1, SmsCallbackReconciler.replay(client, store))
+            assertEquals("Sent", client.beginSendAttempt(command).existingSendState)
+            assertTrue(store.owed().isEmpty())
+            val carrier = FakeCarrier()
+            SmsDispatcher(context, client, carrier, SimRoutes.current(3), sendPermissionGranted = true).dispatch()
+            assertTrue("replayed callback never reacquires a carrier send permit", carrier.calls.isEmpty())
+        } finally {
+            ReceiverWork.evidenceExecutor = previousEvidence
+            ReceiverWork.callbackApplyExecutor = previousApply
+            GatewayScheduler.schedule = previousSchedule
+        }
     }
 }
