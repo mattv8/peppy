@@ -452,3 +452,47 @@ This reference records non-obvious Peppy domain constraints. Related references:
 - Keep simulator, native-build, real-carrier, store-distributable, and
   production-readiness evidence separate. Android carrier and iOS capability
   claims require the applicable evidence, not a fixture or host build.
+
+## Rust build outputs and verification
+
+- Reuse each checkout's own default `target/` for the root workspace and for
+  `apps/desktop/src-tauri`; these are independent manifests with independent
+  outputs. Lane scripts that set an established target directory default remain
+  supported. Do not set per-task or per-command `CARGO_TARGET_DIR` values, and do
+  not create disposable checkout copies or other per-task or per-command target
+  trees. Verify in the working checkout or an existing linked worktree. Do not
+  create another artifact tree to get around a build lock; wait for the lock
+  holder or coordinate with it.
+- Keep `incremental = false` and `debug = "line-tables-only"` in the `[profile.dev]`
+  of both manifests. Do not override them through `RUSTFLAGS`, `CARGO_INCREMENTAL`,
+  or other environment variables in routine commands. A debugger session that
+  needs full debug information may use a deliberate override, and it must
+  restore the defaults afterward. Keep distinct lanes for toolchains and target
+  triples that cannot share outputs (for example `wasm32-unknown-emscripten`,
+  Android, iOS, and release bundles), and do not merge them into host lanes.
+- Iterate with the narrowest command that covers the change, such as
+  `cargo test -p <package> --lib` or `--test <name>`, `cargo clippy -p <package>
+  --all-targets`, and `--manifest-path apps/desktop/src-tauri/Cargo.toml` for the
+  desktop lane. Keep the required regression, security, and integration tests for
+  the touched area. Focused runs do not replace them.
+- Worker sessions do not run workspace-wide gates or the full desktop-manifest
+  test suite. The coordinating session owns those: the root
+  `cargo test --workspace --locked`, the full desktop-manifest tests, and
+  all-target Clippy. It runs them once per final state, after writers finish.
+- Before a large build (a workspace gate, a release bundle, or the first build after
+  a profile change), measure the target directory and free space with `du -sk`
+  and `df -h`. If free space is insufficient for the planned command, stop and
+  report the numbers instead of building until the disk fills.
+- Remove generated output only after every build writer for that checkout has
+  stopped. Prefer named obsolete generated outputs over whole target trees. For
+  host debug output, use `cargo clean --profile dev --manifest-path <manifest>`;
+  for a cross-target lane, use `cargo clean --manifest-path <manifest> --target
+  <triple> --profile dev`. Keep release outputs and release bundles. Remove a whole
+  `target/` directory only for an obsolete disposable checkout whose contents you
+  have verified as generated. Never remove source or user data. Record the size
+  before and after. Do not forge `CACHEDIR.TAG` files to get past Cargo's safety
+  checks; if Cargo refuses to clean a directory, report it and leave the output in
+  place. Cargo's global cache cleanup does not cover `target/`.
+- No disk quota or size budget is installed. Do not state a hard upper bound. A
+  profile change does not delete old artifacts; expect one rebuild and no
+  automatic shrink.

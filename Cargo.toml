@@ -46,6 +46,12 @@ zeroize = "=1.9.0"
 [patch.crates-io]
 libsodium-sys-stable = { path = "vendor/libsodium-sys-stable" }
 
+# Keep repeated local checks/tests from accumulating large incremental caches.
+# Preserve file/line backtraces without full type and variable debug information.
+[profile.dev]
+incremental = false
+debug = "line-tables-only"
+
 # Argon2id's 256 MiB KDF in libsodium is ~8x slower at -O0.
 [profile.dev.package."*"]
 opt-level = 3

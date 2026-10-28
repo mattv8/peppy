@@ -88,6 +88,12 @@ block = "=0.1.6"
 block = { path = "../../../vendor/block" }
 libsodium-sys-stable = { path = "../../../vendor/libsodium-sys-stable" }
 
+# This standalone manifest needs the same disk-conscious defaults as the root.
+# The test profile inherits these settings; release builds are unchanged.
+[profile.dev]
+incremental = false
+debug = "line-tables-only"
+
 # Argon2id's 256 MiB KDF in libsodium is ~8x slower at -O0.
 [profile.dev.package."*"]
 opt-level = 3
