@@ -66,6 +66,7 @@ export type ContactEmail = { id?: string; label: string; displayLabel?: string; 
 /** Unshown components (poBox, subLocality, isoCountryCode, …) must round-trip unchanged; `readOnly` items cannot be edited from this computer. */
 export type ContactAddress = { id?: string; label: string; displayLabel?: string; formatted?: string; street?: string; poBox?: string; neighborhood?: string; subLocality?: string; city?: string; subAdministrativeArea?: string; state?: string; postalCode?: string; country?: string; isoCountryCode?: string; readOnly?: boolean };
 export type ContactBirthday = { year?: number; month?: number; day?: number };
+export type ContactSort = { key: "given" | "family"; direction: "asc" | "desc" };
 export type ContactView = { id: string; bookId: string; revision?: string; displayName: string; givenName?: string; familyName?: string; nickname?: string; phones: ContactPhone[]; emails: ContactEmail[]; addresses: ContactAddress[]; organization?: string; title?: string; birthday?: ContactBirthday; notes?: string; photoDataUrl?: string; photoPending?: boolean; pendingEditId?: string; pendingEditState?: "pending" | "awaiting-approval" | "outcome-unknown" | "conflict" | "rejected" | "failed" | "expired"; pendingEditSummary?: string; deletedAt?: string };
 export type ContactEditRequestInput = { targetBookId: string; kind: "create" | "update" | "delete"; contactId?: string; baseRevision?: string; patches: unknown[]; photo: { kind: "keep" } | { kind: "remove" } | { kind: "set"; croppedDataUrl: string } };
 export type ContactEditOutcome = { state: "pending"; requestId: string } | { state: "applied"; newRevision: string } | { state: "awaiting-approval" } | { state: "conflict"; conflictSummary: string } | { state: "rejected"; reason: string } | { state: "expired" };
@@ -168,7 +169,7 @@ export interface DesktopBridge {
   revoke_device(deviceId: string): Promise<void>;
   forget_contact_book(bookId: string): Promise<void>;
   /** One page of at most 200 contacts; request the next page with `offset`. */
-  list_contacts(bookId: string, query?: string, offset?: number): Promise<ContactView[]>;
+  list_contacts(bookId: string, query?: string, offset?: number, sort?: ContactSort): Promise<ContactView[]>;
   submit_contact_edit(input: ContactEditRequestInput): Promise<ContactEditOutcome>;
   list_contact_edits(bookId?: string): Promise<ContactEditStatus[]>;
   search_contact_recipients(query: string, sourceDeviceId?: string): Promise<RecipientSuggestion[]>;

@@ -153,7 +153,7 @@ impl Harness {
     }
 
     fn contact(&self) -> Value {
-        list_contacts(&self.session, BOOK, None, None)
+        list_contacts(&self.session, BOOK, None, None, None)
             .unwrap()
             .remove(0)
     }
@@ -237,6 +237,21 @@ fn views_are_whitelisted_and_capabilities_follow_the_owner_book() {
     );
     let text = serde_json::to_string(&json!([books, contact])).unwrap();
     assert_no_private_data(&text, &h.f);
+}
+
+#[test]
+fn list_contacts_direct_helper_rejects_a_malformed_explicit_sort() {
+    let h = Harness::new(json!({"read": true, "write": true, "photo": true}), "auto");
+    assert_eq!(
+        list_contacts(&h.session, BOOK, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+    let sort = json!({"key": "family", "direction": "up"});
+    let error = list_contacts(&h.session, BOOK, None, None, Some(&sort)).unwrap_err();
+    assert_eq!(error.code, "invalid-contact-edit");
+    assert_eq!(error.message, "The contact sort is invalid.");
 }
 
 #[test]
@@ -727,7 +742,7 @@ fn birthday_badges_and_remote_restore_round_trip_through_the_owner() {
         )
         .unwrap();
     h.sync_to_desktop();
-    assert!(list_contacts(&h.session, BOOK, None, None)
+    assert!(list_contacts(&h.session, BOOK, None, None, None)
         .unwrap()
         .is_empty());
     let restorable = restorable(&h.session, BOOK).unwrap();

@@ -354,7 +354,7 @@ fn set_metadata_i64(conn: &rusqlite::Connection, key: &str, value: i64) -> Resul
     Ok(())
 }
 
-fn search_generation(conn: &rusqlite::Connection) -> Result<i64, Error> {
+pub(crate) fn search_generation(conn: &rusqlite::Connection) -> Result<i64, Error> {
     metadata_i64(conn, "search_generation")
 }
 
@@ -562,10 +562,17 @@ fn first_contact_value(contact: &Value, field: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn contact_rank(contact: &Value, query: &str) -> Option<usize> {
-    let text_rank = ["display_name", "nickname", "organization"]
+struct ContactMatch {
+    rank: usize,
+    field: Option<&'static str>,
+    snippet: String,
+}
+
+fn contact_match(contact: &Value, query: &str) -> Option<ContactMatch> {
+    let computed_display_name = display_name(contact);
+    let name_match = computed_display_name
+        .as_deref()
         .into_iter()
-        .filter_map(|key| contact.get(key).and_then(Value::as_str))
         .chain(
             contact
                 .get("name")
@@ -574,17 +581,9 @@ fn contact_rank(contact: &Value, query: &str) -> Option<usize> {
                 .flat_map(|name| name.values())
                 .filter_map(Value::as_str),
         )
-        .chain(
-            contact
-                .get("emails")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|item| item.get("value").and_then(Value::as_str)),
-        )
         .filter_map(|value| text_rank(value, query))
         .min();
-    let phone_rank = phone_query_digits(query).and_then(|digits| {
+    let phone_match = phone_query_digits(query).and_then(|digits| {
         contact
             .get("phones")
             .and_then(Value::as_array)
@@ -600,7 +599,135 @@ fn contact_rank(contact: &Value, query: &str) -> Option<usize> {
             })
             .then_some(2)
     });
-    text_rank.into_iter().chain(phone_rank).min()
+    let primary_match = name_match.into_iter().chain(phone_match).min();
+    let metadata_match = contact_metadata(contact)
+        .into_iter()
+        .filter_map(|(field, value)| text_rank(&value, query).map(|rank| (rank + 10, field, value)))
+        .min_by_key(|(rank, _, _)| *rank)
+        .map(|(rank, field, value)| ContactMatch {
+            rank,
+            field: Some(field),
+            snippet: contextual_snippet(&value, query),
+        });
+    primary_match
+        .map(|rank| ContactMatch {
+            rank,
+            field: None,
+            snippet: String::new(),
+        })
+        .into_iter()
+        .chain(metadata_match)
+        .min_by_key(|matched| matched.rank)
+}
+
+fn contact_metadata(contact: &Value) -> Vec<(&'static str, String)> {
+    let mut fields = [
+        ("Nickname", "nickname"),
+        ("Organization", "organization"),
+        ("Title", "title"),
+        ("Notes", "notes"),
+    ]
+    .into_iter()
+    .filter_map(|(field, key)| {
+        contact
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| (field, value.to_owned()))
+    })
+    .collect::<Vec<_>>();
+    for (field, key) in [("Phone", "phones"), ("Email", "emails")] {
+        fields.extend(
+            contact
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("value").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| (field, value.to_owned())),
+        );
+    }
+    fields.extend(
+        contact
+            .get("addresses")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(|address| {
+                [
+                    "value",
+                    "street",
+                    "po_box",
+                    "neighborhood",
+                    "sub_locality",
+                    "city",
+                    "sub_administrative_area",
+                    "state",
+                    "postal_code",
+                    "country",
+                    "iso_country_code",
+                ]
+                .into_iter()
+                .filter_map(move |key| address.get(key).and_then(Value::as_str))
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| ("Address", value.to_owned())),
+    );
+    if let Some(birthday) = birthday_values(contact) {
+        fields.extend(birthday.into_iter().map(|value| ("Birthday", value)));
+    }
+    fields
+}
+
+fn birthday_values(contact: &Value) -> Option<Vec<String>> {
+    let birthday = contact.get("birthday")?.as_object()?;
+    let month = birthday.get("month")?.as_u64()?;
+    let day = birthday.get("day")?.as_u64()?;
+    let month_day = format!("{month:02}-{day:02}");
+    let values = birthday
+        .get("year")
+        .and_then(Value::as_u64)
+        .map(|year| vec![format!("{year:04}-{month_day}"), month_day.clone()])
+        .unwrap_or_else(|| vec![month_day]);
+    Some(values)
+}
+
+fn contextual_snippet(value: &str, query: &str) -> String {
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower_value = value.to_lowercase();
+    let mut source_indices = Vec::new();
+    for (source_index, character) in value.chars().enumerate() {
+        source_indices.extend(std::iter::repeat_n(
+            source_index,
+            character.to_lowercase().count(),
+        ));
+    }
+    let lower_query = query.to_lowercase();
+    let match_start = lower_value
+        .find(&lower_query)
+        .and_then(|index| {
+            lower_value
+                .char_indices()
+                .zip(source_indices)
+                .find(|((offset, _), _)| *offset == index)
+                .map(|(_, source_index)| source_index)
+        })
+        .unwrap_or(0);
+    let characters = value.chars().collect::<Vec<_>>();
+    let start = match_start.saturating_sub(20);
+    let end = (start + 60).min(characters.len());
+    let mut snippet = characters[start..end].iter().collect::<String>();
+    if start > 0 {
+        snippet.insert(0, '…');
+    }
+    if end < characters.len() {
+        snippet.push('…');
+    }
+    snippet
 }
 
 fn contact_hits(
@@ -628,7 +755,7 @@ fn contact_hits(
         let Ok(contact) = serde_json::from_str::<Value>(&contact_body) else {
             continue;
         };
-        let Some(rank) = contact_rank(&contact, query) else {
+        let Some(matched) = contact_match(&contact, query) else {
             continue;
         };
         let book = serde_json::from_str::<Value>(&book_body).unwrap_or(Value::Null);
@@ -644,13 +771,16 @@ fn contact_hits(
             .flatten()
             .filter_map(|phone| phone.get("value").and_then(Value::as_str))
             .find(|value| !value.trim().is_empty());
-        let subtitle = phone.map_or_else(
+        let primary_subtitle = phone.map_or_else(
             || book_label.to_owned(),
             |phone| format!("{book_label} · {phone}"),
         );
+        let subtitle = matched.field.map_or(primary_subtitle, |field| {
+            format!("{book_label} · {field} · {}", matched.snippet)
+        });
         let key = format!("{book_id}\0{contact_id}");
         matches.push((
-            rank,
+            matched.rank,
             key,
             LocalSearchHit::Contact {
                 book_id,

@@ -117,6 +117,26 @@ pub fn required_revision(input: &Value) -> ContactResult<String> {
         .ok_or_else(|| invalid("The contact revision is invalid."))
 }
 
+/// Validates a contact-list sort and supplies the desktop/browser default. Core preserves its
+/// legacy order when this field is omitted, so host adapters must always forward this result.
+pub fn list_sort(value: Option<&Value>) -> ContactResult<Value> {
+    let Some(value) = value else {
+        return Ok(json!({"key": "family", "direction": "asc"}));
+    };
+    let Some(sort) = value.as_object() else {
+        return Err(invalid("The contact sort is invalid."));
+    };
+    let key = sort.get("key").and_then(Value::as_str);
+    let direction = sort.get("direction").and_then(Value::as_str);
+    if sort.len() != 2
+        || !matches!(key, Some("given" | "family"))
+        || !matches!(direction, Some("asc" | "desc"))
+    {
+        return Err(invalid("The contact sort is invalid."));
+    }
+    Ok(json!({"key": key, "direction": direction}))
+}
+
 // ---------------------------------------------------------------------------------------------
 // Books
 // ---------------------------------------------------------------------------------------------
@@ -1084,6 +1104,34 @@ mod tests {
             "/private",
         ] {
             assert!(!text.contains(forbidden), "leaked {forbidden}: {text}");
+        }
+    }
+
+    #[test]
+    fn contact_list_sort_defaults_and_rejects_malformed_values() {
+        assert_eq!(
+            list_sort(None).unwrap(),
+            json!({"key": "family", "direction": "asc"})
+        );
+        assert_eq!(
+            list_sort(Some(&json!({"key": "given", "direction": "desc"}))).unwrap(),
+            json!({"key": "given", "direction": "desc"})
+        );
+        for sort in [
+            json!(null),
+            json!([]),
+            json!({"key": "given"}),
+            json!({"key": "middle", "direction": "asc"}),
+            json!({"key": "family", "direction": "up"}),
+            json!({"key": "family", "direction": "asc", "extra": true}),
+        ] {
+            assert!(matches!(
+                list_sort(Some(&sort)),
+                Err(ContactError::Ui {
+                    code: "invalid-contact-edit",
+                    message: "The contact sort is invalid.",
+                })
+            ));
         }
     }
 
