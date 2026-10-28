@@ -83,6 +83,8 @@ reports missing keys, incomplete repair and paused retention. See the root
 
 On macOS and Windows, closing the main window keeps Peppy in the menu bar or system tray. Sync and floating conversations continue running. Use **Open Peppy** to return to the main window or **Quit Peppy** to exit. Quit waits for draft saves; a failed save keeps the app available for recovery.
 
+The native tray badge totals unread messages across all conversations while Peppy runs in the background. It shows `1`–`99` or `99+`; its tooltip retains the exact total. App or vault-key lock shows a lock badge instead, and an unavailable or revoked account restores the plain Peppy icon. Peppy retains its tray status item for its full process lifetime. Windows DPI rasterization refreshes when the badge changes or a failed apply retries; an unchanged state event does not recreate the icon.
+
 Use the popout button on a conversation row or in its header to open a circular chat head and its compact conversation panel. **–** collapses to the bubble; **×** saves the draft and closes the bubble. The panel resizes from its edges and composer grip, and its size and position are remembered per conversation and re-fitted to the current screen. Drag the circle to move it and its expanded panel. **Dismiss head** removes the pin without deleting the conversation. Up to eight conversations can be pinned; saved pins restore collapsed when the local account is available. Floating conversations work offline and do not require unlocking device sync.
 
 In Settings, **Start at login** opts into quiet menu-bar/tray startup. It is off by default. A manual launch opens the main window in the existing app instance. If the tray cannot initialize, Peppy shows the main window instead of launching invisibly.

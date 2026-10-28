@@ -40,9 +40,7 @@ const MAX_PREVIEW_CACHE: usize = 256;
 const MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT: usize = MAX_PREVIEW_CACHE / 2;
 /// The initial snapshot plus these follow-ups can cover every bounded eligible preview.
 const MAX_DEFERRED_FOLLOW_UPS: usize =
-    (MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT + MAX_PREVIEWS_PER_SNAPSHOT - 1)
-        / MAX_PREVIEWS_PER_SNAPSHOT
-        - 1;
+    MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT.div_ceil(MAX_PREVIEWS_PER_SNAPSHOT) - 1;
 const PREVIEW_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_PREVIEW_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// Per-session decoded contact avatar entries, isolated from attachment previews.
@@ -55,6 +53,42 @@ pub const GATEWAYS_FILE: &str = "gateways.json";
 pub struct VaultSummary {
     pub epoch: u32,
     pub fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EncryptionState {
+    Unlocked { profile_fingerprint: Option<String> },
+    Locked,
+    Mismatch,
+}
+
+/// Classifies encryption availability from the same inputs used by snapshots.
+/// Also reports whether the active epoch is locally unlocked, independently of
+/// the server's current epoch or the displayed encryption state.
+pub fn encryption_state(
+    mismatch: bool,
+    vault: Option<&VaultSummary>,
+    keys: &peppy_client_core::KeyStatus,
+) -> (EncryptionState, bool) {
+    let active_epoch_unlocked = keys
+        .active_epoch
+        .is_some_and(|epoch| keys.unlocked_epochs.contains(&epoch));
+    let behind =
+        matches!((vault, keys.active_epoch), (Some(vault), Some(active)) if vault.epoch > active);
+    if mismatch {
+        (EncryptionState::Mismatch, active_epoch_unlocked)
+    } else if active_epoch_unlocked && !behind {
+        (
+            EncryptionState::Unlocked {
+                profile_fingerprint: vault
+                    .filter(|vault| Some(vault.epoch) == keys.active_epoch)
+                    .map(|vault| vault.fingerprint.clone()),
+            },
+            active_epoch_unlocked,
+        )
+    } else {
+        (EncryptionState::Locked, active_epoch_unlocked)
+    }
 }
 
 #[derive(Default)]
@@ -114,7 +148,7 @@ pub struct Session {
     previews: Mutex<BoundedCache>,
     avatars: Mutex<BoundedCache>,
     pub transfer_errors: Mutex<HashMap<AttachmentId, String>>,
-    pub download_retries: Mutex<HashMap<AttachmentId, DownloadRetryState>>,
+    pub(crate) download_retries: Mutex<HashMap<AttachmentId, DownloadRetryState>>,
     pub remote_ids: Mutex<RemoteIds>,
     /// Wakes the outbound/media worker only (send, read state, unlock).
     pub work_wake: Notify,
@@ -1438,29 +1472,26 @@ impl Session {
             .status
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let unlocked = keys
-            .active_epoch
-            .is_some_and(|epoch| keys.unlocked_epochs.contains(&epoch));
-        let behind = matches!((&status.vault, keys.active_epoch), (Some(vault), Some(active)) if vault.epoch > active);
-        let encryption = if self.mismatch.load(Ordering::Relaxed) {
-            dto::Encryption {
+        let (encryption_state, _) = encryption_state(
+            self.mismatch.load(Ordering::Relaxed),
+            status.vault.as_ref(),
+            &keys,
+        );
+        let encryption = match encryption_state {
+            EncryptionState::Mismatch => dto::Encryption {
                 state: "mismatch",
                 profile_fingerprint: None,
-            }
-        } else if unlocked && !behind {
-            dto::Encryption {
+            },
+            EncryptionState::Unlocked {
+                profile_fingerprint,
+            } => dto::Encryption {
                 state: "unlocked",
-                profile_fingerprint: status
-                    .vault
-                    .as_ref()
-                    .filter(|v| Some(v.epoch) == keys.active_epoch)
-                    .map(|v| v.fingerprint.clone()),
-            }
-        } else {
-            dto::Encryption {
+                profile_fingerprint,
+            },
+            EncryptionState::Locked => dto::Encryption {
                 state: "locked",
                 profile_fingerprint: None,
-            }
+            },
         };
         let connection = if status.revoked {
             dto::Connection {
@@ -1635,6 +1666,55 @@ mod tests {
     };
     use peppy_client_core::IncomingSms;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn encryption_state_preserves_snapshot_precedence() {
+        let unlocked = peppy_client_core::KeyStatus {
+            active_epoch: Some(4),
+            unlocked_epochs: vec![4],
+        };
+        let vault = VaultSummary {
+            epoch: 4,
+            fingerprint: "fingerprint".into(),
+        };
+        assert_eq!(
+            encryption_state(false, Some(&vault), &unlocked),
+            (
+                EncryptionState::Unlocked {
+                    profile_fingerprint: Some("fingerprint".into()),
+                },
+                true,
+            )
+        );
+        assert_eq!(
+            encryption_state(true, Some(&vault), &unlocked).0,
+            EncryptionState::Mismatch
+        );
+        assert_eq!(
+            encryption_state(
+                false,
+                Some(&VaultSummary {
+                    epoch: 5,
+                    fingerprint: "new".into(),
+                }),
+                &unlocked,
+            )
+            .0,
+            EncryptionState::Locked
+        );
+        assert_eq!(
+            encryption_state(
+                false,
+                Some(&vault),
+                &peppy_client_core::KeyStatus {
+                    active_epoch: None,
+                    unlocked_epochs: vec![4],
+                },
+            )
+            .0,
+            EncryptionState::Locked
+        );
+    }
 
     #[test]
     fn cached_gateways_never_restore_live_presence() {

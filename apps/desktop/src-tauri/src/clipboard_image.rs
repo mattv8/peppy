@@ -45,19 +45,6 @@ const PRODUCTION_LIMITS: DecodeLimits = DecodeLimits {
     decoded_rgba_bytes: MAX_DECODED_RGBA_BYTES,
 };
 
-/// Reads, validates, and writes an image from a native-only plaintext path.
-///
-/// Callers must retain the plaintext guard while this runs. The writer boundary deliberately has
-/// no OS clipboard type so the decoder can be tested without a real clipboard.
-pub(crate) fn copy_authorized_image_file(
-    path: &Path,
-    media_type: &str,
-    writer: &mut impl ClipboardImageWriter,
-) -> Result<(), ClipboardImageError> {
-    let image = decode_authorized_image_file(path, media_type)?;
-    write_rgba(writer, image)
-}
-
 /// Decodes an image from a path covered by a caller-owned plaintext guard.
 pub(crate) fn decode_authorized_image_file(
     path: &Path,

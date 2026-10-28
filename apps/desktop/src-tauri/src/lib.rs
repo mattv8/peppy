@@ -56,6 +56,7 @@ mod sync;
 mod tests;
 mod tls;
 mod tray;
+mod tray_badge;
 #[cfg(any(target_os = "linux", test))]
 mod update_linux;
 mod update_safety;
@@ -144,6 +145,9 @@ struct MediaCapability {
     plaintext: NativePlaintextFile,
     opened_at: Instant,
 }
+
+type ReleasedMediaCapabilities = Vec<(Arc<Session>, AttachmentId)>;
+type StoredMediaCapability = (OpenMediaView, ReleasedMediaCapabilities);
 
 pub struct AppState {
     root: PathBuf,
@@ -484,10 +488,7 @@ async fn snapshot_session(state: &AppState) -> BridgeResult<Option<Arc<Session>>
     state.session().await
 }
 
-async fn release_media_capabilities(
-    state: &AppState,
-    capabilities: Vec<(Arc<Session>, AttachmentId)>,
-) {
+async fn release_media_capabilities(state: &AppState, capabilities: ReleasedMediaCapabilities) {
     let Ok(_operation) = admit_update_operation(state) else {
         return;
     };
@@ -513,7 +514,7 @@ async fn release_media_capabilities(
 fn take_window_media_capabilities(
     state: &AppState,
     window_label: &str,
-) -> Vec<(Arc<Session>, AttachmentId)> {
+) -> ReleasedMediaCapabilities {
     let Ok(mut capabilities) = state.media_capabilities.lock() else {
         return Vec::new();
     };
@@ -597,6 +598,14 @@ fn locked_snapshot(storage_available: bool) -> Snapshot {
     snapshot
 }
 
+struct LoadStateOptions {
+    conversation_id: Option<String>,
+    history_from_message_id: Option<String>,
+    origin: Option<String>,
+    preferences: NotificationPreferences,
+    metadata_only: bool,
+}
+
 /// Loads a snapshot using the same window scope policy as the Tauri command.
 #[cfg(test)]
 async fn load_state_for_window(
@@ -612,11 +621,13 @@ async fn load_state_for_window(
         state,
         label,
         session,
-        conversation_id,
-        history_from_message_id,
-        origin,
-        preferences,
-        false,
+        LoadStateOptions {
+            conversation_id,
+            history_from_message_id,
+            origin,
+            preferences,
+            metadata_only: false,
+        },
     )
     .await
 }
@@ -625,12 +636,15 @@ async fn load_state_for_window_with_options(
     state: &AppState,
     label: &str,
     session: Arc<Session>,
-    conversation_id: Option<String>,
-    history_from_message_id: Option<String>,
-    origin: Option<String>,
-    preferences: NotificationPreferences,
-    metadata_only: bool,
+    options: LoadStateOptions,
 ) -> BridgeResult<(Snapshot, DeferredHydration)> {
+    let LoadStateOptions {
+        conversation_id,
+        history_from_message_id,
+        origin,
+        preferences,
+        metadata_only,
+    } = options;
     if label == tray::MAIN {
         return blocking(move || {
             session.snapshot_with_metadata_only(
@@ -692,11 +706,13 @@ async fn load_state(
         &state,
         window.label(),
         session.clone(),
-        conversation_id,
-        history_from_message_id,
-        origin,
-        preferences,
-        metadata_only.unwrap_or(false),
+        LoadStateOptions {
+            conversation_id,
+            history_from_message_id,
+            origin,
+            preferences,
+            metadata_only: metadata_only.unwrap_or(false),
+        },
     )
     .await?;
     if state.app_locked.load(Ordering::Acquire) {
@@ -2214,7 +2230,7 @@ fn store_media_capability(
     window_label: &str,
     info: AttachmentInfo,
     plaintext: NativePlaintextFile,
-) -> BridgeResult<(OpenMediaView, Vec<(Arc<Session>, AttachmentId)>)> {
+) -> BridgeResult<StoredMediaCapability> {
     let media_type = inline_media_type(&info.media_type).ok_or_else(|| {
         BridgeError::new(
             "unsupported",
@@ -4385,7 +4401,7 @@ pub fn run() {
             let state = app.state::<AppState>();
             state
                 .updates
-                .initialize(&app.handle(), &root)
+                .initialize(app.handle(), &root)
                 .map_err(|error| error.message)?;
             let restart_marker = updates::install::confirm_restart_marker(
                 &root,
@@ -4587,6 +4603,9 @@ pub fn run() {
                 },
             );
             TRAY_ACTIVE.store(installed, Ordering::Relaxed);
+            if installed {
+                tray_badge::install(app.handle());
+            }
             let _ = tray::set_update_status(app.handle(), &state.updates.status());
             let tray_handle = app.handle().clone();
             app.listen(updates::STATE_EVENT, move |_| {

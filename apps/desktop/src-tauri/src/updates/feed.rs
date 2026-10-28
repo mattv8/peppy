@@ -95,7 +95,7 @@ fn validate_staging_manifest(document: &serde_json::Value, tag: &str) -> BridgeR
     let manifest_version = document["version"]
         .as_str()
         .and_then(|value| value.strip_prefix('v').or(Some(value)));
-    if manifest_version != Some(tag.strip_prefix('v').unwrap_or(&tag)) {
+    if manifest_version != Some(tag.strip_prefix('v').unwrap_or(tag)) {
         Err(BridgeError::new(
             "update-feed",
             "Staging manifest version does not match its release.",
