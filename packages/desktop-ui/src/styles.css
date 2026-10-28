@@ -161,6 +161,9 @@ select:focus-visible {
 .omni-search-results [role="option"] span { color: var(--peppy-text-secondary); font-size: 12px; }
 .omni-search-results [role="option"] b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .omni-search-results [role="option"] span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.omni-search-history { min-width: 0; margin-top: 8px; }
+.omni-search-history-status { padding: 0 6px 4px; color: var(--peppy-text-secondary); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
+.omni-search-history-action { min-width: 0; }
 .omni-search-hit-row { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: stretch; }
 .omni-search-hit-row > [role="option"] { min-width: 0; }
 .omni-search-hit-row > [data-omni-contact-action] { display: grid; padding: 0; place-items: center; color: var(--peppy-text-secondary); }
@@ -1064,6 +1067,7 @@ select:focus-visible {
     outline-offset: 2px;
   }
   .omni-search-results [role="option"][aria-selected="true"] { background: Highlight; color: HighlightText; outline-color: HighlightText; }
+  .omni-search-history-status { color: CanvasText; }
   #omni-search-clear { color: ButtonText; }
   #omni-search-clear:disabled { color: GrayText; }
   #omni-search-clear:focus-visible { outline-color: Highlight; }

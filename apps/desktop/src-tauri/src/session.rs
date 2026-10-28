@@ -112,6 +112,8 @@ pub struct Session {
     pub work_wake: Notify,
     /// Wakes a pending reconnect wait (for example after unlock).
     pub reconnect_wake: Notify,
+    /// Wakes the live supervisor for an explicitly requested bounded inbound replay.
+    pub replay_wake: Notify,
     pub cancel: CancellationToken,
     /// Supervisor tasks are retained until an update restart has observed their completion.
     workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -127,6 +129,12 @@ pub struct Session {
     pub index_driver_ready: AtomicBool,
     /// Remembers an indexing observation across transient driver restarts.
     pub index_driver_saw_indexing: AtomicBool,
+    /// Active history attempts and the window labels that currently observe them. The core,
+    /// rather than this map, owns durable attempt state and cancellation semantics.
+    history_attempts: Mutex<HashMap<uuid::Uuid, CancellationToken>>,
+    history_interests: Mutex<HashMap<uuid::Uuid, HashSet<String>>>,
+    history_views: Mutex<HashMap<String, uuid::Uuid>>,
+    history_replay_wakes: Mutex<HashMap<uuid::Uuid, i64>>,
     /// A staged snapshot generation known to be impossible to complete; never resumed.
     pub abandoned_snapshot: Mutex<Option<u64>>,
     deferred_follow_up: DeferredFollowUp,
@@ -293,6 +301,7 @@ pub fn open_session(
         transfer_errors: Mutex::new(HashMap::new()),
         work_wake: Notify::new(),
         reconnect_wake: Notify::new(),
+        replay_wake: Notify::new(),
         cancel: CancellationToken::new(),
         workers: Mutex::new(Vec::new()),
         notifier,
@@ -303,6 +312,10 @@ pub fn open_session(
         index_driver_running: AtomicBool::new(false),
         index_driver_ready: AtomicBool::new(false),
         index_driver_saw_indexing: AtomicBool::new(false),
+        history_attempts: Mutex::new(HashMap::new()),
+        history_interests: Mutex::new(HashMap::new()),
+        history_views: Mutex::new(HashMap::new()),
+        history_replay_wakes: Mutex::new(HashMap::new()),
         deferred_follow_up: DeferredFollowUp::default(),
     })
 }
@@ -377,6 +390,120 @@ impl Session {
 
     pub fn request_work(&self) {
         self.work_wake.notify_one();
+    }
+
+    pub fn request_replay(&self) {
+        self.replay_wake.notify_one();
+    }
+
+    pub fn attach_history_interest(
+        &self,
+        attempt: uuid::Uuid,
+        window: &str,
+    ) -> (CancellationToken, bool) {
+        self.history_views
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(window.to_owned(), attempt);
+        self.history_interests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(attempt)
+            .or_default()
+            .insert(window.to_owned());
+        let mut attempts = self
+            .history_attempts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match attempts.entry(attempt) {
+            std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                (entry.insert(CancellationToken::new()).clone(), true)
+            }
+        }
+    }
+
+    pub fn detach_history_interest(&self, attempt: uuid::Uuid, window: &str) -> bool {
+        let removed_view = {
+            let mut views = self
+                .history_views
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if views.get(window) == Some(&attempt) {
+                views.remove(window);
+                true
+            } else {
+                false
+            }
+        };
+        let mut interests = self
+            .history_interests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(windows) = interests.get_mut(&attempt) else {
+            return removed_view;
+        };
+        let removed_interest = windows.remove(window);
+        if windows.is_empty() {
+            interests.remove(&attempt);
+        }
+        removed_view || removed_interest
+    }
+
+    pub fn history_view(&self, window: &str) -> Option<uuid::Uuid> {
+        self.history_views
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(window)
+            .copied()
+    }
+
+    pub fn claim_history_replay_wake(&self, attempt: uuid::Uuid, generation: i64) -> bool {
+        let mut wakes = self
+            .history_replay_wakes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if wakes.get(&attempt) == Some(&generation) {
+            return false;
+        }
+        wakes.insert(attempt, generation);
+        true
+    }
+
+    pub fn active_history_attempts(&self) -> Vec<uuid::Uuid> {
+        self.history_attempts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    pub fn history_attempt_token(&self, attempt: uuid::Uuid) -> Option<CancellationToken> {
+        self.history_attempts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&attempt)
+            .cloned()
+    }
+
+    pub fn finish_history_attempt(&self, attempt: uuid::Uuid) {
+        if let Some(token) = self
+            .history_attempts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&attempt)
+        {
+            token.cancel();
+        }
+        self.history_interests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&attempt);
+        self.history_replay_wakes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&attempt);
     }
 
     pub fn notify(&self) {

@@ -342,6 +342,44 @@ describe("BrowserScheduler", () => {
     expect(mutations).not.toContain("apply_pending");
   });
 
+  it("captures trusted proof context immediately before replay and preserves explicit next_after presence", async () => {
+    const calls: string[] = [];
+    const attemptId = "018f2c5e-6a3b-7c4d-8e5f-0123456789ab";
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        calls.push(`query:${command}`);
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "_worker_history_search_sync_context") return { startedAtMs: 10, snapshotGeneration: 2 };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return {};
+      },
+      mutate: async (command: string, args: Record<string, unknown>) => {
+        calls.push(`mutate:${command}`);
+        if (command === "_worker_history_search_work") return { kind: "wait" };
+        if (command === "_worker_observe_history_search_sync") {
+          expect(args).toEqual({ attemptId, facts: { proof: {
+            context: { startedAtMs: 10, snapshotGeneration: 2 },
+            highWaterCursor: "9", nextAfterPresent: true, terminalNextAfter: true,
+          } } });
+        }
+        return { applied: 0, quarantined: 0, drained: 0 };
+      },
+    };
+    const scheduler = new BrowserScheduler(session, {
+      json: async path => {
+        calls.push(`http:${path}`);
+        if (path.startsWith("/v1/events")) return { events: [], high_water_cursor: "9", next_after: null };
+        return {};
+      }, upload: async () => undefined, download: async () => new Uint8Array(),
+    });
+    scheduler.trackHistorySearch(attemptId);
+    await scheduler.poll();
+    expect(calls.indexOf("query:_worker_history_search_sync_context")).toBeLessThan(calls.findIndex(call => call.startsWith("http:/v1/events")));
+    expect(calls).toContain("mutate:_worker_observe_history_search_sync");
+  });
+
   it("keeps a server epoch manual, then rotates and wakes only after explicit success", async () => {
     let woke = 0;
     const session = {

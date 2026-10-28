@@ -120,6 +120,18 @@ class SmsCaptureOrchestrationTest {
         assertTrue(summary.historyExhausted)
     }
 
+    @Test fun admittedHistoryReservesOneObservationForTheExhaustionProbe() {
+        val summary = SmsCapture.run(
+            SmsCapturePlan("shared-generation", true, null, historyUpperBound = 100, descending = true, budget = 99),
+            FakeCore(mutableListOf()),
+            CappedProvider((1L..100L).map(::record)),
+        )
+
+        assertEquals(99, summary.captured)
+        assertEquals(100, summary.rowsQueried)
+        assertTrue(!summary.historyExhausted)
+    }
+
     @Test fun acceleratedHistoryRequestsContinuationAfterItsAdmittedPage() {
         val summary = SmsCapture.run(
             SmsCapturePlan("shared-generation", true, null, historyUpperBound = 400, descending = true, budget = 200, allowHistoryContinuation = true),
@@ -281,6 +293,31 @@ class SmsCaptureOrchestrationTest {
         assertEquals("one", summary.pendingRecheckCursor)
         assertTrue(summary.advanced)
         assertEquals(listOf("state:one:UNAVAILABLE"), calls)
+    }
+
+    @Test fun historyAdmissionRunsAfterPendingRecheckAndCountsOnlyScanObservations() {
+        val calls = mutableListOf<String>()
+        val summary = SmsCapture.runAfterPendingRecheck(
+            SmsCapturePlan(
+                "shared-generation",
+                imported = true,
+                checkpoint = null,
+                historyUpperBound = 100,
+                descending = true,
+                budget = 50,
+            ),
+            FakeCore(calls, listOf(acquisition("pending", 50))),
+            FakeProvider((1L..100L).map(::record)),
+            prepareScan = { plan ->
+                calls += "admit"
+                plan.copy(budget = 1)
+            },
+        )
+
+        assertTrue(calls.indexOf("complete:50") < calls.indexOf("admit"))
+        assertTrue(calls.indexOf("admit") < calls.indexOf("begin:100"))
+        assertEquals(2, summary.scanObservations)
+        assertEquals(3, summary.rowsQueried)
     }
 
     @Test fun completedHistoryStillRechecksPendingAcquisitions() {

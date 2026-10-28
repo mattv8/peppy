@@ -1,12 +1,14 @@
 import { throwIfFatalTransferError, transferContactPhotoUploads, transferMedia, type MediaTransferResult, type WorkerMediaBridge } from "./scheduler-media.js";
 import { SchedulerProtocol, type VaultRefresh } from "./scheduler-protocol.js";
 import { TransportError } from "./transport.js";
+import { CoreRejectedError } from "./core.js";
 
 const PAGE_LIMIT = 100;
 const OUTBOX_LIMIT = 32;
 const MAX_OUTBOX_BATCHES = 8;
 const MAX_REPLAY_PAGES = 20;
 const APPLY_LIMIT = 8;
+const HISTORY_WORK_STEP_LIMIT = 8;
 const MAX_SNAPSHOT_ATTEMPTS = 3;
 const PAGE_BYTES = 8 * 1024 * 1024;
 
@@ -39,6 +41,7 @@ export class BrowserScheduler {
   private readonly deferredMediaIds = new Set<string>();
   private protocol?: SchedulerProtocol;
   private epochValue?: VaultRefresh;
+  private readonly historyAttempts = new Set<string>();
 
   public constructor(
     private readonly session: SchedulerSession,
@@ -70,6 +73,13 @@ export class BrowserScheduler {
 
   public stop(): void { this.controller?.abort(); }
 
+  /** Registers trusted host-owned interest; renderer input never reaches this scheduler API. */
+  public trackHistorySearch(attemptId: string): void {
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(attemptId)) this.historyAttempts.add(attemptId);
+  }
+
+  public untrackHistorySearch(attemptId: string): void { this.historyAttempts.delete(attemptId); }
+
   /** Makes a previously deferred attachment eligible for the next bounded poll. */
   public retryAttachment(id: string): void {
     this.deferredMediaIds.delete(requiredString(id));
@@ -92,6 +102,7 @@ export class BrowserScheduler {
       await this.sendOutbox(signal);
       await this.replay(signal);
       if (await this.hasPendingProjectionWork()) await this.apply(signal);
+      await this.driveHistorySearch(signal);
       await this.refreshServerContext(signal);
     } catch (error) {
       await this.refreshOfflineContext(statusFor(error), signal);
@@ -144,6 +155,10 @@ export class BrowserScheduler {
     for (let pageNumber = 0; pageNumber < MAX_REPLAY_PAGES; pageNumber += 1) {
       throwIfAborted(signal);
       const cursor = requiredString(object(await this.session.query("receive_cursor", {})).cursor);
+      const attempts = [...this.historyAttempts];
+      const context = attempts.length > 0
+        ? await this.session.query("_worker_history_search_sync_context", {})
+        : undefined;
       let page: Record<string, unknown>;
       try {
         page = object(await this.transport.json(`/v1/events?after=${encodeURIComponent(cursor)}&limit=${PAGE_LIMIT}`, { method: "GET", signal, limit: PAGE_BYTES }));
@@ -155,15 +170,71 @@ export class BrowserScheduler {
         throw error;
       }
       const events = array(page.events);
-      if (events.length === 0) return;
+      if (events.length === 0) {
+        await this.observeHistorySearch(attempts, context, page);
+        return;
+      }
       for (const event of events) {
         throwIfAborted(signal);
         const record = object(event);
         await this.session.mutate("ingest", { cursor: requiredString(record.cursor), envelope: record.envelope });
       }
       await this.apply(signal);
+      await this.observeHistorySearch(attempts, context, page);
       if (events.length < PAGE_LIMIT || page.next_after === null) return;
     }
+  }
+
+  private async observeHistorySearch(attempts: readonly string[], context: unknown, page: Record<string, unknown>): Promise<void> {
+    const nextAfterPresent = Object.prototype.hasOwnProperty.call(page, "next_after");
+    const terminalNextAfter = nextAfterPresent && page.next_after === null;
+    const highWaterCursor = page.high_water_cursor;
+    for (const attemptId of attempts) {
+      if (!this.historyAttempts.has(attemptId)) continue;
+      const proof = typeof highWaterCursor === "string"
+        ? { context, highWaterCursor, nextAfterPresent, terminalNextAfter }
+        : undefined;
+      try {
+        const status = await this.session.mutate("_worker_observe_history_search_sync", {
+          attemptId,
+          facts: proof ? { proof } : {},
+        });
+        if (isTerminalHistoryStatus(status)) this.untrackHistorySearch(attemptId);
+      } catch (error) {
+        this.handleHistoryRejection(attemptId, error);
+      }
+    }
+  }
+
+  private async driveHistorySearch(signal: AbortSignal): Promise<void> {
+    for (const attemptId of [...this.historyAttempts]) {
+      for (let step = 0; step < HISTORY_WORK_STEP_LIMIT; step += 1) {
+        throwIfAborted(signal);
+        let work: Record<string, unknown>;
+        try {
+          work = object(await this.session.mutate("_worker_history_search_work", { attemptId }));
+        } catch (error) {
+          this.handleHistoryRejection(attemptId, error);
+          break;
+        }
+        if (work.kind === "advanceIndex") {
+          await this.session.mutate("advance_search_index", { budgetRows: typeof work.limit === "number" ? work.limit : 100 });
+          continue;
+        }
+        if (work.kind === "requestPhone") {
+          await this.sendOutbox(signal);
+          continue;
+        }
+        if (work.kind === "wakeSync") break;
+        if (work.kind === "wait") break;
+        throw new TransportError("invalid");
+      }
+    }
+  }
+
+  private handleHistoryRejection(attemptId: string, error: unknown): void {
+    if (!(error instanceof CoreRejectedError)) throw error;
+    if (error.code === "not-found") this.untrackHistorySearch(attemptId);
   }
 
   private async snapshot(signal: AbortSignal): Promise<void> {
@@ -285,5 +356,9 @@ function array(value: unknown): unknown[] { if (!Array.isArray(value)) throw new
 function requiredString(value: unknown): string { if (typeof value !== "string" || value.length === 0) throw new TransportError("invalid"); return value; }
 function optionalString(value: unknown): string | undefined { return typeof value === "string" && value.length > 0 ? value : undefined; }
 function nonNegative(value: unknown): number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0; }
+function isTerminalHistoryStatus(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return ["partial", "completed", "blocked", "failed", "cancelled"].includes((value as Record<string, unknown>).state as string);
+}
 function decimal(value: unknown): bigint { const text = requiredString(value); if (!/^(?:0|[1-9][0-9]*)$/.test(text)) throw new TransportError("invalid"); return BigInt(text); }
 function throwIfAborted(signal: AbortSignal): void { if (signal.aborted) throw new TransportError("cancelled"); }

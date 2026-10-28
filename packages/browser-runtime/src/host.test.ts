@@ -65,14 +65,41 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([]);
   });
 
-  it("routes conversation pinning through the checkpointed mutation allowlist", async () => {
+  it("keeps history attempts scoped to their owning port and makes status read-only", async () => {
     const session = new FakeSession();
-    const args = { conversationId: "conversation", pinned: true };
+    const attemptId = "018f2c5e-6a3b-7c4d-8e5f-0123456789ab";
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      session.generation += 1;
+      return { attemptId, state: command === "cancel_history_search" ? "cancelled" : "catchingUp" };
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const first = port();
+    const second = port();
+    await Promise.all([host.attach(first), host.attach(second)]);
 
-    await expect(dispatchBrowserRpc(session, { id: 1, command: "set_conversation_pinned", args }))
-      .resolves.toMatchObject({ ok: true });
+    first.emit({ id: 1, command: "start_history_search", args: { operationId: attemptId } });
+    await eventually(() => first.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    second.emit({ id: 2, command: "cancel_history_search", args: { attemptId } });
+    first.emit({ id: 3, command: "get_history_search", args: {} });
+    await eventually(() => second.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2)
+      && first.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 3));
 
-    expect(session.calls).toEqual([{ command: "set_conversation_pinned", args, mutation: true }]);
+    expect(second.messages).toContainEqual({ id: 2, ok: false, error: expect.objectContaining({ code: "invalid-request" }) });
+    expect(session.calls).toContainEqual({ command: "get_history_search", args: { attemptId }, mutation: false });
+    expect(session.calls.filter(call => call.command === "cancel_history_search")).toHaveLength(0);
+  });
+
+  it("rejects history renderer extras and never exposes worker-only proof commands", async () => {
+    const session = new FakeSession();
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "_worker_history_search_work", args: {} }))
+      .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 2, command: "start_history_search", args: { operationId: "018f2c5e-6a3b-7c4d-8e5f-0123456789ab", query: "private" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+    expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "start_history_search" }));
   });
 
   it("allows one bounded deferred-media batch as a checkpointed mutation", async () => {
@@ -90,6 +117,16 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([
       { command: "media_sync_request", args: { attachmentIds }, mutation: true },
     ]);
+  });
+
+  it("routes conversation pinning through the checkpointed mutation allowlist", async () => {
+    const session = new FakeSession();
+    const args = { conversationId: "conversation", pinned: true };
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "set_conversation_pinned", args }))
+      .resolves.toMatchObject({ ok: true });
+
+    expect(session.calls).toEqual([{ command: "set_conversation_pinned", args, mutation: true }]);
   });
 
     it("checkpoints media demand and cache release instead of exposing generic core dispatch", async () => {

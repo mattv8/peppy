@@ -630,6 +630,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func beginContactScan(inputJson: String) throws  -> String
     
+    func beginMessageHistoryCapture(providerGeneration: String, transport: String) throws  -> String
+    
     func beginMmsAcquisition(input: NativeMmsAcquisitionInput) throws  -> NativeMmsAcquisition
     
     func beginMmsAcquisitionOutcome(input: NativeMmsAcquisitionInput) throws  -> NativeMmsBeginOutcome
@@ -730,6 +732,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func dispose() throws 
     
+    func drainMessageHistoryCaptureResults(providerGeneration: String) throws  -> String
+    
     /**
      * Supplies transient Android network facts for deferred gateway MMS media selection.
      */
@@ -744,6 +748,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func exportNativeKeyCacheForNativeStorage(epoch: UInt32) throws  -> Data
     
     func finishContactScan(inputJson: String) throws  -> String
+    
+    func finishMessageHistoryCapture(input: String) throws  -> String
     
     func finishMmsBackfillPhase(generation: String, scope: String, phase: NativeMmsBackfillPhase, bound: String, exhausted: Bool) throws  -> Bool
     
@@ -858,6 +864,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func pendingGatewayMediaUploads() throws  -> [NativeCipherObject]
     
+    func pendingMessageHistoryCaptureRequests(providerGeneration: String) throws  -> String
+    
     func pendingNotificationDismissals(limit: UInt64) throws  -> [NativeNotificationDismissal]
     
     func pendingOutboxJson() throws  -> [String]
@@ -895,6 +903,12 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func prepareAttachment(sourcePath: String, mediaType: String, displayName: String) throws  -> NativeAttachmentInfo
     
     func prepareContactPhoto(path: String) throws  -> NativeAttachmentInfo
+    
+    /**
+     * Android-only local admission: provider UUIDs stay local while core maps
+     * them to the protocol's decimal control generation.
+     */
+    func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFacts) throws  -> String
     
     func receiveCursor() throws  -> String
     
@@ -1148,6 +1162,17 @@ open func beginContactScan(inputJson: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_contact_scan(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
+open func beginMessageHistoryCapture(providerGeneration: String, transport: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_message_history_capture(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(providerGeneration),
+        FfiConverterString.lower(transport),uniffiCallStatus
     )
 })
 }
@@ -1510,6 +1535,16 @@ open func dispose()throws   {try rustCallWithError(FfiConverterTypeMobileBinding
 }
 }
     
+open func drainMessageHistoryCaptureResults(providerGeneration: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_drain_message_history_capture_results(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(providerGeneration),uniffiCallStatus
+    )
+})
+}
+    
     /**
      * Supplies transient Android network facts for deferred gateway MMS media selection.
      */
@@ -1553,6 +1588,16 @@ open func finishContactScan(inputJson: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_finish_contact_scan(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
+open func finishMessageHistoryCapture(input: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_finish_message_history_capture(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(input),uniffiCallStatus
     )
 })
 }
@@ -2015,6 +2060,16 @@ open func pendingGatewayMediaUploads()throws  -> [NativeCipherObject]  {
 })
 }
     
+open func pendingMessageHistoryCaptureRequests(providerGeneration: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_message_history_capture_requests(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(providerGeneration),uniffiCallStatus
+    )
+})
+}
+    
 open func pendingNotificationDismissals(limit: UInt64)throws  -> [NativeNotificationDismissal]  {
     return try  FfiConverterSequenceTypeNativeNotificationDismissal.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2139,6 +2194,20 @@ open func prepareContactPhoto(path: String)throws  -> NativeAttachmentInfo  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_contact_photo(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Android-only local admission: provider UUIDs stay local while core maps
+     * them to the protocol's decimal control generation.
+     */
+open func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFacts)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_message_history_capture_source(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativeMessageHistorySourceFacts_lower(facts),uniffiCallStatus
     )
 })
 }
@@ -5390,6 +5459,80 @@ public func FfiConverterTypeNativeMessage_lift(_ buf: RustBuffer) throws -> Nati
 #endif
 public func FfiConverterTypeNativeMessage_lower(_ value: NativeMessage) -> RustBuffer {
     return FfiConverterTypeNativeMessage.lower(value)
+}
+
+
+/**
+ * Android's local message-history source facts. The provider UUID stays on this device; the host
+ * never states exhaustion, which Rust derives from durable history evidence.
+ */
+public struct NativeMessageHistorySourceFacts: Equatable, Hashable {
+    public var providerGeneration: String
+    public var sms: Bool
+    public var mms: Bool
+    public var permission: Bool
+    public var policy: Bool
+    public var forceRepublish: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(providerGeneration: String, sms: Bool, mms: Bool, permission: Bool, policy: Bool, forceRepublish: Bool) {
+        self.providerGeneration = providerGeneration
+        self.sms = sms
+        self.mms = mms
+        self.permission = permission
+        self.policy = policy
+        self.forceRepublish = forceRepublish
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeMessageHistorySourceFacts: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeMessageHistorySourceFacts: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMessageHistorySourceFacts {
+        return
+            try NativeMessageHistorySourceFacts(
+                providerGeneration: FfiConverterString.read(from: &buf), 
+                sms: FfiConverterBool.read(from: &buf), 
+                mms: FfiConverterBool.read(from: &buf), 
+                permission: FfiConverterBool.read(from: &buf), 
+                policy: FfiConverterBool.read(from: &buf), 
+                forceRepublish: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeMessageHistorySourceFacts, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.providerGeneration, into: &buf)
+        FfiConverterBool.write(value.sms, into: &buf)
+        FfiConverterBool.write(value.mms, into: &buf)
+        FfiConverterBool.write(value.permission, into: &buf)
+        FfiConverterBool.write(value.policy, into: &buf)
+        FfiConverterBool.write(value.forceRepublish, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeMessageHistorySourceFacts_lift(_ buf: RustBuffer) throws -> NativeMessageHistorySourceFacts {
+    return try FfiConverterTypeNativeMessageHistorySourceFacts.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeMessageHistorySourceFacts_lower(_ value: NativeMessageHistorySourceFacts) -> RustBuffer {
+    return FfiConverterTypeNativeMessageHistorySourceFacts.lower(value)
 }
 
 
@@ -10828,6 +10971,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_contact_scan() != 53985) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_message_history_capture() != 47215) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_mms_acquisition() != 1393) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10924,6 +11070,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_dispose() != 18253) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_drain_message_history_capture_results() != 45225) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_deferred_gateway_media() != 47618) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10934,6 +11083,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_finish_contact_scan() != 10388) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_finish_message_history_capture() != 29027) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_finish_mms_backfill_phase() != 49718) {
@@ -11065,6 +11217,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_gateway_media_uploads() != 42509) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_message_history_capture_requests() != 3032) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_notification_dismissals() != 22332) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11093,6 +11248,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_contact_photo() != 6113) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source() != 6609) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_receive_cursor() != 34175) {

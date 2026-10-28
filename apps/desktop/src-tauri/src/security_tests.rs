@@ -221,6 +221,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let registered = include_str!("lib.rs");
     let hosted = include_str!("hosted/mod.rs");
     let enrollment = include_str!("enrollment.rs");
+    let history_search = include_str!("search_history.rs");
     for command in &commands {
         assert!(
             registered.contains(&format!("enrollment::{command},"))
@@ -229,7 +230,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         );
         assert!(
             registered.contains(&format!("fn {command}("))
-                || [hosted, enrollment].iter().any(|source| {
+                || [hosted, enrollment, history_search].iter().any(|source| {
                     source.contains(&format!("pub async fn {command}("))
                         || source.contains(&format!("pub fn {command}("))
                 }),
@@ -249,6 +250,16 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     assert!(!composer.contains("allow-load-message-window"));
     assert!(main.contains("allow-load-message-window"));
     assert!(!crate::COMPOSER_COMMANDS.contains(&"load_message_window"));
+    for command in [
+        "get_history_search",
+        "start_history_search",
+        "cancel_history_search",
+    ] {
+        assert!(commands.contains(&command.to_owned()));
+        assert!(handler.contains(&format!("\n        search_history::{command},")));
+        assert!(main.contains(&allow(command)));
+        assert!(!composer.contains(&allow(command)));
+    }
     for command in [
         "request_attachment_download",
         "media_page",
@@ -304,6 +315,9 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "popout_conversation",
         "hide_head",
         "mark_all_read",
+        "get_history_search",
+        "start_history_search",
+        "cancel_history_search",
         "set_conversation_pinned",
         "hosted_account",
         "hosted_sign_in",

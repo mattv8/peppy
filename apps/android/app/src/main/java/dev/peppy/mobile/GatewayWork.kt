@@ -118,6 +118,58 @@ object GatewayWork {
     internal fun shouldEnqueueMmsCapture(captureHint: Boolean, enabled: Boolean, receiveGranted: Boolean) =
         captureHint && enabled && receiveGranted
 
+    /** Core admission is queried only after the normal receive/apply pass has made requests durable. */
+    internal fun publishAndScheduleMessageHistory(
+        client: NativeClientInterface,
+        generation: String,
+        smsAvailable: Boolean,
+        mmsAvailable: Boolean,
+        permission: Boolean,
+        policy: Boolean,
+        smsCaptureAllowed: Boolean,
+        mmsCaptureAllowed: Boolean,
+        enqueueSms: () -> Unit,
+        enqueueMms: () -> Unit,
+        smsPermissionGranted: Boolean = permission,
+        mmsPermissionGranted: Boolean = permission,
+    ): Boolean {
+        var controlPublished = false
+        val history = MessageHistoryRequestCoordinator(client) { controlPublished = true }
+        runCatching { history.publish(generation, smsAvailable, mmsAvailable, permission, policy) }
+        runCatching {
+            if (history.drain(generation) > 0) controlPublished = true
+        }
+        val readiness = runCatching { history.pending(generation) }.getOrNull() ?: return controlPublished
+        if (readiness.needsSms) {
+            if (smsCaptureAllowed) enqueueSms()
+            else settleUnavailableHistory(history, generation, "sms", smsPermissionGranted)
+        }
+        if (readiness.needsMms) {
+            if (mmsCaptureAllowed) enqueueMms()
+            else settleUnavailableHistory(history, generation, "mms", mmsPermissionGranted)
+        }
+        return controlPublished
+    }
+
+    private fun settleUnavailableHistory(
+        history: MessageHistoryRequestCoordinator,
+        generation: String,
+        transport: String,
+        permissionGranted: Boolean,
+    ) {
+        runCatching {
+            history.begin(generation, transport)?.let { admission ->
+                history.finish(
+                    generation,
+                    admission,
+                    observations = 0,
+                    exhausted = false,
+                    reason = if (permissionGranted) "policy_denied" else "permission_denied",
+                )
+            }
+        }
+    }
+
     /** Preserves the finishing fence so a concurrent wake appends one bounded successor. */
     internal fun finishPass() {
         coalescer.finish()
@@ -721,6 +773,21 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         } catch (_: GatewayAuthException) {
             return Result.failure()
         }
+        val historyControlPublished = GatewayWork.publishAndScheduleMessageHistory(
+            session.client,
+            MmsPreferences(applicationContext).sourceGeneration,
+            smsAvailable = true,
+            mmsAvailable = MmsPreferences(applicationContext).enabled,
+            permission = smsReadGranted,
+            policy = policy?.captureSms == true || policy?.captureMms == true,
+            smsPermissionGranted = smsReadGranted,
+            mmsPermissionGranted = mmsReceiveGranted,
+            smsCaptureAllowed = smsReadGranted && policy?.captureSms == true,
+            mmsCaptureAllowed = mmsEnabled && mmsReceiveGranted,
+            enqueueSms = { SmsCaptureWork.enqueue(applicationContext) },
+            enqueueMms = { MmsCaptureWork.enqueue(applicationContext) },
+        )
+        if (historyControlPublished) GatewayWork.enqueueAfterCapture(applicationContext)
         result.failure?.let { failure -> binding?.let { ServerReachabilityState.recordFailure(it, failure) } }
         return when {
             result.failure != null -> if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()

@@ -1,6 +1,8 @@
 package dev.peppy.mobile
 
 import android.Manifest
+import java.lang.reflect.Proxy
+import org.json.JSONObject
 import androidx.work.Configuration
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
@@ -14,8 +16,13 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowContentResolver
+import uniffi.peppy_mobile_bindings.NativeCaptured
 import uniffi.peppy_mobile_bindings.NativeClient
+import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativePermitState
+import uniffi.peppy_mobile_bindings.NativeSmsAcquisition
+import uniffi.peppy_mobile_bindings.NativeSmsAcquisitionState
+import uniffi.peppy_mobile_bindings.NativeSmsScanPlan
 
 /**
  * End-to-end provider capture through the real reader (a `content://sms` provider with Android's
@@ -65,6 +72,51 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         creator: String?,
         thread: Long = 1,
     ): Array<Any?> = arrayOf(id, thread, 1L, address, body, date, dateSent, type, 1L, 1L, -1L, creator)
+
+    @Test fun admittedHistoryCapturesNinetyNineRowsAndReportsTheProbeObservation() {
+        grant(Manifest.permission.READ_SMS)
+        (1L..100L).forEach { id ->
+            provider.rows += row(id, 1, "+14155552671", "old $id", 1_600_000_000_000 + id, 1_600_000_000_000 + id, MESSAGES_APP)
+        }
+        var captured = 0
+        var finishInput: JSONObject? = null
+        val client = Proxy.newProxyInstance(javaClass.classLoader, arrayOf(NativeClientInterface::class.java)) { _, method, arguments ->
+            val args = arguments?.toList().orEmpty()
+            when {
+                method.name == "planSmsScansWithHistoryConditions" -> listOf(
+                    NativeSmsScanPlan(
+                        "provider", SmsCapture.PROVIDER_SCOPE, true, null, true, null, "100",
+                        false, false, null, 100u,
+                    ),
+                )
+                method.name.startsWith("smsAcquisitionsAfter") -> emptyList<NativeSmsAcquisition>()
+                method.name == "beginMessageHistoryCapture" -> """{"token":"claim","budget":100}"""
+                method.name == "beginSmsProviderAcquisition" -> {
+                    val input = args.single() as uniffi.peppy_mobile_bindings.NativeSmsProviderAcquisitionInput
+                    NativeSmsAcquisition(input.source.providerMessageId, "conversation", input, NativeSmsAcquisitionState.PENDING, null)
+                }
+                method.name == "completeSmsAcquisition" -> {
+                    captured++
+                    NativeCaptured("message-$captured", "conversation", false)
+                }
+                method.name in setOf("setSmsScanCheckpoint", "setSmsPendingRecheckCursor", "setSmsProviderError") -> null
+                method.name == "finishMessageHistoryCapture" -> {
+                    finishInput = JSONObject(args.single() as String)
+                    "{}"
+                }
+                method.name == "drainMessageHistoryCaptureResults" -> """{"published":0,"pending":0}"""
+                method.name == "planSmsReconciliation" -> null
+                else -> error("unexpected ${method.name}")
+            }
+        } as NativeClientInterface
+
+        val summary = SmsNativeCapture.capture(client, AndroidSmsCaptureProvider(context), "provider")
+
+        assertEquals(99, captured)
+        assertEquals(99, summary.captured)
+        assertEquals(100, finishInput!!.getInt("observations"))
+        assertFalse(finishInput!!.getBoolean("exhausted"))
+    }
 
     @Test fun receiverBroadcastThenProviderInboxRowIsOneMessage() {
         grant(Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS)

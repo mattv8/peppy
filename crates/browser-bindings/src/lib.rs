@@ -32,6 +32,7 @@ mod context;
 mod conversation;
 mod media;
 mod notifications;
+mod search_history;
 mod sync;
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
@@ -298,6 +299,9 @@ impl BrowserCore {
             "mark_seen" => self.mark_seen(args_value(raw_args)?),
             "unread_message_batches" => self.unread_message_batches(args_value(raw_args)?),
             "mark_read_batch" => self.mark_read_batch(args_value(raw_args)?),
+            _ if search_history::handles(command) => {
+                self.search_history_command(command, args_value(raw_args)?)
+            }
             _ if conversation::handles(command) => {
                 self.conversation_command(command, args_value(raw_args)?)
             }

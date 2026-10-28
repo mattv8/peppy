@@ -117,6 +117,9 @@ describe("bridge subscriptions", () => {
     await tauriBridge.reveal_vault_secret();
     await tauriBridge.mark_all_read();
     await tauriBridge.set_conversation_pinned("conversation-id", true);
+    await tauriBridge.get_history_search();
+    await tauriBridge.start_history_search({ operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2", query: "must not cross the bridge" } as never);
+    await tauriBridge.cancel_history_search({ attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2", query: "must not cross the bridge" } as never);
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_devices", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(2, "revoke_device", { deviceId: "device-id" });
@@ -129,6 +132,9 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(9, "reveal_vault_secret", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(10, "mark_all_read", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(11, "set_conversation_pinned", { conversationId: "conversation-id", pinned: true });
+    expect(invokeMock).toHaveBeenNthCalledWith(12, "get_history_search", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(13, "start_history_search", { input: { operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
+    expect(invokeMock).toHaveBeenNthCalledWith(14, "cancel_history_search", { input: { attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
   });
 });
 

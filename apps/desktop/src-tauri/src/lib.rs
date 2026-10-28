@@ -44,6 +44,7 @@ mod media;
 mod net;
 mod notifications;
 mod origin;
+mod search_history;
 mod secure_store;
 #[cfg(test)]
 mod security_tests;
@@ -4462,6 +4463,9 @@ pub fn run() {
         load_history,
         search_local,
         advance_search_index,
+        search_history::get_history_search,
+        search_history::start_history_search,
+        search_history::cancel_history_search,
         load_message_window,
         open_external_url,
         configure_server,

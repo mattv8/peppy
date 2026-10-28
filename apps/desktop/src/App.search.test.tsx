@@ -3,10 +3,14 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { bridge, fixtureBridge, type DesktopSnapshot, type MessageView } from "./bridge";
-import type { LocalSearchHit } from "@peppy/desktop-ui/bridge-contracts";
+import type { HistorySearchSnapshot, LocalSearchHit } from "@peppy/desktop-ui/bridge-contracts";
 
 let snapshot: DesktopSnapshot;
 let subscription: (() => void) | undefined;
+const subscriptionListeners = new Set<() => void>();
+const broadcastSubscription = () => {
+  for (const listener of [...subscriptionListeners]) listener();
+};
 
 const message = (id: string, body = id): MessageView => ({
   id,
@@ -50,9 +54,12 @@ beforeEach(async () => {
   }));
   vi.spyOn(bridge, "search_local").mockImplementation(fixtureBridge.search_local);
   vi.spyOn(bridge, "load_message_window").mockImplementation(fixtureBridge.load_message_window);
+  subscriptionListeners.clear();
+  subscription = undefined;
   vi.spyOn(bridge, "subscribe").mockImplementation((listener) => {
-    subscription = listener;
-    return () => { subscription = undefined; };
+    subscriptionListeners.add(listener);
+    subscription = broadcastSubscription;
+    return () => { subscriptionListeners.delete(listener); };
   });
   vi.spyOn(bridge, "subscribe_lifecycle").mockReturnValue(() => undefined);
   vi.spyOn(bridge, "subscribe_lifecycle_finished").mockReturnValue(() => undefined);
@@ -447,6 +454,132 @@ describe("App search navigation", () => {
 
     await waitFor(() => expect(bridge.load_state).toHaveBeenCalledWith("conv-aurora"));
     expect(bridge.load_state).not.toHaveBeenCalledWith("conv-aurora", "lock-target");
+  });
+
+  describe("search further back", () => {
+    const historyStatus = (overrides: Partial<HistorySearchSnapshot> = {}): HistorySearchSnapshot => ({
+      state: "idle",
+      canSearchFurther: true,
+      progressVersion: "0",
+      indexVersion: "0",
+      ...overrides,
+    });
+    const typeQuery = (value: string) => fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value } });
+    const noHits = () => vi.mocked(bridge.search_local).mockImplementation(async ({ query }) => pageFor(query, []));
+
+    it("reads history for a no-result query without starting work", async () => {
+      const read = vi.spyOn(bridge, "get_history_search").mockResolvedValue(historyStatus());
+      const start = vi.spyOn(bridge, "start_history_search");
+      noHits();
+      render(<App hostKind="browser" />);
+      await screen.findAllByText("Can you send over the estimate?");
+
+      typeQuery("nothing-here");
+
+      await screen.findByRole("option", { name: "Search further back" });
+      expect(read).toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it("starts history only from the explicit option, with an operation id alone", async () => {
+      vi.spyOn(bridge, "get_history_search").mockResolvedValue(historyStatus());
+      const start = vi.spyOn(bridge, "start_history_search").mockResolvedValue(historyStatus({ state: "catchingUp", canSearchFurther: false, attemptId: "attempt-1" }));
+      noHits();
+      render(<App hostKind="browser" />);
+      await screen.findAllByText("Can you send over the estimate?");
+      typeQuery("nothing-here");
+
+      fireEvent.click(await screen.findByRole("option", { name: "Search further back" }));
+
+      await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+      const [input] = start.mock.calls[0];
+      expect(Object.keys(input)).toEqual(["operationId"]);
+      expect(input.operationId).toEqual(expect.any(String));
+    });
+
+    it("shows host index updates for the current query without retyping", async () => {
+      let indexed = false;
+      let status = historyStatus();
+      const hit: LocalSearchHit = { kind: "message", conversationId: "conv-aurora", messageId: "generic", title: "Message", snippet: "Body", timestamp: "1788435180000" };
+      vi.mocked(bridge.search_local).mockImplementation(async ({ query }) => pageFor(query, indexed ? [hit] : []));
+      vi.spyOn(bridge, "get_history_search").mockImplementation(async () => structuredClone(status));
+      render(<App hostKind="browser" />);
+      await screen.findAllByText("Can you send over the estimate?");
+      typeQuery("aurora");
+      await screen.findByRole("option", { name: "Search further back" });
+
+      indexed = true;
+      status = historyStatus({ state: "completed", canSearchFurther: false, progressVersion: "1", indexVersion: "1" });
+      await act(async () => subscription?.());
+
+      await waitFor(() => expect(document.querySelector('[data-search-hit="message-conv-aurora-generic"]')).not.toBeNull(), { timeout: 4000 });
+      expect(bridge.search_local).toHaveBeenLastCalledWith(expect.objectContaining({ query: "aurora" }));
+    });
+
+    it("cancels only the attempt this view started", async () => {
+      let status = historyStatus();
+      vi.spyOn(bridge, "get_history_search").mockImplementation(async () => structuredClone(status));
+      vi.spyOn(bridge, "start_history_search").mockImplementation(async () => {
+        status = historyStatus({ state: "catchingUp", canSearchFurther: false, attemptId: "attempt-1" });
+        return structuredClone(status);
+      });
+      const cancel = vi.spyOn(bridge, "cancel_history_search").mockImplementation(async () => {
+        status = historyStatus({ state: "cancelled", canSearchFurther: true, progressVersion: "2" });
+        return structuredClone(status);
+      });
+      noHits();
+      render(<App hostKind="browser" />);
+      await screen.findAllByText("Can you send over the estimate?");
+      typeQuery("nothing-here");
+      fireEvent.click(await screen.findByRole("option", { name: "Search further back" }));
+
+      fireEvent.click(await screen.findByRole("option", { name: "Cancel searching further back" }));
+
+      await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+      expect(cancel).toHaveBeenCalledWith({ attemptId: "attempt-1" });
+    });
+
+    it("cancels an attempt the host reports after the view remounts, without starting", async () => {
+      vi.spyOn(bridge, "get_history_search").mockResolvedValue(historyStatus({ state: "catchingUp", canSearchFurther: false, attemptId: "attempt-remount" }));
+      const start = vi.spyOn(bridge, "start_history_search");
+      const cancel = vi.spyOn(bridge, "cancel_history_search").mockResolvedValue(historyStatus({ state: "cancelled", canSearchFurther: true, progressVersion: "2" }));
+      noHits();
+      render(<App hostKind="browser" />);
+      await screen.findAllByText("Can you send over the estimate?");
+      typeQuery("nothing-here");
+
+      fireEvent.click(await screen.findByRole("option", { name: "Cancel searching further back" }));
+
+      await waitFor(() => expect(cancel).toHaveBeenCalledWith({ attemptId: "attempt-remount" }));
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it("shows no Retry for a permission block that core reports as not offering further search", async () => {
+      vi.spyOn(bridge, "get_history_search").mockResolvedValue(historyStatus({ state: "blocked", reason: "permission", canSearchFurther: false }));
+      const start = vi.spyOn(bridge, "start_history_search");
+      noHits();
+      render(<App hostKind="browser" />);
+      await screen.findAllByText("Can you send over the estimate?");
+      typeQuery("nothing-here");
+
+      await waitFor(() => expect(document.getElementById("omni-search-history-status")).toHaveTextContent("Phone needs permission"));
+      expect(screen.queryByRole("option", { name: "Retry loading history" })).toBeNull();
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it("offers no history action for an unsupported source", async () => {
+      vi.spyOn(bridge, "get_history_search").mockResolvedValue(historyStatus({ state: "blocked", reason: "unsupported", canSearchFurther: false }));
+      const start = vi.spyOn(bridge, "start_history_search");
+      noHits();
+      render(<App hostKind="browser" />);
+      await screen.findAllByText("Can you send over the estimate?");
+      typeQuery("nothing-here");
+
+      await waitFor(() => expect(document.getElementById("omni-search-history-status")).toHaveTextContent("No matches"));
+      expect(document.querySelector('[data-search-action="history"]')).toBeNull();
+      expect(screen.queryByRole("option", { name: "Search further back" })).toBeNull();
+      expect(start).not.toHaveBeenCalled();
+    });
   });
 
 

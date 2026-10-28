@@ -726,6 +726,10 @@ function createHost() {
 
 let host: ReturnType<typeof createHost>;
 let hint: (() => void) | undefined;
+const hintListeners = new Set<() => void>();
+const broadcastHint = () => {
+  for (const listener of [...hintListeners]) listener();
+};
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -829,6 +833,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   host = createHost();
   hint = undefined;
+  hintListeners.clear();
   lifecycle = undefined;
   lifecycleDispose = vi.fn();
   lifecycleFinished = undefined;
@@ -873,8 +878,9 @@ beforeEach(() => {
     return lifecycleFinishedDispose;
   });
   vi.spyOn(bridge, "subscribe").mockImplementation((listener) => {
-    hint = listener;
-    return () => undefined;
+    hintListeners.add(listener);
+    hint = broadcastHint;
+    return () => { hintListeners.delete(listener); };
   });
   const draftBridge = bridge as typeof bridge & { subscribe_drafts(listener: (draft: Draft) => void): () => void };
   vi.spyOn(draftBridge, "subscribe_drafts").mockImplementation(listener => {

@@ -34,7 +34,13 @@ internal data class MmsBackfillRecheckRequest(
     val state: MmsBackfillRecheckState = MmsBackfillRecheckState.PENDING,
 )
 internal data class MmsBackfillRecheck(val requests: List<MmsBackfillRecheckRequest>, val budget: Int, val continuationDue: Boolean = false)
-internal data class MmsBackfillPageResult(val lastDurableId: String?, val exhausted: Boolean, val more: Boolean)
+internal data class MmsBackfillPageResult(
+    val lastDurableId: String?,
+    val exhausted: Boolean,
+    val more: Boolean,
+    val observations: Int = 0,
+    val reason: String? = null,
+)
 
 internal interface MmsBackfillCore {
     fun migrate(generation: String, scope: String, legacy: MmsLegacyBackfillState)
@@ -59,6 +65,7 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
         recheckConditions: MmsBackfillRecheckConditions,
         scanPage: (MmsBackfillScanPlan) -> MmsBackfillPageResult,
         recheck: (MmsBackfillRecheckRequest) -> MmsBackfillRecheckOutcome?,
+        historyAdmission: MmsHistoryCaptureAdmission? = null,
     ): Boolean {
         captureMmsStage(MmsDiagnosticStage.MIGRATE) { core.migrate(generation, scope, legacy) }
         var more = false
@@ -69,7 +76,12 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
             SyncTraceField.COUNT to plans.size.toLong(),
         )
         for (plan in plans) {
-            if (plan.paused) continue
+            if (plan.paused) {
+                if (plan.phase == MmsBackfillPhase.HISTORY) {
+                    historyAdmission.beginSafely()?.let { historyAdmission?.finish(it, 0, exhausted = false, reason = "capacity") }
+                }
+                continue
+            }
             if (plan.phase == MmsBackfillPhase.RECHECK) {
                 val requests = captureMmsStage(MmsDiagnosticStage.RECHECK_SELECTION_UNCLASSIFIED) {
                     core.dueRechecks(generation, scope, nowMs, recheckConditions)
@@ -103,15 +115,53 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
                 more = more || recheckMore || (requests.continuationDue && completedSelected && recheckConditions.charging)
                 continue
             }
-            if (plan.phase == MmsBackfillPhase.HISTORY && plan.historyComplete) continue
-            val result = scanPage(plan)
-            result.lastDurableId?.let { core.advance(generation, scope, plan.phase, it) }
+            val admission = if (plan.phase == MmsBackfillPhase.HISTORY) historyAdmission.beginSafely() else null
+            if (plan.phase == MmsBackfillPhase.HISTORY && plan.historyComplete) {
+                admission?.let { historyAdmission?.finish(it, 0, exhausted = true) }
+                continue
+            }
+            val admittedPlan = admission?.let { plan.copy(budget = minOf(plan.budget, it.budget)) } ?: plan
+            val result = try {
+                scanPage(admittedPlan)
+            } catch (error: Exception) {
+                admission?.let { historyAdmission.finishSafely(it, 0, exhausted = false, reason = "provider_error") }
+                throw error
+            }
+            try {
+                result.lastDurableId?.let { core.advance(generation, scope, plan.phase, it) }
+                if (plan.phase == MmsBackfillPhase.HISTORY) {
+                    val bound = requireNotNull(plan.historyUpperBound) { "history plan missing frozen bound" }
+                    core.finish(generation, scope, plan.phase, bound, result.exhausted)
+                }
+            } catch (error: Exception) {
+                admission?.let { historyAdmission.finishSafely(it, result.observations, exhausted = false, reason = "storage_error") }
+                throw error
+            }
             if (plan.phase == MmsBackfillPhase.HISTORY) {
-                val bound = plan.historyUpperBound
-                if (bound != null) core.finish(generation, scope, plan.phase, bound, result.exhausted)
+                admission?.let { historyAdmission?.finish(it, result.observations, result.exhausted, result.reason) }
             }
             more = more || result.more || !result.exhausted
         }
         return more
+    }
+}
+
+private fun MmsHistoryCaptureAdmission?.beginSafely(): MessageHistoryRequestCoordinator.Admission? =
+    try {
+        this?.begin()
+    } catch (_: Exception) {
+        null
+    }
+
+private fun MmsHistoryCaptureAdmission?.finishSafely(
+    admission: MessageHistoryRequestCoordinator.Admission,
+    observations: Int,
+    exhausted: Boolean,
+    reason: String,
+) {
+    try {
+        this?.finish(admission, observations, exhausted, reason)
+    } catch (_: Exception) {
+        // Preserve the provider/checkpoint failure that caused this settlement attempt.
     }
 }

@@ -84,6 +84,7 @@ import { dismissibleNotifications, notificationMuteKey, NotificationsView } from
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard, type ContactTarget } from "./Contacts";
 import { findContactTarget } from "./contact-target";
+import { useHistorySearch } from "./useHistorySearch";
 import { DevicesSettings } from "./DevicesSettings";
 import { HostedAccountSettings } from "./HostedAccountSettings";
 import { PrivacySettings } from "./PrivacySettings";
@@ -1957,6 +1958,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setContactTarget(undefined);
   }, [appLock?.locked, snapshot?.encryption.state]);
   const renderedSearchSessionKey = currentSearchSessionKey();
+  const [historySearchVisible, setHistorySearchVisible] = useState(false);
+  const historyControls = useHistorySearch({
+    sessionKey: renderedSearchSessionKey,
+    enabled: snapshot?.encryption.state === "unlocked" && !appLock?.locked,
+    visible: historySearchVisible,
+    bridge,
+  });
   useEffect(() => {
     if (!previousSearchSessionKeyRef.current) {
       previousSearchSessionKeyRef.current = renderedSearchSessionKey;
@@ -3408,7 +3416,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onMaximize={browserHost ? undefined : () => void bridge.window("maximize")}
         onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
-        search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} />}
+        search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} />}
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
