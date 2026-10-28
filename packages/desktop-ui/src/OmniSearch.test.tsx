@@ -1,8 +1,8 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OmniSearch } from "./OmniSearch";
-import type { LocalSearchHit, LocalSearchPage } from "./bridge-contracts";
+import { historyPresentation, OmniSearch } from "./OmniSearch";
+import type { HistorySearchSnapshot, LocalSearchHit, LocalSearchPage } from "./bridge-contracts";
 import { formatDateTime } from "./datetime";
 
 const page = (query: string, items: LocalSearchHit[] = [{ kind: "conversation", conversationId: "c1", title: "Aurora", subtitle: "Recent" }]) => ({
@@ -29,6 +29,14 @@ const deferred = <T,>() => {
   const promise = new Promise<T>((accept) => { resolve = accept; });
   return { promise, resolve };
 };
+
+const history = (overrides: Partial<HistorySearchSnapshot> = {}): HistorySearchSnapshot => ({
+  state: "idle",
+  canSearchFurther: true,
+  progressVersion: "progress-1",
+  indexVersion: "index-1",
+  ...overrides,
+});
 
 afterEach(() => {
   cleanup();
@@ -855,4 +863,206 @@ describe("OmniSearch", () => {
     expect(screen.getByRole("option", { name: "Two" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it.each([
+    [history({ state: "catchingUp" }), true, false, "Cancel"],
+    [history({ state: "partial" }), false, false, "Search further back"],
+    [history({ state: "blocked", reason: "needsUnlock" }), false, false, "Retry"],
+    [history({ state: "completed", canSearchFurther: false }), false, false, null],
+    [history({ state: "completed" }), false, false, "Search further back"],
+    [history({ state: "blocked", reason: "unsupported", canSearchFurther: false }), false, false, null],
+    [history({ state: "blocked", reason: "unsupported" }), false, false, "Search further back"],
+    [history({ state: "blocked", reason: "unsupported" }), false, true, null],
+    [history({ state: "idle", canSearchFurther: false }), false, false, null],
+  ])("maps history state to its available action", (snapshot, indexing, hasMatches, action) => {
+    const presentation = historyPresentation({ snapshot, indexing, hasMatches, queryCurrent: true, hasCancel: true, startFailed: false });
+    expect(presentation === null || presentation.intent === null ? null : presentation.intent === "cancel" ? "Cancel" : presentation.intent === "retry" ? "Retry" : "Search further back").toBe(action);
+  });
+
+  it("offers history only for an actionable no-result query without changing legacy empty behavior", async () => {
+    vi.useFakeTimers();
+    const onSearchFurtherBack = vi.fn(async () => {});
+    const { rerender } = render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "missing" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(screen.getByText("No matches.")).toBeInTheDocument();
+    rerender(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} historySearch={history()} onSearchFurtherBack={onSearchFurtherBack} />);
+    expect(screen.getByRole("option", { name: "Search further back" })).toBeInTheDocument();
+    expect(screen.queryByText("No matches.")).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "missing again" } });
+    expect(onSearchFurtherBack).not.toHaveBeenCalled();
+  });
+
+  it("offers a re-armed completed search only when the flag changes, and starts it only on explicit activation", async () => {
+    vi.useFakeTimers();
+    const onSearchFurtherBack = vi.fn(async () => {});
+    const search = (historySearch: HistorySearchSnapshot) => (
+      <OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} historySearch={historySearch} onSearchFurtherBack={onSearchFurtherBack} />
+    );
+    const { rerender } = render(search(history({ state: "completed", canSearchFurther: false })));
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "missing" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(document.getElementById("omni-search-history-status")).toHaveTextContent("No matches found");
+    expect(screen.queryByRole("option", { name: "Search further back" })).not.toBeInTheDocument();
+    expect(onSearchFurtherBack).not.toHaveBeenCalled();
+
+    rerender(search(history({ state: "completed", canSearchFurther: true, progressVersion: "progress-2" })));
+    expect(screen.getByRole("option", { name: "Search further back" })).toBeInTheDocument();
+    expect(onSearchFurtherBack).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("option", { name: "Search further back" }));
+    await act(async () => {});
+    expect(onSearchFurtherBack).toHaveBeenCalledOnce();
+  });
+
+  it("uses one pending history activation across keyboard and pointer and changes to Cancel", async () => {
+    vi.useFakeTimers();
+    const start = deferred<void>();
+    const onSearchFurtherBack = vi.fn(() => start.promise);
+    const { rerender } = render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} historySearch={history()} onSearchFurtherBack={onSearchFurtherBack} onCancelHistorySearch={async () => {}} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "missing" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.keyDown(input, { key: "End" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("option", { name: "Search further back" }));
+    expect(onSearchFurtherBack).toHaveBeenCalledOnce();
+    rerender(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} historySearch={history({ state: "waitingForPhone", progressVersion: "progress-2" })} onSearchFurtherBack={onSearchFurtherBack} onCancelHistorySearch={async () => {}} />);
+    expect(screen.getByRole("option", { name: "Cancel searching further back" })).toHaveAttribute("aria-disabled", "true");
+    expect(input).toHaveAttribute("aria-activedescendant", expect.stringContaining("history"));
+    await act(async () => start.resolve());
+  });
+
+  it("starts history only when Enter activates its default selected action", async () => {
+    vi.useFakeTimers();
+    const onSearchFurtherBack = vi.fn(async () => {});
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} historySearch={history()} onSearchFurtherBack={onSearchFurtherBack} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "missing" } });
+    expect(onSearchFurtherBack).not.toHaveBeenCalled();
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(onSearchFurtherBack).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {});
+    expect(onSearchFurtherBack).toHaveBeenCalledOnce();
+  });
+
+  it("cancels and retries history through the shared action path", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn(async () => {});
+    const retry = vi.fn(async () => {});
+    const { rerender } = render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} historySearch={history({ state: "catchingUp" })} onSearchFurtherBack={retry} onCancelHistorySearch={cancel} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "missing" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByRole("option", { name: "Cancel searching further back" }));
+    await act(async () => {});
+    expect(cancel).toHaveBeenCalledOnce();
+    rerender(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} historySearch={history({ state: "blocked", reason: "offline", progressVersion: "progress-2" })} onSearchFurtherBack={retry} />);
+    fireEvent.keyDown(input, { key: "End" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {});
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("keeps active history progress beside hits but hides it during composition and never cancels on Escape", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn(async () => {});
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query)} historySearch={history({ state: "indexing" })} onSearchFurtherBack={async () => {}} onCancelHistorySearch={cancel} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "aurora" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(screen.getByRole("option", { name: "Cancel searching further back" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Aurora/ })).toBeInTheDocument();
+    fireEvent.compositionStart(input);
+    expect(screen.queryByRole("option", { name: "Cancel searching further back" })).not.toBeInTheDocument();
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("refreshes a ready query only when the history index version changes", async () => {
+    vi.useFakeTimers();
+    const onSearch = vi.fn(async (request) => page(request.query, []));
+    const { rerender } = render(<OmniSearch sessionKey="one" refreshKey={0} onActivate={() => {}} onSearch={onSearch} historySearch={history()} onSearchFurtherBack={async () => {}} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "missing" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    rerender(<OmniSearch sessionKey="one" refreshKey={1} onActivate={() => {}} onSearch={onSearch} historySearch={history({ progressVersion: "progress-2" })} onSearchFurtherBack={async () => {}} />);
+    await act(async () => { vi.advanceTimersByTime(1_000); });
+    expect(onSearch).toHaveBeenCalledOnce();
+    rerender(<OmniSearch sessionKey="one" refreshKey={1} onActivate={() => {}} onSearch={onSearch} historySearch={history({ progressVersion: "progress-3", indexVersion: "index-2" })} onSearchFurtherBack={async () => {}} />);
+    await act(async () => { vi.advanceTimersByTime(1_000); });
+    expect(onSearch).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces one ready-index rerun when indexVersion changes during a deferred search", async () => {
+    vi.useFakeTimers();
+    const first = deferred<ReturnType<typeof page>>();
+    const onSearch = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockImplementation(async (request) => page(request.query, [{ kind: "conversation", conversationId: "imported", title: "Imported", subtitle: "Ready" }]));
+    const { rerender } = render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={onSearch} historySearch={history()} onSearchFurtherBack={async () => {}} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "missing" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    rerender(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={onSearch} historySearch={history({ indexVersion: "index-2", progressVersion: "progress-2" })} onSearchFurtherBack={async () => {}} />);
+    await act(async () => first.resolve(page("missing", [])));
+    await act(async () => { vi.advanceTimersByTime(1_000); });
+    expect(onSearch).toHaveBeenCalledTimes(2);
+    expect(onSearch).toHaveBeenLastCalledWith({ query: "missing", kind: "all", limit: 6 });
+    expect(screen.getByRole("option", { name: /Imported/ })).toBeInTheDocument();
+  });
+
+  it.each([
+    { hasMatches: true, queryCurrent: true },
+    { hasMatches: false, queryCurrent: false },
+  ])("hides unsupported history status when quiet-state requirements are not met", ({ hasMatches, queryCurrent }) => {
+    expect(historyPresentation({ snapshot: history({ state: "failed", reason: "unsupported", canSearchFurther: false }), indexing: false, hasMatches, queryCurrent, hasCancel: false, startFailed: false })).toBeNull();
+  });
+
+  it("clears a local history failure before a successful retry with an unchanged snapshot", async () => {
+    vi.useFakeTimers();
+    const start = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(undefined);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} historySearch={history()} onSearchFurtherBack={start} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "missing" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByRole("option", { name: "Search further back" }));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("option", { name: "Retry loading history" }));
+    await act(async () => {});
+    expect(screen.getByRole("option", { name: "Search further back" })).toBeInTheDocument();
+  });
+
+  it("releases the history action guard when its callback throws synchronously", async () => {
+    vi.useFakeTimers();
+    const start = vi.fn().mockImplementationOnce(() => { throw new Error("sync"); }).mockResolvedValueOnce(undefined);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} historySearch={history()} onSearchFurtherBack={start} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "missing" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByRole("option", { name: "Search further back" }));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("option", { name: "Retry loading history" }));
+    await act(async () => {});
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports only popup visibility transitions through a stable open callback", () => {
+    const onOpenChange = vi.fn();
+    const { rerender } = render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query)} onOpenChange={onOpenChange} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.focus(input);
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    rerender(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query)} onOpenChange={onOpenChange} />);
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+    fireEvent.pointerDown(document.body);
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    fireEvent.focus(input);
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    expect(onOpenChange).toHaveBeenCalledTimes(4);
+  });
 });

@@ -27,6 +27,7 @@ internal object SmsNativeCapture : SmsCaptureRunner {
             AndroidSmsCaptureProvider(context),
             MmsPreferences(context).sourceGeneration,
             historyImportConditions(context),
+            onControlPublished = { GatewayWork.enqueueAfterCapture(context.applicationContext) },
         )
         if (shouldScheduleGatewayUpload(summary)) {
             if (SyncDiagnostics.enabled) {
@@ -44,29 +45,74 @@ internal object SmsNativeCapture : SmsCaptureRunner {
         reader: AndroidSmsCaptureProvider,
         generation: String,
         conditions: NativeHistoryImportConditions = NativeHistoryImportConditions(false, false),
+        onControlPublished: () -> Unit = {},
     ): SmsCaptureSummary {
         val scope = SmsCapture.PROVIDER_SCOPE
         reader.beginDiagnosticPass()
         return try {
             val highWater = reader.highWater().toString()
             val plans = client.planSmsScansWithHistoryConditions(generation, scope, highWater, conditions)
+            val history = MessageHistoryRequestCoordinator(client, onControlPublished)
             val core = NativeSmsCaptureCore(client)
             val allowHistoryContinuation = conditions.unmeteredNetwork || conditions.charging
             var recheckPending = true
             var summary = SmsCaptureSummary()
             for (plan in plans) {
-                val result = if (recheckPending) {
-                    SmsCapture.run(plan.toCapturePlan(allowHistoryContinuation), core, reader)
-                } else {
-                    SmsCapture.runWithoutPendingRecheck(plan.toCapturePlan(allowHistoryContinuation), core, reader)
+                // The first plan owns pending recheck I/O. A claim starts only once that shared
+                // work has run, so its observation count is exclusively this history slice.
+                var admission: MessageHistoryRequestCoordinator.Admission? = null
+                fun admittedPlan(original: SmsCapturePlan): SmsCapturePlan {
+                    admission = runCatching { history.begin(generation, "sms") }.getOrNull()
+                    return admission?.let { claim ->
+                        // Keep one provider observation for the existing exhaustion probe.
+                        require(claim.budget >= 2) { "SMS history admission must reserve a probe observation" }
+                        original.copy(budget = minOf(original.budget, claim.budget - 1))
+                    } ?: original
+                }
+                val capturePlan = plan.toCapturePlan(allowHistoryContinuation)
+                val result = when {
+                    !plan.imported && recheckPending -> SmsCapture.run(capturePlan, core, reader)
+                    !plan.imported -> SmsCapture.runWithoutPendingRecheck(capturePlan, core, reader)
+                    recheckPending -> SmsCapture.runAfterPendingRecheck(capturePlan, core, reader, ::admittedPlan)
+                    else -> SmsCapture.runWithoutPendingRecheck(admittedPlan(capturePlan), core, reader)
                 }
                 if (recheckPending) {
                     client.setSmsPendingRecheckCursor(plan.sourceGeneration, plan.subscriptionId, plan.imported, result.pendingRecheckCursor)
                     recheckPending = false
                 }
+                var settlementFailed = false
                 if (result.historyExhausted) {
                     val bound = requireNotNull(plan.historyUpperBound) { "history exhaustion without frozen bound" }
-                    client.ackSmsScanExhausted(plan.sourceGeneration, plan.subscriptionId, plan.imported, bound)
+                    try {
+                        client.ackSmsScanExhausted(plan.sourceGeneration, plan.subscriptionId, plan.imported, bound)
+                    } catch (_: Exception) {
+                        admission?.let { claim ->
+                            runCatching { history.finish(generation, claim, result.scanObservations, exhausted = false, reason = "storage_error") }
+                        }
+                        settlementFailed = true
+                    }
+                }
+                if (!settlementFailed) {
+                    admission?.let { claim ->
+                        val reason = when {
+                            result.providerError -> "provider_error"
+                            result.coreError -> "storage_error"
+                            plan.paused -> "capacity"
+                            else -> null
+                        }
+                        if (runCatching {
+                                history.finish(
+                                    generation,
+                                    claim,
+                                    result.scanObservations,
+                                    result.historyExhausted || plan.historyComplete,
+                                    reason,
+                                )
+                            }.isFailure
+                        ) {
+                            settlementFailed = true
+                        }
+                    }
                 }
                 summary += result
                 recordPlanCompletion(if (plan.imported) PLAN_HISTORY else PLAN_LIVE, plan.imported, result)
@@ -74,7 +120,7 @@ internal object SmsNativeCapture : SmsCaptureRunner {
                     client.setSmsProviderError(generation, scope, true)
                     return summary
                 }
-                if (result.coreError) return summary
+                if (result.coreError || settlementFailed) return summary.copy(coreError = true)
             }
             // Completed sweeps restart only after the core's interval unless the core sees reused
             // IDs (high-water below the live checkpoint, or a different row at that checkpoint).
@@ -286,4 +332,5 @@ private operator fun SmsCaptureSummary.plus(other: SmsCaptureSummary) = SmsCaptu
     rowsQueried + other.rowsQueried,
     advanced || other.advanced,
     budgetExhausted || other.budgetExhausted,
+    scanObservations + other.scanObservations,
 )

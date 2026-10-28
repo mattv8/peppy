@@ -37,6 +37,9 @@ mod history_import;
 mod local_search;
 mod media;
 mod media_cache;
+mod message_history_capture;
+mod message_history_protocol;
+mod message_history_requests;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
 mod media_paging;
 mod mms;
@@ -56,6 +59,7 @@ pub use media::{
 };
 pub use media_cache::GatewayMmsCleanup;
 pub use media_paging::MediaPageAround;
+pub use message_history_requests::*;
 pub use mms::{
     MAX_MMS_ACQUISITIONS, MAX_PENDING_MMS_MEDIA_BYTES, MmsAcquisition, MmsAcquisitionInput,
     MmsAcquisitionPart, MmsAcquisitionState, MmsBeginOutcome, MmsContext, MmsPreviewState,
@@ -344,12 +348,6 @@ pub enum PrivatePayload {
     ReadState {
         message_id: MessageId,
     },
-    ConversationPin {
-        conversation_id: ConversationId,
-        pinned: bool,
-        logical_revision: u64,
-        writer_device_id: String,
-    },
     NotificationPosted {
         notification: NotificationWire,
     },
@@ -362,6 +360,12 @@ pub enum PrivatePayload {
     },
     AppFilter {
         filter: AppFilter,
+        logical_revision: u64,
+        writer_device_id: String,
+    },
+    ConversationPin {
+        conversation_id: ConversationId,
+        pinned: bool,
         logical_revision: u64,
         writer_device_id: String,
     },
@@ -394,6 +398,18 @@ pub enum PrivatePayload {
     },
     ContactScanResult {
         result: serde_json::Value,
+    },
+    MessageHistorySource {
+        source: serde_json::Value,
+    },
+    MessageHistoryRequest {
+        request: serde_json::Value,
+    },
+    MessageHistoryResult {
+        result: serde_json::Value,
+    },
+    MessageHistoryCancel {
+        cancel: serde_json::Value,
     },
 }
 
@@ -992,6 +1008,75 @@ impl Client {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         contact_sync_requests::set_capability(conn, &ctx, input)
+    }
+    /// Publishes this authenticated device's retained carrier-history capability.
+    pub fn publish_message_history_source(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        message_history_protocol::publish_source(conn, &ctx, input)
+    }
+    /// Publishes Android's local provider facts after mapping its opaque UUID to
+    /// the independent decimal control generation used by encrypted controls.
+    pub fn publish_message_history_capture_source(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        message_history_capture::publish_source(conn, &ctx, input)
+    }
+    /// Returns only admitted work bound to Android's current provider UUID.
+    pub fn pending_message_history_capture_requests(
+        &self,
+        provider_generation: &str,
+    ) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        message_history_capture::pending(conn, &ctx, provider_generation)
+    }
+    /// Reserves one shared, durable 100-observation page for the current Android provider.
+    pub fn begin_message_history_capture(
+        &self,
+        provider_generation: &str,
+        transport: &str,
+    ) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        message_history_capture::begin(conn, &ctx, provider_generation, transport)
+    }
+    /// Finishes a previously admitted provider page and publishes terminal aggregate results.
+    pub fn finish_message_history_capture(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        message_history_capture::finish(conn, &ctx, input)
+    }
+    /// Retries durable terminal result publication without touching provider cursors.
+    pub fn drain_message_history_capture_results(
+        &self,
+        provider_generation: &str,
+    ) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        message_history_capture::drain(conn, &ctx, provider_generation)
+    }
+    /// Returns admitted carrier-history work for this authenticated phone.
+    pub fn pending_message_history_requests(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        message_history_protocol::pending(conn, &ctx, input)
+    }
+    /// Records an intermediate or terminal bounded carrier-history pass for this phone.
+    pub fn record_message_history_progress(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        message_history_protocol::record_progress(conn, &ctx, input)
+    }
+    /// Returns the caller's durable request state without scheduling work.
+    pub fn message_history_request_status(&self, input: &str) -> Result<String, Error> {
+        let store = self.lock()?;
+        message_history_protocol::status(&store.conn, &store.config.device_id.to_string(), input)
+    }
+    pub fn cancel_message_history_request(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        message_history_protocol::cancel(conn, &ctx, input)
     }
     pub fn contact_book_view(&self, input: &str) -> Result<String, Error> {
         let store = self.lock()?;
@@ -4651,6 +4736,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     conn.execute_batch(&format!("PRAGMA cache_size = -{BROWSER_CACHE_KIB};"))?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_meta(version INTEGER NOT NULL)")?;
     contacts::initialize(conn)?;
+    message_history_requests::initialize(conn)?;
+    message_history_protocol::initialize(conn)?;
+    message_history_capture::initialize(conn)?;
     contact_resolution::initialize(conn)?;
     contact_source::initialize(conn)?;
     contact_state::initialize(conn)?;
@@ -5194,6 +5282,10 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "contact_edit_result"
             | "contact_scan_request"
             | "contact_scan_result"
+            | "message_history_source"
+            | "message_history_request"
+            | "message_history_result"
+            | "message_history_cancel"
     )
 }
 
@@ -5508,6 +5600,28 @@ fn apply_record(
                 return Ok(Some(Q::InvalidPayload));
             }
             contact_media::after_apply(conn, &payload)?;
+        }
+        (
+            EnvelopePurpose::Event,
+            payload @ (PrivatePayload::MessageHistorySource { .. }
+            | PrivatePayload::MessageHistoryRequest { .. }
+            | PrivatePayload::MessageHistoryResult { .. }
+            | PrivatePayload::MessageHistoryCancel { .. }),
+        ) => {
+            let accepted = match message_history_protocol::apply_event(
+                conn,
+                &producer.to_string(),
+                historical,
+                envelope.key_epoch,
+                &payload,
+            ) {
+                Ok(accepted) => accepted,
+                Err(Error::InvalidRequest(_)) => false,
+                Err(error) => return Err(error),
+            };
+            if !accepted {
+                return Ok(Some(Q::InvalidPayload));
+            }
         }
         _ => return Ok(Some(Q::InvalidPayload)),
     }
@@ -6238,6 +6352,16 @@ fn is_contact_payload(payload: &PrivatePayload) -> bool {
     )
 }
 
+fn is_message_history_payload(payload: &PrivatePayload) -> bool {
+    matches!(
+        payload,
+        PrivatePayload::MessageHistorySource { .. }
+            | PrivatePayload::MessageHistoryRequest { .. }
+            | PrivatePayload::MessageHistoryResult { .. }
+            | PrivatePayload::MessageHistoryCancel { .. }
+    )
+}
+
 /// Decides whether `payload` carries compaction metadata. Notifications and app filters fall
 /// back to legacy header-free events until compaction is ready (they join the frontier and are
 /// referenced later). Contact producers never start an uncompactable history: they fail closed
@@ -6249,11 +6373,12 @@ fn compaction_plan(
     payload: &PrivatePayload,
 ) -> Result<Option<CompactionPlan>, Error> {
     let contact = is_contact_payload(payload);
+    let message_history = is_message_history_payload(payload);
     let Some((domain, parts, terminal)) = compaction_group(payload)? else {
         return Ok(None);
     };
     if purpose != EnvelopePurpose::Event {
-        return if contact {
+        return if contact || message_history {
             Err(Error::InvalidRequest("contact event purpose"))
         } else {
             Ok(None)
@@ -6276,9 +6401,9 @@ fn compaction_plan(
                 terminal,
             }))
         }
-        _ if !contact => Ok(None),
+        _ if !contact && !message_history => Ok(None),
         (false, ..) => Err(Error::InvalidRequest(
-            "contact sync requires a compaction-capable server",
+            "retained control requires a compaction-capable server",
         )),
         (true, None, _) => Err(Error::KeysUnavailable),
         (true, Some(_), false) if backfill_unreadable(conn, ctx)? > 0 => {
@@ -6391,6 +6516,29 @@ fn compaction_group(
                 Some("completed" | "blocked" | "failed" | "expired")
             ),
         ),
+        PrivatePayload::MessageHistorySource { source } => (
+            b"message-history-source",
+            vec![text(source, "producer")?],
+            false,
+        ),
+        PrivatePayload::MessageHistoryRequest { request } => (
+            b"message-history-request",
+            vec![text(request, "request_id")?],
+            true,
+        ),
+        PrivatePayload::MessageHistoryResult { result } => (
+            b"message-history-result",
+            vec![text(result, "request_id")?],
+            matches!(
+                result.get("state").and_then(serde_json::Value::as_str),
+                Some("completed" | "partial" | "blocked" | "failed" | "expired" | "cancelled")
+            ),
+        ),
+        PrivatePayload::MessageHistoryCancel { cancel } => (
+            b"message-history-cancel",
+            vec![text(cancel, "request_id")?],
+            true,
+        ),
         _ => return Ok(None),
     }))
 }
@@ -6446,6 +6594,22 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             .get("request_id")
             .and_then(serde_json::Value::as_str)
             .map(|id| format!("contact-scan:{id}")),
+        PrivatePayload::MessageHistorySource { source } => source
+            .get("producer")
+            .and_then(serde_json::Value::as_str)
+            .map(|producer| format!("message-history-source:{producer}")),
+        PrivatePayload::MessageHistoryRequest { request } => request
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| format!("message-history-request:{id}")),
+        PrivatePayload::MessageHistoryResult { result } => result
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| format!("message-history-result:{id}")),
+        PrivatePayload::MessageHistoryCancel { cancel } => cancel
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| format!("message-history-cancel:{id}")),
         _ => None,
     }
 }
@@ -6726,7 +6890,11 @@ pub(crate) fn outbox_priority(purpose: EnvelopePurpose, payload: &PrivatePayload
         | PrivatePayload::ContactEditRequest { .. }
         | PrivatePayload::ContactEditResult { .. }
         | PrivatePayload::ContactScanRequest { .. }
-        | PrivatePayload::ContactScanResult { .. } => 2,
+        | PrivatePayload::ContactScanResult { .. }
+        | PrivatePayload::MessageHistorySource { .. }
+        | PrivatePayload::MessageHistoryRequest { .. }
+        | PrivatePayload::MessageHistoryResult { .. }
+        | PrivatePayload::MessageHistoryCancel { .. } => 2,
         PrivatePayload::Message(message) if message.imported => 3,
         PrivatePayload::MmsMessage { message, .. } if message.imported => 3,
         _ => 1,

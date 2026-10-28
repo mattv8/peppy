@@ -2,9 +2,9 @@ import type {
   AppLockStatus, AttachmentView, BridgeError, ContactBookView, ContactEditOutcome,
   ContactEditRequestInput, ContactEditStatus, ContactScanStatus, ContactSyncStatus, ContactView,
   DesktopBridge, DesktopSnapshot, DeviceRosterView, Draft, DraftInput, HistoryPage,
-  LocalSearchPage, LocalSearchRequest, MediaCursor, MediaOpen, MediaPage, MessageWindow,
+  HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MediaCursor, MediaOpen, MediaPage, MessageWindow,
   MessageWindowRequest, NotificationPreferences, NotificationTarget, PublicCopy,
-  RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput,
+  RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
@@ -435,6 +435,10 @@ export class BrowserBridge implements DesktopBridge {
   }
   public search_local(input: LocalSearchRequest): Promise<LocalSearchPage> { return this.call("search_local", input); }
   public advance_search_index(input?: { budgetRows?: number }): Promise<SearchIndexProgress> { return this.call("advance_search_index", input ?? {}); }
+  /** Query-free: each command forwards only the operation or attempt identity, never extra renderer fields. */
+  public get_history_search(): Promise<HistorySearchSnapshot> { return this.call("get_history_search"); }
+  public start_history_search(input: StartHistorySearchInput): Promise<HistorySearchSnapshot> { return this.call("start_history_search", { operationId: input.operationId }); }
+  public cancel_history_search(input: HistorySearchAttemptInput): Promise<HistorySearchSnapshot> { return this.call("cancel_history_search", { attemptId: input.attemptId }); }
   public load_message_window(input: MessageWindowRequest): Promise<MessageWindow> { return this.call("load_message_window", input); }
   public load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage> { return this.call("load_history", { conversationId, beforeMessageId }); }
   public save_draft(input: DraftInput): Promise<Draft> { return this.call("save_draft", { input }); }

@@ -89,6 +89,18 @@ pub struct NativeGatewayPolicyDecision {
     pub rcs_supported: bool,
 }
 
+/// Android's local message-history source facts. The provider UUID stays on this device; the host
+/// never states exhaustion, which Rust derives from durable history evidence.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeMessageHistorySourceFacts {
+    pub provider_generation: String,
+    pub sms: bool,
+    pub mms: bool,
+    pub permission: bool,
+    pub policy: bool,
+    pub force_republish: bool,
+}
+
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeOpenConfig {
     pub database_path: String,
@@ -1510,6 +1522,62 @@ impl NativeClient {
             capture_mms: decision.capture_mms,
             transfer_media: decision.transfer_media,
             rcs_supported: decision.rcs_supported,
+        })
+    }
+
+    /// Android-only local admission: provider UUIDs stay local while core maps
+    /// them to the protocol's decimal control generation.
+    pub fn publish_message_history_capture_source(
+        &self,
+        facts: NativeMessageHistorySourceFacts,
+    ) -> Result<String, MobileBindingsError> {
+        let input = serde_json::json!({
+            "providerGeneration": facts.provider_generation,
+            "sms": facts.sms,
+            "mms": facts.mms,
+            "permission": facts.permission,
+            "policy": facts.policy,
+            "forceRepublish": facts.force_republish,
+        });
+        with_client(&self.client, |client| {
+            client.publish_message_history_capture_source(&input.to_string())
+        })
+    }
+
+    pub fn pending_message_history_capture_requests(
+        &self,
+        provider_generation: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.pending_message_history_capture_requests(&provider_generation)
+        })
+    }
+
+    pub fn begin_message_history_capture(
+        &self,
+        provider_generation: String,
+        transport: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.begin_message_history_capture(&provider_generation, &transport)
+        })
+    }
+
+    pub fn finish_message_history_capture(
+        &self,
+        input: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.finish_message_history_capture(&input)
+        })
+    }
+
+    pub fn drain_message_history_capture_results(
+        &self,
+        provider_generation: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.drain_message_history_capture_results(&provider_generation)
         })
     }
 

@@ -11,10 +11,11 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::{
-    Client, Cursor, EnvelopePurpose, KeyProfile, RawSnapshotRecord, SnapshotPurpose,
-    VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH, MAX_SNAPSHOT_PAGE,
+    Client, Cursor, EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile,
+    RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH,
+    MAX_SNAPSHOT_PAGE,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 use std::{sync::Arc, time::Duration};
 use tokio::time::{sleep, timeout, Instant};
@@ -199,6 +200,27 @@ struct RawRecord {
 #[derive(Deserialize)]
 struct EventsPage {
     events: Vec<RawRecord>,
+    #[serde(default)]
+    high_water_cursor: Option<String>,
+    /// Presence is material: old servers omit this, while a current terminal page says null.
+    #[serde(default, deserialize_with = "deserialize_next_after")]
+    next_after: OptionalField<Option<String>>,
+}
+
+#[derive(Default)]
+enum OptionalField<T> {
+    #[default]
+    Missing,
+    Present(T),
+}
+
+fn deserialize_next_after<'de, D>(
+    deserializer: D,
+) -> Result<OptionalField<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(OptionalField::Present)
 }
 #[derive(Deserialize)]
 struct SnapshotStart {
@@ -476,6 +498,7 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
         let after = blocking(move || c.receive_cursor().map_err(core_error))
             .await?
             .0;
+        let contexts = history_sync_contexts(session).await.unwrap_or_default();
         let page: EventsPage = match session
             .api
             .get_json(
@@ -497,14 +520,102 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
             Err(error) => return Err(error.into()),
         };
         let count = page.events.len();
+        let proof =
+            page.high_water_cursor
+                .as_ref()
+                .map(|high_water_cursor| HistorySearchReplayProof {
+                    context: peppy_client_core::HistorySearchSyncContext {
+                        started_at_ms: 0,
+                        snapshot_generation: 0,
+                    },
+                    high_water_cursor: high_water_cursor.clone(),
+                    next_after_present: matches!(page.next_after, OptionalField::Present(_)),
+                    terminal_next_after: matches!(page.next_after, OptionalField::Present(None)),
+                });
         if count == 0 {
+            let _ = observe_history_replay(session, contexts, proof).await;
             break;
         }
         ingest_page(session, page.events).await?;
         drain_apply(session, APPLY_STEPS).await?;
+        let _ = observe_history_replay(session, contexts, proof).await;
         pages += 1;
         if count < limit {
             break;
+        }
+    }
+    Ok(())
+}
+
+async fn history_sync_contexts(
+    session: &Arc<Session>,
+) -> BridgeResult<Vec<(uuid::Uuid, peppy_client_core::HistorySearchSyncContext)>> {
+    let attempts = session.active_history_attempts();
+    if attempts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = client(session);
+    match blocking(move || client.history_search_sync_context().map_err(core_error)).await {
+        Ok(context) => Ok(attempts
+            .into_iter()
+            .map(|attempt| (attempt, context.clone()))
+            .collect()),
+        Err(error) => {
+            eprintln!("peppy: history-search context failed: {}", error.code);
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn handle_history_observation_error(session: &Session, attempt: uuid::Uuid, error: &BridgeError) {
+    eprintln!("peppy: history-search observation failed: {}", error.code);
+    if error.code == "not-found" {
+        session.finish_history_attempt(attempt);
+    }
+}
+
+async fn observe_history_replay(
+    session: &Arc<Session>,
+    contexts: Vec<(uuid::Uuid, peppy_client_core::HistorySearchSyncContext)>,
+    proof: Option<HistorySearchReplayProof>,
+) -> BridgeResult<()> {
+    for (attempt, context) in contexts {
+        if session.cancel.is_cancelled() {
+            break;
+        }
+        let facts = HistorySearchSyncFacts {
+            proof: proof.clone().map(|mut proof| {
+                proof.context = context;
+                proof
+            }),
+        };
+        let client = client(session);
+        match blocking(move || {
+            client
+                .observe_history_search_sync(attempt, facts)
+                .map_err(core_error)
+        })
+        .await
+        {
+            Ok(_) => session.notify(),
+            Err(error) => handle_history_observation_error(session, attempt, &error),
+        }
+    }
+    Ok(())
+}
+
+async fn observe_history_progress(session: &Arc<Session>) -> BridgeResult<()> {
+    for attempt in session.active_history_attempts() {
+        let client = client(session);
+        match blocking(move || {
+            client
+                .observe_history_search_sync(attempt, HistorySearchSyncFacts::default())
+                .map_err(core_error)
+        })
+        .await
+        {
+            Ok(_) => session.notify(),
+            Err(error) => handle_history_observation_error(session, attempt, &error),
         }
     }
     Ok(())
@@ -1098,6 +1209,7 @@ pub(crate) async fn pause_live(session: &Arc<Session>, delay: Duration) -> bool 
         _ = session.cancel.cancelled() => false,
         _ = sleep(delay) => true,
         _ = session.reconnect_wake.notified() => true,
+        _ = session.replay_wake.notified() => true,
     }
 }
 
@@ -1266,6 +1378,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
             _ = session.cancel.cancelled() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Cancelled }
             // A manual contact repair runs in the next HTTP round.
             _ = session.repair_wake.notified() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Resync }
+            _ = session.replay_wake.notified() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Resync }
             _ = liveness.tick() => {
                 let idle = last_frame.elapsed();
                 if idle > WS_IDLE_LIMIT {
@@ -1314,6 +1427,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                         if drain_apply(session, APPLY_STEPS).await.is_err() {
                             return ended("core");
                         }
+                        let _ = observe_history_progress(session).await;
                     }
                     "resync_required" => return WsEnd::Resync,
                     "presence_changed" => {
@@ -1420,6 +1534,48 @@ mod transport_status_tests {
             })
             .code,
             "server-rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_history_attempt_does_not_abort_a_healthy_observation() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        let healthy = session
+            .client
+            .start_history_search(uuid::Uuid::new_v4())
+            .unwrap()
+            .attempt_id
+            .unwrap();
+        let missing = uuid::Uuid::new_v4();
+        session.attach_history_interest(missing, "missing");
+        session.attach_history_interest(healthy, "healthy");
+
+        observe_history_progress(&session).await.unwrap();
+
+        assert!(session.history_attempt_token(missing).is_none());
+        assert!(session.history_attempt_token(healthy).is_some());
+        assert_eq!(
+            session
+                .client
+                .history_search_status(Some(healthy))
+                .unwrap()
+                .attempt_id,
+            Some(healthy)
+        );
+    }
+
+    #[test]
+    fn replay_page_preserves_next_after_presence() {
+        let missing: EventsPage = serde_json::from_str(r#"{"events":[]}"#).unwrap();
+        let terminal: EventsPage =
+            serde_json::from_str(r#"{"events":[],"next_after":null}"#).unwrap();
+        let more: EventsPage = serde_json::from_str(r#"{"events":[],"next_after":"42"}"#).unwrap();
+
+        assert!(matches!(missing.next_after, OptionalField::Missing));
+        assert!(matches!(terminal.next_after, OptionalField::Present(None)));
+        assert!(
+            matches!(more.next_after, OptionalField::Present(Some(ref cursor)) if cursor == "42")
         );
     }
 }

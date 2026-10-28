@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { HistorySearchAttemptInput, StartHistorySearchInput } from "@peppy/desktop-ui/bridge-contracts";
 import { BrowserBridge, parseVaultRequestSnapshot } from "./browser-bridge";
 
 class TestPort {
@@ -141,6 +142,29 @@ describe("BrowserBridge", () => {
     await expect(search).resolves.toMatchObject({ query: "hello" });
     await expect(index).resolves.toMatchObject({ processed: 100 });
     await expect(window).resolves.toMatchObject({ conversationId: "conversation-1" });
+    bridge.dispose();
+  });
+
+  it("forwards history search commands with only the operation or attempt identity", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const operationId = "018f2c5e-6a3b-7c4d-8e5f-0123456789ab";
+    const attemptId = "018f2c5e-6a3b-7c4d-8e5f-0123456789ac";
+    const snapshot = { state: "idle", canSearchFurther: false, progressVersion: "0", indexVersion: "0" };
+    const read = bridge.get_history_search();
+    const started = bridge.start_history_search({ operationId, query: "private search text" } as StartHistorySearchInput);
+    const cancelled = bridge.cancel_history_search({ attemptId, query: "private search text" } as HistorySearchAttemptInput);
+    expect(port.sent).toEqual([
+      { id: 1, command: "get_history_search", args: {} },
+      { id: 2, command: "start_history_search", args: { operationId } },
+      { id: 3, command: "cancel_history_search", args: { attemptId } },
+    ]);
+    port.reply({ id: 1, ok: true, value: snapshot });
+    port.reply({ id: 2, ok: true, value: snapshot });
+    port.reply({ id: 3, ok: true, value: snapshot });
+    await expect(read).resolves.toEqual(snapshot);
+    await expect(started).resolves.toEqual(snapshot);
+    await expect(cancelled).resolves.toEqual(snapshot);
     bridge.dispose();
   });
 

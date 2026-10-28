@@ -1,7 +1,8 @@
 use peppy_desktop_api::{
-    AdvanceSearchIndexInputView, LocalSearchHitView, LocalSearchPageView, LocalSearchRequestView,
-    MessageWindowRequestView, MessageWindowView, SearchHasMoreView, SearchIndexProgressView,
-    SearchIndexStateView, SearchKind,
+    AdvanceSearchIndexInputView, HistorySearchAttemptInput, HistorySearchReason,
+    HistorySearchSnapshot, HistorySearchState, LocalSearchHitView, LocalSearchPageView,
+    LocalSearchRequestView, MessageWindowRequestView, MessageWindowView, SearchHasMoreView,
+    SearchIndexProgressView, SearchIndexStateView, SearchKind, StartHistorySearchInput,
 };
 use std::{env, fs, path::Path};
 use ts_rs::TS;
@@ -18,6 +19,11 @@ fn contracts() -> String {
         SearchIndexProgressView::decl(),
         MessageWindowRequestView::decl(),
         MessageWindowView::<()>::decl(),
+        HistorySearchState::decl(),
+        HistorySearchReason::decl(),
+        HistorySearchSnapshot::decl(),
+        StartHistorySearchInput::decl(),
+        HistorySearchAttemptInput::decl(),
     ]
     .join("\n")
     .replace("type ", "export type ");

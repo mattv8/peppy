@@ -170,9 +170,127 @@ class MmsBackfillScannerTest {
         assertFalse(budgetOnlyMore)
     }
 
+    @Test fun admittedHistoryClampsExistingPageThenFinishesAfterCheckpoint() {
+        val calls = mutableListOf<String>()
+        val admission = object : MmsHistoryCaptureAdmission {
+            override fun begin() = MessageHistoryRequestCoordinator.Admission("token", 7)
+            override fun finish(admission: MessageHistoryRequestCoordinator.Admission, observations: Int, exhausted: Boolean, reason: String?) {
+                calls += "finish:$observations:$exhausted:${reason ?: "none"}"
+            }
+        }
+        val core = FakeCore(listOf(MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, "3", "9", false, false, 50)))
+
+        MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "9", 1L, idle,
+            scanPage = { plan ->
+                assertEquals(7, plan.budget)
+                calls += "scan"
+                MmsBackfillPageResult("5", exhausted = true, more = false, observations = 6)
+            },
+            recheck = { error("unused") },
+            historyAdmission = admission,
+        )
+
+        assertEquals(listOf(MmsBackfillPhase.HISTORY to "5"), core.advanced)
+        assertEquals(listOf("9"), core.finished)
+        assertEquals(listOf("scan", "finish:6:true:none"), calls)
+    }
+
+
+    @Test fun admittedHistorySettlesAfterDurableCallsEvenWhenCoreReportsNotExhausted() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(
+            listOf(MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, "3", "9", false, false, 50)),
+            finishResult = false,
+            calls = calls,
+        )
+        val admission = recordingAdmission(calls)
+
+        MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "9", 1L, idle,
+            scanPage = {
+                calls += "scan"
+                MmsBackfillPageResult("5", exhausted = false, more = true, observations = 7)
+            },
+            recheck = { error("unused") },
+            historyAdmission = admission,
+        )
+
+        assertEquals(listOf("begin", "scan", "advance", "core-finish", "finish:7:false:none"), calls)
+    }
+
+    @Test fun admittedHistorySettlesProviderFailureBeforeRethrowingScanError() {
+        val calls = mutableListOf<String>()
+        val failure = IllegalStateException("provider failed")
+
+        val thrown = runCatching {
+            MmsBackfillScanner(FakeCore(listOf(MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, "3", "9", false, false, 50)))).run(
+                "generation", "scope", MmsLegacyBackfillState(null, null, null), "9", 1L, idle,
+                scanPage = { throw failure },
+                recheck = { error("unused") },
+                historyAdmission = recordingAdmission(calls),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(thrown === failure)
+        assertEquals(listOf("begin", "finish:0:false:provider_error"), calls)
+    }
+
+    @Test fun checkpointFailureSettlesStorageErrorBeforeRethrowing() {
+        val calls = mutableListOf<String>()
+        val failure = IllegalStateException("checkpoint failed")
+        val delegate = FakeCore(listOf(MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, "3", "9", false, false, 50)))
+        val core = object : MmsBackfillCore by delegate {
+            override fun advance(generation: String, scope: String, phase: MmsBackfillPhase, providerId: String) {
+                throw failure
+            }
+        }
+
+        val thrown = runCatching {
+            MmsBackfillScanner(core).run(
+                "generation", "scope", MmsLegacyBackfillState(null, null, null), "9", 1L, idle,
+                scanPage = { MmsBackfillPageResult("5", exhausted = false, more = true, observations = 4) },
+                recheck = { error("unused") },
+                historyAdmission = recordingAdmission(calls),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(thrown === failure)
+        assertEquals(listOf("begin", "finish:4:false:storage_error"), calls)
+    }
+
+    @Test fun pausedAndCompleteHistoryPlansSettleZeroWorkAdmissions() {
+        val calls = mutableListOf<String>()
+        val plans = listOf(
+            MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, null, "9", false, true, 50),
+            MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, null, "9", true, false, 50),
+        )
+
+        MmsBackfillScanner(FakeCore(plans)).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "9", 1L, idle,
+            scanPage = { error("zero-work plans must not scan") },
+            recheck = { error("unused") },
+            historyAdmission = recordingAdmission(calls),
+        )
+
+        assertEquals(
+            listOf("begin", "finish:0:false:capacity", "begin", "finish:0:true:none"),
+            calls,
+        )
+    }
+
+    private fun recordingAdmission(calls: MutableList<String>) = object : MmsHistoryCaptureAdmission {
+        override fun begin() = MessageHistoryRequestCoordinator.Admission("token", 100).also { calls += "begin" }
+        override fun finish(admission: MessageHistoryRequestCoordinator.Admission, observations: Int, exhausted: Boolean, reason: String?) {
+            calls += "finish:$observations:$exhausted:${reason ?: "none"}"
+        }
+    }
+
     private class FakeCore(
         private val plans: List<MmsBackfillScanPlan>,
         private val rechecks: MmsBackfillRecheck = MmsBackfillRecheck(emptyList(), 32),
+        private val finishResult: Boolean = true,
+        private val calls: MutableList<String>? = null,
     ) : MmsBackfillCore {
         var migrations = 0
         val advanced = mutableListOf<Pair<MmsBackfillPhase, String>>()
@@ -180,8 +298,15 @@ class MmsBackfillScannerTest {
         val outcomes = mutableListOf<Pair<String, MmsBackfillRecheckOutcome>>()
         override fun migrate(generation: String, scope: String, legacy: MmsLegacyBackfillState) { migrations++ }
         override fun plans(generation: String, scope: String, observedMaxId: String) = plans
-        override fun advance(generation: String, scope: String, phase: MmsBackfillPhase, providerId: String) { advanced += phase to providerId }
-        override fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean): Boolean { finished += bound; return true }
+        override fun advance(generation: String, scope: String, phase: MmsBackfillPhase, providerId: String) {
+            calls?.add("advance")
+            advanced += phase to providerId
+        }
+        override fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean): Boolean {
+            calls?.add("core-finish")
+            finished += bound
+            return finishResult
+        }
         override fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions) = rechecks
         override fun recordRecheckOutcome(acquisitionId: String, nowMs: Long, outcome: MmsBackfillRecheckOutcome, conditions: MmsBackfillRecheckConditions) {
             outcomes += acquisitionId to outcome

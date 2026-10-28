@@ -124,6 +124,8 @@ data class SmsCaptureSummary(
     val advanced: Boolean = false,
     /** Diagnostic-only aggregate: the bounded pass stopped because its time budget elapsed. */
     val budgetExhausted: Boolean = false,
+    /** Provider rows observed by the live/history scan, excluding pending-acquisition rechecks. */
+    val scanObservations: Int = 0,
 )
 
 /** Host-owned binding from scheduled Android work to the generated core adapter. */
@@ -363,6 +365,15 @@ internal object SmsCapture {
         nanoTime: () -> Long = System::nanoTime,
     ): SmsCaptureSummary = runInternal(plan, core, provider, nanoTime, recheckPending = true)
 
+    /** Runs pending rechecks first, then lets the caller admit and bound the provider scan. */
+    fun runAfterPendingRecheck(
+        plan: SmsCapturePlan,
+        core: SmsCaptureCore,
+        provider: SmsCaptureProvider,
+        prepareScan: (SmsCapturePlan) -> SmsCapturePlan,
+        nanoTime: () -> Long = System::nanoTime,
+    ): SmsCaptureSummary = runInternal(plan, core, provider, nanoTime, recheckPending = true, prepareScan = prepareScan)
+
     /** A multi-plan host invocation reconciles global pending rows exactly once. */
     fun runWithoutPendingRecheck(
         plan: SmsCapturePlan,
@@ -410,6 +421,7 @@ internal object SmsCapture {
         provider: SmsCaptureProvider,
         nanoTime: () -> Long,
         recheckPending: Boolean,
+        prepareScan: (SmsCapturePlan) -> SmsCapturePlan = { it },
     ): SmsCaptureSummary {
         val deadline = nanoTime() + PASS_BUDGET_NANOS
         fun expired() = nanoTime() >= deadline
@@ -419,22 +431,23 @@ internal object SmsCapture {
                     recheckPending(plan.pendingRecheckCursor, core, provider, ::expired)
                 }.also { captureProgress(SyncDiagnosticStage.SMS_RECHECK, it) }
             } else SmsCaptureSummary()
+            val preparedPlan = prepareScan(plan)
             val budgetExpired = expired()
             when {
                 // A capacity-paused history plan still lets the pending queue drain above.
-                plan.paused -> rechecked.copy(
+                preparedPlan.paused -> rechecked.copy(
                     paused = rechecked.paused + 1,
                     more = rechecked.more || budgetExpired,
                     budgetExhausted = rechecked.budgetExhausted || budgetExpired,
                 )
-                budgetExpired || plan.historyComplete || rechecked.coreError || rechecked.providerError -> rechecked.copy(
+                budgetExpired || preparedPlan.historyComplete || rechecked.coreError || rechecked.providerError -> rechecked.copy(
                     more = rechecked.more || budgetExpired,
                     budgetExhausted = rechecked.budgetExhausted || budgetExpired,
                 )
                 else -> {
-                    val stage = if (plan.imported) SyncDiagnosticStage.SMS_HISTORY else SyncDiagnosticStage.SMS_LIVE
+                    val stage = if (preparedPlan.imported) SyncDiagnosticStage.SMS_HISTORY else SyncDiagnosticStage.SMS_LIVE
                     val scanned = captureTimed(stage) {
-                        scan(plan, core, provider, ::expired)
+                        scan(preparedPlan, core, provider, ::expired)
                     }
                     captureProgress(stage, scanned)
                     merge(rechecked, scanned)
@@ -502,7 +515,10 @@ internal object SmsCapture {
             } else {
                 provider.page(requireNotNull(cursor), pageLimit)
             }
-            result = result.copy(rowsQueried = result.rowsQueried + page.records.size)
+            result = result.copy(
+                rowsQueried = result.rowsQueried + page.records.size,
+                scanObservations = result.scanObservations + page.records.size,
+            )
             for (row in page.records) {
                 if (plan.historyUpperBound != null && row.id > plan.historyUpperBound) {
                     historyExhausted = plan.imported
@@ -538,6 +554,10 @@ internal object SmsCapture {
             } else {
                 provider.page(requireNotNull(cursor), 1)
             }
+            result = result.copy(
+                rowsQueried = result.rowsQueried + probe.records.size,
+                scanObservations = result.scanObservations + probe.records.size,
+            )
             historyExhausted = probe.records.isEmpty() || (!descending && probe.records.first().id > requireNotNull(plan.historyUpperBound))
         }
         return result.copy(
@@ -657,6 +677,7 @@ internal object SmsCapture {
         right.pendingRecheckCursor ?: left.pendingRecheckCursor, left.historyExhausted || right.historyExhausted,
         left.coreError || right.coreError, left.processed + right.processed, left.rowsQueried + right.rowsQueried, left.advanced || right.advanced,
         left.budgetExhausted || right.budgetExhausted,
+        left.scanObservations + right.scanObservations,
     )
 
     private data class Outcome(val providerDurable: Boolean, val captured: Int = 0, val pending: Int = 0, val unavailable: Int = 0, val paused: Int = 0, val providerError: Boolean = false, val coreError: Boolean = false) {

@@ -84,6 +84,8 @@ export interface BrowserNetwork {
   subscribeChanges?(listener: () => void): () => void;
   retryAttachment?(id: string): void;
   wake?(): void;
+  startHistorySearch?(attemptId: string): void;
+  stopHistorySearch?(attemptId: string): void;
   unlockNewEpoch?(passphrase: string): Promise<void>;
   epochStatus?(): "epoch-mismatch" | "needs-unlock" | undefined;
 }
@@ -133,6 +135,8 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   load_message_window: { coreCommand: "load_message_window", mutation: false },
   media_sync_request: { coreCommand: "media_sync_request", mutation: true },
 };
+
+const HISTORY_COMMANDS = new Set(["get_history_search", "start_history_search", "cancel_history_search"]);
 
 const NATIVE_ONLY = new Set([
   "configure_server", "get_app_lock_status", "set_app_lock", "unlock_app", "pick_attachments",
@@ -235,6 +239,16 @@ function safeErrorId(value: unknown): value is string {
 
 function safeRevision(value: unknown): value is string {
   return typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n;
+}
+
+function canonicalUuid(value: unknown): string | undefined {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) return undefined;
+  return value === "00000000-0000-0000-0000-000000000000" ? undefined : value;
+}
+
+function historyAttemptId(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  return canonicalUuid((value as Record<string, unknown>).attemptId);
 }
 
 function requestId(value: unknown): number {
@@ -584,6 +598,8 @@ export class BrowserWorkerHost {
   private presenter?: BannerPresenter;
   private presentationPort?: BrowserPort;
   private readonly mediaLeases = new Map<BrowserPort, Map<string, number>>();
+  /** View-local interest only; core retains admitted work after a port detaches. */
+  private readonly historyAttempts = new Map<BrowserPort, string>();
   private searchIndexTimer?: ReturnType<typeof setTimeout>;
   private searchIndexInFlight = false;
   private searchIndexLastCompletedAt?: number;
@@ -636,6 +652,7 @@ export class BrowserWorkerHost {
       for (const port of this.ports) { port.postMessage({ event: "stopped", reason }); port.close(); }
       this.ports.clear();
       this.mediaLeases.clear();
+      this.historyAttempts.clear();
       try { await this.owner?.release(); } catch {}
     } finally { this.dependencies.terminate?.(); }
   }
@@ -667,6 +684,7 @@ export class BrowserWorkerHost {
       try { await this.releasePortMedia(port); } catch {} finally {
         this.ports.delete(port);
         this.mediaLeases.delete(port);
+        this.detachHistoryAttempt(port);
         if (this.presentationPort === port) { this.presentationPort = undefined; this.presenter?.clear(); }
         port.postMessage({ event: "stopped", reason: "disconnected" });
         port.close();
@@ -718,6 +736,11 @@ export class BrowserWorkerHost {
       if (this.ports.has(port)) port.postMessage(response);
       return;
     }
+    if (validRequest(request) && HISTORY_COMMANDS.has(request.command)) {
+      const response = await this.historySearch(port, request);
+      if (this.ports.has(port)) port.postMessage(response);
+      return;
+    }
     const generation = this.visibleGeneration();
     const command = validRequest(request) ? request.command : undefined;
     let response: RpcResponse;
@@ -755,6 +778,56 @@ export class BrowserWorkerHost {
     if (response.ok && command === "search_local") {
       this.recordSearchIndexState(response.value);
       if (isIndexing(response.value)) this.scheduleSearchIndex();
+    }
+  }
+
+  private async historySearch(port: BrowserPort, request: RpcRequest): Promise<RpcResponse> {
+    const session = this.owner?.owner;
+    if (!session || session.phase !== "ready") return { id: request.id, ok: false, error: { code: "locked", message: "Browser session is not ready." } };
+    try {
+      if (request.command === "get_history_search") {
+        if (Object.keys(request.args).length !== 0) throw { code: "invalid-request" };
+        return { id: request.id, ok: true, value: await session.query("get_history_search", this.historyArgs(port)) };
+      }
+      if (request.command === "start_history_search") {
+        const operationId = canonicalUuid(request.args.operationId);
+        if (Object.keys(request.args).length !== 1 || !operationId) throw { code: "invalid-request" };
+        const value = await this.historyMutation(session, "start_history_search", { operationId });
+        const attemptId = historyAttemptId(value);
+        if (attemptId && this.ports.has(port)) {
+          this.historyAttempts.set(port, attemptId);
+          this.dependencies.network?.startHistorySearch?.(attemptId);
+        }
+        this.changed();
+        return { id: request.id, ok: true, value };
+      }
+      const attemptId = canonicalUuid(request.args.attemptId);
+      if (Object.keys(request.args).length !== 1 || !attemptId || this.historyAttempts.get(port) !== attemptId) throw { code: "invalid-request" };
+      const value = await this.historyMutation(session, "cancel_history_search", { attemptId });
+      this.detachHistoryAttempt(port);
+      this.changed();
+      return { id: request.id, ok: true, value };
+    } catch (error: unknown) {
+      return { id: request.id, ok: false, error: errorFor(error) };
+    }
+  }
+
+  private historyArgs(port: BrowserPort): Record<string, unknown> {
+    const attemptId = this.historyAttempts.get(port);
+    return attemptId ? { attemptId } : {};
+  }
+
+  private async historyMutation(session: HostSession, command: string, args: Record<string, unknown>): Promise<CoreResult> {
+    this.dispatchesInFlight += 1;
+    try { return await session.mutate(command, args); }
+    finally { this.dispatchesInFlight -= 1; }
+  }
+
+  private detachHistoryAttempt(port: BrowserPort): void {
+    const attemptId = this.historyAttempts.get(port);
+    this.historyAttempts.delete(port);
+    if (attemptId && ![...this.historyAttempts.values()].includes(attemptId)) {
+      this.dependencies.network?.stopHistorySearch?.(attemptId);
     }
   }
 
@@ -1119,6 +1192,8 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     network: {
       async start() { if (polling || !scheduler) return; polling = true; schedulePoll(); },
       wake() { void scheduler?.poll().catch(() => undefined); },
+       startHistorySearch(attemptId) { scheduler?.trackHistorySearch(attemptId); void scheduler?.poll().catch(() => undefined); },
+       stopHistorySearch(attemptId) { scheduler?.untrackHistorySearch(attemptId); },
       retryAttachment(id) { scheduler?.retryAttachment(id); },
       async unlockNewEpoch(passphrase) { if (!scheduler) throw { code: "unavailable" }; await scheduler.unlockNewEpoch(passphrase); },
       epochStatus() { const state = scheduler?.epochStatus?.state; return state === "epoch-mismatch" || state === "needs-unlock" ? state : undefined; },

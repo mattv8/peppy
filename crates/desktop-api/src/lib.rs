@@ -13,6 +13,8 @@ pub mod gateways;
 pub mod images;
 pub mod search;
 pub use search::*;
+pub mod search_history;
+pub use search_history::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

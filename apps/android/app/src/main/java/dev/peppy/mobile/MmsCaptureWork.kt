@@ -237,7 +237,13 @@ internal object MmsCapture {
             charging = context.getSystemService(BatteryManager::class.java)?.isCharging == true,
             providerChanged = providerChanged,
         )
-        return run(plan, NativeCore(native), provider, context.noBackupFilesDir)
+        return run(
+            plan,
+            NativeCore(native),
+            provider,
+            context.noBackupFilesDir,
+            onControlPublished = { GatewayWork.enqueueAfterCapture(context.applicationContext) },
+        )
     }
 
     internal fun syncOwnNumberForMmsCapture(
@@ -255,7 +261,13 @@ internal object MmsCapture {
         return true
     }
 
-    internal fun run(plan: MmsCapturePlan, core: MmsCaptureCore, provider: MmsCaptureProvider, tempDirectory: File): MmsCaptureSummary {
+    internal fun run(
+        plan: MmsCapturePlan,
+        core: MmsCaptureCore,
+        provider: MmsCaptureProvider,
+        tempDirectory: File,
+        onControlPublished: () -> Unit = {},
+    ): MmsCaptureSummary {
         var captured = 0
         var pending = 0
         var unavailable = 0
@@ -299,6 +311,9 @@ internal object MmsCapture {
             }
             fun budgetExpired() = System.nanoTime() >= deadline
             val scanner = MmsBackfillScanner(core)
+            val history = (core as? NativeCore)?.let {
+                MessageHistoryRequestCoordinator(it.client, onControlPublished)
+            }
             val highWater = captureMmsStage(MmsDiagnosticStage.HIGH_WATER) { diagnosticProvider.highWater() }
             followup = captureTimed(SyncDiagnosticStage.MMS) {
                 scanner.run(
@@ -343,7 +358,12 @@ internal object MmsCapture {
                         unavailable = result.unavailable,
                         more = result.more,
                     )
-                    MmsBackfillPageResult(result.lastDurableId, result.exhausted, result.more)
+                    MmsBackfillPageResult(
+                        result.lastDurableId,
+                        result.exhausted,
+                        result.more,
+                        observations = result.rowsQueried,
+                    )
                     },
                     recheck = recheck@{ request ->
                     if (budgetExpired()) return@recheck null
@@ -375,6 +395,11 @@ internal object MmsCapture {
                         else -> MmsBackfillRecheckOutcome.TRANSIENT_FAILURE
                     }
                     },
+                    historyAdmission = history?.let { coordinator -> object : MmsHistoryCaptureAdmission {
+                        override fun begin() = coordinator.begin(plan.generation, "mms")
+                        override fun finish(admission: MessageHistoryRequestCoordinator.Admission, observations: Int, exhausted: Boolean, reason: String?) =
+                            coordinator.finish(plan.generation, admission, observations, exhausted, reason)
+                    } },
                 )
             }
             MmsCaptureSummary(captured, pending, unavailable, followup)
@@ -689,7 +714,9 @@ internal object MmsCapture {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun granted(context: Context) = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+    private fun granted(context: Context) =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_MMS) == PackageManager.PERMISSION_GRANTED
     private fun currentHighWater(context: Context): Long = context.contentResolver.query(Uri.parse("content://mms"), arrayOf("_id"), null, null, "_id DESC")?.use { if (it.moveToFirst()) it.getLong(0) else 0L } ?: 0L
 
     private const val INBOX = 1
@@ -726,7 +753,7 @@ internal object MmsCapture {
     )
 }
 
-private class NativeCore(private val client: NativeClientInterface) : MmsCaptureCore {
+private class NativeCore(internal val client: NativeClientInterface) : MmsCaptureCore {
     override fun begin(input: NativeMmsAcquisitionInput) = client.beginMmsAcquisitionOutcome(input)
     override fun requestManualRecheck(generation: String, scope: String, limit: Int) =
         client.requestMmsRecheck(generation, scope, limit.toULong()).toInt()

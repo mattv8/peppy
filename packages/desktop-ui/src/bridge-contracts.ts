@@ -3,6 +3,8 @@
  * cryptographic material, device tokens, or raw filesystem paths.
  */
 import type {
+  HistorySearchAttemptInput,
+  HistorySearchSnapshot,
   LocalSearchHit,
   LocalSearchPage,
   LocalSearchRequest,
@@ -10,8 +12,13 @@ import type {
   MessageWindowRequest,
   SearchIndexProgress,
   SearchKind,
+  StartHistorySearchInput,
 } from "@peppy/generated/local-search";
 export type {
+  HistorySearchAttemptInput,
+  HistorySearchReason,
+  HistorySearchSnapshot,
+  HistorySearchState,
   LocalSearchHit,
   LocalSearchPage,
   LocalSearchRequest,
@@ -20,6 +27,7 @@ export type {
   SearchIndexProgress,
   SearchIndexState,
   SearchKind,
+  StartHistorySearchInput,
 } from "@peppy/generated/local-search";
 
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
@@ -113,6 +121,9 @@ export interface DesktopBridge {
   load_state(conversationId?: string, historyFromMessageId?: string, options?: { metadataOnly?: boolean }): Promise<DesktopSnapshot>;
   search_local(input: LocalSearchRequest): Promise<LocalSearchPage>;
   advance_search_index(input?: { budgetRows?: number }): Promise<SearchIndexProgress>;
+  get_history_search(): Promise<HistorySearchSnapshot>;
+  start_history_search(input: StartHistorySearchInput): Promise<HistorySearchSnapshot>;
+  cancel_history_search(input: HistorySearchAttemptInput): Promise<HistorySearchSnapshot>;
   load_message_window(input: MessageWindowRequest): Promise<MessageWindow>;
   open_external_url?(url: string): Promise<void>;
   load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage>;
