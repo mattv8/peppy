@@ -3,7 +3,7 @@ import type {
   ContactEditRequestInput, ContactEditStatus, ContactScanStatus, ContactSyncStatus, ContactView,
   DesktopBridge, DesktopSnapshot, DeviceRosterView, Draft, DraftInput, HistoryPage,
   HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MediaCursor, MediaOpen, MediaPage, MessageWindow,
-  MessageWindowRequest, NotificationPreferences, NotificationTarget, PublicCopy,
+  MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
@@ -487,7 +487,18 @@ export class BrowserBridge implements DesktopBridge {
   public get_app_lock_status(): Promise<AppLockStatus> { return unsupported("App lock"); }
   public set_app_lock(_enabled: boolean): Promise<boolean> { return unsupported("App lock"); }
   public unlock_app(): Promise<boolean> { return unsupported("App lock"); }
-  public async request_notification_permission(): Promise<"granted" | "denied" | "unknown"> { if (!("Notification" in window)) return "unknown"; const permission = await Notification.requestPermission(); return permission === "default" ? "unknown" : permission; }
+  public async request_notification_permission(): Promise<NotificationCheck> {
+    if (!("Notification" in window)) return { status: "unknown", testSent: false, canOpenSettings: false };
+    const status = await Notification.requestPermission();
+    if (status !== "granted") return { status: status === "default" ? "unknown" : status, testSent: false, canOpenSettings: false };
+    try {
+      new Notification("Peppy", { body: "Test notification: desktop banners are working." });
+      return { status, testSent: true, canOpenSettings: false };
+    } catch {
+      return { status, testSent: false, canOpenSettings: false };
+    }
+  }
+  public open_notification_settings(): Promise<void> { return unsupported("Notification settings"); }
   public async pick_attachments(): Promise<AttachmentView[]> {
     const files = await chooseFile("*/*", true);
     if (files.some((file) => file.size > MAX_FILE_BYTES)) throw new BrowserBridgeError("attachment-too-large", "Attachments must be 32 MiB or smaller.");

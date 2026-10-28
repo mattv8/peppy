@@ -74,6 +74,7 @@ import {
   type MessageView,
   type HistoryPage,
   type AppFilter,
+  type NotificationCheck,
   type NotificationPreferences,
   type PublicCopy,
   type ContactResolutionMap,
@@ -849,6 +850,8 @@ function SettingsView({
   onPreferences,
   onMute,
   onPermission,
+  onOpenSettings,
+  headsSupported,
   onLock,
   appLock,
   onAppLock,
@@ -879,7 +882,9 @@ function SettingsView({
   preferences: NotificationPreferences;
   onPreferences(preferences: NotificationPreferences): Promise<void>;
   onMute(filter: AppFilter): Promise<void>;
-  onPermission(): Promise<"granted" | "denied" | "unknown" | void>;
+  onPermission(): Promise<NotificationCheck | void>;
+  onOpenSettings(): Promise<void>;
+  headsSupported: boolean;
   onLock?: () => Promise<void>;
   appLock: AppLockStatus | null;
   onAppLock(enabled: boolean): Promise<boolean>;
@@ -1065,6 +1070,8 @@ function SettingsView({
         onPreferences={onPreferences}
         onMute={onMute}
         onPermission={onPermission}
+        onOpenSettings={onOpenSettings}
+        headsSupported={headsSupported}
       />
       <section id="settings-theme" className="settings-card" data-settings-section="theme">
         <h2>Appearance</h2>
@@ -3703,10 +3710,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               notifications={snapshot?.notifications ?? []}
               filters={snapshot?.appFilters ?? []}
               sources={snapshot?.gateways ?? []}
-              preferences={snapshot?.notificationPreferences ?? { messageBanners: true, mirroredBanners: true, preview: "full" }}
+              preferences={snapshot?.notificationPreferences ?? { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true }}
               onPreferences={async preferences => { await bridge.set_notification_preferences(preferences); await refresh(); }}
                onMute={async filter => { await bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, filter.muted); await refresh(); }}
-               onPermission={() => bridge.request_notification_permission()}
+              onPermission={() => bridge.request_notification_permission()}
+              onOpenSettings={() => bridge.open_notification_settings()}
+              headsSupported={snapshot?.head.enabled === true}
                onLock={browserHost ? lockSync : undefined}
                appLock={appLock}
                onAppLock={changeAppLock}

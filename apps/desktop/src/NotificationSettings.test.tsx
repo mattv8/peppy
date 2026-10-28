@@ -2,9 +2,13 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { NotificationSettings } from "./NotificationSettings";
-import type { AppFilter, MirroredNotification, NotificationPreferences } from "./bridge";
+import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "./bridge";
 
 afterEach(cleanup);
+
+const CHECK = "Send test notification";
+const MUTE = "Mute while a chat head is open";
+const OPEN = "Open notification settings";
 const preferences: NotificationPreferences = { messageBanners: true, mirroredBanners: true, preview: "full" };
 const filter: AppFilter = { sourceDeviceId: "one", packageName: "chat", appName: "Chat", muted: true };
 const notification: MirroredNotification = {
@@ -12,24 +16,120 @@ const notification: MirroredNotification = {
   packageName: "chat", appName: "Chat", title: "Hello", text: "Text", postedAt: 0,
   dismissible: true, seen: false, dismissalPending: false,
 };
+const check = (status: NotificationCheck["status"], extra: Partial<NotificationCheck> = {}): NotificationCheck =>
+  ({ status, testSent: status !== "denied", canOpenSettings: true, ...extra });
 const props = () => ({
   notifications: [notification], filters: [filter], sources: [{ id: "one", name: "Pixel" }],
-  preferences, onPreferences: vi.fn().mockResolvedValue(undefined),
+  preferences, headsSupported: true, onPreferences: vi.fn().mockResolvedValue(undefined),
   onMute: vi.fn().mockResolvedValue(undefined), onPermission: vi.fn().mockResolvedValue(undefined),
+  onOpenSettings: vi.fn().mockResolvedValue(undefined),
 });
 
 it("shows banner controls when either desktop banner preference is enabled", () => {
   const input = props();
   const { rerender } = render(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: false, mirroredBanners: false }} />);
   expect(screen.queryByLabelText("Banner preview")).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Check desktop notifications" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: CHECK })).not.toBeInTheDocument();
 
   rerender(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: true, mirroredBanners: false }} />);
   expect(screen.getByLabelText("Banner preview")).toBeVisible();
-  expect(screen.getByRole("button", { name: "Check desktop notifications" })).toBeVisible();
+  expect(screen.getByRole("button", { name: CHECK })).toBeVisible();
+});
 
-  rerender(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: false, mirroredBanners: true }} />);
-  expect(screen.getByLabelText("Banner preview")).toBeVisible();
+it("shows the chat-head mute toggle only for SMS/MMS banners on platforms with heads", () => {
+  const input = props();
+  const { rerender } = render(<NotificationSettings {...input} />);
+  expect(screen.getByRole("switch", { name: MUTE })).toBeChecked();
+  expect(screen.getByRole("switch", { name: MUTE })).toHaveAttribute("aria-describedby", "notification-mute-with-heads-hint");
+  rerender(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: false }} />);
+  expect(screen.queryByRole("switch", { name: MUTE })).not.toBeInTheDocument();
+  rerender(<NotificationSettings {...input} headsSupported={false} />);
+  expect(screen.queryByRole("switch", { name: MUTE })).not.toBeInTheDocument();
+});
+
+it("defaults missing muteWithHeads to on and persists a changed choice while saving", async () => {
+  let resolve!: () => void;
+  const input = props();
+  input.onPreferences.mockImplementation(() => new Promise<void>(done => { resolve = done; }));
+  render(<NotificationSettings {...input} />);
+
+  const toggle = screen.getByRole("switch", { name: MUTE });
+  expect(toggle).toBeChecked();
+  fireEvent.click(toggle);
+  expect(input.onPreferences).toHaveBeenCalledWith({ ...preferences, muteWithHeads: false });
+  expect(toggle).toBeDisabled();
+  expect(screen.getByRole("button", { name: CHECK })).toBeDisabled();
+  await act(async () => resolve());
+  expect(toggle).toBeEnabled();
+});
+
+it.each([
+  ["granted", true, /test notification sent.*allowed/i],
+  ["granted", false, /could not be sent/i],
+  ["quiet", true, /deliver quietly.*no banner may pop up/i],
+  ["quiet", false, /deliver quietly.*could not be sent/i],
+  ["denied", true, /turned off for peppy/i],
+  ["unknown", true, /test notification sent.*doesn't report/i],
+  ["unknown", false, /doesn't report.*could not be sent/i],
+] as const)("reports %s notification status honestly", async (status, testSent, expectedStatus) => {
+  const input = props();
+  input.onPermission.mockResolvedValue(check(status, { testSent }));
+  render(<NotificationSettings {...input} />);
+  fireEvent.click(screen.getByRole("button", { name: CHECK }));
+
+  expect(await screen.findByText(expectedStatus)).toBeVisible();
+  expect(screen.getByRole("button", { name: OPEN })).toBeVisible();
+});
+
+it("hides the settings button when the platform has no settings page", async () => {
+  const input = props();
+  input.onPermission.mockResolvedValue(check("unknown", { canOpenSettings: false }));
+  render(<NotificationSettings {...input} />);
+  fireEvent.click(screen.getByRole("button", { name: CHECK }));
+  await screen.findByRole("status");
+  expect(screen.queryByRole("button", { name: OPEN })).not.toBeInTheDocument();
+});
+
+it("shows pending check status and hides the result button until the request resolves", async () => {
+  let resolve!: (result: NotificationCheck) => void;
+  const input = props();
+  input.onPermission.mockImplementation(() => new Promise<NotificationCheck>(done => { resolve = done; }));
+  render(<NotificationSettings {...input} />);
+  fireEvent.click(screen.getByRole("button", { name: CHECK }));
+
+  expect(screen.getByRole("status")).toHaveTextContent("Sending test notification");
+  expect(screen.queryByRole("button", { name: OPEN })).not.toBeInTheDocument();
+  await act(async () => resolve(check("granted")));
+  expect(await screen.findByRole("status")).toHaveTextContent(/allowed to show notifications/i);
+  expect(screen.getByRole("button", { name: OPEN })).toBeVisible();
+});
+
+it("reports check and settings failures while preserving a retryable result", async () => {
+  const input = props();
+  input.onPermission.mockRejectedValueOnce(new Error("failure"));
+  render(<NotificationSettings {...input} />);
+  fireEvent.click(screen.getByRole("button", { name: CHECK }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not send test notification. Try again.");
+
+  input.onPermission.mockResolvedValue(check("denied"));
+  fireEvent.click(screen.getByRole("button", { name: CHECK }));
+  await screen.findByRole("status");
+  input.onOpenSettings.mockRejectedValueOnce(new Error("failure"));
+  fireEvent.click(screen.getByRole("button", { name: OPEN }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not open notification settings.");
+  expect(screen.getByRole("button", { name: OPEN })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: OPEN }));
+  await waitFor(() => expect(input.onOpenSettings).toHaveBeenCalledTimes(2));
+});
+
+it("keeps the stored mute choice over observed defaults and allows unmuting that phone while desktop banners are off", async () => {
+  const input = props();
+  render(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: false, mirroredBanners: false }} />);
+  fireEvent.click(screen.getByText("Per-app mirroring"));
+  const control = screen.getByRole("switch", { name: "Mirror Chat from Pixel" });
+  expect(control).not.toBeChecked();
+  fireEvent.click(control);
+  await waitFor(() => expect(input.onMute).toHaveBeenCalledWith({ ...filter, muted: false }));
 });
 
 it("hides the saved preview without changing it when both desktop banners are off", () => {
@@ -43,16 +143,6 @@ it("hides the saved preview without changing it when both desktop banners are of
 
   rerender(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: true, mirroredBanners: false, preview: "hidden" }} />);
   expect(screen.getByLabelText("Banner preview")).toHaveValue("hidden");
-});
-
-it("keeps the stored mute choice over observed defaults and allows unmuting that phone while desktop banners are off", async () => {
-  const input = props();
-  render(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: false, mirroredBanners: false }} />);
-  fireEvent.click(screen.getByText("Per-app mirroring"));
-  const control = screen.getByRole("switch", { name: "Mirror Chat from Pixel" });
-  expect(control).not.toBeChecked();
-  fireEvent.click(control);
-  await waitFor(() => expect(input.onMute).toHaveBeenCalledWith({ ...filter, muted: false }));
 });
 
 it("uses friendly names for legacy package labels without changing mute payloads", async () => {
@@ -105,6 +195,7 @@ it("does not save, request permission, or change muted app controls when app rul
   expect(input.onPreferences).not.toHaveBeenCalled();
   expect(input.onMute).not.toHaveBeenCalled();
   expect(input.onPermission).not.toHaveBeenCalled();
+  expect(input.onOpenSettings).not.toHaveBeenCalled();
 });
 
 it("does not render an empty app rules disclosure", () => {
@@ -115,25 +206,12 @@ it("does not render an empty app rules disclosure", () => {
   expect(screen.queryByRole("list", { name: "App mirroring filters" })).not.toBeInTheDocument();
 });
 
-it.each([
-  ["granted", /granted/i],
-  ["denied", /denied/i],
-  ["unknown", /operating system notification settings/i],
-] as const)("reports %s notification permission locally", async (permission, expectedStatus) => {
-  const input = props();
-  input.onPermission.mockResolvedValue(permission);
-  render(<NotificationSettings {...input} />);
-  fireEvent.click(screen.getByRole("button", { name: "Check desktop notifications" }));
-
-  expect(await screen.findByRole("status")).toHaveTextContent(expectedStatus);
-});
-
 it("hides a saved permission result with banner controls without changing preferences or app rules", async () => {
   const input = props();
-  input.onPermission.mockResolvedValue("granted");
+  input.onPermission.mockResolvedValue(check("granted"));
   const { rerender } = render(<NotificationSettings {...input} />);
-  fireEvent.click(screen.getByRole("button", { name: "Check desktop notifications" }));
-  expect(await screen.findByRole("status")).toHaveTextContent(/granted/i);
+  fireEvent.click(screen.getByRole("button", { name: CHECK }));
+  expect(await screen.findByRole("status")).toHaveTextContent(/allowed to show notifications/i);
 
   rerender(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: false, mirroredBanners: false }} />);
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
@@ -142,13 +220,4 @@ it("hides a saved permission result with banner controls without changing prefer
   expect(input.onPreferences).not.toHaveBeenCalled();
   expect(input.onPermission).toHaveBeenCalledTimes(1);
   expect(input.onMute).not.toHaveBeenCalled();
-});
-
-it("reports a rejected notification permission check locally", async () => {
-  const input = props();
-  input.onPermission.mockRejectedValue(new Error("failure"));
-  render(<NotificationSettings {...input} />);
-  fireEvent.click(screen.getByRole("button", { name: "Check desktop notifications" }));
-
-  expect(await screen.findByRole("alert")).toBeVisible();
 });

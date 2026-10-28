@@ -1,21 +1,35 @@
 import { useState } from "react";
-import type { AppFilter, MirroredNotification, NotificationPreferences } from "./bridge";
+import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "./bridge";
 import { notificationAppName, notificationTuple, notificationSourceName } from "./Notifications";
 
-type PermissionResult = "granted" | "denied" | "unknown";
+function permissionMessage(check: NotificationCheck): string {
+  if (check.status === "denied") return "Notifications are turned off for Peppy in your system settings, so no test was sent.";
+  if (check.status === "granted") return check.testSent
+    ? "Test notification sent. Peppy is allowed to show notifications. If nothing appears, check Focus or Do Not Disturb."
+    : "Peppy is allowed to show notifications, but the test notification could not be sent.";
+  if (check.status === "quiet") return check.testSent
+    ? "Test notification sent, but Peppy's notifications are set to deliver quietly, so no banner may pop up."
+    : "Peppy's notifications are set to deliver quietly, and the test notification could not be sent.";
+  return check.testSent
+    ? "Test notification sent, but this system doesn't report Peppy's notification permission. If nothing appears, check Peppy's notification settings and Focus or Do Not Disturb."
+    : "This system doesn't report Peppy's notification permission, and the test notification could not be sent.";
+}
 
-export function NotificationSettings({ notifications, filters, sources, preferences, onPreferences, onMute, onPermission }: {
+export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, onPreferences, onMute, onPermission, onOpenSettings }: {
   notifications: MirroredNotification[];
   filters: AppFilter[];
   sources: { id: string; name: string }[];
   preferences: NotificationPreferences;
+  headsSupported: boolean;
   onPreferences(value: NotificationPreferences): Promise<void>;
   onMute(filter: AppFilter): Promise<void>;
-  onPermission(): Promise<PermissionResult | void>;
+  onPermission(): Promise<NotificationCheck | void>;
+  onOpenSettings(): Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
-  const [permissionStatus, setPermissionStatus] = useState<PermissionResult>();
+  const [check, setCheck] = useState<NotificationCheck>();
   // Observed app defaults never override authoritative synchronized mute choices.
   const apps = [...new Map([
     ...notifications.map(n => ({ sourceDeviceId: n.target.sourceDeviceId, packageName: n.packageName, appName: n.appName, muted: false })),
@@ -23,6 +37,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   ].map(filter => [notificationTuple(filter.sourceDeviceId, filter.packageName), filter])).values()];
   const sourceIds = apps.map(app => app.sourceDeviceId);
   const hasDesktopBanners = preferences.messageBanners || preferences.mirroredBanners;
+  const muteWithHeads = preferences.muteWithHeads ?? true;
   const save = async (action: () => Promise<void>) => {
     if (busy) return;
     setBusy(true);
@@ -34,18 +49,27 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const checkPermission = async () => {
     if (busy) return;
     setBusy(true);
+    setChecking(true);
     setError("");
-    setPermissionStatus(undefined);
+    setCheck(undefined);
     try {
       const result = await onPermission();
-      if (result) setPermissionStatus(result);
+      if (result) setCheck(result);
     }
-    catch { setError("Could not check desktop notifications. Try again."); }
+    catch { setError("Could not send test notification. Try again."); }
+    finally {
+      setChecking(false);
+      setBusy(false);
+    }
+  };
+  const openSettings = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try { await onOpenSettings(); }
+    catch { setError("Could not open notification settings."); }
     finally { setBusy(false); }
   };
-  const permissionMessage = permissionStatus === "unknown"
-    ? "Check Peppy in your operating system notification settings; permission cannot be read here."
-    : permissionStatus && `Desktop notification permission: ${permissionStatus}.`;
   return (
     <section id="notification-settings" className="settings-card" data-settings-section="notifications" aria-busy={busy}>
       <h2>Notification mirroring</h2>
@@ -60,6 +84,18 @@ export function NotificationSettings({ notifications, filters, sources, preferen
           <span aria-hidden />
         </span>
       </div>
+      {preferences.messageBanners && headsSupported && <div id="notification-mute-with-heads-row" className="settings-control-row">
+        <label htmlFor="notification-mute-with-heads">
+          <span id="notification-mute-with-heads-label">Mute while a chat head is open</span>
+          <span id="notification-mute-with-heads-hint" className="settings-note">Skip SMS/MMS banners for conversations that have a chat head, collapsed or expanded. Messages and unread counts still appear. Other conversations and app notifications are unaffected.</span>
+        </label>
+        <span className="settings-switch">
+          <input id="notification-mute-with-heads" type="checkbox" role="switch" checked={muteWithHeads} aria-checked={muteWithHeads}
+            aria-labelledby="notification-mute-with-heads-label" aria-describedby="notification-mute-with-heads-hint" disabled={busy}
+            onChange={event => void save(() => onPreferences({ ...preferences, muteWithHeads: event.target.checked }))} />
+          <span aria-hidden />
+        </span>
+      </div>}
       <div className="settings-control-row">
         <label htmlFor="notification-mirrored-banners">App notification banners</label>
         <span className="settings-switch">
@@ -78,11 +114,14 @@ export function NotificationSettings({ notifications, filters, sources, preferen
             <option value="hidden">Hidden — generic banner only</option>
           </select>
         </div>
-        <button className="secondary-button" disabled={busy} onClick={() => void checkPermission()}>
-          Check desktop notifications
+        <button id="notification-check" className="secondary-button" disabled={busy} onClick={() => void checkPermission()}>
+          Send test notification
         </button>
+        {(checking || check) && <p id="notification-permission-status" role="status">{checking ? "Sending test notification… If your system asks for permission, choose Allow." : permissionMessage(check!)}</p>}
+        {check?.canOpenSettings && <button id="notification-open-settings" className="secondary-button" disabled={busy} onClick={() => void openSettings()}>
+          Open notification settings
+        </button>}
       </>}
-      {hasDesktopBanners && permissionMessage && <p role="status">{permissionMessage}</p>}
       {error && <p role="alert">{error}</p>}
       {apps.length ? (
         <details id="notification-app-rules-disclosure" className="settings-disclosure">

@@ -42,6 +42,7 @@ const COMMANDS: &[&str] = &[
     "set_notification_preferences",
     "set_notification_context",
     "request_notification_permission",
+    "open_notification_settings",
     "list_contact_books",
     "list_contacts",
     "forget_contact_book",

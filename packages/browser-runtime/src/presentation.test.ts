@@ -27,11 +27,13 @@ describe("Worker notification presentation settings", () => {
     const name = `presentation-${crypto.randomUUID()}`;
     const first = new IndexedDbNotificationSettings(name);
     await first.save({ messageBanners: true, mirroredBanners: false, preview: "full" });
-    await expect(new IndexedDbNotificationSettings(name).load()).resolves.toEqual({ messageBanners: true, mirroredBanners: false, preview: "full" });
+    await expect(new IndexedDbNotificationSettings(name).load()).resolves.toEqual({ messageBanners: true, mirroredBanners: false, preview: "full", muteWithHeads: true });
   });
 
   it("rejects malformed settings values", () => {
+    expect(notificationPreferences({ messageBanners: true, muteWithHeads: false })).toMatchObject({ muteWithHeads: false });
     expect(() => notificationPreferences({ messageBanners: "yes" })).toThrow("Invalid notification preferences");
+    expect(() => notificationPreferences({ muteWithHeads: "yes" })).toThrow("Invalid notification preferences");
     expect(() => notificationPreferences({ plaintext: "message body" })).toThrow("Invalid notification preferences");
   });
 

@@ -6,6 +6,7 @@ export type NotificationPreferences = {
   messageBanners: boolean;
   mirroredBanners: boolean;
   preview: "full" | "hidden";
+  muteWithHeads?: boolean;
 };
 
 export interface NotificationSettings {
@@ -132,6 +133,7 @@ export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
   messageBanners: true,
   mirroredBanners: true,
   preview: "full",
+  muteWithHeads: true,
 };
 
 export function notificationPreferences(value: unknown): NotificationPreferences {
@@ -141,7 +143,7 @@ export function notificationPreferences(value: unknown): NotificationPreferences
     throw new Error("Invalid notification preferences");
   }
   const merged = { ...DEFAULT_NOTIFICATION_PREFERENCES, ...preferences };
-  if (typeof merged.messageBanners !== "boolean" || typeof merged.mirroredBanners !== "boolean" || (merged.preview !== "full" && merged.preview !== "hidden")) {
+  if (typeof merged.messageBanners !== "boolean" || typeof merged.mirroredBanners !== "boolean" || (merged.preview !== "full" && merged.preview !== "hidden") || (merged.muteWithHeads !== undefined && typeof merged.muteWithHeads !== "boolean")) {
     throw new Error("Invalid notification preferences");
   }
   return merged;

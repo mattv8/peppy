@@ -259,7 +259,7 @@ mod tests {
         let snapshot = call(&mut core, "snapshot", json!({}));
         assert_eq!(
             snapshot["notificationPreferences"],
-            json!({"messageBanners":false,"mirroredBanners":true,"preview":"hidden"})
+            json!({"messageBanners":false,"mirroredBanners":true,"preview":"hidden","muteWithHeads":true})
         );
         let rejected: Value=serde_json::from_str(&core.dispatch(r#"{"command":"set_notification_preferences","args":{"messageBanners":true,"mirroredBanners":true,"preview":"secret-fixture"}}"#)).unwrap();
         assert_eq!(rejected["ok"], false);
