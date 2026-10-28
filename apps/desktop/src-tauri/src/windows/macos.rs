@@ -37,7 +37,7 @@ const DRAG_THRESHOLD: f64 = 4.0;
 const NS_NONACTIVATING_PANEL_MASK: u64 = 1 << 7;
 const MONITOR_GEOMETRY_TOLERANCE: f64 = 0.5;
 const IMAGE_SCALING_PROPORTIONALLY_UP_OR_DOWN: i64 = 3;
-const CG_IMAGE_ALPHA_NONE_SKIP_LAST: u32 = 6;
+const CG_IMAGE_ALPHA_NONE_SKIP_LAST: u32 = 5;
 
 type CFTypeRef = *const c_void;
 type CFDataRef = *const c_void;
@@ -1297,6 +1297,27 @@ mod tests {
             [12, 34, 56]
         );
     }
+
+    #[test]
+    fn photo_image_preserves_rgba_channel_order() {
+        unsafe {
+            let image = photo_image(1, &[20, 127, 227, 255]);
+            assert_ne!(image, nil);
+            let data: id = msg_send![image, TIFFRepresentation];
+            let bitmap: id = msg_send![class!(NSBitmapImageRep), imageRepWithData: data];
+            let color: id = msg_send![bitmap, colorAtX: 0usize y: 0usize];
+            let red: f64 = msg_send![color, redComponent];
+            let green: f64 = msg_send![color, greenComponent];
+            let blue: f64 = msg_send![color, blueComponent];
+            let _: () = msg_send![image, release];
+
+            assert_eq!(
+                (red, green, blue),
+                (20.0 / 255.0, 127.0 / 255.0, 227.0 / 255.0)
+            );
+        }
+    }
+
     #[test]
     fn cross_monitor_drag_uses_destination_scale_and_negative_work_origin() {
         let (position, frame) = drag_frame_in_work_area(

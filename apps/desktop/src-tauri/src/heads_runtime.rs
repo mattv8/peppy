@@ -505,14 +505,10 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         Err(_) => return,
     };
     let pin_ids: HashSet<String> = pins.iter().map(|pin| pin.conversation_id.clone()).collect();
-    let reveal = matches!(
-        app.state::<AppState>().notifications.preferences().preview,
-        crate::notifications::Preview::Full
-    );
     let photos = runtime(app).photos.clone();
     let queried = crate::sync::blocking({
         let session = session.clone();
-        move || resolve_heads(&session, &pin_ids, reveal, &photos)
+        move || resolve_heads(&session, &pin_ids, &photos)
     })
     .await;
     let data = match queried {
@@ -634,7 +630,6 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
 fn resolve_heads(
     session: &Arc<crate::session::Session>,
     wanted: &HashSet<String>,
-    reveal: bool,
     photos: &PhotoCache,
 ) -> BridgeResult<Option<Vec<HeadData>>> {
     if !session_displayable(session)? {
@@ -695,13 +690,12 @@ fn resolve_heads(
         });
         emitted_ids.insert(id);
     }
-    Ok(Some(resolve_raw_heads(session, raw_heads, reveal, photos)))
+    Ok(Some(resolve_raw_heads(session, raw_heads, photos)))
 }
 
 fn resolve_one(
     session: &Arc<crate::session::Session>,
     conversation: ConversationId,
-    reveal: bool,
     photos: &PhotoCache,
 ) -> BridgeResult<HeadData> {
     if !session_displayable(session)? {
@@ -745,7 +739,6 @@ fn resolve_one(
                 recipientless: false,
                 unread: found.unread_count,
             },
-            reveal,
             photos,
         ));
     }
@@ -763,7 +756,6 @@ fn resolve_one(
                 recipientless: draft.recipients.is_empty(),
                 unread: 0,
             },
-            reveal,
             photos,
         ));
     }
@@ -776,7 +768,6 @@ fn resolve_one(
 fn resolve_raw_heads(
     session: &crate::session::Session,
     heads: Vec<RawHead>,
-    reveal: bool,
     photos: &PhotoCache,
 ) -> Vec<HeadData> {
     let addresses = heads
@@ -784,25 +775,24 @@ fn resolve_raw_heads(
         .flat_map(raw_addresses)
         .map(|address| (address, None))
         .collect::<Vec<_>>();
-    let resolved = reveal.then(|| crate::contacts::resolve_addresses(&session.client, &addresses));
+    let resolved = crate::contacts::resolve_addresses(&session.client, &addresses);
     heads
         .into_iter()
-        .map(|head| resolve_raw_head(session, head, reveal, resolved.as_ref(), photos))
+        .map(|head| resolve_raw_head(session, head, &resolved, photos))
         .collect()
 }
 
 fn resolve_one_raw_head(
     session: &crate::session::Session,
     head: RawHead,
-    reveal: bool,
     photos: &PhotoCache,
 ) -> HeadData {
     let addresses = raw_addresses(&head)
         .into_iter()
         .map(|address| (address, None))
         .collect::<Vec<_>>();
-    let resolved = reveal.then(|| crate::contacts::resolve_addresses(&session.client, &addresses));
-    resolve_raw_head(session, head, reveal, resolved.as_ref(), photos)
+    let resolved = crate::contacts::resolve_addresses(&session.client, &addresses);
+    resolve_raw_head(session, head, &resolved, photos)
 }
 
 fn raw_addresses(head: &RawHead) -> Vec<String> {
@@ -825,8 +815,7 @@ fn raw_addresses(head: &RawHead) -> Vec<String> {
 fn resolve_raw_head(
     session: &crate::session::Session,
     head: RawHead,
-    reveal: bool,
-    resolved: Option<&HashMap<String, crate::contacts::Resolved>>,
+    resolved: &HashMap<String, crate::contacts::Resolved>,
     photos: &PhotoCache,
 ) -> HeadData {
     let avatar = conversation_avatar(
@@ -840,20 +829,18 @@ fn resolve_raw_head(
     let resolved_face = matches!(avatar.kind, AvatarKind::Person)
         .then(|| {
             single_address.and_then(|address| {
-                resolved
-                    .and_then(|contacts| contacts.get(address))
-                    .map(|contact| ResolvedFace {
-                        display_name: contact.display_name.clone(),
-                        photo: contact
-                            .photo
-                            .filter(|id| {
-                                session
-                                    .client
-                                    .attachment_info(*id)
-                                    .is_ok_and(|info| info.state.is_local())
-                            })
-                            .and_then(|id| cached_photo(session, id, photos)),
-                    })
+                resolved.get(address).map(|contact| ResolvedFace {
+                    display_name: contact.display_name.clone(),
+                    photo: contact
+                        .photo
+                        .filter(|id| {
+                            session
+                                .client
+                                .attachment_info(*id)
+                                .is_ok_and(|info| info.state.is_local())
+                        })
+                        .and_then(|id| cached_photo(session, id, photos)),
+                })
             })
         })
         .flatten();
@@ -861,14 +848,13 @@ fn resolve_raw_head(
         .iter()
         .map(|address| {
             resolved
-                .and_then(|contacts| contacts.get(address))
+                .get(address)
                 .map(|contact| contact.display_name.clone())
                 .unwrap_or_else(|| address.clone())
         })
         .collect::<Vec<_>>();
     let (glyph, label) = head_face(
         avatar.kind,
-        reveal,
         resolved_face,
         single_address,
         &group_addresses,
@@ -923,7 +909,6 @@ fn clear_photos(app: &AppHandle) {
 
 fn head_face(
     kind: AvatarKind,
-    reveal: bool,
     resolved: Option<ResolvedFace>,
     single_address: Option<&str>,
     group_addresses: &[String],
@@ -934,15 +919,6 @@ fn head_face(
     } else {
         "Conversation"
     };
-    if !reveal {
-        return (
-            match kind {
-                AvatarKind::Person => HeadGlyph::Person,
-                AvatarKind::Group => HeadGlyph::Group,
-            },
-            generic_label.into(),
-        );
-    }
     if matches!(kind, AvatarKind::Group) {
         return (HeadGlyph::Group, group_addresses.join(", "));
     }
@@ -1400,14 +1376,10 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
         })
         .await?;
     }
-    let reveal = matches!(
-        app.state::<AppState>().notifications.preferences().preview,
-        crate::notifications::Preview::Full
-    );
     let photos = runtime(app).photos.clone();
     let head = crate::sync::blocking({
         let session = session.clone();
-        move || resolve_one(&session, conversation, reveal, &photos)
+        move || resolve_one(&session, conversation, &photos)
     })
     .await?;
     if !revalidate_after_await(app, &token).await {
@@ -2070,15 +2042,14 @@ mod tests {
     }
 
     #[test]
-    fn hidden_heads_never_reveal_resolved_names_or_photos() {
+    fn head_face_reveals_resolved_photo_and_group_names() {
         let photo = HeadPhoto {
             edge: 1,
             rgba: Arc::from([0, 0, 0, 255]),
         };
-        assert_eq!(
+        assert!(matches!(
             head_face(
                 AvatarKind::Person,
-                false,
                 Some(ResolvedFace {
                     display_name: "Ada Lovelace".into(),
                     photo: Some(photo),
@@ -2087,16 +2058,16 @@ mod tests {
                 &[],
                 false,
             ),
-            (HeadGlyph::Person, "Conversation".into())
-        );
+            (HeadGlyph::Photo(_), label) if label == "Ada Lovelace"
+        ));
         assert_eq!(
-            head_face(AvatarKind::Group, false, None, None, &[], false),
-            (HeadGlyph::Group, "Conversation".into())
+            head_face(AvatarKind::Group, None, None, &["Ada".into()], false),
+            (HeadGlyph::Group, "Ada".into())
         );
     }
 
     #[test]
-    fn head_face_selects_full_preview_glyphs_and_labels() {
+    fn head_face_selects_glyphs_and_labels() {
         let photo = HeadPhoto {
             edge: 1,
             rgba: Arc::from([0, 0, 0, 255]),
@@ -2104,7 +2075,6 @@ mod tests {
         assert!(matches!(
             head_face(
                 AvatarKind::Person,
-                true,
                 Some(ResolvedFace {
                     display_name: "Ada".into(),
                     photo: Some(photo),
@@ -2118,7 +2088,6 @@ mod tests {
         assert_eq!(
             head_face(
                 AvatarKind::Person,
-                true,
                 Some(ResolvedFace {
                     display_name: "Ada Lovelace".into(),
                     photo: None,
@@ -2132,7 +2101,6 @@ mod tests {
         assert_eq!(
             head_face(
                 AvatarKind::Person,
-                true,
                 Some(ResolvedFace {
                     display_name: "+18015551234".into(),
                     photo: None,
@@ -2144,24 +2112,16 @@ mod tests {
             (HeadGlyph::Person, "+18015551234".into())
         );
         assert_eq!(
-            head_face(AvatarKind::Person, true, None, None, &[], false),
+            head_face(AvatarKind::Person, None, None, &[], false),
             (HeadGlyph::Person, "Conversation".into())
         );
         assert_eq!(
-            head_face(
-                AvatarKind::Person,
-                true,
-                None,
-                Some("+18015551234"),
-                &[],
-                false,
-            ),
+            head_face(AvatarKind::Person, None, Some("+18015551234"), &[], false,),
             (HeadGlyph::Person, "+18015551234".into())
         );
         assert_eq!(
             head_face(
                 AvatarKind::Group,
-                true,
                 None,
                 None,
                 &["Ada".into(), "+18015551234".into()],
@@ -2172,9 +2132,9 @@ mod tests {
     }
 
     #[test]
-    fn recipientless_drafts_and_hidden_duplicate_labels_are_safe_in_the_tray() {
+    fn recipientless_drafts_and_duplicate_labels_are_safe_in_the_tray() {
         assert_eq!(
-            head_face(AvatarKind::Person, false, None, None, &[], true),
+            head_face(AvatarKind::Person, None, None, &[], true),
             (HeadGlyph::Person, "New message".into())
         );
         assert_eq!(
@@ -2282,7 +2242,7 @@ mod tests {
         let id = conversation.to_string();
         let wanted = HashSet::from([id.clone()]);
         assert!(
-            resolve_heads(&session, &wanted, false, &photo_cache())
+            resolve_heads(&session, &wanted, &photo_cache())
                 .unwrap()
                 .unwrap()[0]
                 .unread
@@ -2297,7 +2257,7 @@ mod tests {
             .mark_seen_scoped(&[message], Some(conversation))
             .unwrap();
         assert_eq!(
-            resolve_heads(&session, &wanted, false, &photo_cache())
+            resolve_heads(&session, &wanted, &photo_cache())
                 .unwrap()
                 .unwrap()[0]
                 .unread,
@@ -2310,14 +2270,13 @@ mod tests {
         let (_fixture, session, conversation) = locally_saved_draft_without_sync_unlock();
         assert_eq!(session.client.key_status().unwrap().active_epoch, None);
 
-        let head = resolve_one(&session, conversation, false, &photo_cache()).unwrap();
+        let head = resolve_one(&session, conversation, &photo_cache()).unwrap();
 
         assert_eq!(head.id, conversation.to_string());
-        assert_eq!(head.name, "Conversation");
+        assert_eq!(head.name, "+15555550100");
         let restored = resolve_heads(
             &session,
             &HashSet::from([conversation.to_string()]),
-            false,
             &photo_cache(),
         )
         .unwrap()
@@ -2356,7 +2315,7 @@ mod tests {
         });
 
         assert_eq!(
-            resolve_one(&session, conversation, false, &photo_cache())
+            resolve_one(&session, conversation, &photo_cache())
                 .unwrap()
                 .id,
             conversation.to_string()
@@ -2364,7 +2323,6 @@ mod tests {
         let restored = resolve_heads(
             &session,
             &HashSet::from([conversation.to_string()]),
-            false,
             &photo_cache(),
         )
         .unwrap()
@@ -2378,7 +2336,7 @@ mod tests {
         let (_fixture, session, conversation) = locally_saved_draft_without_sync_unlock();
         session.mismatch.store(true, Ordering::Release);
         assert_eq!(
-            resolve_one(&session, conversation, false, &photo_cache())
+            resolve_one(&session, conversation, &photo_cache())
                 .unwrap()
                 .id,
             conversation.to_string()
@@ -2386,7 +2344,6 @@ mod tests {
         let restored = resolve_heads(
             &session,
             &HashSet::from([conversation.to_string()]),
-            false,
             &photo_cache(),
         )
         .unwrap()
@@ -2401,7 +2358,7 @@ mod tests {
         session.cancel.cancel();
         assert!(!session_displayable(&session).unwrap());
         assert_eq!(
-            resolve_one(&session, conversation, false, &photo_cache())
+            resolve_one(&session, conversation, &photo_cache())
                 .err()
                 .unwrap()
                 .code,
@@ -2415,7 +2372,7 @@ mod tests {
         session.status.lock().unwrap().revoked = true;
         assert!(!session_displayable(&session).unwrap());
         assert_eq!(
-            resolve_one(&session, conversation, false, &photo_cache())
+            resolve_one(&session, conversation, &photo_cache())
                 .err()
                 .unwrap()
                 .code,
@@ -2427,7 +2384,7 @@ mod tests {
     fn local_head_resolution_rejects_unknown_conversation() {
         let (_fixture, session, _) = locally_saved_draft_without_sync_unlock();
         assert_eq!(
-            resolve_one(&session, ConversationId::new(), false, &photo_cache())
+            resolve_one(&session, ConversationId::new(), &photo_cache())
                 .err()
                 .unwrap()
                 .code,
