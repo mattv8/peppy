@@ -562,6 +562,38 @@ jobs:
       environment: production
       sha: ${{ github.sha }}
     secrets: inherit
+  notify-hosted-production:
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'"
+    needs: [gate, publish-production-server, publish-production-relay]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment: production
+    steps:
+      - name: Check out dispatched source revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Mint private dispatch token
+        id: dispatch-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.HOSTED_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.HOSTED_DISPATCH_APP_PRIVATE_KEY }}
+          owner: mattv8
+          repositories: peppy-platform
+          permission-actions: write
+      - name: Notify hosted production promotion
+        env:
+          HOSTED_DISPATCH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
+          SOURCE_REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SERVER_DIGEST: ${{ needs.publish-production-server.outputs.digest }}
+          RELAY_DIGEST: ${{ needs.publish-production-relay.outputs.digest }}
+        run: bash .github/scripts/notify-hosted-production.sh
   stable-release:
     if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true' && needs.version.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'"
     needs: [gate, version, publish-production-server, publish-production-relay]
