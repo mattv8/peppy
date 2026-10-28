@@ -20,15 +20,16 @@
 
 #contact-form-header h2 {
   flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: 14px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-#contact-form-header button {
-  padding: 4px 8px;
-  font-size: 12px;
-}
+#contact-form-header button { flex-shrink: 0; }
 
 #contact-form-error {
   margin: 8px 8px 0;
