@@ -8,6 +8,7 @@ import type {
 
 type Source = { id: string; name: string };
 type SeenResult = Promise<void>;
+const ACTIVATION_HIGHLIGHT_MS = 1600;
 
 export const notificationTuple = (...parts: string[]) =>
   encodeURIComponent(JSON.stringify(parts));
@@ -48,6 +49,8 @@ export function NotificationsView({
   onMute,
   onSeen,
   onSettings,
+  focusRequest,
+  onFocusResult,
   displayTitle = (title) => title,
 }: {
   /** Display-only contact name for a phone-number title; stored text is never changed. */
@@ -60,6 +63,9 @@ export function NotificationsView({
   onMute(filter: AppFilter): void;
   onSeen(targets: NotificationTarget[]): SeenResult;
   onSettings(): void;
+  /** Supply only after the current unlocked snapshot is ready. */
+  focusRequest?: { requestId: string; target: NotificationTarget };
+  onFocusResult?: (requestId: string, found: boolean) => void;
 }) {
   const feedRef = useRef<HTMLDivElement>(null);
   const visible = useRef(new Map<string, NotificationTarget>());
@@ -67,6 +73,8 @@ export function NotificationsView({
   const inFlight = useRef(new Set<string>());
   const onSeenRef = useRef(onSeen);
   onSeenRef.current = onSeen;
+  const onFocusResultRef = useRef(onFocusResult);
+  onFocusResultRef.current = onFocusResult;
   const shown = visibleNotifications(notifications, filters, locked);
   const knownSourceIds = [...new Set(shown.map(notification => notification.target.sourceDeviceId))];
   const filtersByApp = new Map(filters.map(filter => [notificationMuteKey(filter.sourceDeviceId, filter.packageName), filter]));
@@ -79,6 +87,39 @@ export function NotificationsView({
       ),
     )
     .join(",");
+
+  const focusRequestId = focusRequest?.requestId;
+  const focusKey = focusRequest && notificationTuple(
+    focusRequest.target.sourceDeviceId,
+    focusRequest.target.notificationKey,
+    focusRequest.target.lifetime,
+  );
+  const focusRowShown = shown.some(notification => notificationTuple(
+    notification.target.sourceDeviceId,
+    notification.target.notificationKey,
+    notification.target.lifetime,
+  ) === focusKey);
+
+  useEffect(() => {
+    if (locked || focusRequestId === undefined || focusKey === undefined) return;
+    const row = focusRowShown ? document.getElementById(`notif-${focusKey}`) : null;
+    if (!row || !feedRef.current?.contains(row)) {
+      onFocusResultRef.current?.(focusRequestId, false);
+      return;
+    }
+    // Instant scrolling avoids obsolete smooth-scroll work and respects reduced motion.
+    row.scrollIntoView({ block: "nearest", behavior: "instant" });
+    row.focus({ preventScroll: true });
+    row.dataset.activationHighlight = "true";
+    const timer = window.setTimeout(() => {
+      delete row.dataset.activationHighlight;
+    }, ACTIVATION_HIGHLIGHT_MS);
+    onFocusResultRef.current?.(focusRequestId, true);
+    return () => {
+      window.clearTimeout(timer);
+      delete row.dataset.activationHighlight;
+    };
+  }, [locked, focusRequestId, focusKey, focusRowShown]);
 
   useEffect(() => {
     const flushSeen = () => {
@@ -183,7 +224,7 @@ export function NotificationsView({
 function NotificationRow({ notification, phoneName, appName, filter, title, onDismiss, onMute }: { notification: MirroredNotification; phoneName: string; appName: string; filter: AppFilter; title: string; onDismiss(target: NotificationTarget): void; onMute(filter: AppFilter): void }) {
   const pending = notification.dismissalPending;
   const id = notificationTuple(notification.target.sourceDeviceId, notification.target.notificationKey, notification.target.lifetime);
-  return <article id={`notif-${id}`} data-device-id={notification.target.sourceDeviceId} data-notification-key={notification.target.notificationKey} data-dismiss-state={pending ? "pending" : "idle"} data-notification-target={JSON.stringify(notification.target)} className="notif-row" aria-label={`${appName} on ${phoneName}: ${title}: ${notification.text}`}>
+  return <article id={`notif-${id}`} tabIndex={-1} data-device-id={notification.target.sourceDeviceId} data-notification-key={notification.target.notificationKey} data-dismiss-state={pending ? "pending" : "idle"} data-notification-target={JSON.stringify(notification.target)} className="notif-row" aria-label={`${appName} on ${phoneName}: ${title}: ${notification.text}`}>
     <NotificationAppIcon key={notification.appIconPngBase64} appName={appName} base64={notification.appIconPngBase64} />
     <div className="notif-row-body">
       <span className="notif-row-app-source"><b>{appName}</b><span>{phoneName}</span></span>

@@ -42,6 +42,7 @@ mod lifecycle;
 mod material_state;
 mod media;
 mod net;
+mod notification_activation;
 mod notification_permission;
 mod notifications;
 mod origin;
@@ -163,6 +164,7 @@ pub struct AppState {
     import_lock: tokio::sync::Mutex<()>,
     notifier: Notifier,
     notifications: Arc<NotificationSettings>,
+    notification_activation: notification_activation::ActivationState,
     lifecycle: std::sync::Mutex<lifecycle::Coordinator>,
     lifecycle_gate: std::sync::Mutex<lifecycle::TopologyGate>,
     head_generation: std::sync::Mutex<heads::GenerationFence>,
@@ -329,6 +331,7 @@ impl AppState {
             import_lock: tokio::sync::Mutex::new(()),
             notifier,
             notifications,
+            notification_activation: notification_activation::ActivationState::default(),
             lifecycle: std::sync::Mutex::new(lifecycle::Coordinator::default()),
             lifecycle_gate: std::sync::Mutex::new(lifecycle::TopologyGate::default()),
             head_generation: std::sync::Mutex::new(heads::GenerationFence::default()),
@@ -369,11 +372,14 @@ impl AppState {
                 generation.invalidate();
             }
         }
-        let session = self.session.lock().await.take();
-        self.revoke_media_capabilities();
-        if let Some(session) = session {
-            session.cancel.cancel();
+        {
+            let mut active = self.session.lock().await;
+            if let Some(session) = active.take() {
+                session.cancel.cancel();
+            }
         }
+        self.revoke_media_capabilities();
+        self.notification_activation.retire();
     }
 
     async fn close_session(&self) {
@@ -401,6 +407,7 @@ impl AppState {
             if let Some(old) = self.session.lock().await.take() {
                 old.cancel.cancel();
             }
+            self.notification_activation.retire();
             self.revoke_media_capabilities();
             return Ok(None);
         };
@@ -411,10 +418,14 @@ impl AppState {
                     return Ok(Some(existing.clone()));
                 }
             }
-            current.take()
+            let retiring = current.take();
+            if let Some(session) = &retiring {
+                session.cancel.cancel();
+            }
+            retiring
         };
         if let Some(retiring) = retiring {
-            retiring.cancel.cancel();
+            self.notification_activation.retire();
             self.revoke_media_capabilities();
             if !sync::drain(&retiring, std::time::Duration::from_secs(30)).await {
                 // Keep the retiring session observable while its workers own
@@ -4397,7 +4408,6 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let root = app
@@ -4415,6 +4425,10 @@ pub fn run() {
             // State hints only; no payload, no focus or window changes.
             let notifier: Notifier = Arc::new(move || {
                 let _ = handle.emit(STATE_EVENT, ());
+                let _ = handle.emit_to(tray::MAIN, notification_activation::EVENT, ());
+                if let Some(state) = handle.try_state::<AppState>() {
+                    state.notification_activation.wake();
+                }
             });
             let secure_store = KeyringStore::new(app.config().identifier.clone());
             #[cfg(target_os = "macos")]
@@ -4430,6 +4444,7 @@ pub fn run() {
                 notifier,
             ));
             window_placement::install(app.handle(), &root);
+            notification_activation::install(app.handle());
             if let Some(main) = app.get_webview_window(tray::MAIN) {
                 window_placement::restore_initial(&main);
             }
@@ -4841,6 +4856,8 @@ pub fn run() {
                 | "report_update_activity"
                 | "unlock_app"
                 | "acknowledge_lifecycle"
+                | "peek_notification_activation"
+                | "ack_notification_activation"
         );
         if state.app_locked.load(Ordering::Acquire) && !allowed {
             invoke
@@ -4849,6 +4866,8 @@ pub fn run() {
             return true;
         }
         let handler: fn(tauri::ipc::Invoke) -> bool = command_handler!(
+            notification_activation::peek_notification_activation,
+            notification_activation::ack_notification_activation,
             hosted::hosted_account,
             hosted::hosted_session_renew,
             hosted::hosted_origin_url,
@@ -4897,6 +4916,7 @@ pub fn run() {
             }
         }
         RunEvent::Exit => {
+            app.state::<AppState>().notification_activation.shutdown();
             window_placement::flush(app);
             heads_runtime::clear_on_exit(app);
         }

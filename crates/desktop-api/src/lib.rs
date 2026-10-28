@@ -13,6 +13,8 @@ pub mod avatar;
 pub mod compose;
 pub mod gateways;
 pub mod images;
+pub mod notification_activation;
+pub use notification_activation::*;
 pub mod search;
 pub use search::*;
 pub mod search_history;

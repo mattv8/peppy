@@ -141,6 +141,7 @@ impl RemoteIds {
 }
 
 pub struct Session {
+    pub generation: String,
     pub binding: Binding,
     pub client: Client,
     pub api: Api,
@@ -383,6 +384,7 @@ pub fn open_session(
         ..NetStatus::default()
     };
     Ok(Session {
+        generation: uuid::Uuid::new_v4().to_string(),
         binding: binding.clone(),
         client,
         api,

@@ -88,6 +88,8 @@ import {
   type Draft,
 } from "./bridge";
 import { dismissibleNotifications, notificationMuteKey, NotificationsView } from "./Notifications";
+import { createNotificationActivationDrain, nativeNotificationActivation, type ActivationContext } from "./notificationActivation";
+import type { NotificationActivation, NotificationActivationTarget } from "@peppy/generated/notification-activation";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard, type ContactTarget } from "./Contacts";
 import { findContactTarget } from "./contact-target";
@@ -1358,10 +1360,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [contactsHeaderHost, setContactsHeaderHost] = useState<HTMLDivElement | null>(null);
   const contactTargetRequestId = useRef(0);
   const contactNavigation = useRef<ContactNavigationGuard | null>(null);
+  const notificationNavigationEpoch = useRef(0);
   const registerContactNavigation = useCallback((guard: ContactNavigationGuard | null) => {
     contactNavigation.current = guard;
   }, []);
   const setActiveView = useCallback((view: typeof activeView) => {
+    notificationNavigationEpoch.current += 1;
     if (view === "contacts" && contactNavigation.current) return;
     const navigate = () => {
       if (view !== "contacts") setContactTarget(undefined);
@@ -1381,6 +1385,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [refreshNotice, setRefreshNotice] = useState("");
   const [composerFeedback, setComposerFeedback] = useState<ComposerFeedback>();
   const [notificationActionNotice, setNotificationActionNotice] = useState("");
+  const [notificationFocus, setNotificationFocus] = useState<{ requestId: string; target: NotificationActivationTarget }>();
+  const notificationFocusContext = useRef<{ requestId: string; context: ActivationContext; reported?: boolean } | undefined>(undefined);
+  const notificationDrain = useRef<ReturnType<typeof createNotificationActivationDrain> | undefined>(undefined);
+  const notificationNavigation = useRef<{ requestId: string; sessionGeneration: string; generation: number; epoch: number } | undefined>(undefined);
+  const notificationHandler = useRef<(request: NotificationActivation, context: ActivationContext) => Promise<void>>(async () => {});
   const [dismissingNotifications, setDismissingNotifications] = useState(false);
   const [addingPhone, setAddingPhone] = useState(false);
   const [initialEnrollmentActive, setInitialEnrollmentActive] = useState(false);
@@ -1987,6 +1996,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
 
   const select = (key: string) => {
+    notificationNavigationEpoch.current += 1;
     const previous = selectedRef.current;
     if (key === previous) {
       if (detachedHistoryRef.current?.conversationId === key) void loadLatest(key).catch(reportAction("Could not load the latest messages: "));
@@ -2069,6 +2079,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
 
   activateSearchHitHandlerRef.current = (hit: LocalSearchHit) => {
+    notificationNavigationEpoch.current += 1;
     const navigate = () => { void activateApprovedSearchHit(hit); };
     if (contactNavigation.current) contactNavigation.current(navigate);
     else navigate();
@@ -2097,7 +2108,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       setMediaStateHint(current => current + 1);
       setStoredConflict(null);
       void retryPendingSaves();
-      void refresh().catch(reportRefresh(""));
+      void refresh().then(() => notificationDrain.current?.retry()).catch(reportRefresh(""));
     });
     const unsubscribeDrafts = bridge.subscribe_drafts?.((draft) => {
       if (mountedRef.current && snapshotRef.current?.encryption.state === "unlocked" && !appLockRef.current?.locked) {
@@ -2134,6 +2145,118 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setContactTarget(undefined);
   }, [appLock?.locked, snapshot?.encryption.state]);
   const renderedSearchSessionKey = currentSearchSessionKey();
+  notificationHandler.current = async (request, context) => {
+    const session = currentSearchSessionKey();
+    if (notificationNavigation.current?.requestId !== request.requestId || notificationNavigation.current.sessionGeneration !== request.sessionGeneration) {
+      notificationNavigation.current = { requestId: request.requestId, sessionGeneration: request.sessionGeneration, generation: navigationGeneration.current, epoch: notificationNavigationEpoch.current };
+    }
+    const generation = notificationNavigation.current.generation;
+    const epoch = notificationNavigation.current.epoch;
+    let approvedGuard = contactNavigation.current;
+    let deferredByGuard = false;
+    const valid = async () => {
+      if (!await context.validate() || session !== currentSearchSessionKey()) return false;
+      if (generation === navigationGeneration.current && epoch === notificationNavigationEpoch.current && approvedGuard === contactNavigation.current) return true;
+      await context.complete();
+      return false;
+    };
+    if (request.destination.kind === "main") { await context.complete(); return; }
+    const navigate = async () => {
+      if (!await valid()) return;
+      const previous = selectedRef.current;
+      if (previous) {
+        const flushed = await store.flush(previous);
+        if (!await valid()) return;
+        if (!flushed.ok) throw new Error(flushed.error);
+      }
+      const destination = request.destination;
+      if (destination.kind === "mirrored") {
+        await refresh();
+        if (!await valid()) return;
+        setContactTarget(undefined);
+        setNotificationActionNotice("");
+        setNotice("");
+        flushSync(() => {
+          setActiveViewNow("notifications");
+          notificationFocusContext.current = { requestId: request.requestId, context };
+          setNotificationFocus({ requestId: request.requestId, target: destination.target });
+        });
+        return;
+      }
+      const conversationId = destination.kind === "conversation" ? destination.conversationId : undefined;
+      const state = await bridge.load_state(conversationId);
+      if (!await valid() || state.encryption.state !== "unlocked" ||
+          createSearchSessionKey(state, false) !== session) return;
+      navigationGeneration.current += 1;
+      loadSequence.current += 1;
+      setContactTarget(undefined);
+      setNotificationActionNotice("");
+      if (destination.kind !== "conversation") return;
+      const found = state.conversations.find(item => item.id === conversationId);
+      clearDetached();
+      flushSync(() => {
+        setSnapshot(state);
+        setActiveViewNow("conversations");
+        choose(found ? destination.conversationId : "");
+        setNewComposeKey(null);
+        setNotice(found ? "" : "This conversation is no longer available.", "warning");
+        if (found) {
+          store.adopt(destination.conversationId, state.draft);
+          const hasOlder = found.hasOlderMessages ?? false;
+          hasOlderMessagesRef.current = hasOlder;
+          setHasOlderMessages(hasOlder);
+          setHistoryExhausted(!hasOlder);
+        }
+      });
+      await context.complete();
+    };
+    const attempt = () => navigate().catch(context.fail);
+    if (contactNavigation.current) {
+      deferredByGuard = contactNavigation.current(() => {
+        if (deferredByGuard) {
+          // Commit Discard's dirty-state reset before capturing the approved guard.
+          // Subsequent edits must still invalidate this approval.
+          flushSync(() => {});
+          approvedGuard = contactNavigation.current;
+        }
+        void attempt();
+      }, () => { void context.complete(); }) === true;
+    } else await attempt();
+  };
+  useEffect(() => {
+    if (browserHost || composerConversation || headPanelBootstrap) return;
+    const drain = createNotificationActivationDrain({
+      transport: nativeNotificationActivation,
+      ready: () => mountedRef.current && snapshotRef.current?.encryption.state === "unlocked" && !appLockRef.current?.locked,
+      handle: (request, context) => notificationHandler.current(request, context),
+      error: error => setNotice(`Could not open notification: ${errorText(error)}. Try again by clicking the notification or refreshing.`, "warning"),
+      invalidate: () => {
+        notificationFocusContext.current = undefined;
+        setNotificationFocus(undefined);
+      },
+    });
+    notificationDrain.current = drain;
+    return () => { drain.dispose(); notificationDrain.current = undefined; };
+  }, [browserHost, composerConversation, headPanelBootstrap]);
+  useEffect(() => {
+    notificationNavigation.current = undefined;
+    notificationDrain.current?.reset();
+  }, [renderedSearchSessionKey, loading, appLock?.locked]);
+  useEffect(() => {
+    if (activeView === "notifications") return;
+    notificationFocusContext.current = undefined;
+    setNotificationFocus(undefined);
+  }, [activeView]);
+  const notificationFocusResult = (requestId: string, found: boolean) => {
+    const pending = notificationFocusContext.current;
+    if (pending?.requestId !== requestId || pending.reported) return;
+    pending.reported = true;
+    void (async () => {
+      if (!await pending.context.validate()) return;
+      if (!found) setNotificationActionNotice("This notification is no longer available.");
+      await pending.context.complete();
+    })().catch(reportAction("Could not open notification: "));
+  };
   const [historySearchVisible, setHistorySearchVisible] = useState(false);
   const historyControls = useHistorySearch({
     sessionKey: renderedSearchSessionKey,
@@ -2547,6 +2670,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
 
   const startNewMessage = async (recipient?: string) => {
+    notificationNavigationEpoch.current += 1;
     const previous = selectedRef.current;
     const previousSlot = previous ? store.get(previous) : undefined;
     if (previousSlot && isDirty(previousSlot)) await store.flush(previous);
@@ -3991,6 +4115,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
              />
           ) : notificationsOpen ? (
             <NotificationsView
+              focusRequest={notificationFocus}
+              onFocusResult={notificationFocusResult}
               notifications={snapshot?.notifications ?? []}
               displayTitle={(title) => resolution[title]?.displayName ?? title}
               filters={snapshot?.appFilters ?? []}
