@@ -199,6 +199,19 @@ describe("App reactions", () => {
     expect(document.querySelector('[data-reaction-notice="removed-add"]')).toBeVisible();
   });
 
+  it("keeps an incoming sender run continuous across a suppressed notice", async () => {
+    enableObservation();
+    snapshot.conversations[0].participants = ["+12025550123", "+15555550142"];
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”", { senderAddress: "+15555550142" }), message("after", "after")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    act(() => ReactionObserver.intersect(reactionChip()));
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toBeInTheDocument());
+    expect(document.querySelector('[data-message-row="plan"]')).toHaveAttribute("data-sender-run-start");
+    expect(document.querySelector('[data-message-row="plan"]')).not.toHaveAttribute("data-sender-run-end");
+    expect(document.querySelector('[data-message-row="after"]')).not.toHaveAttribute("data-sender-run-start");
+    expect(document.querySelector('[data-message-row="after"]')).toHaveAttribute("data-sender-run-end");
+  });
+
   it("waits for a fresh chip observation after the search navigation gate releases", async () => {
     enableObservation();
     const frames: FrameRequestCallback[] = [];
