@@ -1,0 +1,29 @@
+{
+  "name": "Required CI",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/heads/production",
+        "refs/heads/staging"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "required_status_checks": [
+          {
+            "context": "gate",
+            "integration_id": 15368
+          }
+        ]
+      }
+    }
+  ],
+  "bypass_actors": []
+}
