@@ -46,6 +46,9 @@ mod notification_activation;
 mod notification_permission;
 mod notifications;
 mod origin;
+mod recents;
+#[cfg(test)]
+mod recents_command_tests;
 mod search_history;
 mod secure_store;
 #[cfg(test)]
@@ -169,6 +172,7 @@ pub struct AppState {
     lifecycle: std::sync::Mutex<lifecycle::Coordinator>,
     lifecycle_gate: std::sync::Mutex<lifecycle::TopologyGate>,
     head_generation: std::sync::Mutex<heads::GenerationFence>,
+    recents: recents::RecentStore,
     allow_exit: AtomicBool,
     quit_requested: AtomicBool,
     app_locked: AtomicBool,
@@ -322,6 +326,7 @@ fn remember_composer_target(
 impl AppState {
     pub fn new(root: PathBuf, store: Arc<dyn SecretStore>, notifier: Notifier) -> Self {
         let notifications = Arc::new(NotificationSettings::load(&root));
+        let recents = recents::RecentStore::new(&root);
         let state = Self {
             config_path: root.join("server.json"),
             root,
@@ -338,6 +343,7 @@ impl AppState {
             lifecycle: std::sync::Mutex::new(lifecycle::Coordinator::default()),
             lifecycle_gate: std::sync::Mutex::new(lifecycle::TopologyGate::default()),
             head_generation: std::sync::Mutex::new(heads::GenerationFence::default()),
+            recents,
             allow_exit: AtomicBool::new(false),
             quit_requested: AtomicBool::new(false),
             app_locked: AtomicBool::new(true),
@@ -1764,8 +1770,27 @@ async fn send_draft_for_window(
             Some(input.conversation_id.as_str()),
         )?;
     }
+    let binding = session.binding.clone();
     let s = session.clone();
-    let result = blocking(move || s.send_draft(&input)).await;
+    let result = blocking(move || {
+        let conversation_id = if input.conversation_id.is_empty() {
+            peppy_client_core::DraftId::from_str(&input.id)
+                .ok()
+                .and_then(|draft_id| s.client.compose_draft(draft_id).ok().flatten())
+                .map(|draft| draft.conversation_id.to_string())
+        } else {
+            Some(input.conversation_id.clone())
+        };
+        let result = s.send_draft(&input);
+        Ok((result, conversation_id))
+    })
+    .await?;
+    let (result, conversation_id) = result;
+    if result.as_ref().is_ok_and(|sent| sent.accepted) {
+        if let Some(conversation_id) = conversation_id {
+            state.record_recent(&binding, &conversation_id);
+        }
+    }
     if let Err(error) = &result {
         remember_composer_move(state, label, &session, error);
         if error.code == "draft-moved" {
@@ -1775,6 +1800,26 @@ async fn send_draft_for_window(
         session.notify();
     }
     result
+}
+
+impl AppState {
+    /// Records a conversation as recently active. Persistence failures are logged and never
+    /// change the caller's result.
+    pub(crate) fn record_recent(&self, binding: &credentials::Binding, conversation_id: &str) {
+        if let Err(error) = self
+            .recents
+            .touch(binding, conversation_id, unix_timestamp())
+        {
+            eprintln!("peppy: could not save recent conversation: {error}");
+        }
+    }
+}
+
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[tauri::command]
@@ -4773,6 +4818,9 @@ pub fn run() {
                             tray::show_main(&app);
                         }
                     });
+                },
+                |app, conversation_id| {
+                    heads_runtime::open_recent_from_tray(app, conversation_id);
                 },
                 |app| {
                     if app.state::<AppState>().app_locked.load(Ordering::Acquire) {
