@@ -10,6 +10,7 @@ assert = ->(condition, message) { abort(message) unless condition }
 
 ci = load_workflow.call('ci.yml')
 ci_jobs = ci.fetch('jobs')
+assert.call(ci_jobs.fetch('desktop').fetch('timeout-minutes') == 60, 'public CI desktop must allow 60 minutes uniformly for native cold-cache builds')
 ci_text = File.read(File.join(root, 'workflows', 'ci.yml'))
 assert.call(ci_jobs.key?('notify-hosted-production'), 'public CI must dispatch verified hosted production evidence')
 assert.call(!ci_text.include?('create-github-app-token'), 'public CI must not mint an App token')
