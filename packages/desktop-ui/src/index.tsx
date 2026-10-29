@@ -876,6 +876,7 @@ export function AppTitlebar({
               <Minus size={10} strokeWidth={1.75} aria-hidden />
             </button>}
             {onMaximize && <button
+              id="window-maximize"
               aria-label="Maximize window"
               title="Maximize window"
               onClick={onMaximize}

@@ -51,6 +51,7 @@ mod secure_store;
 #[cfg(test)]
 mod security_tests;
 mod session;
+mod snap_layout;
 mod startup;
 mod sync;
 #[cfg(test)]
@@ -4075,6 +4076,18 @@ fn close_composer(window: tauri::WebviewWindow) -> BridgeResult<()> {
     lifecycle::request_window(window.app_handle(), window.label(), action)
 }
 
+/// Synchronous so Win32 calls run on the UI thread in invoke order.
+#[tauri::command]
+fn set_maximize_button_region(
+    window: tauri::WebviewWindow,
+    region: Option<snap_layout::MaximizeButtonRegion>,
+) -> BridgeResult<()> {
+    if window.label() != tray::MAIN {
+        return Ok(());
+    }
+    snap_layout::set_region(window, region)
+}
+
 /// Closes (rather than collapses) the floating conversation associated with
 /// this composer window. The label is the authority for both conversation and
 /// panel ownership; callers never supply an ID.
@@ -4990,6 +5003,7 @@ pub fn run() {
         popout_conversation,
         hide_head,
         close_composer,
+        set_maximize_button_region,
         close_head_panel,
         update_status,
         check_for_updates,

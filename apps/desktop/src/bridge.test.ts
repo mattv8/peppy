@@ -104,6 +104,22 @@ describe("bridge subscriptions", () => {
     expect(listener).toHaveBeenCalledWith({ id: "request", ok: false });
   });
 
+  it("forwards maximize button regions and hover events through the current webview", async () => {
+    const listener = vi.fn();
+    const region = { x: 1, y: 2, width: 46, height: 32 };
+    await tauriBridge.set_maximize_button_region(region);
+    expect(invokeMock).toHaveBeenCalledWith("set_maximize_button_region", { region });
+
+    tauriBridge.subscribe_maximize_button_hover(listener);
+    await vi.waitFor(() => expect(eventMock.windowHandlers.get("peppy://maximize-button-hover")).toEqual(expect.any(Function)));
+    const handler = eventMock.windowHandlers.get("peppy://maximize-button-hover");
+    handler?.({ payload: "true" });
+    handler?.({ payload: true });
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(true);
+    invokeMock.mockClear();
+  });
+
   it("safely disposes when the dynamic listener resolves after unmount", async () => {
     const dispose = tauriBridge.subscribe_lifecycle(() => undefined);
     dispose();

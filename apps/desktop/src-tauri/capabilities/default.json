@@ -75,6 +75,7 @@
     "allow-get-notification-sound",
     "allow-set-notification-sound",
     "allow-hide-head",
+    "allow-set-maximize-button-region",
     "allow-popout-conversation",
     "allow-acknowledge-lifecycle",
     "allow-hosted-account",
