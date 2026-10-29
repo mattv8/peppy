@@ -557,6 +557,27 @@ describe("desktop UI controls", () => {
     expect(resizeTo).toHaveBeenCalledWith(0);
   });
 
+  it("renders a native macOS window-controls spacer without HTML traffic lights", () => {
+    render(<AppTitlebar platform="macos" nativeWindowControls onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} />);
+
+    const controls = document.getElementById("window-controls");
+    expect(controls).toHaveAttribute("data-native-window-controls");
+    expect(controls).toHaveAttribute("aria-hidden", "true");
+    expect(controls).toHaveClass("window-controls-macos");
+    expect(screen.queryByRole("button", { name: "Close window" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Minimize window" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Maximize window" })).not.toBeInTheDocument();
+  });
+
+  it("keeps Windows controls when native window controls are requested", () => {
+    render(<AppTitlebar platform="windows" nativeWindowControls onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} />);
+
+    expect(document.getElementById("window-controls")).toHaveClass("window-controls-windows");
+    expect(screen.getByRole("button", { name: "Close window" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Minimize window" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Maximize window" })).toBeInTheDocument();
+  });
+
   it("renders main-window conversation controls and invokes their callbacks", () => {
     const toggleSidebar = vi.fn();
     const newMessage = vi.fn();

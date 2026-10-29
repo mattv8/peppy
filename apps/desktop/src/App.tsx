@@ -4097,6 +4097,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onMaximize={browserHost ? undefined : () => void bridge.window("maximize")}
         onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
+        nativeWindowControls={!browserHost && platform === "macos"}
         search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} />}
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={narrowConversationListMode ? showingMobileConversationList : activeView === "conversations" && !listCollapsed}

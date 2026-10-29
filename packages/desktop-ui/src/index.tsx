@@ -725,6 +725,7 @@ export function AppTitlebar({
   onMaximize,
   onClose,
   platform,
+  nativeWindowControls = false,
   isComposer = false,
   title,
   status,
@@ -741,6 +742,7 @@ export function AppTitlebar({
   onClose?(): void;
   simulated?: boolean;
   platform?: "macos" | "windows" | "linux";
+  nativeWindowControls?: boolean;
   isComposer?: boolean;
   title?: string;
   status?: ReactNode;
@@ -787,7 +789,13 @@ export function AppTitlebar({
       data-navigation-placement={renderedNavigation ? (macos ? "trailing" : "leading") : undefined}
     >
       {!macos && renderedNavigation}
-      {macos && (onClose || onMinimize || onMaximize) && <div
+      {macos && nativeWindowControls ? <div
+        id="window-controls"
+        className="window-controls window-controls-macos"
+        data-native-window-controls
+        aria-hidden="true"
+        data-tauri-drag-region
+      /> : macos && (onClose || onMinimize || onMaximize) && <div
         id="window-controls"
         className="window-controls window-controls-macos"
         role="toolbar"
