@@ -28,7 +28,9 @@ key_tmp=$(mktemp); trap 'rm -f "$key_tmp"' EXIT
 if ! "$dry_run"; then
   curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 "$key_url" -o "$key_tmp"
   read -r primary_count actual < <(gpg --show-keys --with-colons "$key_tmp" | awk -F: '$1 == "pub" { want_fpr=1; next } $1 == "fpr" && want_fpr { primaries++; primary=toupper($10); want_fpr=0 } END { print primaries, primary }')
-  [ "$primary_count" = 1 ] && [ "$actual" = "$fingerprint" ] || fail 'downloaded repository key must contain exactly the pinned primary fingerprint'
+  if [ "$primary_count" != 1 ] || [ "$actual" != "$fingerprint" ]; then
+    fail 'downloaded repository key must contain exactly the pinned primary fingerprint'
+  fi
 fi
 
 if [ "$distro" = debian ]; then
