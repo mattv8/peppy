@@ -8,6 +8,7 @@ import {
   GripVertical,
   Loader,
   LoaderCircle,
+  Maximize2,
   MessageCircle,
   MessageSquarePlus,
   Minus,
@@ -15,7 +16,6 @@ import {
   PanelLeft,
   Pin,
   PinOff,
-  Plus,
   SendHorizontal,
   Settings,
   Smartphone,
@@ -818,7 +818,7 @@ export function AppTitlebar({
           disabled={isComposer}
           aria-hidden={isComposer || undefined}
           tabIndex={isComposer ? -1 : undefined}
-        ><Plus size={10} strokeWidth={1.75} aria-hidden /></button>}
+        ><Maximize2 size={10} strokeWidth={2} aria-hidden /></button>}
       </div>}
       {!isComposer && (onToggleSidebar || onNewMessage) && <div id="titlebar-actions" role="toolbar" aria-label="Conversation controls">
         {onToggleSidebar && <button
