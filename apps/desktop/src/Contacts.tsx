@@ -50,7 +50,15 @@ const scanStatusText = (status: ContactScanStatus) => ({
 }[status.state]);
 
 export type ContactNavigationGuard = (navigate: () => void, onCancel?: () => void) => boolean | void;
-export type ContactTarget = { bookId: string; contactId: string; requestId?: number };
+export type ContactTarget =
+  | { kind?: "contact"; bookId: string; contactId: string; requestId?: number }
+  | { kind: "create"; phone: string; requestId: number };
+
+type CreateContactEditing = "create" | { createPrefill: { phone: string }; requestId: number };
+
+function isCreateEditing(editing: ContactView | null | CreateContactEditing): editing is CreateContactEditing {
+  return editing === "create" || (editing !== null && "createPrefill" in editing);
+}
 
 export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, headerHost, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone }: {
   books?: ContactBookView[];
@@ -74,7 +82,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const [sortOpen, setSortOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [restore, setRestore] = useState<RestorableContact[] | null>(null);
-  const [editing, setEditing] = useState<ContactView | null | "create">(null);
+  const [editing, setEditing] = useState<ContactView | null | CreateContactEditing>(null);
   const [error, setError] = useState("");
   const [validationError, setValidationError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -139,9 +147,9 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     setPendingNavigation(next);
   };
 
-  const targetKey = (value: ContactTarget) => value.requestId === undefined
-    ? `${value.bookId}:${value.contactId}`
-    : `request:${value.requestId}`;
+  const targetKey = (value: ContactTarget) => value.kind === "create" || value.requestId !== undefined
+    ? `request:${value.requestId}`
+    : `${value.bookId}:${value.contactId}`;
   const consumeTarget = useCallback((value: ContactTarget) => {
     const key = targetKey(value);
     if (completedTargetRef.current === key) return;
@@ -318,7 +326,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     setBusy(true);
 
     try {
-      const isCreate = editing === "create";
+      const isCreate = isCreateEditing(editing);
       const current = isCreate ? undefined : editing;
 
       // Build patches from draft changes
@@ -497,7 +505,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const activeTargetKey = target ? targetKey(target) : undefined;
   useEffect(() => {
     const requestedTarget = targetRef.current;
-    if (!requestedTarget || !booksLoaded || targetKey(requestedTarget) !== activeTargetKey) return;
+    if (!requestedTarget || requestedTarget.kind === "create" || !booksLoaded || targetKey(requestedTarget) !== activeTargetKey) return;
     if (completedTargetRef.current === activeTargetKey) return;
     setTargetError("");
     const sequence = ++targetLookupRef.current;
@@ -580,6 +588,40 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     }
     startLookup();
   }, [activeTargetKey, booksLoaded, consumeTarget, targetLookupRestart]);
+
+  useEffect(() => {
+    const requestedTarget = targetRef.current;
+    if (!requestedTarget || requestedTarget.kind !== "create" || targetKey(requestedTarget) !== activeTargetKey) return;
+    cancelTargetLookup(false);
+    if (!booksLoaded) return;
+    if (completedTargetRef.current === activeTargetKey) return;
+
+    const openCreateForm = () => {
+      setEditing({ createPrefill: { phone: requestedTarget.phone }, requestId: requestedTarget.requestId });
+      setDirty(false);
+      setConfirmDelete(false);
+      setError("");
+      setValidationError("");
+      setTargetError("");
+      consumeTarget(requestedTarget);
+    };
+
+    if (busyRef.current) {
+      setNotice("Finish saving the current contact before adding a new one.");
+      consumeTarget(requestedTarget);
+      return;
+    }
+    if (!booksRef.current.some(candidate => candidate.id === currentBookRef.current)) {
+      setTargetError("Select a contact book first.");
+      consumeTarget(requestedTarget);
+      return;
+    }
+    if (editingRef.current && dirtyRef.current) {
+      replacePendingNavigation({ action: openCreateForm, onCancel: () => consumeTarget(requestedTarget) });
+      return;
+    }
+    openCreateForm();
+  }, [activeTargetKey, booksLoaded, cancelTargetLookup, consumeTarget]);
 
   useEffect(() => {
     if (!focusTargetId) return;
@@ -738,7 +780,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const resizeDetail = (delta: number) => setDetailSize((detailDragActive.current ? detailDragWidth.current : renderedDetailWidth) - delta);
   const resetDetailWidth = () => { detailDragActive.current = false; setDetailWidth(DETAIL_DEFAULT_WIDTH); detailDragWidth.current = DETAIL_DEFAULT_WIDTH; persistLayoutPatch({ contactsDetailWidth: DETAIL_DEFAULT_WIDTH }); };
 
-  const editorToneSeed = editing && editing !== "create"
+  const editorToneSeed = editing && !isCreateEditing(editing)
     ? (() => { const identity = contactSeed(editing.phones, editing.id); return identity.startsWith("contact:") ? undefined : identity; })()
     : undefined;
 
@@ -901,7 +943,9 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           <aside id="contacts-detail-panel" role="region" aria-label="Contact detail" style={{ "--contacts-detail-width": `${renderedDetailWidth}px` } as CSSProperties}>
           {editing ? (
             <ContactForm
-              initial={editing === "create" ? undefined : editing}
+              key={editing === "create" ? "create" : isCreateEditing(editing) ? `create:${editing.requestId}` : editing.id}
+              initial={isCreateEditing(editing) ? undefined : editing}
+              createPrefill={editing !== "create" && isCreateEditing(editing) ? editing.createPrefill : undefined}
               onCancel={handleEditCancel}
               onSave={handleSave}
               onDirtyChange={setDirty}
@@ -909,7 +953,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
               validationError={validationError}
               busy={busy}
               bookCapabilities={book?.capabilities}
-              toneControl={editing === "create" ? undefined : (() => {
+              toneControl={isCreateEditing(editing) ? undefined : (() => {
                 return { value: editorToneSeed ? toneOverrides[editorToneSeed] : undefined, pending: Boolean(editorToneSeed && pendingToneSeeds[editorToneSeed]), error: editorToneSeed ? toneErrors[editorToneSeed] : undefined, disabled: toneDisabled, onSelect: (index: number | null) => { if (editorToneSeed) onSelectTone?.(editorToneSeed, index); } };
               })()}
               savedToneSeed={editorToneSeed}
