@@ -986,6 +986,122 @@ describe("ContactsView", () => {
       expect(scrollIntoView).toHaveBeenCalled();
     });
 
+    it("opens a create target with its raw phone number prefilled", async () => {
+      const consumed = vi.fn();
+      render(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 70 }} onTargetConsumed={consumed} />);
+
+      expect(await screen.findByRole("form", { name: "Create contact" })).toBeInTheDocument();
+      expect(screen.getByLabelText("Phone 1 number")).toHaveValue("+18014320853");
+      expect(consumed).toHaveBeenCalledWith(70);
+    });
+
+    it("consumes a create target when keeping a dirty edit", async () => {
+      const consumed = vi.fn();
+      const { rerender } = render(<ContactsView onTargetConsumed={consumed} />);
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      fireEvent.click(screen.getByLabelText("Edit contact"));
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Unsaved" } });
+
+      rerender(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 71 }} onTargetConsumed={consumed} />);
+      expect(await screen.findByText("You have unsaved changes.")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+
+      expect(screen.getByLabelText("Given name")).toHaveValue("Unsaved");
+      expect(consumed).toHaveBeenCalledWith(71);
+    });
+
+    it("reports and consumes a create target when no book is available", async () => {
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([]);
+      const consumed = vi.fn();
+      render(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 72 }} onTargetConsumed={consumed} />);
+
+      expect(await screen.findByText("Select a contact book first.")).toBeInTheDocument();
+      expect(screen.queryByRole("form", { name: "Create contact" })).not.toBeInTheDocument();
+      expect(consumed).toHaveBeenCalledWith(72);
+    });
+
+    it("opens an empty form from the manual new-contact action", async () => {
+      render(<ContactsView />);
+      fireEvent.click(await screen.findByLabelText("New contact"));
+
+      expect(screen.getByRole("form", { name: "Create contact" })).toBeInTheDocument();
+      expect(screen.queryByLabelText("Phone 1 number")).not.toBeInTheDocument();
+    });
+
+    it("cancels an active contact lookup before opening a create target", async () => {
+      const lookup = deferred<ContactView[]>();
+      vi.mocked(bridge.list_contacts).mockReturnValue(lookup.promise);
+      const { rerender, container } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 73 }} />);
+      await screen.findByText("Finding requested contact…");
+
+      rerender(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 74 }} />);
+
+      expect(await screen.findByRole("form", { name: "Create contact" })).toBeInTheDocument();
+      expect(container.querySelector("#contacts-target-status")).toBeNull();
+    });
+
+    it("resets a dirty prefilled form when a new request targets the same phone", async () => {
+      const { rerender } = render(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 75 }} />);
+      await screen.findByRole("form", { name: "Create contact" });
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Unsaved" } });
+
+      rerender(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 76 }} />);
+      expect(await screen.findByText("You have unsaved changes.")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+
+      expect(screen.getByLabelText("Given name")).toHaveValue("");
+      expect(screen.getByLabelText("Phone 1 number")).toHaveValue("+18014320853");
+    });
+
+    it("keeps the selected book when opening a create target", async () => {
+      const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone" };
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, secondBook]);
+      const { rerender } = render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /iPhone/ }));
+
+      rerender(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 77 }} />);
+
+      await screen.findByRole("form", { name: "Create contact" });
+      expect(screen.getByRole("button", { name: /iPhone/ })).toHaveAttribute("aria-current", "location");
+    });
+
+    it("sends the prefilled phone when saving a create target", async () => {
+      vi.mocked(bridge.submit_contact_edit).mockResolvedValue({ state: "pending", requestId: "prefilled-create" });
+      render(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 78 }} />);
+      fireEvent.change(await screen.findByLabelText("Given name"), { target: { value: "Grace" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+      await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledWith(expect.objectContaining({
+        kind: "create",
+        patches: expect.arrayContaining([expect.objectContaining({ field: "phones", value: [{ label: "mobile", number: "+18014320853" }] })]),
+      })));
+    });
+
+    it("consumes a create target during a save with an adding notice", async () => {
+      const submit = deferred<Awaited<ReturnType<typeof bridge.submit_contact_edit>>>();
+      vi.mocked(bridge.submit_contact_edit).mockReturnValue(submit.promise);
+      const consumed = vi.fn();
+      const { rerender } = render(<ContactsView onTargetConsumed={consumed} />);
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Grace" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(1));
+
+      rerender(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 79 }} onTargetConsumed={consumed} />);
+
+      expect(await screen.findByText("Finish saving the current contact before adding a new one.")).toBeInTheDocument();
+      expect(consumed).toHaveBeenCalledWith(79);
+      submit.resolve({ state: "pending", requestId: "save" });
+    });
+
+    it("consumes a create target when book loading fails", async () => {
+      vi.mocked(bridge.list_contact_books).mockRejectedValue(new Error("offline"));
+      const consumed = vi.fn();
+      render(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 80 }} onTargetConsumed={consumed} />);
+
+      await waitFor(() => expect(consumed).toHaveBeenCalledWith(80));
+    });
+
     it("consumes a cancelled dirty target so a newer request can ask again", async () => {
       const consumed = vi.fn();
       const { rerender } = render(<ContactsView onTargetConsumed={consumed} />);
