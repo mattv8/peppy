@@ -19,6 +19,9 @@ pub const COMPOSER_PREFIX: &str = "composer-";
 const TRAY_ID: &str = "peppy";
 const HEAD_OPEN_PREFIX: &str = "head-open:";
 const HEAD_DISMISS_PREFIX: &str = "head-dismiss:";
+pub const RECENT_OPEN_PREFIX: &str = "recent-open:";
+const RECENT_HEADING_ID: &str = "recent-heading";
+const RECENT_MENU_LIMIT: usize = 5;
 const UPDATE_ID: &str = "update";
 const PANEL_WIDTH: f64 = 340.0;
 const PANEL_HEIGHT: f64 = 440.0;
@@ -32,6 +35,7 @@ struct UpdateItem {
 #[derive(Default)]
 struct MenuState {
     heads: Vec<(String, String)>,
+    recents: Vec<(String, String)>,
     update: Option<UpdateItem>,
 }
 
@@ -64,6 +68,7 @@ pub(crate) fn icon(app: &AppHandle) -> Option<tauri::tray::TrayIcon<tauri::Wry>>
 pub fn install(
     app: &AppHandle,
     on_compose: impl Fn(&AppHandle) + Send + Sync + 'static,
+    on_recent: impl Fn(&AppHandle, &str) + Send + Sync + 'static,
     on_update: impl Fn(&AppHandle) + Send + Sync + 'static,
     on_quit: impl Fn(&AppHandle) + Send + Sync + 'static,
 ) -> bool {
@@ -81,6 +86,8 @@ pub fn install(
                     show_main(app);
                 } else if id == "compose" {
                     on_compose(app);
+                } else if let Some(conversation_id) = id.strip_prefix(RECENT_OPEN_PREFIX) {
+                    on_recent(app, conversation_id);
                 } else if id == UPDATE_ID {
                     on_update(app);
                 } else if id == "quit" {
@@ -99,12 +106,13 @@ pub fn install(
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let state = menu_state().lock().expect("tray menu state poisoned");
-    build_menu_with(app, &state.heads, state.update.as_ref())
+    build_menu_with(app, &state.heads, &state.recents, state.update.as_ref())
 }
 
 fn build_menu_with(
     app: &AppHandle,
     heads: &[(String, String)],
+    recents: &[(String, String)],
     update: Option<&UpdateItem>,
 ) -> tauri::Result<Menu<tauri::Wry>> {
     let open = MenuItem::with_id(app, "open", "Open Peppy", true, None::<&str>)?;
@@ -114,6 +122,23 @@ fn build_menu_with(
     let compose = MenuItem::with_id(app, "compose", "New message", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Peppy", true, None::<&str>)?;
+
+    let recent_rows = recent_menu_rows(recents);
+    let recent_top_separator = PredefinedMenuItem::separator(app)?;
+    let recent_bottom_separator = PredefinedMenuItem::separator(app)?;
+    let recent_heading = MenuItem::with_id(app, RECENT_HEADING_ID, "Recent", false, None::<&str>)?;
+    let recent_items = recent_rows
+        .iter()
+        .map(|(conversation_id, label)| {
+            MenuItem::with_id(
+                app,
+                format!("{RECENT_OPEN_PREFIX}{conversation_id}"),
+                label,
+                true,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
 
     let mut head_items = Vec::with_capacity(heads.len() * 2);
     for (conversation_id, name) in heads {
@@ -144,14 +169,37 @@ fn build_menu_with(
         !heads.is_empty(),
         &head_refs,
     )?;
+
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
+    items.push(&open);
     if let Some(update) = update.as_ref() {
-        Menu::with_items(
-            app,
-            &[&open, update, &compose, &floating, &separator, &quit],
-        )
-    } else {
-        Menu::with_items(app, &[&open, &compose, &floating, &separator, &quit])
+        items.push(update);
     }
+    items.push(&compose);
+    if !recent_items.is_empty() {
+        items.push(&recent_top_separator);
+        items.push(&recent_heading);
+        items.extend(
+            recent_items
+                .iter()
+                .map(|item| item as &dyn IsMenuItem<tauri::Wry>),
+        );
+        items.push(&recent_bottom_separator);
+    }
+    items.push(&floating);
+    items.push(&separator);
+    items.push(&quit);
+    Menu::with_items(app, &items)
+}
+
+/// Sanitized `(conversation id, label)` rows for the Recent section, newest
+/// first and capped. An empty result means the section is omitted entirely.
+fn recent_menu_rows(recents: &[(String, String)]) -> Vec<(String, String)> {
+    recents
+        .iter()
+        .take(RECENT_MENU_LIMIT)
+        .map(|(conversation_id, name)| (conversation_id.clone(), menu_name(name)))
+        .collect()
 }
 
 fn menu_name(name: &str) -> String {
@@ -179,17 +227,26 @@ pub fn set_floating_conversations(app: &AppHandle, heads: &[(String, String)]) -
     if let Ok(mut state) = menu_state().lock() {
         state.heads = heads.to_vec();
     }
-    let Ok(menu) = build_menu(app) else {
-        return false;
-    };
-    app.tray_by_id(TRAY_ID)
-        .is_some_and(|tray| tray.set_menu(Some(menu)).is_ok())
+    apply_menu(app)
+}
+
+/// Rebuilds the Recent section from the caller's newest-first list. Names are
+/// display-only and are never persisted by the tray.
+pub fn set_recent_conversations(app: &AppHandle, recents: &[(String, String)]) -> bool {
+    if let Ok(mut state) = menu_state().lock() {
+        state.recents = recents.to_vec();
+    }
+    apply_menu(app)
 }
 
 pub fn set_update_status(app: &AppHandle, status: &UpdateStatus) -> bool {
     if let Ok(mut state) = menu_state().lock() {
         state.update = update_item(status);
     }
+    apply_menu(app)
+}
+
+fn apply_menu(app: &AppHandle) -> bool {
     let Ok(menu) = build_menu(app) else {
         return false;
     };
@@ -756,6 +813,18 @@ mod tests {
         assert_eq!(menu_name(" Alice\n  Example "), "Alice Example");
         assert_eq!(menu_name("\n\t"), "conversation");
         assert_eq!(menu_name(&"x".repeat(80)).chars().count(), 60);
+    }
+
+    #[test]
+    fn recent_rows_keep_newest_first_sanitize_and_cap_at_five() {
+        let recents = (0..7)
+            .map(|index| (format!("id-{index}"), format!(" Name\n{index} ")))
+            .collect::<Vec<_>>();
+        let rows = recent_menu_rows(&recents);
+        assert_eq!(rows.len(), RECENT_MENU_LIMIT);
+        assert_eq!(rows[0], ("id-0".into(), "Name 0".into()));
+        assert_eq!(rows[4], ("id-4".into(), "Name 4".into()));
+        assert!(recent_menu_rows(&[]).is_empty());
     }
 
     #[test]

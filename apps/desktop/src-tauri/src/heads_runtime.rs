@@ -52,6 +52,8 @@ struct RuntimeState {
     queued: bool,
     stopped: bool,
     menu_entries: Option<Vec<(String, String)>>,
+    recent_entries: Option<Vec<(String, String)>>,
+    applied_recent_entries: Option<Vec<(String, String)>>,
     /// Layout cache keyed by conversation_id for the active binding.
     /// Loaded on popout/refresh/expand and updated on every write.
     /// Cleared on binding change/reset.
@@ -69,6 +71,8 @@ impl RuntimeState {
             queued: false,
             stopped: false,
             menu_entries: None,
+            recent_entries: None,
+            applied_recent_entries: None,
             layout_cache: HashMap::new(),
         }
     }
@@ -77,6 +81,13 @@ impl RuntimeState {
 enum ActivationUi {
     Collapse(BridgeResult<()>),
     Expand(BridgeResult<()>),
+    Focus(BridgeResult<()>),
+}
+
+#[derive(Clone, Copy)]
+enum ActivationMode {
+    Toggle,
+    ExpandOrFocus,
 }
 
 fn expansion_failed(result: &BridgeResult<Option<ActivationUi>>) -> bool {
@@ -110,6 +121,7 @@ enum RuntimeAction {
     Activate {
         conversation_id: String,
         generation: u64,
+        mode: ActivationMode,
     },
     Dismiss {
         conversation_id: String,
@@ -486,10 +498,11 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         }
         Err(_) => return,
     };
-    let (token, stale) = match begin_binding(app, binding.clone(), session.clone()) {
-        Ok(value) => value,
-        Err(_) => return,
-    };
+    let (token, stale, clear_recent_menu) =
+        match begin_binding(app, binding.clone(), session.clone()) {
+            Ok(value) => value,
+            Err(_) => return,
+        };
     if !stale.is_empty() {
         let stale_for_ui = stale.clone();
         let _ = on_main_if_current(app, token.clone(), move |app| {
@@ -499,16 +512,30 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         })
         .await;
     }
+    if clear_recent_menu {
+        update_recent_tray_menu(app, Some(&token)).await;
+    }
 
     let pins = match runtime(app).pins.pins(&binding) {
         Ok(pins) => pins,
         Err(_) => return,
     };
-    let pin_ids: HashSet<String> = pins.iter().map(|pin| pin.conversation_id.clone()).collect();
+    let recent_ids = match app.state::<AppState>().recents.list(&token.binding) {
+        Ok(ids) => ids,
+        Err(_) => {
+            clear_recent_entries(app, &token).await;
+            Vec::new()
+        }
+    };
+    let wanted_ids = pins
+        .iter()
+        .map(|pin| pin.conversation_id.clone())
+        .chain(recent_ids.iter().cloned())
+        .collect::<HashSet<_>>();
     let photos = runtime(app).photos.clone();
     let queried = crate::sync::blocking({
         let session = session.clone();
-        move || resolve_heads(&session, &pin_ids, &photos)
+        move || resolve_heads(&session, &wanted_ids, &photos)
     })
     .await;
     let data = match queried {
@@ -517,7 +544,10 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
             clear_visible(app).await;
             return;
         }
-        Err(_) => return, // transient query failures leave the last good registry intact
+        Err(_) => {
+            clear_recent_entries(app, &token).await;
+            return; // transient query failures leave the last good registry intact
+        }
     };
     if app
         .state::<AppState>()
@@ -535,6 +565,7 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         .into_iter()
         .map(|head| (head.id.clone(), head))
         .collect();
+    refresh_recent_conversations(app, &token, &recent_ids, &data).await;
     // The core resolution above is authoritative for this binding. Only now may stale persisted
     // pins be pruned; doing it before a successful resolution makes transient failures consume
     // capacity permanently.
@@ -649,6 +680,9 @@ fn resolve_heads(
 ) -> BridgeResult<Option<Vec<HeadData>>> {
     if !session_displayable(session)? {
         return Ok(None);
+    }
+    if wanted.is_empty() {
+        return Ok(Some(Vec::new()));
     }
     let tone_overrides = unlocked_tone_overrides(session)?;
     let conversations = session.client.list_conversations().map_err(core_error)?;
@@ -1009,7 +1043,7 @@ fn begin_binding(
     app: &AppHandle,
     binding: Binding,
     session: Arc<crate::session::Session>,
-) -> BridgeResult<(RuntimeToken, Vec<String>)> {
+) -> BridgeResult<(RuntimeToken, Vec<String>, bool)> {
     let runtime = runtime(app);
     let mut state = runtime
         .state
@@ -1048,6 +1082,9 @@ fn begin_binding(
     } else {
         Vec::new()
     };
+    if binding_changed || session_changed {
+        state.recent_entries = None;
+    }
     state.session = Some(session.clone());
     let token = RuntimeToken {
         binding,
@@ -1058,7 +1095,7 @@ fn begin_binding(
     if binding_changed || session_changed {
         clear_photos(app);
     }
-    Ok((token, stale))
+    Ok((token, stale, binding_changed || session_changed))
 }
 
 async fn revalidate_after_await(app: &AppHandle, token: &RuntimeToken) -> bool {
@@ -1175,6 +1212,7 @@ fn callback(app: &AppHandle) -> HeadCallback {
             let _ = runtime(&app).actions.send(RuntimeAction::Activate {
                 conversation_id,
                 generation,
+                mode: ActivationMode::Toggle,
             });
         }
         HeadEvent::Dismiss {
@@ -1239,14 +1277,32 @@ fn handle_moved_inline(
 }
 
 async fn handle_action(app: &AppHandle, action: RuntimeAction) {
+    let recent_action = matches!(
+        action,
+        RuntimeAction::Activate {
+            mode: ActivationMode::ExpandOrFocus,
+            ..
+        }
+    );
     let Ok(_operation) = crate::admit_update_operation(&app.state::<AppState>()) else {
+        if recent_action {
+            show_main_fallback(app).await;
+        }
         return;
     };
     match action {
         RuntimeAction::Activate {
             conversation_id,
             generation,
-        } => activate(app, &conversation_id, generation).await,
+            mode,
+        } => {
+            if recent_activation_failed(
+                mode,
+                activate(app, &conversation_id, generation, mode).await,
+            ) {
+                show_main_fallback(app).await;
+            }
+        }
         RuntimeAction::Dismiss {
             conversation_id,
             generation,
@@ -1304,33 +1360,42 @@ async fn handle_action(app: &AppHandle, action: RuntimeAction) {
     }
 }
 
-async fn activate(app: &AppHandle, conversation_id: &str, generation: u64) {
+fn recent_activation_failed(mode: ActivationMode, activated: bool) -> bool {
+    matches!(mode, ActivationMode::ExpandOrFocus) && !activated
+}
+
+async fn activate(
+    app: &AppHandle,
+    conversation_id: &str,
+    generation: u64,
+    mode: ActivationMode,
+) -> bool {
     let _window_permit = match crate::lifecycle::permit_window_creation(app) {
         Ok(permit) => permit,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let (binding, frame) = {
         let runtime = runtime(app);
         let Ok(state) = runtime.state.lock() else {
-            return;
+            return false;
         };
         if state.stopped || state.generation != generation {
-            return;
+            return false;
         }
         let Some(head) = state.heads.get(conversation_id) else {
-            return;
+            return false;
         };
         if head.generation != generation {
-            return;
+            return false;
         }
         let Some(binding) = state.binding.clone() else {
-            return;
+            return false;
         };
         (binding, head.frame.clone())
     };
     let session = match app.state::<AppState>().session().await {
         Ok(Some(session)) if session.binding == binding => session,
-        _ => return,
+        _ => return false,
     };
     let token = RuntimeToken {
         binding,
@@ -1338,34 +1403,35 @@ async fn activate(app: &AppHandle, conversation_id: &str, generation: u64) {
         session,
     };
     if !revalidate_after_await(app, &token).await {
-        return;
+        return false;
     }
     if load_layout_cache(app, &token, conversation_id)
         .await
         .is_err()
     {
-        return;
+        return false;
     }
     {
         let rt = runtime(app);
         let Ok(mut state) = rt.state.lock() else {
-            return;
+            return false;
         };
         if !token_matches_state(app, &state, &token) {
-            return;
+            return false;
         }
         let Some(head) = state.heads.get_mut(conversation_id) else {
-            return;
+            return false;
         };
         if head.generation != generation {
-            return;
+            return false;
         }
         head.panel = true;
     }
     let Ok(conversation) = ConversationId::from_str(conversation_id) else {
-        return;
+        return false;
     };
     let id = conversation_id.to_owned();
+    let recent_binding = token.binding.clone();
     let result = on_main_if_current(app, token, move |app| {
         let label = format!("{}{}", tray::COMPOSER_PREFIX, id);
         if app
@@ -1373,11 +1439,27 @@ async fn activate(app: &AppHandle, conversation_id: &str, generation: u64) {
             .and_then(|window| window.is_visible().ok())
             .unwrap_or(false)
         {
-            ActivationUi::Collapse(crate::lifecycle::request_window(
-                app,
-                &label,
-                crate::lifecycle::Action::Collapse,
-            ))
+            match mode {
+                ActivationMode::Toggle => ActivationUi::Collapse(crate::lifecycle::request_window(
+                    app,
+                    &label,
+                    crate::lifecycle::Action::Collapse,
+                )),
+                ActivationMode::ExpandOrFocus => ActivationUi::Focus(
+                    app.get_webview_window(&label)
+                        .ok_or_else(|| {
+                            BridgeError::new("not-found", "The conversation panel is unavailable.")
+                        })
+                        .and_then(|window| {
+                            crate::window_chrome::show_when_ready(&window).map_err(|_| {
+                                BridgeError::new(
+                                    "heads",
+                                    "Could not focus the floating conversation.",
+                                )
+                            })
+                        }),
+                ),
+            }
         } else {
             let opened = tray::open_head_panel(app, conversation).map(|()| {
                 if let Some(frame) = frame.as_ref() {
@@ -1392,14 +1474,32 @@ async fn activate(app: &AppHandle, conversation_id: &str, generation: u64) {
         set_panel(app, conversation_id, false);
     }
     match result {
-        Ok(Some(ActivationUi::Expand(Err(_)))) => {}
-        Ok(Some(ActivationUi::Expand(Ok(())) | ActivationUi::Collapse(Ok(())))) => {
+        Ok(Some(ActivationUi::Expand(Err(_)))) => false,
+        Ok(Some(ActivationUi::Expand(Ok(())))) => {
+            app.state::<AppState>()
+                .record_recent(&recent_binding, conversation_id);
             let _ = app.emit(STATE_EVENT, ());
+            true
+        }
+        Ok(Some(ActivationUi::Collapse(Ok(())) | ActivationUi::Focus(Ok(())))) => {
+            let _ = app.emit(STATE_EVENT, ());
+            true
         }
         // Busy/failed collapse keeps panel mode so a later click still uses the
         // draft-safe collapse path. Stale tokens are handled by the fence.
-        Ok(Some(ActivationUi::Collapse(Err(_)))) | Ok(None) | Err(_) => {}
+        Ok(Some(ActivationUi::Collapse(Err(_)) | ActivationUi::Focus(Err(_))))
+        | Ok(None)
+        | Err(_) => false,
     }
+}
+
+async fn show_main_fallback(app: &AppHandle) {
+    let _ = on_main(app, tray::show_main).await;
+}
+
+fn schedule_main_fallback(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move { show_main_fallback(&app).await });
 }
 
 pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResult<PopoutResult> {
@@ -1414,7 +1514,7 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
     if session.binding != binding {
         return Err(BridgeError::no_session());
     }
-    let (token, stale) = begin_binding(app, binding.clone(), session.clone())?;
+    let (token, stale, _) = begin_binding(app, binding.clone(), session.clone())?;
     if !stale.is_empty() {
         let _ = on_main_if_current(app, token.clone(), move |app| {
             for id in stale {
@@ -1582,6 +1682,8 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
             )),
         };
     }
+    app.state::<AppState>()
+        .record_recent(&binding, &spec.conversation_id);
     update_tray_menu(app, Some(&token)).await;
     let _ = app.emit(STATE_EVENT, ());
     Ok(PopoutResult {
@@ -1881,6 +1983,52 @@ pub fn has_head(app: &AppHandle, conversation_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Opens a tray recent without changing a visible panel's layout or collapsing it.
+pub fn open_recent_from_tray(app: &AppHandle, conversation_id: &str) {
+    if app
+        .state::<AppState>()
+        .app_locked
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        schedule_main_fallback(app);
+        return;
+    }
+    let Ok(conversation) = ConversationId::from_str(conversation_id) else {
+        schedule_main_fallback(app);
+        return;
+    };
+    let Some(runtime) = app.try_state::<HeadRuntime>() else {
+        schedule_main_fallback(app);
+        return;
+    };
+    let action = runtime.state.lock().ok().and_then(|state| {
+        state
+            .heads
+            .get(conversation_id)
+            .map(|head| RuntimeAction::Activate {
+                conversation_id: conversation_id.to_owned(),
+                generation: head.generation,
+                mode: ActivationMode::ExpandOrFocus,
+            })
+    });
+    if let Some(action) = action {
+        if runtime.actions.send(action).is_err() {
+            schedule_main_fallback(app);
+        }
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let opened = match crate::lifecycle::permit_window_creation(&app) {
+            Ok(_permit) => popout(&app, conversation).await,
+            Err(error) => Err(error),
+        };
+        if opened.is_err() {
+            show_main_fallback(&app).await;
+        }
+    });
+}
+
 pub fn activate_from_tray(app: &AppHandle, conversation_id: &str) {
     let event = runtime(app).state.lock().ok().and_then(|state| {
         state
@@ -1889,6 +2037,7 @@ pub fn activate_from_tray(app: &AppHandle, conversation_id: &str) {
             .map(|head| RuntimeAction::Activate {
                 conversation_id: conversation_id.to_owned(),
                 generation: head.generation,
+                mode: ActivationMode::Toggle,
             })
     });
     if let Some(event) = event {
@@ -1930,11 +2079,13 @@ pub async fn reset(app: &AppHandle) -> BridgeResult<()> {
         state.binding = None;
         state.session = None;
         state.queued = false;
+        state.recent_entries = None;
         state.layout_cache.clear(); // Clear cache on binding change (N2)
     }
     clear_photos(app);
     on_main(app, windows::clear_heads).await?;
     update_tray_menu(app, None).await;
+    update_recent_tray_menu(app, None).await;
     Ok(())
 }
 
@@ -1949,6 +2100,7 @@ pub fn clear_on_exit(app: &AppHandle) {
         state.heads.clear();
         state.binding = None;
         state.session = None;
+        state.recent_entries = None;
         state.layout_cache.clear(); // Clear cache on exit (N2)
     }
     clear_photos(app);
@@ -1979,6 +2131,7 @@ async fn clear_visible(app: &AppHandle) {
         state.heads.clear();
         state.binding = None;
         state.session = None;
+        state.recent_entries = None;
         state.layout_cache.clear(); // Clear cache on clear visible (N2)
         labels
     };
@@ -1993,6 +2146,7 @@ async fn clear_visible(app: &AppHandle) {
     })
     .await;
     update_tray_menu(app, None).await;
+    update_recent_tray_menu(app, None).await;
 }
 
 fn set_panel(app: &AppHandle, conversation_id: &str, panel: bool) {
@@ -2050,6 +2204,131 @@ async fn update_tray_menu(app: &AppHandle, token: Option<&RuntimeToken>) {
     }
 }
 
+async fn refresh_recent_conversations(
+    app: &AppHandle,
+    token: &RuntimeToken,
+    ids: &[String],
+    heads: &HashMap<String, HeadData>,
+) {
+    let (entries, missing) = reconcile_recent_heads(ids, heads);
+    for missing in missing {
+        if app
+            .state::<AppState>()
+            .recents
+            .remove(&token.binding, &missing)
+            .is_err()
+        {
+            return;
+        }
+    }
+    if let Ok(mut state) = runtime(app).state.lock() {
+        if !token_matches_state(app, &state, token) {
+            return;
+        }
+        state.recent_entries = Some(entries);
+    }
+    update_recent_tray_menu(app, Some(token)).await;
+}
+
+/// Resolved recent tray entries (ID, display name) paired with recent IDs whose conversation is missing.
+type ResolvedRecentEntries = (Vec<(String, String)>, Vec<String>);
+
+fn reconcile_recent_heads(
+    ids: &[String],
+    heads: &HashMap<String, HeadData>,
+) -> ResolvedRecentEntries {
+    let names = heads
+        .iter()
+        .map(|(id, head)| (id.clone(), head.name.clone()))
+        .collect::<HashMap<_, _>>();
+    let missing = ids
+        .iter()
+        .filter(|id| !names.contains_key(*id))
+        .cloned()
+        .collect();
+    (recent_tray_entries(ids, &names), missing)
+}
+
+async fn clear_recent_entries(app: &AppHandle, token: &RuntimeToken) {
+    let cleared = runtime(app).state.lock().ok().is_some_and(|mut state| {
+        if state.stopped
+            || state.generation != token.generation
+            || state.binding.as_ref() != Some(&token.binding)
+        {
+            return false;
+        }
+        state.recent_entries = Some(Vec::new());
+        true
+    });
+    if cleared {
+        update_recent_tray_menu(app, None).await;
+    }
+}
+
+async fn update_recent_tray_menu(app: &AppHandle, token: Option<&RuntimeToken>) {
+    if let Some(token) = token {
+        let token = token.clone();
+        let _ = on_main_if_current(app, token.clone(), move |app| {
+            let runtime = runtime(app);
+            let Ok(mut state) = runtime.state.lock() else {
+                return false;
+            };
+            if !token_matches_state(app, &state, &token) {
+                return false;
+            }
+            let entries = state.recent_entries.clone().unwrap_or_default();
+            if !recent_menu_changed(state.applied_recent_entries.as_deref(), &entries) {
+                return false;
+            }
+            if !tray::set_recent_conversations(app, &entries) {
+                return false;
+            }
+            state.applied_recent_entries = Some(entries);
+            true
+        })
+        .await;
+    } else {
+        let _ = on_main(app, move |app| {
+            let runtime = runtime(app);
+            let Ok(mut state) = runtime.state.lock() else {
+                return false;
+            };
+            let entries = state.recent_entries.clone().unwrap_or_default();
+            if !recent_menu_changed(state.applied_recent_entries.as_deref(), &entries) {
+                return false;
+            }
+            if !tray::set_recent_conversations(app, &entries) {
+                return false;
+            }
+            state.applied_recent_entries = Some(entries);
+            true
+        })
+        .await;
+    }
+}
+
+fn recent_menu_changed(applied: Option<&[(String, String)]>, desired: &[(String, String)]) -> bool {
+    applied != Some(desired)
+}
+
+fn recent_tray_entries(ids: &[String], names: &HashMap<String, String>) -> Vec<(String, String)> {
+    let mut labels = HashMap::new();
+    ids.iter()
+        .filter_map(|id| {
+            names.get(id).map(|name| {
+                let count = labels.entry(name.clone()).or_insert(0usize);
+                *count += 1;
+                let label = if *count > 1 {
+                    format!("{name} {count}")
+                } else {
+                    name.clone()
+                };
+                (id.clone(), label)
+            })
+        })
+        .collect()
+}
+
 fn tray_entries(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
     entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     let mut labels = HashMap::new();
@@ -2096,6 +2375,61 @@ mod tests {
             entries: HashMap::new(),
             epoch: 0,
         }))
+    }
+
+    #[test]
+    fn recent_entries_preserve_newest_order_and_disambiguate_labels() {
+        let ids = vec!["newest".into(), "missing".into(), "older".into()];
+        let names = HashMap::from([
+            ("newest".into(), "Ada".into()),
+            ("older".into(), "Ada".into()),
+        ]);
+
+        assert_eq!(
+            recent_tray_entries(&ids, &names),
+            vec![
+                ("newest".into(), "Ada".into()),
+                ("older".into(), "Ada 2".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn nondisplayable_session_yields_no_authoritative_head_resolution() {
+        let (_fixture, session, conversation) = locally_saved_draft_without_sync_unlock();
+        let persisted = [conversation.to_string()];
+        session.cancel.cancel();
+
+        let resolution = resolve_heads(
+            &session,
+            &persisted.iter().cloned().collect(),
+            &photo_cache(),
+        )
+        .unwrap();
+
+        assert!(resolution.is_none());
+    }
+
+    #[test]
+    fn unchanged_recent_menu_does_not_require_a_native_rebuild() {
+        let entries = vec![("conversation".into(), "Ada".into())];
+
+        assert!(!recent_menu_changed(Some(&entries), &entries));
+        assert!(recent_menu_changed(Some(&entries), &[]));
+        assert!(recent_menu_changed(None, &entries));
+    }
+
+    #[test]
+    fn only_failed_recent_expansion_requires_main_window_fallback() {
+        assert!(recent_activation_failed(
+            ActivationMode::ExpandOrFocus,
+            false
+        ));
+        assert!(!recent_activation_failed(
+            ActivationMode::ExpandOrFocus,
+            true
+        ));
+        assert!(!recent_activation_failed(ActivationMode::Toggle, false));
     }
 
     #[test]
