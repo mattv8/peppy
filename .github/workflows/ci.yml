@@ -363,7 +363,7 @@ jobs:
           timeout --signal=TERM --kill-after=30s 8m ./gradlew --console=plain :app:testDebugUnitTest
       - name: Lint and assemble Android artifacts
         working-directory: apps/android
-        run: ./gradlew --console=plain :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
+        run: ./gradlew --console=plain --stacktrace :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
       - name: Verify release SMS diagnostics policy
         working-directory: apps/android
         run: ./gradlew --console=plain :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest
