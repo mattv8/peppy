@@ -126,8 +126,10 @@ const COMPUTER_DIRECTORY_STAMP: &str = ".computer-enrollment-attempt";
 
 fn sync_directory(dir: &Dir) -> BridgeResult<()> {
     #[cfg(unix)]
-    dir.try_clone()
-        .and_then(|dir| dir.into_std_file().sync_all())
+    // Linux directory capabilities may use O_PATH, which dup preserves but fsync rejects.
+    // Open "." relative to the capability for a readable handle to the same directory.
+    dir.open(".")
+        .and_then(|file| file.sync_all())
         .map_err(|_| BridgeError::host_state())?;
     #[cfg(not(unix))]
     let _ = dir;
@@ -1940,6 +1942,22 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "offline");
         assert!(state.enrollment.lock().unwrap().computer_claimant.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_directory_accepts_nofollow_capability_after_rename() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+        parent.create_dir("reserved").unwrap();
+        let dir = parent.open_dir_nofollow("reserved").unwrap();
+        parent.rename("reserved", &parent, "moved").unwrap();
+        parent.create_dir("reserved").unwrap();
+        // Sync the already-open capability, not a replacement at its former path.
+        sync_directory(&dir).unwrap();
+        dir.write("owned", b"attempt").unwrap();
+        assert_eq!(parent.read("moved/owned").unwrap(), b"attempt");
+        assert!(!parent.exists("reserved/owned"));
     }
 
     fn binding(origin: &str) -> crate::credentials::Binding {
