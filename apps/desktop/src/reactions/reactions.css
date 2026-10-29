@@ -6,7 +6,7 @@
   gap: 4px;
   max-width: min(76%, 620px);
   min-width: 0;
-  margin: -10px 8px 0;
+  margin: -10px 8px 0 calc(var(--message-sender-indent, 0px) + 8px);
 }
 .reaction-badge { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 6px; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); white-space: nowrap; }
 .reaction-emoji, .reaction-notice-emoji { font-family: var(--peppy-font-body), "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }

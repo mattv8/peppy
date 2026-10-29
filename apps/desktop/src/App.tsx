@@ -121,7 +121,8 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 
 import { GatewayPicker } from "./GatewayPicker";
 import { installHostedSessionRenewal } from "./hostedSessionRenewal";
-import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps } from "./layout-persistence";
+import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars } from "./layout-persistence";
+import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { hiddenTimeIds } from "./timestamp-bursts";
 import { createSeenReactionLedger, linkReactions, locateReactionTarget, NO_REACTIONS, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
 import { normalizeReactionText, quoteMatches } from "./reactions/parse";
@@ -682,6 +683,10 @@ function MessageList({
   onLoadNewer,
   onGoToLatest,
   compactTimestamps,
+  showSenderAvatars,
+  onOpenSender,
+  senderLocked,
+  resolution,
   showReactions,
   actorName,
   onOpenReactionTarget,
@@ -722,6 +727,10 @@ function MessageList({
   onLoadNewer(): void;
   onGoToLatest(): void;
   compactTimestamps: boolean;
+  showSenderAvatars: boolean;
+  onOpenSender?: (address: string) => void;
+  senderLocked: boolean;
+  resolution: ContactResolutionMap;
   showReactions: boolean;
   actorName: ActorName;
   onOpenReactionTarget(reaction: MessageView, notice: ReactionNoticeInfo): void;
@@ -806,6 +815,37 @@ function MessageList({
   const hiddenTimeTitle = (message: MessageView) => hiddenTimes.has(message.id)
     ? formatDateTime(messageTime(message).displayedTime) ?? undefined
     : undefined;
+  const isGroup = (conversation.participants?.length ?? 0) > 1;
+  const messageGroups = groupMessages(visualMessages);
+  const senderEdges = isGroup
+    ? senderRunEdges(messageGroups, {
+      key: (group) => group.id,
+      identity: (group) => {
+        const message = group.messages[0];
+        if (message.sender === "self") return { kind: "outgoing" };
+        if (reactions.notices.has(message.id)) return { kind: "boundary" };
+        return { kind: "incoming", address: message.senderAddress };
+      },
+      endsRunAfter: (group) => {
+        if (!compactTimestamps) return false;
+        const message = group.messages.at(-1)!;
+        return timeIsShown(message) && !hiddenTimes.has(message.id) && (!reactions.notices.has(message.id) || showsReactionNoticeMeta(message));
+      },
+    })
+    : new Map<string, { start: boolean; end: boolean }>();
+  const senderRun = (group: ReturnType<typeof groupMessages>[number]) => {
+    const message = group.messages[0];
+    const edge = senderEdges.get(group.id);
+    if (!edge) return undefined;
+    const label = senderLabel(message.senderAddress, resolution);
+    const actionable = Boolean(message.senderAddress && onOpenSender && !senderLocked);
+    const openSender = () => message.senderAddress && onOpenSender?.(message.senderAddress);
+    const labelNode = edge.start ? actionable ? (
+      <button type="button" className="message-sender-label" data-sender-label={message.senderAddress} data-sender-known={label.isName} aria-label={label.contact ? `Open ${label.text} in Contacts` : `Add ${label.text} to contacts`} onClick={openSender}>{label.text}</button>
+    ) : <span className="message-sender-label" data-plain data-sender-label={message.senderAddress} data-sender-known={label.isName} aria-hidden="true" title={label.text}>{label.text}</span> : undefined;
+    const avatar = edge.end && showSenderAvatars ? <span className="message-sender-avatar" data-sender-avatar={message.senderAddress} data-clickable={actionable || undefined} aria-hidden="true" onClick={actionable ? openSender : undefined}><ContactAvatar size={24} seed={incomingToneSeed(conversationToneSeed, message.senderAddress)} name={label.isName ? label.text : undefined} photoDataUrl={resolution[message.senderAddress ?? ""]?.photoDataUrl} toneOverrides={toneOverrides} /></span> : undefined;
+    return { edge, label, labelNode, avatar };
+  };
   return (
     <ReactionHintLayout suppressed={suppressed} capture={captureReactionLayout} restore={restoreReactionLayout}>
     <div
@@ -836,104 +876,113 @@ function MessageList({
         {conversation.messages.filter(message => suppressed.has(message.id)).map(message => <ReactionNotice key={message.id} reaction={message} notice={reactions.notices.get(message.id)!} actorName={actorName} rowRef={row => registerRow(message.id, row)} onOpen={onOpenReactionTarget} suppressedHint />)}
         {historyExhausted && <p id="history-beginning-marker" className="history-load-band" data-history-state="beginning">Beginning of conversation</p>}
         {!conversation.messages.length && <p>Start the conversation.</p>}
-        {groupMessages(visualMessages).map((group) => {
+        {messageGroups.map((group) => {
           const message = group.messages[0];
           const reactionNotice = reactions.notices.get(message.id);
           const imageRun = group.messages.every((candidate) => candidate.transport === "mms" && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} />;
+          const sender = senderRun(group);
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
           if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
           const badges = reactions.badges.get(message.id);
+          const bubble = (
+            <article
+              ref={(row) => registerRow(message.id, row)}
+              data-message-id={message.id}
+              data-search-target={searchTargetId === message.id || undefined}
+              aria-describedby={searchTargetId === message.id ? "search-result-message-hint" : undefined}
+              tabIndex={searchTargetId === message.id ? -1 : undefined}
+              className={`message-bubble ${message.sender}`}
+              data-peppy-tone={message.sender === "other" || undefined}
+              style={message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined}
+              title={hiddenTimeTitle(message)}
+            >
+              {sender && <span className="sr-only">From {sender.label.text}: </span>}
+              {message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
+              {message.subject && <p className="message-subject">Subject: {message.subject}</p>}
+              {message.attachments.map((file) => {
+                const copy = publicCopies[file.id];
+                if (originalPending(file)) return <MediaTile key={file.id} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
+                const shareable =
+                  file.state === "ready" && file.mediaType.startsWith("image/");
+                if (file.mediaType.startsWith("video/") || file.mediaType.startsWith("audio/")) return <InlineMedia key={file.id} attachment={file} requestOriginal={requestOriginal} checkOriginal={checkOriginal} releaseMedia={releaseMedia} retryKey={mediaRetryKey} />;
+                return (
+                  <div
+                    key={file.id}
+                    data-attachment-id={file.id}
+                    className="file-card"
+                  >
+                    {file.previewUrl && (
+                      <img
+                        src={file.previewUrl}
+                        alt={file.name}
+                        onError={(event) => {
+                          event.currentTarget.hidden = true;
+                        }}
+                      />
+                    )}
+                    {file.mediaType.startsWith("image/") ? (
+                      <Image size={16} aria-hidden />
+                    ) : (
+                      <FileText size={16} aria-hidden />
+                    )}
+                    <span>{file.name}</span>
+                    <small>
+                      {fileSize(file.byteSize)} · {attachmentState(file)}
+                    </small>
+                    {file.retryable && file.transfer && (
+                      <button className="secondary-button" onClick={() => onRetryAttachment(file)} aria-label={`Retry ${file.transfer} for ${file.name}`}>
+                        Retry {file.transfer}
+                      </button>
+                    )}
+                    {(!file.mediaType.startsWith("image/") || file.state === "ready") && (
+                      <button className="secondary-button" onClick={() => onSaveAttachment(file)} aria-label={`Save ${file.name}`}>
+                        Save {file.name}
+                      </button>
+                    )}
+                    {shareable && !copy && (
+                      <button
+                        className="secondary-button"
+                        onClick={() => onPublish(file)}
+                        aria-label={`Create public link for ${file.name}`}
+                      >
+                        Create public link
+                      </button>
+                    )}
+                    {copy && (
+                      <div className="public-copy" data-public-copy-for={file.id}>
+                        <label>
+                          Public link{" "}
+                          <span className="public-link-warning" role="status">
+                            <ShieldAlert size={12} aria-hidden /> Anyone with this
+                            link can view this copy
+                          </span>
+                          <input
+                            readOnly
+                            aria-label={`Public link for ${file.name}`}
+                            value={copy.url}
+                            onFocus={(event) => event.currentTarget.select()}
+                          />
+                        </label>
+                        <small>{expiryText(copy.expiresInSeconds)}</small>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </article>
+          );
           return (
             <div
               key={message.id}
               className={`message-row ${message.sender}`}
               data-message-row={message.id}
               data-sender={message.sender}
+              data-sender-gutter={sender && showSenderAvatars ? "" : undefined}
+              data-sender-run-start={sender?.edge.start ? "" : undefined}
+              data-sender-run-end={sender?.edge.end ? "" : undefined}
             >
-              <article
-                ref={(row) => registerRow(message.id, row)}
-                data-message-id={message.id}
-                data-search-target={searchTargetId === message.id || undefined}
-                aria-describedby={searchTargetId === message.id ? "search-result-message-hint" : undefined}
-                tabIndex={searchTargetId === message.id ? -1 : undefined}
-                className={`message-bubble ${message.sender}`}
-                data-peppy-tone={message.sender === "other" || undefined}
-                style={message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined}
-                title={hiddenTimeTitle(message)}
-              >
-                {message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
-                {message.subject && <p className="message-subject">Subject: {message.subject}</p>}
-                {message.attachments.map((file) => {
-                  const copy = publicCopies[file.id];
-                  if (originalPending(file)) return <MediaTile key={file.id} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
-                  const shareable =
-                    file.state === "ready" && file.mediaType.startsWith("image/");
-                  if (file.mediaType.startsWith("video/") || file.mediaType.startsWith("audio/")) return <InlineMedia key={file.id} attachment={file} requestOriginal={requestOriginal} checkOriginal={checkOriginal} releaseMedia={releaseMedia} retryKey={mediaRetryKey} />;
-                  return (
-                    <div
-                      key={file.id}
-                      data-attachment-id={file.id}
-                      className="file-card"
-                    >
-                  {file.previewUrl && (
-                    <img
-                      src={file.previewUrl}
-                      alt={file.name}
-                      onError={(event) => {
-                        event.currentTarget.hidden = true;
-                      }}
-                    />
-                  )}
-                  {file.mediaType.startsWith("image/") ? (
-                    <Image size={16} aria-hidden />
-                  ) : (
-                    <FileText size={16} aria-hidden />
-                  )}
-                  <span>{file.name}</span>
-                  <small>
-                    {fileSize(file.byteSize)} · {attachmentState(file)}
-                  </small>
-                  {file.retryable && file.transfer && (
-                    <button className="secondary-button" onClick={() => onRetryAttachment(file)} aria-label={`Retry ${file.transfer} for ${file.name}`}>
-                      Retry {file.transfer}
-                    </button>
-                  )}
-                  {(!file.mediaType.startsWith("image/") || file.state === "ready") && (
-                    <button className="secondary-button" onClick={() => onSaveAttachment(file)} aria-label={`Save ${file.name}`}>
-                      Save {file.name}
-                    </button>
-                  )}
-                  {shareable && !copy && (
-                    <button
-                      className="secondary-button"
-                      onClick={() => onPublish(file)}
-                      aria-label={`Create public link for ${file.name}`}
-                    >
-                      Create public link
-                    </button>
-                  )}
-                  {copy && (
-                    <div className="public-copy" data-public-copy-for={file.id}>
-                      <label>
-                        Public link{" "}
-                        <span className="public-link-warning" role="status">
-                          <ShieldAlert size={12} aria-hidden /> Anyone with this
-                          link can view this copy
-                        </span>
-                        <input
-                          readOnly
-                          aria-label={`Public link for ${file.name}`}
-                          value={copy.url}
-                          onFocus={(event) => event.currentTarget.select()}
-                        />
-                      </label>
-                      <small>{expiryText(copy.expiresInSeconds)}</small>
-                    </div>
-                  )}
-                    </div>
-                  );
-                })}
-              </article>
+              {sender?.labelNode}
+              {sender ? <div className="message-sender-line" data-sender-line>{sender.avatar ?? (showSenderAvatars && <span className="message-sender-gutter" aria-hidden="true" />)}{bubble}</div> : bubble}
               {badges && <ReactionBadges messageId={message.id} badges={badges} actorName={actorName} chipRef={chipRef} />}
               <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} />
             </div>
@@ -972,6 +1021,8 @@ function SettingsView({
   onNavigationPosition,
   compactTimestamps,
   onCompactTimestamps,
+  groupSenderAvatars,
+  onGroupSenderAvatars,
   showReactions,
   onShowReactions,
   desktop,
@@ -1009,6 +1060,8 @@ function SettingsView({
   onNavigationPosition(position: NavigationPosition): void;
   compactTimestamps: boolean;
   onCompactTimestamps(enabled: boolean): void;
+  groupSenderAvatars: boolean;
+  onGroupSenderAvatars(enabled: boolean): void;
   showReactions: boolean;
   onShowReactions(show: boolean): void;
   desktop?: DesktopSnapshot["desktop"];
@@ -1270,6 +1323,13 @@ function SettingsView({
           </label>
           <p id="settings-compact-timestamps-hint" className="settings-field-hint">Hides times on messages sent within an hour of the next one.</p>
         </div>
+        <div id="settings-group-sender-avatars-group">
+          <label className="settings-check">
+            <input id="settings-group-sender-avatars" type="checkbox" checked={groupSenderAvatars} aria-describedby="settings-group-sender-avatars-hint" onChange={(event) => onGroupSenderAvatars(event.target.checked)} />
+            Show sender avatars in group conversations
+          </label>
+          <p id="settings-group-sender-avatars-hint" className="settings-field-hint">Shows a photo or initials beside the last message in each stretch from one person. Names always show.</p>
+        </div>
       </section>
       {desktop?.startupSupported && <section id="settings-startup" className="settings-card" data-settings-section="startup">
         <h2>Startup</h2>
@@ -1396,6 +1456,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   });
   const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
+  const [groupSenderAvatars, setGroupSenderAvatars] = useState(readGroupSenderAvatars);
   const [showReactions, setShowReactions] = useShowReactions();
   const [pendingReactionId, setPendingReactionId] = useState<string>();
   const [reactionFeedback, setReactionFeedback] = useState<{ reactionId: string; message: string }>();
@@ -1640,6 +1701,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const changeCompactTimestamps = (enabled: boolean) => {
     setCompactTimestamps(enabled);
     persistLayout({ compactTimestamps: enabled });
+  };
+  const changeGroupSenderAvatars = (enabled: boolean) => {
+    setGroupSenderAvatars(enabled);
+    persistLayout({ groupSenderAvatars: enabled });
   };
   const railWidth = navigationPosition === "side-rail" ? RAIL_WIDTH : 0;
   const listMaxForWindow = Math.max(
@@ -2066,21 +2131,37 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (!isLocalDraftKey(key)) void refresh(key).catch(reportRefresh(""));
   };
 
-  const activateApprovedSearchHit = async (hit: LocalSearchHit) => {
+  const flushBeforeNavigation = async (failurePrefix: string) => {
     const activationGeneration = ++navigationGeneration.current;
     const activationSessionKey = currentSearchSessionKey();
+    const isCurrent = () => activationGeneration === navigationGeneration.current && activationSessionKey === currentSearchSessionKey();
     const previous = selectedRef.current;
     if (previous) {
       const flushed = await store.flush(previous);
-      if (!flushed.ok) return setNotice(`Search result not opened: ${flushed.error}`);
+      if (!flushed.ok) {
+        setNotice(`${failurePrefix}: ${flushed.error}`);
+        return false;
+      }
     }
-    if (activationGeneration !== navigationGeneration.current || activationSessionKey !== currentSearchSessionKey()) return;
+    if (!isCurrent()) return false;
+    return { activationGeneration, activationSessionKey, isCurrent };
+  };
+  const openContactTarget = async (target: ContactTarget & { requestId: number }, failurePrefix = "Search result not opened") => {
+    const navigation = await flushBeforeNavigation(failurePrefix);
+    if (!navigation || !navigation.isCurrent()) return false;
+    setActiveViewNow("contacts");
+    setContactTarget(target);
+    return true;
+  };
+  const activateApprovedSearchHit = async (hit: LocalSearchHit) => {
     if (hit.kind === "contact") {
       const requestId = ++contactTargetRequestId.current;
-      setActiveViewNow("contacts");
-      setContactTarget({ bookId: hit.bookId, contactId: hit.contactId, requestId });
+      await openContactTarget({ bookId: hit.bookId, contactId: hit.contactId, requestId });
       return;
     }
+    const navigation = await flushBeforeNavigation("Search result not opened");
+    if (!navigation) return;
+    const { activationGeneration, activationSessionKey } = navigation;
     if (hit.kind === "conversation") {
       setContactTarget(undefined);
       setActiveViewNow("conversations");
@@ -3453,10 +3534,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const actorName: ActorName = (actor) => {
     if (actor.sender === "self") return "You";
     if (!actor.senderAddress) return activeDisplay?.name ?? "Someone";
+    if ((active?.participants?.length ?? 0) > 1) return senderLabel(actor.senderAddress, resolution).text;
     const contactName = resolution[actor.senderAddress]?.displayName;
     if (contactName) return contactName;
     const isSoleParticipant = active?.participants?.length === 1 && active.participants[0] === actor.senderAddress;
     return isSoleParticipant && activeDisplay?.name ? activeDisplay.name : actor.senderAddress;
+  };
+  const openSender = (address: string) => {
+    const label = senderLabel(address, resolution);
+    const requestId = ++contactTargetRequestId.current;
+    const target: ContactTarget & { requestId: number } = label.contact
+      ? { ...label.contact, requestId }
+      : { kind: "create", phone: address, requestId };
+    void openContactTarget(target, "Sender not opened");
   };
   const revealReactionTarget = (row: HTMLElement) => {
     reactionHighlightCleanupRef.current();
@@ -3800,6 +3890,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onLoadNewer={() => void loadNewerMessages()}
       onGoToLatest={() => active?.id && void loadLatest(active.id).catch(reportAction("Could not load the latest messages: "))}
       compactTimestamps={compactTimestamps}
+      showSenderAvatars={groupSenderAvatars}
+      onOpenSender={!composerConversation ? openSender : undefined}
+      senderLocked={!snapshot || snapshot.encryption.state !== "unlocked" || Boolean(appLock?.locked)}
+      resolution={resolution}
       showReactions={showReactions}
       actorName={actorName}
       onOpenReactionTarget={(reaction, notice) => { void openReactionTarget(reaction, notice); }}
@@ -4162,6 +4256,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onNavigationPosition={changeNavigationPosition}
               compactTimestamps={compactTimestamps}
               onCompactTimestamps={changeCompactTimestamps}
+              groupSenderAvatars={groupSenderAvatars}
+              onGroupSenderAvatars={changeGroupSenderAvatars}
               showReactions={showReactions}
               onShowReactions={setShowReactions}
               desktop={snapshot?.desktop}

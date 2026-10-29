@@ -32,6 +32,25 @@ describe("MediaGrid", () => {
     expect(view.container.querySelector("[data-media-tile][data-variant='single']")).toBeInTheDocument();
   });
 
+  it("renders optional sender attribution around an image group", () => {
+    const view = render(<MediaGrid messages={[message("1"), message("2")]} onOpen={vi.fn()} senderRun={() => ({ label: <span data-sender-label="+18015551234">Ada</span>, avatar: <span data-sender-avatar="+18015551234" />, gutter: true, ariaName: "Ada", start: true, end: true })} />);
+    const row = view.container.querySelector('[data-message-group="1"]')!;
+    expect(row).toHaveAttribute("data-sender-gutter");
+    expect(row).toHaveAttribute("data-sender-run-start");
+    expect(row).toHaveAttribute("data-sender-run-end");
+    expect(row.querySelector("[data-sender-line]")).toBeInTheDocument();
+    expect(row.querySelector("article")).toHaveAttribute("aria-label", "2 images from Ada");
+  });
+
+  it("does not render sender attribution around groups without a sender run", () => {
+    const otherSender = { ...message("2"), sender: "other" as const, senderAddress: "+18015551235" };
+    const view = render(<MediaGrid messages={[message("1"), otherSender]} onOpen={vi.fn()} senderRun={(group) => group.id === "1" ? { label: <span data-sender-label="+18015551234">Ada</span>, gutter: true, start: true, end: true } : undefined} />);
+
+    const unmatchedGroup = view.container.querySelector('[data-message-group="2"]')!;
+    expect(unmatchedGroup.querySelector("[data-sender-label]")).toBeNull();
+    expect(unmatchedGroup.querySelector("[data-sender-line]")).toBeNull();
+  });
+
   it("uses per-message titles on single images and carousel slides", () => {
     const title = (value: { id: string }) => `Sent at ${value.id}`;
     const single = render(<MediaGrid messages={[message("1")]} onOpen={vi.fn()} messageTitle={title} />);

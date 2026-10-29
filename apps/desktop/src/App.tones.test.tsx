@@ -112,6 +112,7 @@ describe("App conversation tones", () => {
     const fallbackBubble = document.querySelector<HTMLElement>('[data-message-row="unknown-sender"] .message-bubble')!;
     expect(senderBubble.style.getPropertyValue("--peppy-tone")).toBe(toneVariable(incomingToneSeed(groupSeed, "+18015551234")));
     expect(fallbackBubble.style.getPropertyValue("--peppy-tone")).toBe(toneVariable(groupSeed));
+    expect(document.querySelector<HTMLElement>('[data-sender-avatar="+18015551234"] .contact-avatar')?.style.getPropertyValue("--peppy-tone")).toBe(senderBubble.style.getPropertyValue("--peppy-tone"));
   });
 
   it("keeps an active contact editor and its unsaved draft when a color save refreshes metadata", async () => {
