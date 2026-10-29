@@ -1,6 +1,8 @@
 import json
 import os
 import pathlib
+import plistlib
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -36,9 +38,41 @@ class DesktopHelperTests(unittest.TestCase):
         return {"DEBUG": debug, "PEPPY_DEV_TLS_DIR": str(pathlib.Path(fake_bin) / "tls")}
 
     def configure_macos_tools(self, fake_bin):
+        self.configure_codesign(fake_bin)
         self.fake_command(fake_bin, "uname", "echo Darwin")
         self.fake_command(fake_bin, "node", f"echo v{self.compatible_node_version()}")
         self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
+
+    def configure_codesign(self, fake_bin, failure=None):
+        calls = pathlib.Path(fake_bin) / "codesign-calls"
+        record = "import json, sys; print(json.dumps(sys.argv[1:]))"
+        body = f"python3 -c {shlex.quote(record)} \"$@\" >> {shlex.quote(str(calls))}\n"
+        if failure:
+            option, status = failure
+            body += f'if [ "$1" = "{option}" ]; then exit {status}; fi\n'
+        self.fake_command(fake_bin, "codesign", body)
+
+    def codesign_calls(self, fake_bin):
+        calls = pathlib.Path(fake_bin) / "codesign-calls"
+        return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+
+    def write_bundle(self, target, identifier="org.peppy.fixture.built"):
+        bundle = target / "release/bundle/macos/Peppy_dev.app"
+        contents = bundle / "Contents"
+        contents.mkdir(parents=True)
+        (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": identifier}))
+        return bundle
+
+    def signing_fixture(self, fake_bin):
+        self.configure_macos_tools(fake_bin)
+        self.fake_command(fake_bin, "pnpm", 'if [ "${1:-}" = --version ]; then echo 12.8.1; fi')
+        target = fake_bin / "target with spaces"
+        bundle = self.write_bundle(target)
+        return bundle, {
+            "DEBUG": "false",
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "CARGO_TARGET_DIR": str(target),
+        }
 
     def node_selector(self):
         return (ROOT / ".node-version").read_text().strip()
@@ -226,6 +260,7 @@ class DesktopHelperTests(unittest.TestCase):
             with self.subTest(debug=debug), tempfile.TemporaryDirectory() as temporary:
                 fake_bin = pathlib.Path(temporary)
                 target = fake_bin / "target"
+                self.write_bundle(target)
                 arguments = fake_bin / "pnpm-arguments"
                 tls_directory = fake_bin / "tls"
                 self.configure_macos_tools(fake_bin)
@@ -289,6 +324,7 @@ class DesktopHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
             target = fake_bin / "target"
+            self.write_bundle(target)
             pnpm_env = fake_bin / "pnpm-env"
             self.configure_macos_tools(fake_bin)
             self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"${{APPLE_SIGNING_IDENTITY:-}}\" > '{pnpm_env}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi")
@@ -350,6 +386,7 @@ class DesktopHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
             target = fake_bin / "target"
+            self.write_bundle(target)
             pnpm_env = fake_bin / "pnpm-env"
             self.configure_macos_tools(fake_bin)
             self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"${{APPLE_SIGNING_IDENTITY:-}}\" > '{pnpm_env}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi")
@@ -360,6 +397,74 @@ class DesktopHelperTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(pnpm_env.read_text().strip(), "Apple Development: test@example.com (ABCDEF1234)")
+
+    def test_macos_adhoc_signs_built_identifier_then_strictly_verifies_bundle(self):
+        for plist_format in (plistlib.FMT_XML, plistlib.FMT_BINARY):
+            with self.subTest(format=plist_format), tempfile.TemporaryDirectory() as temporary:
+                fake_bin = pathlib.Path(temporary)
+                bundle, env = self.signing_fixture(fake_bin)
+                plist = bundle / "Contents/Info.plist"
+                plist.write_bytes(plistlib.dumps({"CFBundleIdentifier": "org.peppy.fixture.built"}, fmt=plist_format))
+                original = plist.read_bytes()
+
+                result = self.run_helper("build", env=env)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.codesign_calls(fake_bin), [
+                    ["--force", "--sign", "-", "--identifier", "org.peppy.fixture.built",
+                     "--preserve-metadata=entitlements,flags,runtime", str(bundle)],
+                    ["--verify", "--deep", "--strict", str(bundle)],
+                ])
+                self.assertEqual(plist.read_bytes(), original)
+
+    def test_macos_signing_failures_propagate_without_later_calls(self):
+        for option, status, expected_calls in (("--force", 23, 1), ("--verify", 24, 2)):
+            with self.subTest(option=option), tempfile.TemporaryDirectory() as temporary:
+                fake_bin = pathlib.Path(temporary)
+                bundle, env = self.signing_fixture(fake_bin)
+                self.configure_codesign(fake_bin, (option, status))
+
+                result = self.run_helper("build", env=env)
+
+                self.assertEqual(result.returncode, status, result.stderr)
+                calls = self.codesign_calls(fake_bin)
+                self.assertEqual(len(calls), expected_calls)
+                self.assertEqual(calls[-1][0], option)
+                self.assertEqual(calls[-1][-1], str(bundle))
+
+    def test_macos_stable_identity_only_verifies_and_propagates_verification_failure(self):
+        for status in (0, 24):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                fake_bin = pathlib.Path(temporary)
+                bundle, env = self.signing_fixture(fake_bin)
+                self.configure_codesign(fake_bin, ("--verify", status))
+                self.fake_command(fake_bin, "security", "echo '  1) ABCDEF \"Apple Development: fixture\"'")
+                env["PEPPY_MACOS_SIGNING_IDENTITY"] = "Apple Development: fixture"
+
+                result = self.run_helper("build", env=env)
+
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(self.codesign_calls(fake_bin), [["--verify", "--deep", "--strict", str(bundle)]])
+
+    def test_macos_rejects_unreadable_or_invalid_bundle_identifier_before_signing(self):
+        fixtures = (None, b"not a plist", plistlib.dumps({}),
+                    plistlib.dumps({"CFBundleIdentifier": ""}),
+                    plistlib.dumps({"CFBundleIdentifier": 42}))
+        for contents in fixtures:
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as temporary:
+                fake_bin = pathlib.Path(temporary)
+                bundle, env = self.signing_fixture(fake_bin)
+                plist = bundle / "Contents/Info.plist"
+                if contents is None:
+                    plist.unlink()
+                else:
+                    plist.write_bytes(contents)
+
+                result = self.run_helper("build", env=env)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("bundle identifier", result.stderr)
+                self.assertEqual(self.codesign_calls(fake_bin), [])
 
     def test_macos_build_rejects_empty_signing_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -435,6 +540,7 @@ class DesktopHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
             target = fake_bin / "target"
+            self.write_bundle(target)
             pnpm_env = fake_bin / "pnpm-env"
             self.configure_macos_tools(fake_bin)
             self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"${{APPLE_SIGNING_IDENTITY:-}}\" > '{pnpm_env}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi")
@@ -473,6 +579,7 @@ class DesktopHelperTests(unittest.TestCase):
             (source / ".node-version").write_text("24.21.0\n")
             (source / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.98.1"\n')
             target = temporary_path / "caller target"
+            self.write_bundle(target)
             command_cwd = temporary_path / "pnpm-cwd"
             self.configure_macos_tools(fake_bin)
             self.fake_command(fake_bin, "node", "echo v24.21.0")

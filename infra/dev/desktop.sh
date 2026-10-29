@@ -151,12 +151,22 @@ macos() {
       fi
       [[ -d "$app_bundle" ]] || die "Tauri completed without the expected bundle: $app_bundle"
       if [[ ${PEPPY_MACOS_SIGNING_IDENTITY+set} != set ]]; then
-        bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_bundle/Contents/Info.plist") || die "Could not read the built bundle identifier."
+        bundle_identifier=$(python3 - "$app_bundle/Contents/Info.plist" <<'PYTHON'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as plist:
+    identifier = plistlib.load(plist)["CFBundleIdentifier"]
+if not isinstance(identifier, str):
+    raise SystemExit("The built bundle identifier must be a string.")
+print(identifier)
+PYTHON
+        ) || die "Could not read the built bundle identifier."
         [[ -n "$bundle_identifier" ]] || die "The built bundle identifier is empty."
-        /usr/bin/codesign --force --sign - --identifier "$bundle_identifier" \
+        codesign --force --sign - --identifier "$bundle_identifier" \
           --preserve-metadata=entitlements,flags,runtime "$app_bundle"
       fi
-      /usr/bin/codesign --verify --deep --strict "$app_bundle"
+      codesign --verify --deep --strict "$app_bundle"
       ;;
   esac
 }
