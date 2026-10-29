@@ -66,17 +66,26 @@ pub enum PreferenceRead {
 
 impl NotificationSettings {
     pub fn sound_enabled(&self) -> bool {
-        *self.sound.lock().unwrap_or_else(|poison| poison.into_inner())
+        *self
+            .sound
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     pub fn set_sound_enabled(&self, enabled: bool) -> BridgeResult<()> {
-        let mut sound = self.sound.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut sound = self
+            .sound
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::fsutil::write_private_atomic(
             &self.root.join(SOUND_FILE),
             if enabled { b"true" } else { b"false" },
         )
         .map_err(|_| {
-            BridgeError::new("notification-sound", "Could not save notification sound settings.")
+            BridgeError::new(
+                "notification-sound",
+                "Could not save notification sound settings.",
+            )
         })?;
         *sound = enabled;
         Ok(())
@@ -92,7 +101,8 @@ impl NotificationSettings {
             drain_lock: Mutex::new(()),
             banner_drain: Mutex::new(BannerDrainState::default()),
             sound: Mutex::new(
-                fs::read(root.join(SOUND_FILE)).ok()
+                fs::read(root.join(SOUND_FILE))
+                    .ok()
                     .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok())
                     .unwrap_or(false),
             ),
@@ -413,7 +423,7 @@ pub(crate) fn drain_with_delivery(
         peppy_desktop_api::NotificationActivationDestination,
         String,
         String,
-    ) -> Result<(), ()>,
+    ) -> Result<(), crate::notification_activation::PostError>,
 ) -> BridgeResult<bool> {
     let _drain = settings
         .drain_lock
@@ -465,13 +475,68 @@ pub(crate) fn drain_with_delivery(
                         .map(|target| target.source_device_id.as_str());
                     title = crate::contacts::banner_title(&session.client, &title, source);
                 }
-                if post(
+                match post(
                     crate::notification_activation::destination(&candidate),
                     title,
                     body,
-                )
-                .is_err()
-                {
+                ) {
+                    Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {
+                        acknowledge.push(candidate.id);
+                    }
+                    Err(crate::notification_activation::PostError::AwaitingAuthorization) => {
+                        if !acknowledge.is_empty() {
+                            session
+                                .client
+                                .ack_banner_candidates(acknowledge)
+                                .map_err(crate::error::core_error)?;
+                        }
+                        session.set_status(|status| {
+                            if status.work_error == Some("notification-post") {
+                                status.work_error = None;
+                            }
+                        });
+                        // Candidates are ordered, and every later candidate needs the same OS
+                        // authorization. Hold this and the remaining queue until it resolves.
+                        return Ok(false);
+                    }
+                    Err(crate::notification_activation::PostError::Failed) => {
+                        if !acknowledge.is_empty() {
+                            session
+                                .client
+                                .ack_banner_candidates(acknowledge)
+                                .map_err(crate::error::core_error)?;
+                        }
+                        session.set_status(|status| status.work_error = Some("notification-post"));
+                        return Err(BridgeError::new(
+                            "notification-post",
+                            "Could not post a native notification.",
+                        ));
+                    }
+                }
+            }
+        }
+        if summary_count > 0 && (preferences.message_banners || preferences.mirrored_banners) {
+            match post(
+                peppy_desktop_api::NotificationActivationDestination::Main,
+                "Peppy".into(),
+                format!("{summary_count} new items arrived while Peppy was away."),
+            ) {
+                Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {}
+                Err(crate::notification_activation::PostError::AwaitingAuthorization) => {
+                    if !acknowledge.is_empty() {
+                        session
+                            .client
+                            .ack_banner_candidates(acknowledge)
+                            .map_err(crate::error::core_error)?;
+                    }
+                    session.set_status(|status| {
+                        if status.work_error == Some("notification-post") {
+                            status.work_error = None;
+                        }
+                    });
+                    return Ok(false);
+                }
+                Err(crate::notification_activation::PostError::Failed) => {
                     if !acknowledge.is_empty() {
                         session
                             .client
@@ -484,29 +549,7 @@ pub(crate) fn drain_with_delivery(
                         "Could not post a native notification.",
                     ));
                 }
-                acknowledge.push(candidate.id);
             }
-        }
-        if summary_count > 0
-            && (preferences.message_banners || preferences.mirrored_banners)
-            && post(
-                peppy_desktop_api::NotificationActivationDestination::Main,
-                "Peppy".into(),
-                format!("{summary_count} new items arrived while Peppy was away."),
-            )
-            .is_err()
-        {
-            if !acknowledge.is_empty() {
-                session
-                    .client
-                    .ack_banner_candidates(acknowledge)
-                    .map_err(crate::error::core_error)?;
-            }
-            session.set_status(|status| status.work_error = Some("notification-post"));
-            return Err(BridgeError::new(
-                "notification-post",
-                "Could not post a native notification.",
-            ));
         }
         acknowledge.extend(summary_ids);
         session
