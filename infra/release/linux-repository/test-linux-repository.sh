@@ -41,7 +41,7 @@ case " $* " in
   *' -qp '*'%{VERSION}'*) printf '%s\n' "${RPM_VERSION:-1.2.3}";;
   *' -qp '*'%{RELEASE}'*) printf '%s\n' "${RPM_RELEASE:-1}";;
   *' -qp '*'%{ARCH}'*) printf '%s\n' "${RPM_ARCH:-x86_64}";;
-  *' --checksig '*) [ "${FAIL_RPM_SIGNATURE:-0}" = 0 ];;
+  *' --checksig '*) [ "${FAIL_RPM_SIGNATURE:-0}" = 0 ] || exit 1; printf '%s\n' "${RPM_CHECKSIG_OUTPUT:-package.rpm: digests signatures OK}";;
   *) exit 0;;
 esac
 EOF
@@ -74,5 +74,6 @@ make_fixture; rm -rf "$root/repository"; printf '.sig\n' >> "$root/staged/SHA256
 make_fixture; DEB_NAME=other expect_failure run_build "${build[@]}" stable 1.2.3 "$root/staged" "$root/wrong-name"
 make_fixture; RPM_VERSION=9.9.9 expect_failure run_build "${build[@]}" stable 1.2.3 "$root/staged" "$root/wrong-version"
 make_fixture; FAIL_RPM_SIGNATURE=1 expect_failure run_build "${build[@]}" stable 1.2.3 "$root/staged" "$root/unsigned-rpm"
+make_fixture; RPM_CHECKSIG_OUTPUT='package.rpm: digests OK' expect_failure run_build "${build[@]}" stable 1.2.3 "$root/staged" "$root/unsigned-digest-rpm"
 make_fixture; expect_failure run_build "${build[@]}" staging 1.2.3 "$root/staged" "$root/channel-mismatch"
 echo 'linux repository tests passed'

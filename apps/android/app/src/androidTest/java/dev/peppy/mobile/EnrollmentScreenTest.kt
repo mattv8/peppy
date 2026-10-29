@@ -16,11 +16,13 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -34,7 +36,7 @@ class EnrollmentScreenTest {
                 onDismiss = {},
                 onEnrolled = {},
                 hasCameraPermission = { true },
-                scanner = { _, _ -> Text("scanner", Modifier.testTag("fake-enrollment-scanner")) },
+                scanner = { _, _, _ -> Text("scanner", Modifier.testTag("fake-enrollment-scanner")) },
             )
         }
 
@@ -49,7 +51,7 @@ class EnrollmentScreenTest {
                 onDismiss = {},
                 onEnrolled = {},
                 hasCameraPermission = { true },
-                scanner = { _, _ -> Text("scanner", Modifier.testTag("fake-enrollment-scanner")) },
+                scanner = { _, _, _ -> Text("scanner", Modifier.testTag("fake-enrollment-scanner")) },
             )
         }
 
@@ -64,7 +66,7 @@ class EnrollmentScreenTest {
                 onDismiss = {},
                 onEnrolled = {},
                 hasCameraPermission = { true },
-                scanner = { modifier, callback ->
+                scanner = { modifier, callback, _ ->
                     onCode = callback
                     Box(modifier.fillMaxSize())
                 },
@@ -102,12 +104,39 @@ class EnrollmentScreenTest {
                 onDismiss = { dismisses += 1 },
                 onEnrolled = {},
                 hasCameraPermission = { true },
-                scanner = { modifier, _ -> Box(modifier.fillMaxSize()) },
+                scanner = { modifier, _, _ -> Box(modifier.fillMaxSize()) },
             )
         }
 
         compose.onNodeWithTag("enrollment-cancel").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(1, dismisses) }
+    }
+
+    @Test fun unavailableCameraFromPhoneScannerShowsTerminalWithoutAutomaticRetry() {
+        var onUnavailable: (() -> Unit)? = null
+        compose.setContent {
+            EnrollmentScreen(
+                initialOrigin = HostedAccountClient.ORIGIN,
+                onDismiss = {},
+                onEnrolled = {},
+                hasCameraPermission = { true },
+                scanner = { modifier, _, unavailable ->
+                    onUnavailable = unavailable
+                    Box(modifier.fillMaxSize())
+                },
+            )
+        }
+
+        compose.onNodeWithTag("enrollment-qr-scanner").assertIsDisplayed()
+        compose.runOnIdle { onUnavailable?.invoke() }
+        compose.onNodeWithTag("phone-terminal-error")
+            .assertIsDisplayed()
+            .assertTextEquals(InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.peppy_enrollment_camera_unavailable))
+        compose.onNodeWithTag("phone-retry").assertIsDisplayed()
+        compose.onNodeWithTag("enrollment-cancel").assertIsDisplayed()
+        compose.onNodeWithTag("enrollment-qr-scanner").assertDoesNotExist()
+        compose.waitForIdle()
+        compose.onNodeWithTag("enrollment-qr-scanner").assertDoesNotExist()
     }
 
     @Test fun invalidServerOriginAnnouncesErrorAssertively() {
@@ -116,7 +145,7 @@ class EnrollmentScreenTest {
                 onDismiss = {},
                 onEnrolled = {},
                 hasCameraPermission = { true },
-                scanner = { _, _ -> Text("scanner", Modifier.testTag("fake-enrollment-scanner")) },
+                scanner = { _, _, _ -> Text("scanner", Modifier.testTag("fake-enrollment-scanner")) },
             )
         }
 

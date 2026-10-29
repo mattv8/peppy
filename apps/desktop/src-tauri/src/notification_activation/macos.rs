@@ -1,4 +1,4 @@
-use super::owner::Signal;
+use super::{owner::Signal, PostError};
 use block2::{DynBlock, RcBlock};
 use objc2::{
     define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
@@ -13,8 +13,10 @@ use std::{
         Arc, Mutex,
     },
 };
+use tauri::Emitter;
 
 type Signals = Arc<Mutex<HashMap<String, Signal>>>;
+const UN_ERROR_CODE_NOTIFICATIONS_NOT_ALLOWED: isize = 1;
 
 fn notification_content(
     title: &str,
@@ -31,7 +33,8 @@ fn notification_content(
 }
 
 fn presentation_options(sound: bool) -> UNNotificationPresentationOptions {
-    let options = UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List;
+    let options =
+        UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List;
     if sound {
         options | UNNotificationPresentationOptions::Sound
     } else {
@@ -112,6 +115,8 @@ pub fn prepare() -> Option<Signals> {
 pub struct Backend {
     signals: Signals,
     in_flight: Arc<AtomicUsize>,
+    requested: bool,
+    app: tauri::AppHandle,
 }
 #[derive(Clone)]
 pub struct Item {
@@ -139,10 +144,12 @@ impl Item {
 }
 
 impl Backend {
-    pub fn new(_app: &tauri::AppHandle, signals: Signals) -> Option<Self> {
+    pub fn new(app: &tauri::AppHandle, signals: Signals) -> Option<Self> {
         Some(Self {
             signals,
             in_flight: Arc::new(AtomicUsize::new(0)),
+            requested: false,
+            app: app.clone(),
         })
     }
 
@@ -153,10 +160,10 @@ impl Backend {
         body: &str,
         sound: bool,
         signal: Signal,
-    ) -> Result<Item, ()> {
+    ) -> Result<Item, PostError> {
         // UN owns completion blocks until posting finishes. Removing a request
         // does not guarantee its completion has run, so bound this lifetime too.
-        reserve_completion(&self.in_flight)?;
+        reserve_completion(&self.in_flight).map_err(|_| PostError::Failed)?;
         objc2::rc::autoreleasepool(|_| {
             let content = notification_content(title, body, sound);
             let identifier = NSString::from_str(id);
@@ -178,27 +185,55 @@ impl Backend {
             let (accepted, acceptance) = std::sync::mpsc::sync_channel(1);
             let completion = RcBlock::new(move |error: *mut NSError| {
                 in_flight.fetch_sub(1, Ordering::AcqRel);
-                if !error.is_null() {
+                let result = if error.is_null() {
+                    Ok(())
+                } else {
                     eprintln!("peppy: asynchronous native notification post failed");
                     signal.retire();
-                }
+                    // SAFETY: the completion handler supplies a valid NSError when non-null.
+                    // UNErrorCodeNotificationsNotAllowed is 1.
+                    Err(
+                        if unsafe { (*error).code() } == UN_ERROR_CODE_NOTIFICATIONS_NOT_ALLOWED {
+                            PostError::NotAllowed
+                        } else {
+                            PostError::Failed
+                        },
+                    )
+                };
                 // A request may finish posting after cap/session cleanup. Remove it
                 // again rather than leaving an OS item whose callback was retired.
                 completing.complete(remove_os);
-                let _ = accepted.try_send(if error.is_null() { Ok(()) } else { Err(()) });
+                let _ = accepted.try_send(result);
             });
             UNUserNotificationCenter::currentNotificationCenter()
                 .addNotificationRequest_withCompletionHandler(&request, Some(&completion));
-            if super::owner::await_platform_acceptance(&acceptance, super::owner::PLATFORM_TIMEOUT)
-                .is_err()
-            {
+            let result = super::owner::await_platform_acceptance(
+                &acceptance,
+                super::owner::PLATFORM_TIMEOUT,
+            )
+            .map_err(|_| PostError::Failed)?;
+            if let Err(error) = result {
                 // Timeout is not acceptance. Fence/remove the request now; a late
                 // successful completion repeats cleanup and cannot ACK the candidate.
                 self.remove(&item);
-                return Err(());
+                return Err(error);
             }
             Ok(item)
         })
+    }
+
+    pub fn ensure_authorized(&mut self) -> Result<(), PostError> {
+        let app = self.app.clone();
+        authorize(
+            &mut self.requested,
+            crate::notification_permission::macos::authorization_status,
+            move || {
+                let completed = app.clone();
+                crate::notification_permission::macos::request_authorization(move || {
+                    let _ = completed.emit(crate::STATE_EVENT, ());
+                })
+            },
+        )
     }
 
     pub fn remove(&mut self, item: &Item) -> bool {
@@ -211,6 +246,25 @@ impl Backend {
                 self.signals.lock().unwrap().remove(id);
             },
         )
+    }
+}
+
+fn authorize(
+    requested: &mut bool,
+    mut read: impl FnMut() -> Option<crate::notification_permission::MacAuth>,
+    mut request: impl FnMut(),
+) -> Result<(), PostError> {
+    match read() {
+        Some(crate::notification_permission::MacAuth::Denied) => Err(PostError::NotAllowed),
+        Some(crate::notification_permission::MacAuth::NotDetermined) if !*requested => {
+            *requested = true;
+            request();
+            Err(PostError::AwaitingAuthorization)
+        }
+        Some(crate::notification_permission::MacAuth::NotDetermined) => {
+            Err(PostError::AwaitingAuthorization)
+        }
+        Some(_) | None => Ok(()),
     }
 }
 
@@ -241,8 +295,13 @@ mod tests {
         for enabled in [false, true] {
             let content = notification_content("title", "body", enabled);
             assert_eq!(content.sound().is_some(), enabled);
-            assert_eq!(presentation_options(enabled).contains(UNNotificationPresentationOptions::Sound), enabled);
-            assert!(presentation_options(enabled).contains(UNNotificationPresentationOptions::Banner));
+            assert_eq!(
+                presentation_options(enabled).contains(UNNotificationPresentationOptions::Sound),
+                enabled
+            );
+            assert!(
+                presentation_options(enabled).contains(UNNotificationPresentationOptions::Banner)
+            );
         }
     }
     use std::cell::Cell;
@@ -313,5 +372,53 @@ mod tests {
         in_flight.fetch_sub(1, Ordering::AcqRel);
         assert!(reserve_completion(&in_flight).is_ok());
         assert!(reserve_completion(&in_flight).is_err());
+    }
+
+    #[test]
+    fn notification_authorization_holds_not_determined_once_until_completion() {
+        let mut requested = false;
+        let request_count = Cell::new(0);
+        for _ in 0..2 {
+            assert_eq!(
+                authorize(
+                    &mut requested,
+                    || Some(crate::notification_permission::MacAuth::NotDetermined),
+                    || request_count.set(request_count.get() + 1),
+                ),
+                Err(PostError::AwaitingAuthorization)
+            );
+        }
+        assert_eq!(request_count.get(), 1);
+    }
+
+    #[test]
+    fn notification_authorization_denial_does_not_request() {
+        let mut requested = false;
+        let request_count = Cell::new(0);
+        assert_eq!(
+            authorize(
+                &mut requested,
+                || Some(crate::notification_permission::MacAuth::Denied),
+                || request_count.set(request_count.get() + 1),
+            ),
+            Err(PostError::NotAllowed)
+        );
+        assert!(!requested);
+        assert_eq!(request_count.get(), 0);
+    }
+
+    #[test]
+    fn notification_authorization_granted_proceeds_without_request() {
+        let mut requested = false;
+        let request_count = Cell::new(0);
+        assert_eq!(
+            authorize(
+                &mut requested,
+                || Some(crate::notification_permission::MacAuth::Authorized),
+                || request_count.set(request_count.get() + 1),
+            ),
+            Ok(())
+        );
+        assert_eq!(request_count.get(), 0);
     }
 }

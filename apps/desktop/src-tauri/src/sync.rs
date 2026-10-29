@@ -449,7 +449,7 @@ async fn start_or_resume(
         .parse::<u64>()
         .map_err(|_| invalid())?;
     let count = start.record_count.parse::<u64>().map_err(|_| invalid())?;
-    let compaction_generation = parse_compaction_generation(&start)?;
+    let compaction_generation = parse_compaction_generation(&start).ok().flatten();
     let _ = start.max_page_size;
     let c = client(session);
     blocking(move || {
@@ -498,7 +498,9 @@ async fn probe_snapshot_capability(session: &Arc<Session>) -> BridgeResult<()> {
             .await;
         }
     };
-    let supported = parse_compaction_generation(&start)?.is_some();
+    // Capability metadata is optional. A malformed optional generation must not block the
+    // ordinary replay path; treat it like an unavailable capability instead.
+    let supported = parse_compaction_generation(&start).ok().flatten().is_some();
     let active = supported && start.compaction_active;
     let c = client(session);
     // Store both trusted snapshot fields and do one bounded backfill on every connect.
@@ -893,11 +895,6 @@ async fn upload_object(
     {
         return Err(NetError::Invalid.into());
     }
-    session
-        .remote_ids
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(id, &remote);
     let c = client(session);
     blocking(move || c.mark_attachment_uploaded(id, &remote).map_err(core_error))
         .await
@@ -915,11 +912,6 @@ async fn download_one(
     let remote = uuid::Uuid::parse_str(&remote)
         .map_err(|_| NetError::Invalid)?
         .to_string();
-    session
-        .remote_ids
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(object.attachment_id, &remote);
     let dir = session.data_dir.join("downloads");
     tokio::fs::create_dir_all(&dir)
         .await

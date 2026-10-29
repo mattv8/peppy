@@ -162,4 +162,24 @@ describe("browser checkpoint filesystem", () => {
     fs.writeFile(`/peppy/${cipher(id)}`, encoder.encode("old"));
     await expect(hydrateCipher(id, 7, { readCipher: async () => encoder.encode("new") }, fs)).rejects.toMatchObject({ code: "invalid-checkpoint" });
   });
+
+  it("retains a resident cipher already committed at the previous generation without copying it again", async () => {
+    const fs = seededFs();
+    const reads: string[] = [];
+    const readFile = fs.readFile.bind(fs);
+    fs.readFile = (path: string) => { reads.push(path); return readFile(path); };
+
+    const captured = await captureFilesystemCheckpoint({ fs, core: core([[id]]), expectedGeneration: 4, previousFiles: ["client.db", cipher(id)] });
+
+    expect(captured.files.map(file => file.path)).toEqual(["client.db"]);
+    expect(captured.retainedCipherPaths).toEqual([cipher(id)]);
+    expect(reads).toEqual(["/peppy/client.db"]);
+  });
+
+  it("drops a previously committed cipher whose attachment was removed from the manifest", async () => {
+    const captured = await captureFilesystemCheckpoint({ fs: seededFs(), core: core([[]]), expectedGeneration: 4, previousFiles: ["client.db", cipher(id)] });
+
+    expect(captured.files.map(file => file.path)).toEqual(["client.db"]);
+    expect(captured.retainedCipherPaths).toEqual([]);
+  });
 });

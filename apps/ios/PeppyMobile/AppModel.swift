@@ -141,47 +141,31 @@ final class AppModel {
 
     /// Non-destructive: the encrypted database, keys and queued work stay archived on this device.
     func disconnect() async {
-        stopForegroundReachability()
-        wakeFence.preferenceChanged()
-        wakeEnrollmentBinding = nil
-        let retiringRelay = relay
-        relay = nil
-        // Queue cleanup while the old identity's credential context is still available.
-        try? await session.retireRelayWakeContexts()
-        await retiringRelay?.revoke()
+        await prepareIdentityTeardown()
         await run(.disconnecting) { try await $0.disconnect() }
-        if status.identity == nil {
-            relay = nil
-            UserDefaults.standard.set(false, forKey: "peppy.relay-opted-in")
-            UserDefaults.standard.removeObject(forKey: "peppy.relay-origin")
-            relayOrigin = ""
-        }
-        lastSync = nil
-        lastSyncDate = nil
-        if status.identity == nil { serverReachability = .unknown }
+        await finishIdentityTeardownIfGone()
     }
 
     func disconnectLocalOnly() async {
-        stopForegroundReachability()
-        wakeFence.preferenceChanged()
-        wakeEnrollmentBinding = nil
-        let retiringRelay = relay
-        relay = nil
-        try? await session.retireRelayWakeContexts()
-        await retiringRelay?.revoke()
+        await prepareIdentityTeardown()
         await run(.disconnecting) { try await $0.disconnectLocalOnly() }
+        await finishIdentityTeardownIfGone()
         if status.identity == nil {
-            relay = nil
-            UserDefaults.standard.set(false, forKey: "peppy.relay-opted-in")
-            UserDefaults.standard.removeObject(forKey: "peppy.relay-origin")
-            relayOrigin = ""
             lastError = "Signed out locally only. This device credential may remain active on the server until it can be revoked."
-            serverReachability = .unknown
         }
     }
 
     func unlock(passphrase: String) async {
         await run(.unlocking) { try await $0.unlock(passphrase: passphrase) }
+    }
+
+    func unlockHostedEnrollmentAndBind(passphrase: String, client: HostedAccountClient, identity: EnrollmentIdentity) async throws {
+        activity = .unlocking
+        defer { activity = .idle }
+        let unlocked = try await session.unlock(passphrase: passphrase)
+        guard unlocked.identity == identity, unlocked.keysUnlocked else { throw ClientError.identityMismatch }
+        try await client.bindVerifiedEnrollmentSecret(passphrase, identity: identity)
+        status = unlocked
     }
 
     func claimInstance(origin: String, setupToken: String, username: String, adminPassword: String, passphrase: String) async {
@@ -405,10 +389,33 @@ final class AppModel {
 
     func deleteVault() async {
         guard let vault = status.identity?.vaultId else { return }
-        activity = .disconnecting
-        defer { activity = .idle }
-        do { try await session.deleteVault(vaultId: vault); status = SessionStatus(); devices = []; lastError = nil }
-        catch { lastError = (error as? ClientError)?.userMessage ?? "Could not delete vault." }
+        await prepareIdentityTeardown()
+        await run(.disconnecting) { try await $0.deleteVault(vaultId: vault) }
+        await finishIdentityTeardownIfGone()
+    }
+
+    private func prepareIdentityTeardown() async {
+        stopForegroundReachability()
+        wakeFence.preferenceChanged()
+        wakeEnrollmentBinding = nil
+        let retiringRelay = relay
+        relay = nil
+        // Capture cleanup before the active credential can be removed; failures remain an escape hatch.
+        try? await session.retireRelayWakeContexts()
+        await retiringRelay?.revoke()
+    }
+
+    private func finishIdentityTeardownIfGone() async {
+        guard status.identity == nil else { return }
+        await stopContactsForIdentityTeardown()
+        relay = nil
+        UserDefaults.standard.set(false, forKey: "peppy.relay-opted-in")
+        UserDefaults.standard.removeObject(forKey: "peppy.relay-origin")
+        relayOrigin = ""
+        lastSync = nil
+        lastSyncDate = nil
+        devices = []
+        serverReachability = .unknown
     }
 
     func configureRelay() {

@@ -360,6 +360,74 @@ fn full_pending_queue_backpressures_new_rows_without_pausing_history() {
 }
 
 #[test]
+fn new_sms_history_ids_are_canonical_and_rejected_before_state_initialization() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "canonical-sms", &vault), &vault);
+
+    for (index, bad) in ["+5", "05", "-5", "", "18446744073709551616"]
+        .into_iter()
+        .enumerate()
+    {
+        let scope = format!("provider-{index}");
+        assert_eq!(
+            client.plan_sms_scans("install-1", &scope, bad),
+            Err(Error::InvalidRequest("SMS high-water mark"))
+        );
+        assert!(
+            !client
+                .sms_history_status("install-1", &scope)
+                .unwrap()
+                .baseline_initialized
+        );
+    }
+
+    let maximum = u64::MAX.to_string();
+    let next = (u64::MAX - 1).to_string();
+    let plans = client
+        .plan_sms_scans("install-1", "maximum", &maximum)
+        .unwrap();
+    assert_eq!(
+        plans[1].history_upper_bound.as_deref(),
+        Some(maximum.as_str())
+    );
+    client
+        .set_sms_scan_checkpoint("install-1", "maximum", true, &next)
+        .unwrap();
+    let before = client
+        .sms_scan_status("install-1", "maximum", true)
+        .unwrap()
+        .checkpoint;
+    assert_eq!(
+        client.set_sms_scan_checkpoint("install-1", "maximum", true, "+1"),
+        Err(Error::InvalidRequest("SMS checkpoint"))
+    );
+    assert_eq!(
+        client
+            .sms_scan_status("install-1", "maximum", true)
+            .unwrap()
+            .checkpoint,
+        before
+    );
+
+    let above_signed = (i64::MAX as u64 + 1).to_string();
+    client
+        .plan_sms_scans("install-1", "live-range", &above_signed)
+        .unwrap();
+    client
+        .set_sms_scan_checkpoint("install-1", "live-range", false, &maximum)
+        .unwrap();
+    assert_eq!(
+        client
+            .sms_scan_status("install-1", "live-range", false)
+            .unwrap()
+            .checkpoint
+            .as_deref(),
+        Some(maximum.as_str())
+    );
+}
+
+#[test]
 fn plans_freeze_history_and_require_explicit_exhaustion() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

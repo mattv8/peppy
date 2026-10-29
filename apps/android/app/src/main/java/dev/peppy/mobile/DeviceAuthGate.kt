@@ -141,9 +141,19 @@ private suspend fun readOwnerVaultSecret(context: Context): RevealOutcome = with
     val credential = NativeGateway.accountCredential(context)
         ?: return@withContext RevealOutcome.Failed("vault-secret-unavailable")
     try {
-        when (val stored = VaultSecretStore(AndroidHostedSecureStore(context)).read(credential.vaultId, credential.deviceId)) {
-            StoredSecret.Missing -> RevealOutcome.Failed("vault-secret-unavailable")
-            is StoredSecret.Present -> RevealOutcome.Revealed(stored.value)
+        val secrets = VaultSecretStore(HostedProvisioningStorage.store(context))
+        when (val stored = secrets.read(credential.vaultId, credential.deviceId)) {
+            StoredSecret.Missing -> {
+                NativeGateway.repairHostedVaultSecret(context)
+                when (val repaired = secrets.read(credential.vaultId, credential.deviceId)) {
+                    StoredSecret.Missing -> RevealOutcome.Failed("vault-secret-unavailable")
+                    is StoredSecret.Present -> RevealOutcome.Revealed(repaired.value)
+                }
+            }
+            is StoredSecret.Present -> {
+                NativeGateway.repairHostedVaultSecret(context)
+                RevealOutcome.Revealed(stored.value)
+            }
         }
     } catch (_: SecureStoreUnavailable) {
         RevealOutcome.Failed("secure-store-unavailable")

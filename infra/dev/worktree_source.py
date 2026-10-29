@@ -58,7 +58,8 @@ def origin_head_exists(root: Path) -> bool:
     result = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", "origin/HEAD"],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     if result.returncode == 0:
         return True

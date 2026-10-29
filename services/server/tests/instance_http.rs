@@ -1149,3 +1149,146 @@ async fn hosted_router_does_not_mount_community_instance_routes() {
     }
     fixture.cleanup().await;
 }
+
+async fn provision_gateway_with_wake_work(
+    app: Router,
+    pool: &PgPool,
+    vault: Uuid,
+    fingerprint: &str,
+) -> (Uuid, String) {
+    let device = Uuid::new_v4();
+    let token = Uuid::new_v4().simple().to_string().repeat(3);
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch,kind) VALUES($1,$2,'gateway','{}'::jsonb,$3,1,'android')")
+        .bind(vault)
+        .bind(device)
+        .bind(fingerprint)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind(Sha256::digest(token.as_bytes()).as_slice())
+        .bind(vault)
+        .bind(device)
+        .execute(pool)
+        .await
+        .unwrap();
+    let registered = send(
+        app,
+        Method::PUT,
+        "/v1/devices/self/wake-route",
+        Some(&json!({"route_id": Uuid::new_v4(), "wake_credential": "a".repeat(64)})),
+        &[("authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(registered.status(), StatusCode::NO_CONTENT);
+    sqlx::query("INSERT INTO device_wake_jobs(vault_id,device_id,cursor,job_id,opaque_nonce) VALUES($1,$2,1,$3,'fixture-nonce')")
+        .bind(vault)
+        .bind(device)
+        .bind(Uuid::new_v4())
+        .execute(pool)
+        .await
+        .unwrap();
+    (device, token)
+}
+
+async fn roster_wake_route(app: Router, owner_token: &str, device: Uuid) -> (bool, bool) {
+    let roster = send(
+        app,
+        Method::GET,
+        "/v1/devices",
+        None,
+        &[("authorization", &format!("Bearer {owner_token}"))],
+    )
+    .await;
+    assert_eq!(roster.status(), StatusCode::OK);
+    let roster = json_body(roster).await;
+    let entry = roster["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["device_id"] == device.to_string())
+        .unwrap()
+        .clone();
+    (
+        entry["revoked"].as_bool().unwrap(),
+        entry["wake_route"].as_bool().unwrap(),
+    )
+}
+
+async fn wake_effects(pool: &PgPool, vault: Uuid, device: Uuid) -> (bool, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT revoked_at IS NOT NULL FROM device_wake_routes WHERE vault_id=$1 AND device_id=$2), (SELECT count(*) FROM device_wake_jobs WHERE vault_id=$1 AND device_id=$2)",
+    )
+    .bind(vault)
+    .bind(device)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn instance_admin_and_owner_revocation_both_retire_wake_routes_and_jobs() {
+    let fixture = Fixture::new().await;
+    let app = fixture.community_app().await;
+    let owner_token = "a".repeat(96);
+    let mut claim = claim_request(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "desktop");
+    claim["credential_digest"] = json!(hex::encode(Sha256::digest(owner_token.as_bytes())));
+    let claimed = send(
+        app.clone(),
+        Method::POST,
+        "/v1/instance/claim",
+        Some(&claim),
+        &[],
+    )
+    .await;
+    assert_eq!(claimed.status(), StatusCode::OK);
+    let admin_session = json_body(claimed).await["session"]["session_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let vault: Uuid = claim["material"]["profile"]["vault_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let fingerprint = claim["material"]["fingerprint"].as_str().unwrap();
+    let (admin_target, _) =
+        provision_gateway_with_wake_work(app.clone(), &fixture.pool, vault, fingerprint).await;
+    let (owner_target, _) =
+        provision_gateway_with_wake_work(app.clone(), &fixture.pool, vault, fingerprint).await;
+    for device in [admin_target, owner_target] {
+        assert_eq!(wake_effects(&fixture.pool, vault, device).await, (false, 1));
+        assert_eq!(
+            roster_wake_route(app.clone(), &owner_token, device).await,
+            (false, true)
+        );
+    }
+
+    let admin_revoke = send(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/instance/devices/{admin_target}/revoke"),
+        None,
+        &[("peppy-instance-session", &admin_session)],
+    )
+    .await;
+    assert_eq!(admin_revoke.status(), StatusCode::NO_CONTENT);
+    let owner_revoke = send(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/devices/{owner_target}/revoke"),
+        None,
+        &[("authorization", &format!("Bearer {owner_token}"))],
+    )
+    .await;
+    assert_eq!(owner_revoke.status(), StatusCode::NO_CONTENT);
+
+    for device in [admin_target, owner_target] {
+        assert_eq!(wake_effects(&fixture.pool, vault, device).await, (true, 0));
+        assert_eq!(
+            roster_wake_route(app.clone(), &owner_token, device).await,
+            (true, false)
+        );
+    }
+    fixture.cleanup().await;
+}

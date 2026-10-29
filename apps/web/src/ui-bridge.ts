@@ -34,3 +34,8 @@ export function installBrowserBridge(browserBridge: DesktopBridge): void {
 export function renewHostedSession(): Promise<void> {
   return Promise.reject(new Error("Hosted session renewal is unavailable in the browser."));
 }
+
+export function discardComputerClaimant(): Promise<void> {
+  // Browser cancellation preserves approved/finishing claimants; it cannot discard them.
+  return Promise.reject(new Error("Computer claimant discard is unavailable in the browser."));
+}

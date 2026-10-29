@@ -24,6 +24,17 @@
 //!    a pending pre-snapshot record cannot resurrect removed state. Non-compactable records
 //!    (messages, statuses, commands) are unaffected.
 //!
+//! Header-free (legacy) records predate compaction metadata, so the server can neither
+//! compact them by identity nor are they staged: their payloads are never decrypted here,
+//! because an old epoch that is no longer unlocked must not newly fail a projection. Instead
+//! `drain_snapshot` records their plaintext header provenance (`projection_legacy_retained`:
+//! cursor, producer device and sequence) when the journal holds the identical wire at that
+//! cursor, whatever its status. Promotion keeps the live notification, app-filter or conversation
+//! pin or conversation-tone row that this provenance still produces, provided the journal row was
+//! applied by promotion (live apply may run between drain and promotion), instead of deleting it as absent; staged
+//! authenticated writes and tombstones still override it through the usual gates. A
+//! header-free record still pending at promotion produced no state and applies live after it.
+//!
 //! Until promotion the apply ceiling stays at the snapshot high-water, so nothing newer can be
 //! applied and then erased. Nothing visible is cleared before promotion. A retained record that
 //! cannot be authenticated or fails payload validation fails the projection: live state stays
@@ -31,10 +42,10 @@
 //! validate but are not authorized (a foreign device claiming a book) are ignored exactly as
 //! live apply ignores them by quarantine.
 use crate::{
-    AppFilter, Client, Ctx, Cursor, Error, MAX_SNAPSHOT_PAGE_BYTES, NotificationTarget,
-    NotificationWire, Opened, PrivatePayload, contact_media, contacts, conversation_pinning,
-    conversation_tones, notification_preferences, notifications, open_payload, parse_wire,
-    take_within_budget, to_i64,
+    AppFilter, Client, Ctx, Cursor, EnvelopePurpose, Error, MAX_SNAPSHOT_PAGE_BYTES,
+    NotificationTarget, NotificationWire, Opened, PrivatePayload, contact_media, contacts,
+    conversation_pinning, conversation_tones, notification_preferences, notifications,
+    open_payload, parse_wire, take_within_budget, to_i64,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -49,6 +60,8 @@ pub(crate) const SUPERSEDED_REASON: &str = "snapshot_superseded";
 /// Metadata latch: this device's contact/notification projection must be rebuilt from an
 /// authoritative compaction snapshot. Value is the reason (`upgrade` or `requested`).
 const REPAIR_LATCH: &str = "contact_repair_required";
+/// Failure reason of an in-flight projection that drained before legacy provenance existed.
+const LEGACY_PROVENANCE_MISSING: &str = "legacy_provenance_missing";
 
 pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
     // An existing database gaining these tables predates authoritative projection: latch one
@@ -62,6 +75,10 @@ pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
         )?)
     };
     let upgrading = table_exists("metadata")? && !table_exists("projection_generations")?;
+    // A projection schema without legacy provenance may hold a generation that drained under
+    // code that dropped header-free records; promoting it would delete their current state.
+    let provenance_missing =
+        table_exists("projection_generations")? && !table_exists("projection_legacy_retained")?;
     conn.execute_batch(
         "\
 CREATE TABLE IF NOT EXISTS projection_generations(generation INTEGER PRIMARY KEY, high_water INTEGER NOT NULL,
@@ -96,6 +113,26 @@ CREATE TABLE IF NOT EXISTS projection_notification_preferences(generation INTEGE
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL);
 ",
     )?;
+    // One transaction, so a crash cannot create the table without invalidating its
+    // predecessors (or the reverse).
+    let tx = conn.unchecked_transaction()?;
+    if provenance_missing {
+        let invalidated = tx.execute(
+            "UPDATE projection_generations SET state='failed',reason=? WHERE state IN ('draining','staging')",
+            [LEGACY_PROVENANCE_MISSING],
+        )?;
+        if invalidated > 0 {
+            tx.execute(
+                "INSERT OR IGNORE INTO metadata(k,v) VALUES(?,'upgrade')",
+                [REPAIR_LATCH],
+            )?;
+        }
+    }
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS projection_legacy_retained(generation INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
+  producer_sequence INTEGER NOT NULL, cursor INTEGER NOT NULL, PRIMARY KEY(generation,producer_device_id,producer_sequence,cursor));",
+    )?;
+    tx.commit()?;
     if upgrading {
         conn.execute(
             "INSERT OR IGNORE INTO metadata(k,v) VALUES(?,'upgrade')",
@@ -123,7 +160,8 @@ pub struct SnapshotProjectionStatus {
     pub high_water: Cursor,
     pub state: SnapshotProjectionState,
     /// Why a projection failed: a quarantine reason code, `keys_unavailable`,
-    /// `stale_snapshot` or `missing_record`.
+    /// `stale_snapshot`, `missing_record` or `legacy_provenance_missing` (drained before an
+    /// upgrade; fetch a fresh snapshot).
     pub reason: Option<String>,
 }
 
@@ -221,17 +259,42 @@ pub(crate) fn is_draining(conn: &Connection, generation: i64) -> Result<bool, Er
         .is_some())
 }
 
-/// Records a drained snapshot cursor when it carries compaction metadata.
+/// Records a drained snapshot cursor when it carries compaction metadata. A header-free event
+/// is never staged; only its header provenance is recorded, when the journal holds exactly this
+/// wire at this cursor. Promotion honours it only if that journal row was applied by then, so
+/// it keeps just the state this device itself produced from it. Unparseable, command and
+/// overflowing records record nothing.
 pub(crate) fn retain(
     conn: &Connection,
     generation: i64,
     cursor: i64,
     wire: &[u8],
 ) -> Result<(), Error> {
-    if compactable(wire) {
+    let Some(envelope) = parse_wire(wire) else {
+        return Ok(());
+    };
+    if envelope.compaction.is_some() {
         conn.execute(
             "INSERT OR IGNORE INTO projection_retained(generation,cursor) VALUES(?,?)",
             params![generation, cursor],
+        )?;
+        return Ok(());
+    }
+    if envelope.purpose != EnvelopePurpose::Event {
+        return Ok(());
+    }
+    let Ok(sequence) = i64::try_from(envelope.producer_sequence.0) else {
+        return Ok(());
+    };
+    let journaled: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM journal WHERE cursor=? AND wire=?)",
+        params![cursor, wire],
+        |r| r.get(0),
+    )?;
+    if journaled {
+        conn.execute(
+            "INSERT OR IGNORE INTO projection_legacy_retained(generation,producer_device_id,producer_sequence,cursor) VALUES(?,?,?,?)",
+            params![generation, envelope.producer_device_id.to_string(), sequence, cursor],
         )?;
     }
     Ok(())
@@ -727,8 +790,13 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
     )?;
 
     // Notifications from other sources. Tombstones only accumulate (a lifetime never returns).
+    // A row still produced by a retained legacy record that was applied by promotion stays
+    // unless a staged tombstone for its lifetime is at least as new.
     conn.execute(
-        "DELETE FROM notifications WHERE source_device_id!=?1 AND NOT EXISTS(SELECT 1 FROM projection_notifications s WHERE s.generation=?2 AND s.source_device_id=notifications.source_device_id AND s.notification_key=notifications.notification_key)",
+        "DELETE FROM notifications WHERE source_device_id!=?1 AND NOT EXISTS(SELECT 1 FROM projection_notifications s WHERE s.generation=?2 AND s.source_device_id=notifications.source_device_id AND s.notification_key=notifications.notification_key)
+           AND NOT (EXISTS(SELECT 1 FROM projection_legacy_retained l WHERE l.generation=?2 AND l.producer_device_id=notifications.source_device_id AND l.producer_sequence=notifications.source_sequence
+                  AND EXISTS(SELECT 1 FROM journal j WHERE j.cursor=l.cursor AND j.status='applied'))
+                AND NOT EXISTS(SELECT 1 FROM projection_tombstones t WHERE t.generation=?2 AND t.source_device_id=notifications.source_device_id AND t.notification_key=notifications.notification_key AND t.lifetime=notifications.lifetime AND t.source_sequence>=notifications.source_sequence))",
         params![me, generation],
     )?;
     conn.execute(
@@ -751,15 +819,26 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
 
     // App filters (any source, any writer). This device's own write is kept while there is
     // no proof the snapshot covers it: its outbox row's echo is not journaled at or below the
-    // high-water (unsent, or accepted after the snapshot was taken).
+    // high-water (unsent, or accepted after the snapshot was taken). A write still produced by
+    // a retained legacy record that was applied by promotion is kept too.
     conn.execute(
         "DELETE FROM app_filters WHERE logical_revision>0
            AND NOT EXISTS(SELECT 1 FROM projection_filters s WHERE s.generation=?2 AND s.source_device_id=app_filters.source_device_id AND s.package_name=app_filters.package_name)
+           AND NOT EXISTS(SELECT 1 FROM projection_legacy_retained l WHERE l.generation=?2 AND l.producer_device_id=app_filters.producer_device_id AND l.producer_sequence=app_filters.source_sequence
+                AND EXISTS(SELECT 1 FROM journal j WHERE j.cursor=l.cursor AND j.status='applied'))
            AND NOT (app_filters.producer_device_id=?1 AND EXISTS(SELECT 1 FROM outbox o WHERE o.seq=app_filters.source_sequence
                 AND NOT EXISTS(SELECT 1 FROM journal j WHERE j.envelope_id=o.envelope_id AND j.cursor<=?3)))",
         params![me, generation, high_water],
     )?;
-    conn.execute("DELETE FROM conversation_pins WHERE logical_revision>0 AND NOT EXISTS(SELECT 1 FROM projection_conversation_pins s WHERE s.generation=?2 AND s.conversation_id=conversation_pins.conversation_id) AND NOT (conversation_pins.producer_device_id=?1 AND EXISTS(SELECT 1 FROM outbox o WHERE o.seq=conversation_pins.source_sequence AND NOT EXISTS(SELECT 1 FROM journal j WHERE j.envelope_id=o.envelope_id AND j.cursor<=?3)))", params![me, generation, high_water])?;
+    conn.execute(
+        "DELETE FROM conversation_pins WHERE logical_revision>0
+           AND NOT EXISTS(SELECT 1 FROM projection_conversation_pins s WHERE s.generation=?2 AND s.conversation_id=conversation_pins.conversation_id)
+           AND NOT EXISTS(SELECT 1 FROM projection_legacy_retained l WHERE l.generation=?2 AND l.producer_device_id=conversation_pins.producer_device_id AND l.producer_sequence=conversation_pins.source_sequence
+                AND EXISTS(SELECT 1 FROM journal j WHERE j.cursor=l.cursor AND j.status='applied'))
+           AND NOT (conversation_pins.producer_device_id=?1 AND EXISTS(SELECT 1 FROM outbox o WHERE o.seq=conversation_pins.source_sequence
+                AND NOT EXISTS(SELECT 1 FROM journal j WHERE j.envelope_id=o.envelope_id AND j.cursor<=?3)))",
+        params![me, generation, high_water],
+    )?;
     let mut after_pin = String::new();
     loop {
         let page: Vec<(String, bool, i64, String, i64, String)> = conn.prepare("SELECT conversation_id,pinned,source_sequence,producer_device_id,logical_revision,writer_device_id FROM projection_conversation_pins WHERE generation=? AND conversation_id>? ORDER BY conversation_id LIMIT ?")?.query_map(params![generation, after_pin, PROMOTE_PAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<Result<_, _>>()?;
@@ -779,7 +858,15 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
             )?;
         }
     }
-    conn.execute("DELETE FROM conversation_tones WHERE logical_revision>0 AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones s WHERE s.generation=?2 AND s.seed=conversation_tones.seed) AND NOT (conversation_tones.producer_device_id=?1 AND EXISTS(SELECT 1 FROM outbox o WHERE o.seq=conversation_tones.source_sequence AND NOT EXISTS(SELECT 1 FROM journal j WHERE j.envelope_id=o.envelope_id AND j.cursor<=?3)))", params![me, generation, high_water])?;
+    conn.execute(
+        "DELETE FROM conversation_tones WHERE logical_revision>0
+           AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones s WHERE s.generation=?2 AND s.seed=conversation_tones.seed)
+           AND NOT EXISTS(SELECT 1 FROM projection_legacy_retained l WHERE l.generation=?2 AND l.producer_device_id=conversation_tones.producer_device_id AND l.producer_sequence=conversation_tones.source_sequence
+                AND EXISTS(SELECT 1 FROM journal j WHERE j.cursor=l.cursor AND j.status='applied'))
+           AND NOT (conversation_tones.producer_device_id=?1 AND EXISTS(SELECT 1 FROM outbox o WHERE o.seq=conversation_tones.source_sequence
+                AND NOT EXISTS(SELECT 1 FROM journal j WHERE j.envelope_id=o.envelope_id AND j.cursor<=?3)))",
+        params![me, generation, high_water],
+    )?;
     let mut after_tone = String::new();
     loop {
         let page: Vec<(String, Option<u8>, i64, String, i64, String)> = conn.prepare("SELECT seed,palette_index,source_sequence,producer_device_id,logical_revision,writer_device_id FROM projection_conversation_tones WHERE generation=? AND seed>? ORDER BY seed LIMIT ?")?.query_map(params![generation, after_tone, PROMOTE_PAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<Result<_, _>>()?;
@@ -939,6 +1026,7 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
         "projection_conversation_pins",
         "projection_conversation_tones",
         "projection_notification_preferences",
+        "projection_legacy_retained",
     ] {
         conn.execute(
             &format!("DELETE FROM {table} WHERE rowid IN (SELECT t.rowid FROM {table} t JOIN projection_generations g ON g.generation=t.generation WHERE g.state IN ('promoted','failed','superseded') LIMIT ?)"),
@@ -958,7 +1046,8 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
            AND NOT EXISTS(SELECT 1 FROM projection_filters r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_conversation_pins r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones r WHERE r.generation=projection_generations.generation)
-            AND NOT EXISTS(SELECT 1 FROM projection_notification_preferences r WHERE r.generation=projection_generations.generation)",
+           AND NOT EXISTS(SELECT 1 FROM projection_notification_preferences r WHERE r.generation=projection_generations.generation)
+           AND NOT EXISTS(SELECT 1 FROM projection_legacy_retained r WHERE r.generation=projection_generations.generation)",
         [],
     )?;
     Ok(())
@@ -1000,5 +1089,143 @@ mod tests {
             .unwrap();
         initialize(&fresh).unwrap();
         assert_eq!(latch(&fresh), None);
+    }
+
+    fn states(conn: &Connection) -> Vec<(i64, String, Option<String>)> {
+        conn.prepare(
+            "SELECT generation,state,reason FROM projection_generations ORDER BY generation",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    #[test]
+    fn provenance_upgrade_fails_in_flight_generations_and_keeps_visible_rows() {
+        // A database whose projection schema predates legacy provenance, with a promoted, a
+        // staging and a draining generation and some visible state.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+             CREATE TABLE notifications(notification_key TEXT PRIMARY KEY);
+             INSERT INTO notifications VALUES('n1');
+             CREATE TABLE projection_generations(generation INTEGER PRIMARY KEY, high_water INTEGER NOT NULL,
+               state TEXT NOT NULL CHECK(state IN ('draining','staging','promoted','failed','superseded')),
+               progress INTEGER NOT NULL DEFAULT 0, reason TEXT);
+             CREATE TABLE projection_retained(generation INTEGER NOT NULL, cursor INTEGER NOT NULL, PRIMARY KEY(generation,cursor));
+             INSERT INTO projection_generations(generation,high_water,state) VALUES(1,5,'promoted'),(2,8,'staging'),(3,9,'draining');
+             INSERT INTO projection_retained VALUES(1,4),(2,7);",
+        )
+        .unwrap();
+        initialize(&conn).unwrap();
+        let reason = Some(LEGACY_PROVENANCE_MISSING.to_owned());
+        assert_eq!(
+            states(&conn),
+            [
+                (1, "promoted".into(), None),
+                (2, "failed".into(), reason.clone()),
+                (3, "failed".into(), reason.clone()),
+            ]
+        );
+        assert_eq!(latch(&conn).as_deref(), Some("upgrade"));
+        let visible: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(visible, 1, "visible state is untouched");
+        assert!(!is_draining(&conn, 3).unwrap());
+        drained(&conn, 3).unwrap();
+        assert_eq!(states(&conn)[2], (3, "failed".into(), reason));
+    }
+
+    #[test]
+    fn provenance_upgrade_without_in_flight_generation_does_not_latch() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+             CREATE TABLE projection_generations(generation INTEGER PRIMARY KEY, high_water INTEGER NOT NULL,
+               state TEXT NOT NULL CHECK(state IN ('draining','staging','promoted','failed','superseded')),
+               progress INTEGER NOT NULL DEFAULT 0, reason TEXT);
+             INSERT INTO projection_generations(generation,high_water,state) VALUES(1,5,'promoted');",
+        )
+        .unwrap();
+        initialize(&conn).unwrap();
+        assert_eq!(states(&conn), [(1, "promoted".into(), None)]);
+        assert_eq!(latch(&conn), None);
+    }
+
+    #[test]
+    fn garbage_collection_keeps_superseded_generation_until_pin_and_legacy_rows_are_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO projection_generations(generation,high_water,state) VALUES(1,1,'superseded'),(2,2,'superseded')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(&format!(
+            "WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM rows WHERE value<{})
+             INSERT INTO projection_conversation_pins(generation,conversation_id,pinned,source_sequence,producer_device_id,logical_revision,writer_device_id)
+             SELECT 1,printf('conversation-%d',value),1,value,'producer',value,'writer' FROM rows;
+             WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM rows WHERE value<{})
+             INSERT INTO projection_legacy_retained(generation,producer_device_id,producer_sequence,cursor)
+             SELECT 2,'producer',value,value FROM rows;",
+            GC_BATCH + 1,
+            GC_BATCH + 1
+        ))
+        .unwrap();
+
+        collect_garbage(&conn).unwrap();
+        for table in ["projection_conversation_pins", "projection_legacy_retained"] {
+            let remaining: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(remaining, 1, "{table} must be collected in bounded batches");
+        }
+        assert_eq!(
+            states(&conn),
+            [
+                (1, "superseded".into(), None),
+                (2, "superseded".into(), None),
+            ]
+        );
+
+        collect_garbage(&conn).unwrap();
+        for table in ["projection_conversation_pins", "projection_legacy_retained"] {
+            let remaining: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(remaining, 0, "{table} must be fully collected");
+        }
+        assert!(
+            states(&conn).is_empty(),
+            "the superseded generation must remain until both child tables are empty"
+        );
+    }
+
+    #[test]
+    fn reopening_current_schema_keeps_in_flight_generations() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE metadata(k TEXT PRIMARY KEY, v TEXT NOT NULL);")
+            .unwrap();
+        initialize(&conn).unwrap();
+        conn.execute("DELETE FROM metadata WHERE k=?", [REPAIR_LATCH])
+            .unwrap();
+        on_publish(&conn, 1, 5, true, 3).unwrap();
+        drained(&conn, 1).unwrap();
+        on_publish(&conn, 2, 6, true, 3).unwrap();
+        // Generation 1 was superseded by 2, which is still draining.
+        initialize(&conn).unwrap();
+        assert_eq!(
+            states(&conn),
+            [(1, "superseded".into(), None), (2, "draining".into(), None)]
+        );
+        assert!(is_draining(&conn, 2).unwrap());
+        assert_eq!(latch(&conn), None);
     }
 }

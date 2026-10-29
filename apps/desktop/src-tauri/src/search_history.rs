@@ -35,7 +35,11 @@ async fn current(state: &AppState, session: &Arc<Session>) -> bool {
         .lock()
         .await
         .as_ref()
-        .is_some_and(|candidate| Arc::ptr_eq(candidate, session))
+        .is_some_and(|candidate| {
+            !candidate.cancel.is_cancelled()
+                && !session.cancel.is_cancelled()
+                && Arc::ptr_eq(candidate, session)
+        })
 }
 
 #[tauri::command]
@@ -48,7 +52,7 @@ pub async fn get_history_search(
     locked(&state)?;
     // A status read must not create a session, wake networking, or open the encrypted store.
     // Starting a session is an explicit user action elsewhere; no active session is idle.
-    let session = state.session.lock().await.clone();
+    let session = state.uncancelled_session().await;
     let Some(session) = session else {
         return Ok(HistorySearchSnapshot {
             attempt_id: None,
@@ -270,6 +274,25 @@ mod tests {
         let fixture = fixture_at("http://127.0.0.1:9");
         let session = Arc::new(open(&fixture, &fixture.binding, &[]));
         (fixture, session)
+    }
+
+    #[tokio::test]
+    async fn cancelled_retained_session_is_not_exposed_as_current() {
+        let (fixture, session) = session();
+        let state = AppState::new(
+            fixture.dir.path().to_path_buf(),
+            Arc::new(crate::secure_store::MemoryStore::default()),
+            crate::tests::noop(),
+        );
+        *state.session.lock().await = Some(session.clone());
+
+        assert!(state.uncancelled_session().await.is_some());
+        assert!(current(&state, &session).await);
+
+        session.cancel.cancel();
+
+        assert!(state.uncancelled_session().await.is_none());
+        assert!(!current(&state, &session).await);
     }
 
     #[tokio::test]

@@ -90,7 +90,7 @@ pub fn settings_url(_bundle_id: Option<&str>) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-mod macos {
+pub(crate) mod macos {
     use super::{map_macos, MacAuth, PermissionStatus};
     use block2::RcBlock;
     use objc2::runtime::Bool;
@@ -130,10 +130,15 @@ mod macos {
         rx.recv_timeout(READ_TIMEOUT).ok()
     }
 
-    fn request(center: &UNUserNotificationCenter) {
+    fn request(
+        center: &UNUserNotificationCenter,
+        wait: bool,
+        completed: impl Fn() + Send + 'static,
+    ) {
         let (tx, rx) = mpsc::sync_channel(1);
         let block = RcBlock::new(move |_granted: Bool, _error: *mut NSError| {
             let _ = tx.try_send(());
+            completed();
         });
         center.requestAuthorizationWithOptions_completionHandler(
             UNAuthorizationOptions::Alert
@@ -141,25 +146,45 @@ mod macos {
                 | UNAuthorizationOptions::Badge,
             &block,
         );
-        let _ = rx.recv_timeout(PROMPT_TIMEOUT);
+        if wait {
+            let _ = rx.recv_timeout(PROMPT_TIMEOUT);
+        }
     }
 
     pub fn query() -> PermissionStatus {
-        if tauri::is_dev() || bundle_id().is_none() {
-            return PermissionStatus::Unknown;
-        }
-        let center = UNUserNotificationCenter::currentNotificationCenter();
-        let Some((mut auth, mut alerts_off)) = read(&center) else {
+        let Some(auth) = authorization_after_request_if_needed() else {
             return PermissionStatus::Unknown;
         };
-        if auth == MacAuth::NotDetermined {
-            request(&center);
-            match read(&center) {
-                Some(next) => (auth, alerts_off) = next,
-                None => return PermissionStatus::Unknown,
-            }
+        map_macos(auth.0, auth.1)
+    }
+
+    pub fn authorization_after_request_if_needed() -> Option<(MacAuth, bool)> {
+        if tauri::is_dev() || bundle_id().is_none() {
+            return None;
         }
-        map_macos(auth, alerts_off)
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let (mut auth, mut alerts_off) = read(&center)?;
+        if auth == MacAuth::NotDetermined {
+            request(&center, true, || {});
+            (auth, alerts_off) = read(&center)?;
+        }
+        Some((auth, alerts_off))
+    }
+
+    pub fn authorization_status() -> Option<MacAuth> {
+        if tauri::is_dev() || bundle_id().is_none() {
+            return None;
+        }
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        read(&center).map(|(auth, _)| auth)
+    }
+
+    pub fn request_authorization(completed: impl Fn() + Send + 'static) {
+        request(
+            &UNUserNotificationCenter::currentNotificationCenter(),
+            false,
+            completed,
+        );
     }
 }
 

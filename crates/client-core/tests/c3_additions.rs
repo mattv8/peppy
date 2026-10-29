@@ -509,3 +509,121 @@ fn authenticated_status_with_out_of_range_sequence_is_quarantined_not_stalled() 
         "after poison"
     );
 }
+
+#[test]
+fn authenticated_read_state_with_out_of_range_supersedes_is_quarantined_not_stalled() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "desktop", &vault), &vault);
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let compaction = CompactionMetadata {
+        key: vec![7; 32],
+        terminal: false,
+        supersedes: vec![CompactionReference {
+            producer_device_id: DeviceId::new(),
+            producer_sequence: SourceSequence(u64::MAX),
+        }],
+        checkpoint: false,
+    };
+    let mut envelope = Envelope {
+        protocol_version: 1,
+        envelope_id: EnvelopeId::new(),
+        command_id: None,
+        vault_id: vault.id,
+        producer_device_id: DeviceId::new(),
+        producer_sequence: SourceSequence(u64::MAX),
+        key_epoch: 1,
+        crypto_suite: vault.profile.crypto_suite,
+        profile_fingerprint: vault.profile.fingerprint().unwrap(),
+        purpose: EnvelopePurpose::Event,
+        route: None,
+        compaction: Some(compaction.clone()),
+        ciphertext: Vec::new(),
+    };
+    let mut plain = serde_json::to_value(PrivatePayload::ReadState {
+        message_id: MessageId::new(),
+    })
+    .unwrap();
+    plain["compaction"] = serde_json::to_value(compaction).unwrap();
+    let sealed = encrypt(
+        &key,
+        &envelope.aad_bytes().unwrap(),
+        &serde_json::to_vec(&plain).unwrap(),
+    )
+    .unwrap();
+    envelope.ciphertext = [sealed.nonce.as_slice(), &sealed.ciphertext].concat();
+    assert_eq!(
+        client.ingest(&envelope, Cursor(1)).unwrap(),
+        IngestResult::Journaled
+    );
+
+    let peer = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let captured = peer
+        .capture_incoming(incoming("after poison", "p-2"))
+        .unwrap();
+    assert_eq!(
+        client
+            .ingest(&peer.pending_outbox().unwrap()[0], Cursor(2))
+            .unwrap(),
+        IngestResult::Journaled
+    );
+    let report = client.apply_pending(10).unwrap();
+    assert_eq!((report.applied, report.quarantined), (1, 1));
+    assert_eq!(client.quarantine_count().unwrap(), 1);
+    assert_eq!(
+        client.quarantined().unwrap()[0].reason,
+        QuarantineReason::InvalidPayload
+    );
+    assert_eq!(
+        only_message(&client, captured.conversation_id).payload.body,
+        "after poison"
+    );
+}
+
+#[test]
+fn outbox_counts_and_message_membership_are_exact_without_loading_history() {
+    const OUTBOX_ROWS: usize = 1_001;
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "desktop", &vault), &vault);
+    let conversation = ConversationId::new();
+    let mut ids = Vec::new();
+    for sequence in 0..OUTBOX_ROWS {
+        let captured = client
+            .capture_incoming(IncomingSms {
+                conversation_id: Some(conversation),
+                sender_address: ADDRESS.into(),
+                body: format!("message-{sequence}"),
+                provider_message_id: Some(format!("provider-{sequence}")),
+                imported: false,
+            })
+            .unwrap();
+        if sequence < 2 {
+            ids.push(captured.message_id);
+        }
+    }
+
+    assert_eq!(client.pending_outbox_count().unwrap(), OUTBOX_ROWS);
+    assert_eq!(client.pending_outbox_batch(1_000).unwrap().len(), 1_000);
+    assert!(
+        client
+            .messages_belong_to_conversation(conversation, &[])
+            .unwrap()
+    );
+    assert!(
+        client
+            .messages_belong_to_conversation(conversation, &[ids[0], ids[0], ids[1]])
+            .unwrap()
+    );
+    assert!(
+        !client
+            .messages_belong_to_conversation(conversation, &[ids[0], MessageId::new()])
+            .unwrap()
+    );
+    assert!(
+        !client
+            .messages_belong_to_conversation(ConversationId::new(), &[ids[0]])
+            .unwrap()
+    );
+}

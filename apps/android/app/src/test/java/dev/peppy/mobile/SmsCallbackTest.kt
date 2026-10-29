@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.telephony.SmsManager
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -11,6 +12,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.MobileBindingsException
+import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeSendResult
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -173,6 +176,50 @@ class SmsCallbackTest : GatewayTestBase() {
         assertEquals("Sent", reopened.beginSendAttempt(command).existingSendState)
         assertTrue(store.owed().isEmpty())
         assertEquals("replay is idempotent", 0, SmsCallbackReconciler.replay(reopened, store))
+    }
+
+    @Test
+    fun oldOwedAggregateSurvivesCallbackRecordPurge() {
+        var now = 0L
+        val store = SmsCallbackStore(context) { now }
+        val command = UUID.randomUUID().toString()
+        store.register(command, 1)
+        assertEquals(NativeSendResult.SENT, store.record(CallbackIdentity(CallbackKind.SENT, command, 0, 1), ok))
+
+        now = Long.MAX_VALUE / 2
+        store.purgeOlderThan(1)
+
+        assertEquals(listOf(command to NativeSendResult.SENT), store.owed())
+        store.settled(command, NativeSendResult.SENT)
+    }
+
+    @Test
+    fun reconcilerKeepsTransientCoreFailuresOwedAndSettlesOnlyPermanentRefusals() {
+        val client = enrollAndUnlock()
+        val store = SmsCallbackStore(context)
+        val staysOwedAfter = listOf(
+            MobileBindingsException.Crypto() to true,
+            MobileBindingsException.KeysUnavailable() to true,
+            MobileBindingsException.Database() to true,
+            MobileBindingsException.InvalidRequest() to false,
+            MobileBindingsException.NotFound() to false,
+        )
+
+        staysOwedAfter.forEach { (error, staysOwed) ->
+            val command = UUID.randomUUID().toString()
+            store.register(command, 1)
+            assertEquals(NativeSendResult.SENT, store.record(CallbackIdentity(CallbackKind.SENT, command, 0, 1), ok))
+            val failingCore = object : NativeClientInterface by client {
+                override fun recordSendResult(commandId: String, result: NativeSendResult): String = throw error
+            }
+
+            assertFalse(SmsCallbackReconciler.apply(failingCore, store, command, NativeSendResult.SENT))
+            assertEquals(
+                "${error::class.simpleName} owed retention",
+                staysOwed,
+                store.owed().contains(command to NativeSendResult.SENT),
+            )
+        }
     }
 
     @Test

@@ -145,9 +145,9 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
         try await call("GET", path, query: query, body: nil, limit: limit, meter: &meter)
     }
 
-    func post(_ path: String, json: Data, limit: Int = maxSmallBytes, meter: inout RequestMeter) async throws -> sending [String: Any] {
+    func post(_ path: String, json: Data, limit: Int = maxSmallBytes, preserveCodedForbidden: Bool = false, meter: inout RequestMeter) async throws -> sending [String: Any] {
         guard json.count <= Self.maxEnvelopeBytes else { throw ClientError.requestTooLarge(limit: Self.maxEnvelopeBytes) }
-        return try await call("POST", path, query: [], body: json, limit: limit, meter: &meter)
+        return try await call("POST", path, query: [], body: json, limit: limit, preserveCodedForbidden: preserveCodedForbidden, meter: &meter)
     }
 
     /// Sends an authenticated POST whose successful response is intentionally bodyless.
@@ -160,12 +160,15 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
         ))
         guard origin.contains(response.url) else { throw ClientError.originMismatch }
         observeResponse?(ServerResponseReachability.state(for: response.status))
+        let object = (try? JSONSerialization.jsonObject(with: response.body)) as? [String: Any]
         switch response.status {
         case 200..<300: return
         case 401: throw ClientError.unauthorized
-        case 403: throw ClientError.forbidden
+        case 403:
+            // A JSON-coded 403 refuses this request only; a bodiless 403 stays fatal.
+            if let code = object?["code"] as? String { throw ClientError.server(status: 403, code: code) }
+            throw ClientError.forbidden
         default:
-            let object = (try? JSONSerialization.jsonObject(with: response.body)) as? [String: Any]
             throw ClientError.server(status: response.status, code: object?["code"] as? String)
         }
     }
@@ -192,7 +195,7 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
     }
 
     private func call(
-        _ method: String, _ path: String, query: [URLQueryItem], body: Data?, limit: Int, meter: inout RequestMeter
+        _ method: String, _ path: String, query: [URLQueryItem], body: Data?, limit: Int, preserveCodedForbidden: Bool = false, meter: inout RequestMeter
     ) async throws -> sending [String: Any] {
         try Task.checkCancellation()
         try meter.spend()
@@ -209,7 +212,11 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
             guard let object else { throw ClientError.invalidResponse("\(path) body") }
             return object
         case 401: throw ClientError.unauthorized
-        case 403: throw ClientError.forbidden
+        case 403:
+            if preserveCodedForbidden, let code = object?["code"] as? String {
+                throw ClientError.server(status: 403, code: code)
+            }
+            throw ClientError.forbidden
         case 409 where object?["code"] as? String == "resync_required":
             throw ClientError.resyncRequired(reason: object?["reason"] as? String ?? "unknown")
         default:

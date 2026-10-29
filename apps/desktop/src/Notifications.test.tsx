@@ -1,8 +1,8 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dismissibleNotifications, NotificationsView } from "./Notifications";
-import type { MirroredNotification } from "./bridge";
+import type { MirroredNotification, NotificationTarget } from "./bridge";
 
 const notification = (sourceDeviceId: string, packageName = "chat", overrides: Partial<MirroredNotification> = {}): MirroredNotification => ({
   target: { sourceDeviceId, notificationKey: `key-${sourceDeviceId}`, lifetime: "one" },
@@ -281,5 +281,68 @@ describe("NotificationsView", () => {
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     fireEvent.focus(window);
     await waitFor(() => expect(view.onSeen).toHaveBeenCalledTimes(1));
+  });
+
+  describe("seen tracking after rows leave the feed (L11)", () => {
+    let callbacks: IntersectionObserverCallback[];
+
+    beforeEach(() => {
+      callbacks = [];
+      vi.stubGlobal("IntersectionObserver", class {
+        constructor(next: IntersectionObserverCallback) { callbacks.push(next); }
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+        takeRecords() { return []; }
+        root = null;
+        rootMargin = "0px";
+        thresholds = [];
+      });
+    });
+
+    const intersect = (callback: IntersectionObserverCallback, rows: Element[]) => act(() => {
+      callback(rows.map(target => ({ target, isIntersecting: true }) as unknown as IntersectionObserverEntry), {} as IntersectionObserver);
+    });
+    const seenKeys = (onSeen: ReturnType<typeof props>["onSeen"]) =>
+      (onSeen.mock.calls as [NotificationTarget[]][]).flatMap(([targets]) => targets.map(target => target.notificationKey));
+    const rowFor = (sourceDeviceId: string) =>
+      document.querySelector(`[data-notification-key="key-${sourceDeviceId}"]`)!;
+
+    it.each([
+      ["removed", (view: ReturnType<typeof props>) => ({ ...view, notifications: [view.notifications[1]] })],
+      ["muted", (view: ReturnType<typeof props>) => ({ ...view, filters: [{ sourceDeviceId: "phone-a", packageName: "chat", appName: "Chat", muted: true }] })],
+    ])("never marks a visible row seen on focus after it is %s while unfocused", async (_change, change) => {
+      const view = props([notification("phone-a"), notification("phone-b", "mail")]);
+      vi.spyOn(document, "hasFocus").mockReturnValue(false);
+      const { rerender } = render(<NotificationsView {...view} />);
+      intersect(callbacks.at(-1)!, [rowFor("phone-a"), rowFor("phone-b")]);
+      expect(view.onSeen).not.toHaveBeenCalled();
+
+      rerender(<NotificationsView {...change(view)} />);
+      expect(screen.queryByRole("article", { name: /Chat on Pixel/ })).not.toBeInTheDocument();
+      vi.mocked(document.hasFocus).mockReturnValue(true);
+      fireEvent.focus(window);
+
+      await waitFor(() => expect(view.onSeen).toHaveBeenCalled());
+      expect(seenKeys(view.onSeen)).toEqual(["key-phone-b"]);
+    });
+
+    it("does not let a previous observer generation resurrect a removed row", async () => {
+      const removed = notification("phone-a");
+      const view = props([removed, notification("phone-b", "mail")]);
+      vi.spyOn(document, "hasFocus").mockReturnValue(false);
+      const { rerender } = render(<NotificationsView {...view} />);
+      const previousGeneration = callbacks.at(-1)!;
+      const removedRow = rowFor("phone-a");
+
+      rerender(<NotificationsView {...view} notifications={[view.notifications[1]]} />);
+      intersect(callbacks.at(-1)!, [rowFor("phone-b")]);
+      intersect(previousGeneration, [removedRow]);
+      vi.mocked(document.hasFocus).mockReturnValue(true);
+      fireEvent.focus(window);
+
+      await waitFor(() => expect(view.onSeen).toHaveBeenCalled());
+      expect(seenKeys(view.onSeen)).toEqual(["key-phone-b"]);
+    });
   });
 });

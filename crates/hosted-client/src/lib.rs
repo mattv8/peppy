@@ -135,12 +135,20 @@ struct Checkpoint {
     admission_public_key: String,
 }
 
-impl Drop for Checkpoint {
-    fn drop(&mut self) {
+impl Checkpoint {
+    /// Clears every secret the checkpoint carries; Drop shares this path.
+    fn zeroize_secrets(&mut self) {
         self.token.zeroize();
         if let Some(ref mut grant) = self.grant {
             grant.zeroize();
         }
+        self.signing_seed.zeroize();
+    }
+}
+
+impl Drop for Checkpoint {
+    fn drop(&mut self) {
+        self.zeroize_secrets();
     }
 }
 
@@ -376,13 +384,69 @@ pub fn restore(
     expected_account_id: impl AsRef<str>,
 ) -> Result<HostedProvisioning, HostedClientError> {
     let checkpoint_bytes = Zeroizing::new(checkpoint_bytes);
+    restore_validated(
+        &checkpoint_bytes,
+        expected_origin.as_ref(),
+        expected_account_id.as_ref(),
+    )
+}
+
+/// Restores protected local checkpoint material only for an exact canonical
+/// origin, vault, and device identity tuple.
+///
+/// This is structural checkpoint validation, not cryptographic authentication.
+/// Callers must read the checkpoint from protected local storage and verify any
+/// recovered secret against the current server-verified vault header.
+pub fn restore_for_identity(
+    checkpoint_bytes: Vec<u8>,
+    expected_origin: impl AsRef<str>,
+    expected_vault_id: impl AsRef<str>,
+    expected_device_id: impl AsRef<str>,
+) -> Result<HostedProvisioning, HostedClientError> {
+    let checkpoint_bytes = Zeroizing::new(checkpoint_bytes);
+    let origin = canonical_origin(expected_origin.as_ref())?;
+    if expected_origin.as_ref() != origin {
+        return invalid();
+    }
+    let vault_id = canonical_non_nil_uuid(expected_vault_id.as_ref())?;
+    let device_id = canonical_non_nil_uuid(expected_device_id.as_ref())?;
+    let account_id = checkpoint_account_id(&checkpoint_bytes)?;
+    let provisioning = restore_validated(&checkpoint_bytes, &origin, &account_id)?;
+    if provisioning.vault_id != vault_id || provisioning.device_id != device_id {
+        return invalid();
+    }
+    Ok(provisioning)
+}
+
+fn checkpoint_account_id(checkpoint_bytes: &[u8]) -> Result<String, HostedClientError> {
     if checkpoint_bytes.is_empty() || checkpoint_bytes.len() > MAX_CHECKPOINT {
         return invalid();
     }
-    let origin = canonical_origin(expected_origin.as_ref())?;
-    let account = uuid(expected_account_id.as_ref())?;
+    let value: Checkpoint =
+        serde_json::from_slice(checkpoint_bytes).map_err(|_| HostedClientError::InvalidRequest)?;
+    Ok(value.account_id.clone())
+}
+
+fn canonical_non_nil_uuid(value: &str) -> Result<Uuid, HostedClientError> {
+    let id = uuid(value)?;
+    if id.is_nil() || value != id.to_string() {
+        return invalid();
+    }
+    Ok(id)
+}
+
+fn restore_validated(
+    checkpoint_bytes: &[u8],
+    expected_origin: &str,
+    expected_account_id: &str,
+) -> Result<HostedProvisioning, HostedClientError> {
+    if checkpoint_bytes.is_empty() || checkpoint_bytes.len() > MAX_CHECKPOINT {
+        return invalid();
+    }
+    let origin = canonical_origin(expected_origin)?;
+    let account = uuid(expected_account_id)?;
     let mut value: Checkpoint =
-        serde_json::from_slice(&checkpoint_bytes).map_err(|_| HostedClientError::InvalidRequest)?;
+        serde_json::from_slice(checkpoint_bytes).map_err(|_| HostedClientError::InvalidRequest)?;
     if value.version != 2
         || value.origin != origin
         || value.account_id != account.to_string()
@@ -582,6 +646,25 @@ mod tests {
     use super::*;
     const PASSPHRASE: &str = "alpha bravo charlie delta echo foxtrot";
     const ORIGIN: &str = "https://peppy.example";
+
+    #[test]
+    fn checkpoint_secret_wipe_clears_signing_seed_with_token_and_grant() {
+        let prepared = prepare(
+            ORIGIN,
+            Uuid::new_v4().to_string(),
+            PASSPHRASE,
+            ClientKind::Desktop,
+            "test device",
+        )
+        .expect("valid local preparation");
+        let bytes = checkpoint(&prepared).expect("checkpoint serializes");
+        let mut restored: Checkpoint = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.signing_seed.len(), 32);
+        assert!(!restored.token.is_empty());
+        restored.zeroize_secrets();
+        assert!(restored.token.is_empty());
+        assert!(restored.signing_seed.is_empty());
+    }
 
     #[test]
     fn provisioning_material_unlocks_serializes_and_restores_without_plaintext() {
@@ -834,6 +917,99 @@ mod tests {
 
         // Wrong account
         assert!(restore(checkpoint, ORIGIN, Uuid::new_v4().to_string()).is_err());
+    }
+
+    #[test]
+    fn restore_for_identity_requires_the_exact_canonical_identity_tuple() {
+        let account = Uuid::new_v4().to_string();
+        let prepared = prepare(
+            ORIGIN,
+            account.clone(),
+            PASSPHRASE,
+            ClientKind::Desktop,
+            "test device",
+        )
+        .expect("valid local preparation");
+        let view = prepared.view();
+        let checkpoint = prepared.checkpoint().unwrap();
+
+        let restored =
+            restore_for_identity(checkpoint.clone(), ORIGIN, &view.vault_id, &view.device_id)
+                .expect("checkpoint restores without an account session");
+        assert_eq!(restored.view(), view);
+
+        for (origin, vault_id, device_id) in [
+            (
+                "https://wrong.example".to_owned(),
+                view.vault_id.clone(),
+                view.device_id.clone(),
+            ),
+            (
+                ORIGIN.to_owned(),
+                Uuid::new_v4().to_string(),
+                view.device_id.clone(),
+            ),
+            (
+                ORIGIN.to_owned(),
+                view.vault_id.clone(),
+                Uuid::new_v4().to_string(),
+            ),
+        ] {
+            assert!(restore_for_identity(checkpoint.clone(), origin, vault_id, device_id).is_err());
+        }
+
+        for (origin, vault_id, device_id) in [
+            (
+                format!("{ORIGIN}/"),
+                view.vault_id.clone(),
+                view.device_id.clone(),
+            ),
+            (
+                ORIGIN.to_owned(),
+                view.vault_id.to_uppercase(),
+                view.device_id.clone(),
+            ),
+            (
+                ORIGIN.to_owned(),
+                view.vault_id.clone(),
+                view.device_id.to_uppercase(),
+            ),
+            (
+                ORIGIN.to_owned(),
+                view.vault_id.clone(),
+                Uuid::nil().to_string(),
+            ),
+            (
+                ORIGIN.to_owned(),
+                Uuid::nil().to_string(),
+                view.device_id.clone(),
+            ),
+        ] {
+            assert!(restore_for_identity(checkpoint.clone(), origin, vault_id, device_id).is_err());
+        }
+
+        assert!(restore_for_identity(vec![b'{'], ORIGIN, &view.vault_id, &view.device_id).is_err());
+        assert!(
+            restore_for_identity(
+                vec![b'{'; MAX_CHECKPOINT + 1],
+                ORIGIN,
+                &view.vault_id,
+                &view.device_id,
+            )
+            .is_err()
+        );
+
+        let mut inconsistent: Checkpoint = serde_json::from_slice(&checkpoint).unwrap();
+        inconsistent.profile.key_epoch = 2;
+        assert!(
+            restore_for_identity(
+                serde_json::to_vec(&inconsistent).unwrap(),
+                ORIGIN,
+                &view.vault_id,
+                &view.device_id,
+            )
+            .is_err()
+        );
     }
 
     #[test]

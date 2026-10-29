@@ -37,7 +37,7 @@ import Testing
         let unlocked = try await first.unlock(passphrase: passphrase)
         #expect(unlocked.keysUnlocked)
         #expect(store.value(identity.account("key-cache-1")) != nil)
-        #expect(!store.accounts.contains { store.value($0).map { String(decoding: $0, as: UTF8.self).contains(passphrase) } ?? false })
+        #expect(store.value(identity.account("vault-secret-v2")) == Data(passphrase.utf8))
 
         // Re-import of the same identity refreshes metadata but never replaces the database key.
         _ = try await first.importCredential(server.credential(deviceId: deviceId))
@@ -113,5 +113,242 @@ import Testing
         #expect(server.paths.last == "GET /v1/events")
         await session.close()
         await #expect(throws: ClientError.notEnrolled) { try await session.syncOnce() }
+    }
+
+    @Test func wrongUnlockDoesNotBindAndVerifiedUnlockNeverOverwrites() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let store = InMemorySecureStore()
+        let deviceId = UUID().uuidString.lowercased()
+        let native = session(server, store: store, deviceId: deviceId, directory: temporaryDirectory())
+        let imported = try await native.importCredential(server.credential(deviceId: deviceId))
+        let identity = try #require(imported.identity)
+        let binding = identity.account("vault-secret-v2")
+
+        await #expect(throws: ClientError.core(.WrongPassphrase)) {
+            try await native.unlock(passphrase: "wrong passphrase")
+        }
+        #expect(store.value(binding) == nil)
+
+        _ = try await native.unlock(passphrase: passphrase)
+        #expect(store.value(binding) == Data(passphrase.utf8))
+        try store.upsert(binding, Data("existing conflicting secret".utf8))
+        _ = try await native.unlock(passphrase: passphrase)
+        #expect(store.value(binding) == Data("existing conflicting secret".utf8))
+    }
+
+    @Test func verifiedUnlockSurvivesBindingStorageFailure() async throws {
+        let readFailure = try RecoverySessionFixture(passphrase: passphrase)
+        _ = try await readFailure.importIdentity()
+        readFailure.store.failingRead = readFailure.bindingAccount
+        let readUnlocked = try await readFailure.session.unlock(passphrase: passphrase)
+        #expect(readUnlocked.keysUnlocked)
+        #expect(readFailure.store.value(readFailure.bindingAccount) == nil)
+
+        let writeFailure = try RecoverySessionFixture(passphrase: passphrase)
+        _ = try await writeFailure.importIdentity()
+        writeFailure.store.failingWrite = writeFailure.bindingAccount
+        let writeUnlocked = try await writeFailure.session.unlock(passphrase: passphrase)
+        #expect(writeUnlocked.keysUnlocked)
+        #expect(writeFailure.store.value(writeFailure.bindingAccount) == nil)
+    }
+
+    @Test func offlineRevealRepairsBindingWithoutUnlockingCore() async throws {
+        let fixture = try RecoverySessionFixture(passphrase: passphrase)
+        let imported = try await fixture.session.importCredential(
+            fixture.server.credential(deviceId: fixture.identity.deviceId, origin: fixture.identity.origin)
+        )
+        #expect(!imported.keysUnlocked)
+        #expect(fixture.store.value(fixture.bindingAccount) == nil)
+        #expect(fixture.store.value(fixture.checkpointAccount) == fixture.checkpoint)
+        let sessionAccount = "hosted-account-session:\(fixture.identity.origin)"
+        #expect(fixture.store.value(sessionAccount) == nil)
+        let expired = ExpiredHostedSession(
+            accountID: UUID().uuidString.lowercased(),
+            bearer: "pst_" + String(repeating: "a", count: 64),
+            expiresAt: .distantPast
+        )
+        try fixture.store.upsert(sessionAccount, try JSONEncoder().encode(expired))
+        let requestsBeforeReveal = fixture.server.paths
+
+        let revealed = try await fixture.session.ownerVaultSecret()
+
+        #expect(revealed == passphrase)
+        #expect(fixture.store.value(fixture.bindingAccount) == Data(passphrase.utf8))
+        #expect(fixture.store.value(fixture.pendingAccount) == nil)
+        #expect(fixture.store.value(fixture.checkpointAccount) == nil)
+        let status = try await fixture.session.open()
+        #expect(!status.keysUnlocked, "pure header verification must not call NativeClient.unlock")
+        #expect(fixture.store.value(fixture.identity.account("key-cache-1")) == nil)
+        #expect(fixture.server.paths == requestsBeforeReveal, "offline repair must not use a hosted or device session")
+    }
+
+    @Test func offlineRevealPreservesWrongPhraseAndWrongTupleRecovery() async throws {
+        let wrongPhrase = try RecoverySessionFixture(passphrase: passphrase)
+        _ = try await wrongPhrase.importIdentity()
+        try wrongPhrase.store.upsert(wrongPhrase.pendingAccount, Data("wrong phrase with enough words here".utf8))
+        await #expect(throws: ClientError.core(.WrongPassphrase)) {
+            try await wrongPhrase.session.ownerVaultSecret()
+        }
+        #expect(wrongPhrase.store.value(wrongPhrase.bindingAccount) == nil)
+        #expect(wrongPhrase.store.value(wrongPhrase.pendingAccount) != nil)
+        #expect(wrongPhrase.store.value(wrongPhrase.checkpointAccount) == wrongPhrase.checkpoint)
+
+        let wrongTuple = try RecoverySessionFixture(passphrase: passphrase)
+        _ = try await wrongTuple.importIdentity()
+        let other = try prepareHostedProvisioning(
+            origin: wrongTuple.identity.origin,
+            accountId: UUID().uuidString.lowercased(),
+            passphrase: passphrase,
+            clientKind: .ios,
+            deviceName: "Other recovery"
+        )
+        let otherCheckpoint = try other.checkpoint()
+        try wrongTuple.store.upsert(wrongTuple.checkpointAccount, otherCheckpoint)
+        await #expect(throws: (any Error).self) { try await wrongTuple.session.ownerVaultSecret() }
+        #expect(wrongTuple.store.value(wrongTuple.bindingAccount) == nil)
+        #expect(wrongTuple.store.value(wrongTuple.pendingAccount) == Data(passphrase.utf8))
+        #expect(wrongTuple.store.value(wrongTuple.checkpointAccount) == otherCheckpoint)
+    }
+
+    @Test func offlineRevealRetriesAfterPartialCleanup() async throws {
+        let fixture = try RecoverySessionFixture(passphrase: passphrase)
+        _ = try await fixture.importIdentity()
+        fixture.store.failingDelete = fixture.pendingAccount
+
+        await #expect(throws: recoveryStoreFailure) { try await fixture.session.ownerVaultSecret() }
+        #expect(fixture.store.value(fixture.bindingAccount) == Data(passphrase.utf8))
+        #expect(fixture.store.value(fixture.pendingAccount) == Data(passphrase.utf8))
+        #expect(fixture.store.value(fixture.checkpointAccount) == fixture.checkpoint)
+
+        fixture.store.failingDelete = fixture.checkpointAccount
+        #expect(try await fixture.session.ownerVaultSecret() == passphrase)
+        #expect(fixture.store.value(fixture.pendingAccount) == nil)
+        #expect(fixture.store.value(fixture.checkpointAccount) == fixture.checkpoint)
+
+        fixture.store.failingDelete = nil
+        #expect(try await fixture.session.ownerVaultSecret() == passphrase)
+        #expect(fixture.store.value(fixture.checkpointAccount) == nil)
+    }
+
+    @Test func offlineRevealNeverDeletesAChangedCheckpoint() async throws {
+        let fixture = try RecoverySessionFixture(passphrase: passphrase)
+        _ = try await fixture.importIdentity()
+        let replacement = Data("newer checkpoint bytes".utf8)
+        fixture.store.replaceOnRead = (fixture.checkpointAccount, 3, replacement)
+
+        await #expect(throws: ClientError.identityMismatch) { try await fixture.session.ownerVaultSecret() }
+        #expect(fixture.store.value(fixture.bindingAccount) == nil)
+        #expect(fixture.store.value(fixture.pendingAccount) == Data(passphrase.utf8))
+        #expect(fixture.store.value(fixture.checkpointAccount) == replacement)
+    }
+
+    @Test func offlineRevealPreservesConflictAndReadFailure() async throws {
+        let conflict = try RecoverySessionFixture(passphrase: passphrase)
+        _ = try await conflict.importIdentity()
+        let existing = "existing verified binding"
+        try conflict.store.upsert(conflict.bindingAccount, Data(existing.utf8))
+        #expect(try await conflict.session.ownerVaultSecret() == existing)
+        #expect(conflict.store.value(conflict.bindingAccount) == Data(existing.utf8))
+        #expect(conflict.store.value(conflict.pendingAccount) == Data(passphrase.utf8))
+        #expect(conflict.store.value(conflict.checkpointAccount) == conflict.checkpoint)
+
+        let unreadable = try RecoverySessionFixture(passphrase: passphrase)
+        _ = try await unreadable.importIdentity()
+        unreadable.store.failingRead = unreadable.checkpointAccount
+        await #expect(throws: recoveryStoreFailure) { try await unreadable.session.ownerVaultSecret() }
+        unreadable.store.failingRead = nil
+        #expect(unreadable.store.value(unreadable.bindingAccount) == nil)
+        #expect(unreadable.store.value(unreadable.pendingAccount) == Data(passphrase.utf8))
+        #expect(unreadable.store.value(unreadable.checkpointAccount) == unreadable.checkpoint)
+    }
+}
+
+private struct RecoverySessionFixture {
+    let store = RecoverySecureStore()
+    let server: FakeServer
+    let session: NativeSession
+    let identity: EnrollmentIdentity
+    let checkpoint: Data
+    let checkpointAccount: String
+    let pendingAccount: String
+    let bindingAccount: String
+
+    func importIdentity() async throws -> SessionStatus {
+        try await session.importCredential(server.credential(deviceId: identity.deviceId, origin: identity.origin))
+    }
+
+    init(passphrase: String) throws {
+        let origin = FakeServer.origin
+        let accountID = UUID().uuidString.lowercased()
+        let provisioning = try prepareHostedProvisioning(
+            origin: origin,
+            accountId: accountID,
+            passphrase: passphrase,
+            clientKind: .ios,
+            deviceName: "Recovery test"
+        )
+        let view = provisioning.view()
+        identity = EnrollmentIdentity(origin: origin, vaultId: view.vaultId, deviceId: view.deviceId)
+        checkpoint = try provisioning.checkpoint()
+        checkpointAccount = "hosted-provisioning:\(origin)"
+        pendingAccount = "vault-secret-pending-v2:\(origin)|hosted-account|\(accountID)"
+        bindingAccount = identity.account("vault-secret-v2")
+        try store.upsert(checkpointAccount, checkpoint)
+        try store.upsert(pendingAccount, Data(passphrase.utf8))
+        server = try FakeServer(vaultId: view.vaultId, passphrase: passphrase)
+        session = NativeSession(
+            secureStore: store,
+            transport: DeviceScopedTransport(server: server, deviceId: view.deviceId),
+            databaseDirectory: temporaryDirectory(),
+            allowLoopbackHTTP: false
+        )
+    }
+}
+
+private struct ExpiredHostedSession: Codable {
+    let accountID: String
+    let bearer: String
+    let expiresAt: Date
+}
+
+private let recoveryStoreFailure = ClientError.secureStorage(status: -25308)
+
+private final class RecoverySecureStore: SecureStore, @unchecked Sendable {
+    private let backing = InMemorySecureStore()
+    private let lock = NSLock()
+    private var readCounts: [String: Int] = [:]
+    var failingRead: String?
+    var failingWrite: String?
+    var failingDelete: String?
+    var replaceOnRead: (account: String, count: Int, data: Data)?
+
+    func value(_ account: String) -> Data? { backing.value(account) }
+
+    func read(_ account: String) throws(ClientError) -> Data? {
+        if failingRead == account { throw recoveryStoreFailure }
+        let count = lock.withLock {
+            readCounts[account, default: 0] += 1
+            return readCounts[account]!
+        }
+        if let replacement = replaceOnRead,
+           replacement.account == account, replacement.count == count {
+            try backing.upsert(account, replacement.data)
+        }
+        return try backing.read(account)
+    }
+
+    func addIfAbsent(_ account: String, _ data: Data) throws(ClientError) -> Bool {
+        if failingWrite == account { throw recoveryStoreFailure }
+        return try backing.addIfAbsent(account, data)
+    }
+
+    func upsert(_ account: String, _ data: Data) throws(ClientError) {
+        if failingWrite == account { throw recoveryStoreFailure }
+        try backing.upsert(account, data)
+    }
+
+    func delete(_ account: String) throws(ClientError) {
+        if failingDelete == account { throw recoveryStoreFailure }
+        try backing.delete(account)
     }
 }

@@ -60,6 +60,8 @@ export class BrowserScheduler {
   private targetHighWater?: string;
   private readonly historyAttempts = new Set<string>();
   private lastPublishedProgress?: string;
+  /** True when this round stopped outbox delivery on a coded server refusal; reset at each round start. */
+  private outboxRejected = false;
 
   public constructor(
     private readonly session: SchedulerSession,
@@ -105,6 +107,7 @@ export class BrowserScheduler {
 
   private async round(signal: AbortSignal): Promise<void> {
     this.lastPublishedProgress = undefined;
+    this.outboxRejected = false;
     try {
       throwIfAborted(signal);
       if (this.transport.discard) {
@@ -165,6 +168,7 @@ export class BrowserScheduler {
           await this.session.mutate("ack_outbox", { envelopeId: requiredString(record.envelope_id) });
         } catch (error) {
           throwIfFatalTransferError(error, signal);
+          if (isCodedServerRefusal(error)) this.outboxRejected = true;
           return;
         }
       }
@@ -367,7 +371,7 @@ export class BrowserScheduler {
     const devices = await this.transport.json("/v1/devices", { method: "GET", signal });
     throwIfAborted(signal);
     const capabilities = await this.transport.json("/v1/capabilities", { method: "GET", signal });
-    await this.session.query("_worker_apply_server_context", { devices, capabilities, connection: "connected" });
+    await this.session.query("_worker_apply_server_context", { devices, capabilities, connection: "connected", outboxRejected: this.outboxRejected });
   }
 
   private async refreshOfflineContext(connection: SchedulerConnection, signal: AbortSignal): Promise<void> {
@@ -406,6 +410,11 @@ function isCancelled(error: unknown): boolean {
 
 function isUnavailableStatus(status: number | undefined): boolean {
   return status === 502 || status === 503 || status === 504;
+}
+
+/** A 4xx response carrying a server code refuses the envelope itself; code-less proxy failures do not. */
+function isCodedServerRefusal(error: unknown): boolean {
+  return error instanceof TransportError && error.kind === "status" && error.status !== undefined && error.status >= 400 && error.status < 500 && typeof error.code === "string";
 }
 
 function isResync(error: unknown): boolean {

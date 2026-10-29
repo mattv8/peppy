@@ -30,7 +30,11 @@ use uuid::Uuid;
 
 use crate::{
     api::{EnrollmentAuthorization, EnrollmentAuthorizationRequest, EnrollmentOperation},
-    enrollment::{client_kind_name, validate_device_name},
+    enrollment::{
+        client_kind_name,
+        owner_authorization::{OwnerAuthorizationError, OwnerCredential, resolve_owner_credential},
+        validate_device_name,
+    },
     scope,
 };
 
@@ -486,39 +490,23 @@ async fn cancel_invitation(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Clone)]
-struct Owner {
-    vault_id: Uuid,
-    device_id: Uuid,
-    token_digest: Vec<u8>,
-}
+type Owner = OwnerCredential;
+
 async fn owner(
     state: &InvitationRouterState,
     headers: &HeaderMap,
 ) -> Result<Owner, InvitationError> {
-    let token = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| value.len() == 96 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or(unauthorized("invalid_bearer"))?;
-    let digest = Sha256::digest(token.as_bytes());
-    let query = if state.hosted {
-        "SELECT vault_id,device_id,token_digest FROM peppy.resolve_device_credential($1) WHERE role='owner'"
-    } else {
-        "SELECT c.vault_id,c.device_id,c.token_digest FROM device_credentials c JOIN devices d ON d.vault_id=c.vault_id AND d.device_id=c.device_id WHERE c.token_digest=$1 AND c.revoked_at IS NULL AND d.revoked_at IS NULL AND d.role='owner'"
-    };
-    let row = sqlx::query(query)
-        .bind(digest.as_slice())
-        .fetch_optional(&state.db)
+    resolve_owner_credential(&state.db, state.hosted, headers)
         .await
-        .map_err(database)?
-        .ok_or(unauthorized("owner_required"))?;
-    Ok(Owner {
-        vault_id: row.get("vault_id"),
-        device_id: row.get("device_id"),
-        token_digest: row.get("token_digest"),
-    })
+        .map_err(owner_authorization)
+}
+
+fn owner_authorization(error: OwnerAuthorizationError) -> InvitationError {
+    match error {
+        OwnerAuthorizationError::InvalidBearer => unauthorized("invalid_bearer"),
+        OwnerAuthorizationError::OwnerRequired => unauthorized("owner_required"),
+        OwnerAuthorizationError::Database(error) => database(error),
+    }
 }
 async fn authorize_owner(
     state: &InvitationRouterState,
@@ -940,7 +928,12 @@ fn crypto_role(role: EnrollmentRole) -> CryptoRole {
         EnrollmentRole::Gateway => CryptoRole::Gateway,
     }
 }
-fn database(_: sqlx::Error) -> InvitationError {
+fn database(error: sqlx::Error) -> InvitationError {
+    tracing::warn!(
+        operation = "phone_enrollment",
+        kind = crate::api::database_error_kind(&error),
+        "database operation failed"
+    );
     InvitationError(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable")
 }
 fn bad(code: &'static str) -> InvitationError {
@@ -952,6 +945,10 @@ fn unauthorized(code: &'static str) -> InvitationError {
 struct InvitationError(StatusCode, &'static str);
 impl IntoResponse for InvitationError {
     fn into_response(self) -> axum::response::Response {
-        (self.0, Json(serde_json::json!({"error":self.1}))).into_response()
+        (
+            self.0,
+            Json(serde_json::json!({"error":self.1,"code":self.1})),
+        )
+            .into_response()
     }
 }

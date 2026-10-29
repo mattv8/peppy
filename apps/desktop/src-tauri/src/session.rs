@@ -47,7 +47,6 @@ const MAX_PREVIEW_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::fro
 /// Per-session decoded contact avatar entries, isolated from attachment previews.
 const MAX_AVATAR_CACHE: usize = 256;
 const MAX_SEEN_IDS: usize = 1000;
-const PENDING_COUNT_CAP: usize = 200;
 pub const GATEWAYS_FILE: &str = "gateways.json";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,39 +106,6 @@ pub struct NetStatus {
     pub revoked_device_ids: HashSet<String>,
 }
 
-/// Local attachment ID -> server object ID, learned when this host uploads or downloads an
-/// object. Core keeps the authoritative binding in SQLCipher but exposes it only for pending
-/// work; this owner-only sidecar lets the owning device request a public copy later. It holds
-/// no key material.
-pub struct RemoteIds {
-    path: PathBuf,
-    map: HashMap<String, String>,
-}
-impl RemoteIds {
-    fn load(path: PathBuf) -> Self {
-        let map = fs::read(&path)
-            .ok()
-            .filter(|bytes| bytes.len() <= 4 * 1024 * 1024)
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        Self { path, map }
-    }
-    pub fn get(&self, local: AttachmentId) -> Option<String> {
-        self.map.get(&local.to_string()).cloned()
-    }
-    pub fn insert(&mut self, local: AttachmentId, remote: &str) {
-        if self.map.get(&local.to_string()).map(String::as_str) == Some(remote)
-            || uuid::Uuid::parse_str(remote).is_err()
-        {
-            return;
-        }
-        self.map.insert(local.to_string(), remote.to_owned());
-        if let Ok(bytes) = serde_json::to_vec(&self.map) {
-            let _ = crate::fsutil::write_private_atomic(&self.path, &bytes);
-        }
-    }
-}
-
 pub struct Session {
     pub generation: String,
     pub binding: Binding,
@@ -151,7 +117,6 @@ pub struct Session {
     avatars: Mutex<BoundedCache>,
     pub transfer_errors: Mutex<HashMap<AttachmentId, String>>,
     pub(crate) download_retries: Mutex<HashMap<AttachmentId, DownloadRetryState>>,
-    pub remote_ids: Mutex<RemoteIds>,
     /// Wakes the outbound/media worker only (send, read state, unlock).
     pub work_wake: Notify,
     /// Wakes a pending reconnect wait (for example after unlock).
@@ -388,7 +353,6 @@ pub fn open_session(
         binding: binding.clone(),
         client,
         api,
-        remote_ids: Mutex::new(RemoteIds::load(data_dir.join("remote-objects.json"))),
         data_dir,
         status: Mutex::new(status),
         previews: Mutex::new(BoundedCache::new(MAX_PREVIEW_CACHE)),
@@ -816,14 +780,11 @@ impl Session {
             })
             .collect::<BridgeResult<Vec<_>>>()?;
         if let Some(conversation) = conversation {
-            let allowed = self
+            if !self
                 .client
-                .messages(conversation)
+                .messages_belong_to_conversation(conversation, &parsed)
                 .map_err(core_error)?
-                .into_iter()
-                .map(|message| message.payload.record.message_id)
-                .collect::<HashSet<_>>();
-            if parsed.iter().any(|id| !allowed.contains(id)) {
+            {
                 return Err(BridgeError::new(
                     "window-context",
                     "A composer window can only mark its own conversation messages as seen.",
@@ -903,19 +864,9 @@ impl Session {
     ) -> BridgeResult<bool> {
         let id = AttachmentId::from_str(id)
             .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
-        Ok(self
-            .client
-            .messages(conversation)
-            .map_err(core_error)?
-            .iter()
-            .any(|message| {
-                message
-                    .payload
-                    .record
-                    .attachments
-                    .iter()
-                    .any(|reference| reference.attachment_id == id)
-            }))
+        self.client
+            .attachment_belongs_to_conversation(conversation, id)
+            .map_err(core_error)
     }
 
     pub fn save_attachment(&self, id: &str, destination: &Path) -> BridgeResult<()> {
@@ -930,11 +881,18 @@ impl Session {
         }
         let plaintext = self.client.open_native_plaintext(id).map_err(core_error)?;
         crate::fsutil::copy_new_atomic(plaintext.path(), destination, info.plaintext_bytes).map_err(
-            |_| {
-                BridgeError::new(
-                    "attachment-save",
-                    "The attachment could not be saved safely.",
-                )
+            |error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    BridgeError::new(
+                        "attachment-save-name-conflict",
+                        "A file with that name already exists. Choose another name.",
+                    )
+                } else {
+                    BridgeError::new(
+                        "attachment-save",
+                        "The attachment could not be saved safely.",
+                    )
+                }
             },
         )
     }
@@ -1540,12 +1498,8 @@ impl Session {
         let draft = active
             .and_then(|id| drafts_by_conversation.get(&id).copied())
             .map(dto::draft_view);
-        let pending = self
-            .client
-            .pending_outbox_batch(PENDING_COUNT_CAP)
-            .map_err(core_error)?
-            .len() as u64;
-        let quarantine = self.client.quarantined().map_err(core_error)?.len() as u64;
+        let pending = self.client.pending_outbox_count().map_err(core_error)? as u64;
+        let quarantine = self.client.quarantine_count().map_err(core_error)? as u64;
         let notification_snapshot = self.client.notification_snapshot().map_err(core_error)?;
         let keys = self.client.key_status().map_err(core_error)?;
         let status = self

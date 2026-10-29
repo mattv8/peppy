@@ -255,8 +255,31 @@ export function BusyIndicator({ id, label }: { id: string; label: string }): Rea
 
 export type RecipientChip = { id: string; label: string; avatarUrl?: string; avatarSeed?: string; avatarName?: string };
 /** A contact phone offered while typing; `id` is the phone address that becomes the recipient. */
-export type RecipientSuggestion = { id: string; label: string; detail?: string; avatarUrl?: string; avatarSeed?: string; avatarName?: string };
+export type RecipientSuggestion = { id: string; rowId?: string; label: string; detail?: string; avatarUrl?: string; avatarSeed?: string; avatarName?: string };
 export type RecipientPosition = { x: number; y: number };
+
+type RecipientSuggestionRow = { suggestion: RecipientSuggestion; rowId: string };
+
+function recipientSuggestionRows(suggestions: RecipientSuggestion[]): RecipientSuggestionRow[] {
+  const occurrences = new Map<string, number>();
+  return suggestions.map((suggestion) => {
+    const content = suggestion.rowId ?? JSON.stringify([
+      suggestion.id,
+      suggestion.label,
+      suggestion.detail ?? "",
+      suggestion.avatarUrl ?? "",
+      suggestion.avatarSeed ?? "",
+      suggestion.avatarName ?? "",
+    ]);
+    const occurrence = occurrences.get(content) ?? 0;
+    occurrences.set(content, occurrence + 1);
+    return { suggestion, rowId: occurrence ? `${content}:${occurrence}` : content };
+  });
+}
+
+function recipientSuggestionOptionId(listId: string, rowId: string): string {
+  return `${listId}-recipient-${encodeURIComponent(rowId)}`;
+}
 
 export function isRecipientPosition(value: unknown): value is RecipientPosition {
   return typeof value === "object" && value !== null
@@ -324,6 +347,7 @@ export function RecipientPanel({
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const searchSeqRef = useRef(0);
   const suggestionListId = useId();
+  const suggestionRows = recipientSuggestionRows(suggestions);
   const recipientIds = recipients.map((recipient) => recipient.id).join("\n");
   const chosenRecipientIds = new Set(recipients.map((recipient) => recipient.id));
   // Latest callback without re-running the search on every parent render.
@@ -571,8 +595,8 @@ export function RecipientPanel({
       <input
         ref={inputRef}
         aria-label="Recipients"
-        aria-controls={suggestions.length ? suggestionListId : undefined}
-        aria-activedescendant={suggestions.length ? `${suggestionListId}-${activeSuggestion}` : undefined}
+        aria-controls={suggestionRows.length ? suggestionListId : undefined}
+        aria-activedescendant={suggestionRows.length ? recipientSuggestionOptionId(suggestionListId, suggestionRows[Math.min(activeSuggestion, suggestionRows.length - 1)].rowId) : undefined}
         aria-autocomplete={searchContacts ? "list" : undefined}
         aria-describedby={`draft-recipients-hint${error ? " draft-recipients-error" : ""}`}
         aria-invalid={error ? "true" : undefined}
@@ -632,12 +656,12 @@ export function RecipientPanel({
           commitTokens(`${value}${pasted}`, true);
         }}
       />
-      {suggestions.length > 0 && (
+      {suggestionRows.length > 0 && (
         <ul id={suggestionListId} role="listbox" aria-label="Contact suggestions" className="recipient-suggestions" data-recipient-suggestions>
-          {suggestions.map((suggestion, index) => (
+          {suggestionRows.map(({ suggestion, rowId }, index) => (
             <li
-              key={`${suggestion.id}-${index}`}
-              id={`${suggestionListId}-${index}`}
+              key={rowId}
+              id={recipientSuggestionOptionId(suggestionListId, rowId)}
               role="option"
               aria-selected={index === activeSuggestion}
               data-suggestion-address={suggestion.id}
@@ -1017,6 +1041,7 @@ export function RecipientPicker({
   const [error, setError] = useState<string | null>(null);
   const listId = useId();
   const errorId = useId();
+  const contactRows = recipientSuggestionRows(contactMatches);
   const typed = query.trim();
   const normalizedQuery = normalizePhoneNumber(typed);
   const options: PickerOption[] = [
@@ -1028,9 +1053,9 @@ export function RecipientPicker({
           !chosen.includes(r.id),
       )
       .map((r) => ({ kind: "existing" as const, id: r.id, name: r.name })),
-    ...contactMatches.map((match, index) => ({
+    ...contactRows.map(({ suggestion: match, rowId }) => ({
       kind: "contact" as const,
-      id: `contact-${index}`,
+      id: `contact-${encodeURIComponent(rowId)}`,
       name: match.label,
       detail: match.detail,
       avatarUrl: match.avatarUrl,

@@ -28,6 +28,8 @@ struct HostedEnrollmentView: View {
     @State private var provisioningPassphrase = ""
     @State private var acknowledgement = false
     @State private var revealPassphrase = false
+    /// A pending secret from an interrupted prepare is stored for this account; it must be reused.
+    @State private var pendingSecretProtected = false
     
     @State private var error: HostedAccountClientError?
     @State private var localError: String?
@@ -178,7 +180,7 @@ struct HostedEnrollmentView: View {
             }
             Text("peppy.passphrase_irrecoverable_warn", tableName: "Peppy").font(.footnote)
             
-            passphraseField("passphrase_field", text: $generatedPassphrase)
+            passphraseField("passphrase_field", text: $generatedPassphrase, locked: pendingSecretProtected)
             
             Button {
                 generatedPassphrase = generateHostedPassphrase()
@@ -189,7 +191,7 @@ struct HostedEnrollmentView: View {
                 Text("peppy.passphrase_generate_cta", tableName: "Peppy")
             }
             .accessibilityIdentifier("enrollment-passphrase-generate")
-            .disabled(task != nil)
+            .disabled(task != nil || pendingSecretProtected)
             
             Button {
                 let value = generatedPassphrase
@@ -256,7 +258,7 @@ struct HostedEnrollmentView: View {
             .disabled(confirmationPassphrase.isEmpty || task != nil)
             
             if let localErr = localError {
-                Text("peppy.\(localErr)", tableName: "Peppy")
+                Text(LocalizedStringKey("peppy.\(localErr)"), tableName: "Peppy")
                     .foregroundStyle(colors.Error)
                     .accessibilityIdentifier("enrollment-confirm-error")
             }
@@ -297,8 +299,8 @@ struct HostedEnrollmentView: View {
             Text("peppy.hosted_join_body", tableName: "Peppy")
             
             Button {
-                onPairExisting()
                 dismiss()
+                DispatchQueue.main.async { onPairExisting() }
             } label: {
                 Text("peppy.production_join_cta", tableName: "Peppy")
                     .frame(maxWidth: .infinity)
@@ -342,7 +344,7 @@ struct HostedEnrollmentView: View {
         PeppyTokens.colors(for: colorScheme)
     }
     
-    private func passphraseField(_ key: String, text binding: Binding<String>) -> some View {
+    private func passphraseField(_ key: String, text binding: Binding<String>, locked: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(LocalizedStringKey("peppy.\(key)"), tableName: "Peppy").font(.subheadline)
             if revealPassphrase {
@@ -357,7 +359,7 @@ struct HostedEnrollmentView: View {
         .privacySensitive()
         .textFieldStyle(.roundedBorder)
             .accessibilityIdentifier(key == "passphrase_confirm_field" ? "enrollment-confirm-passphrase-field" : "enrollment-passphrase-field")
-        .disabled(task != nil)
+        .disabled(task != nil || locked)
     }
     
     // MARK: - Logic
@@ -394,8 +396,18 @@ struct HostedEnrollmentView: View {
             } else if acct.vaultId != nil {
                 phase = .existing
             } else if acct.access == "read_write" {
+                // An orphaned pending secret (checkpoint write failed, or the app died before it)
+                // fails closed against any other phrase, so it is reused and never regenerated.
+                // A storage error throws to the error phase rather than generating over it.
+                let protected = try await client.candidatePendingSecret()
+                guard gen == uiGeneration else { return }
+                pendingSecretProtected = protected != nil
+                if let protected {
+                    generatedPassphrase = protected
+                } else if generatedPassphrase.isEmpty {
+                    generatedPassphrase = generateHostedPassphrase()
+                }
                 phase = .passphrase
-                if generatedPassphrase.isEmpty { generatedPassphrase = generateHostedPassphrase() }
             } else {
                 phase = .billing
             }
@@ -496,8 +508,8 @@ struct HostedEnrollmentView: View {
                 throw HostedAccountClientError.invalidResponse
             }
             
-            try await client.acknowledgeEnrollment(vaultID: identity.vaultId, deviceID: identity.deviceId)
-            await model.unlock(passphrase: phrase)
+            try await model.unlockHostedEnrollmentAndBind(passphrase: phrase, client: client, identity: identity)
+            try await client.acknowledgeEnrollment(identity: identity, passphrase: phrase)
             await model.load()
             guard gen == uiGeneration else { return }
             clearSecrets()
@@ -567,6 +579,7 @@ struct HostedEnrollmentView: View {
         provisioningPassphrase = ""
         acknowledgement = false
         revealPassphrase = false
+        pendingSecretProtected = false
     }
     
     private func isValidPassphrase() -> Bool {

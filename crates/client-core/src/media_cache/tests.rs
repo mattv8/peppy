@@ -231,6 +231,33 @@ fn terminal_command_media_is_evictable_but_unfinished_command_media_is_protected
 }
 
 #[test]
+fn eviction_treats_a_missing_ciphertext_file_as_done_but_keeps_other_io_errors() {
+    let dir = TempDir::new().unwrap();
+    let vault = vault();
+    let (_, source) = client(&dir, "eviction-source", &vault);
+    let (_, receiver) = client(&dir, "eviction-receiver", &vault);
+    let missing = prepare(&source, &dir, "missing.png", b"missing ciphertext image");
+    let blocked = prepare(&source, &dir, "blocked.png", b"blocked ciphertext image");
+    for id in [missing, blocked] {
+        download(&source, &receiver, id, &dir);
+        mark_v3_original(&receiver, id, None);
+        command_dependency(&receiver, id, "sent");
+    }
+    let media_dir = receiver.lock().unwrap().media_dir.clone();
+    fs::remove_file(media::cipher_path(&media_dir, missing)).unwrap();
+    // A directory at the ciphertext path makes removal fail with a non-NotFound error.
+    let blocked_path = media::cipher_path(&media_dir, blocked);
+    fs::remove_file(&blocked_path).unwrap();
+    fs::create_dir(&blocked_path).unwrap();
+
+    assert!(receiver.evict_attachment_ciphertext(missing).unwrap());
+    assert!(matches!(
+        receiver.evict_attachment_ciphertext(blocked),
+        Err(Error::Storage)
+    ));
+}
+
+#[test]
 fn fulfilled_demand_is_ready_then_evicts_under_later_lru_pressure() {
     let dir = TempDir::new().unwrap();
     let vault = vault();
@@ -290,6 +317,60 @@ fn fulfilled_demand_is_ready_then_evicts_under_later_lru_pressure() {
         receiver.attachment_info(newer).unwrap().state,
         AttachmentState::Available
     );
+}
+
+#[test]
+fn multi_eviction_walks_lru_past_leased_and_protected_rows() {
+    let dir = TempDir::new().unwrap();
+    let vault = vault();
+    let (_, source) = client(&dir, "multi-source", &vault);
+    let (_, receiver) = client(&dir, "multi-receiver", &vault);
+    let leased = prepare(&source, &dir, "leased.png", b"leased lru image");
+    let protected = prepare(&source, &dir, "protected.png", b"protected lru image");
+    let missing = prepare(&source, &dir, "missing.png", b"missing lru image");
+    let evicted = prepare(&source, &dir, "evicted.png", b"evicted lru image");
+    let newest = prepare(&source, &dir, "newest.png", b"newest lru image");
+
+    // Leasing bumps `leased` to the next access value, so it stays the oldest candidate; the
+    // trim must skip it rather than stop at it.
+    download(&source, &receiver, leased, &dir);
+    receiver.retain_attachment_ciphertext(leased).unwrap();
+    for id in [protected, missing, evicted, newest] {
+        download(&source, &receiver, id, &dir);
+    }
+    for id in [leased, protected, missing, evicted, newest] {
+        mark_v3_original(&receiver, id, None);
+    }
+    receiver
+        .lock()
+        .unwrap()
+        .conn
+        .execute(
+            "INSERT INTO contact_photo_received(attachment_id,rejected) VALUES(?,0)",
+            [protected.to_string()],
+        )
+        .unwrap();
+    // A ciphertext file that is already gone must count as evicted, not stop the walk.
+    let media_dir = receiver.lock().unwrap().media_dir.clone();
+    fs::remove_file(media::cipher_path(&media_dir, missing)).unwrap();
+
+    let budget = receiver.attachment_info(newest).unwrap().ciphertext_bytes;
+    crate::media_cache::trim_to_budget_for_test(&receiver, budget).unwrap();
+
+    assert_eq!(
+        receiver.attachment_info(missing).unwrap().state,
+        AttachmentState::PendingDownload
+    );
+    assert_eq!(
+        receiver.attachment_info(evicted).unwrap().state,
+        AttachmentState::PendingDownload
+    );
+    for kept in [leased, protected, newest] {
+        assert_eq!(
+            receiver.attachment_info(kept).unwrap().state,
+            AttachmentState::Available
+        );
+    }
 }
 
 #[test]

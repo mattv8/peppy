@@ -832,6 +832,328 @@ async fn vault_delete_is_owner_only_requires_echo_and_queues_all_object_cleanup(
     server.shutdown().await;
 }
 
+async fn insert_phone_invitation(
+    pool: &PgPool,
+    vault: Uuid,
+    owner_device: Uuid,
+    fingerprint: &str,
+    state: &str,
+    expired: bool,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO phone_invitations(id,vault_id,owner_device_id,origin,method,token_digest,owner_transfer_public_key,profile_fingerprint,key_epoch,state,expires_at) VALUES($1,$2,$3,'https://peppy.test','transfer',$4,$5,$6,1,$7,CASE WHEN $8 THEN now()-interval '1 hour' ELSE now()+interval '1 hour' END)")
+        .bind(id)
+        .bind(vault)
+        .bind(owner_device)
+        .bind(Sha256::digest(id.as_bytes()).as_slice())
+        .bind(vec![7_u8; 32])
+        .bind(fingerprint)
+        .bind(state)
+        .bind(expired)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn insert_computer_enrollment(
+    pool: &PgPool,
+    vault: Uuid,
+    owner_device: Uuid,
+    fingerprint: &str,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO computer_enrollments(id,vault_id,owner_device_id,origin,claim_token_digest,server_nonce,recipient_device_id,recipient_kind,recipient_name,recipient_signing_public_key,recipient_transfer_public_key,recipient_credential_digest,recipient_commitment,profile_fingerprint,key_epoch,state,expires_at) VALUES($1,$2,$3,'https://peppy.test',$4,$5,$6,'browser','Computer',$7,$8,$9,$10,$11,1,'consumed',now()+interval '1 hour')")
+        .bind(id)
+        .bind(vault)
+        .bind(owner_device)
+        .bind(Sha256::digest(id.as_bytes()).as_slice())
+        .bind(vec![1_u8; 32])
+        .bind(Uuid::new_v4())
+        .bind(vec![2_u8; 32])
+        .bind(vec![3_u8; 32])
+        .bind(vec![4_u8; 32])
+        .bind(vec![5_u8; 32])
+        .bind(fingerprint)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn vault_delete_removes_device_owned_phone_invitations_and_keeps_other_vaults() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let device = server.provision_device("device").await;
+    for (owner, state, expired) in [
+        (server.owner_device, "waiting", false),
+        (device.id, "consumed", false),
+        (server.owner_device, "expired", true),
+    ] {
+        insert_phone_invitation(
+            &server.pool,
+            server.vault,
+            owner,
+            &server.fingerprint,
+            state,
+            expired,
+        )
+        .await;
+    }
+    let other_vault = Uuid::new_v4();
+    let (other_profile, other_fingerprint) = profile(other_vault, 1);
+    let other_owner = create_owner(
+        &server.pool,
+        other_profile,
+        vec![4, 5, 6],
+        other_fingerprint.clone(),
+        1,
+    )
+    .await
+    .unwrap();
+    let other_invitation = insert_phone_invitation(
+        &server.pool,
+        other_vault,
+        other_owner.device_id,
+        &other_fingerprint,
+        "waiting",
+        false,
+    )
+    .await;
+    let computer_enrollment = insert_computer_enrollment(
+        &server.pool,
+        server.vault,
+        server.owner_device,
+        &server.fingerprint,
+    )
+    .await;
+    let other_computer_enrollment = insert_computer_enrollment(
+        &server.pool,
+        other_vault,
+        other_owner.device_id,
+        &other_fingerprint,
+    )
+    .await;
+
+    let (status, deleted) = server
+        .call(
+            Client::new()
+                .delete(format!("{}/v1/vault", server.base_url))
+                .bearer_auth(&server.owner_token)
+                .json(&json!({"vault_id":server.vault})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{deleted}");
+    let (vaults, invitations, enrollments, devices, credentials): (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM vaults WHERE vault_id=$1), (SELECT count(*) FROM phone_invitations WHERE vault_id=$1), (SELECT count(*) FROM computer_enrollments WHERE vault_id=$1 AND id=$2), (SELECT count(*) FROM devices WHERE vault_id=$1), (SELECT count(*) FROM device_credentials WHERE vault_id=$1)",
+    )
+    .bind(server.vault)
+    .bind(computer_enrollment)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (vaults, invitations, enrollments, devices, credentials),
+        (0, 0, 0, 0, 0)
+    );
+    let (other_invitations, other_enrollments, other_devices): (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM phone_invitations WHERE vault_id=$1 AND id=$2), (SELECT count(*) FROM computer_enrollments WHERE vault_id=$1 AND id=$3), (SELECT count(*) FROM devices WHERE vault_id=$1)",
+    )
+    .bind(other_vault)
+    .bind(other_invitation)
+    .bind(other_computer_enrollment)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (other_invitations, other_enrollments, other_devices),
+        (1, 1, 1)
+    );
+    server.shutdown().await;
+}
+
+async fn ingest_state(server: &TestServer) -> (i64, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT next_cursor FROM vaults WHERE vault_id=$1), (SELECT count(*) FROM encrypted_records WHERE vault_id=$1)",
+    )
+    .bind(server.vault)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn ingest_rejects_sequences_beyond_bigint_without_advancing_the_cursor() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let beyond_bigint = i64::MAX as u64 + 1;
+    assert_eq!(beyond_bigint.to_string(), "9223372036854775808");
+    let overflowed_sequence = server.owner_event(beyond_bigint);
+    let overflowed_supersedes = set_fingerprint(
+        compacting_event(
+            server.vault,
+            server.owner_device,
+            1,
+            Uuid::new_v4(),
+            vec![(Uuid::new_v4(), beyond_bigint)],
+        ),
+        &server.fingerprint,
+    );
+    for envelope in [overflowed_sequence, overflowed_supersedes] {
+        let (status, rejected) = server
+            .post(&server.owner_token, "/v1/events", &envelope)
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+        assert_eq!(rejected["code"], "invalid_envelope");
+        assert_eq!(ingest_state(&server).await, (0, 0));
+    }
+
+    assert_eq!(server.commit(&server.owner_event(1)).await, "1");
+    assert_eq!(ingest_state(&server).await, (1, 1));
+    server.shutdown().await;
+}
+
+/// Holds the vault row lock in a test transaction and returns it with its backend pid.
+async fn hold_vault_lock(server: &TestServer) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let mut holder = server.pool.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(server.vault)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    (holder, pid)
+}
+
+/// Waits until PostgreSQL reports a backend running `statement` blocked by `holder_pid`.
+/// Reaching the vault lock proves the request already authenticated.
+async fn wait_for_lock_waiter(server: &TestServer, holder_pid: i32, statement: &str) {
+    let pattern = format!("%{statement}%");
+    wait_until(5, "request blocked on the vault lock", || {
+        let admin = server.admin.clone();
+        let pattern = pattern.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE $2)",
+            )
+            .bind(holder_pid)
+            .bind(pattern)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        }
+    })
+    .await;
+}
+
+async fn revoke_credential_and_release(
+    mut holder: sqlx::Transaction<'static, sqlx::Postgres>,
+    device: Uuid,
+) {
+    sqlx::query("UPDATE device_credentials SET revoked_at=now() WHERE device_id=$1")
+        .bind(device)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+}
+
+async fn finish_blocked(task: JoinHandle<(StatusCode, Value)>) -> (StatusCode, Value) {
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("blocked request did not finish after the lock was released")
+        .unwrap()
+}
+
+async fn send_detached(request: reqwest::RequestBuilder) -> (StatusCode, Value) {
+    let response = request.send().await.unwrap();
+    let status = response.status();
+    let text = response.text().await.unwrap();
+    let body = if text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap()
+    };
+    (status, body)
+}
+
+#[tokio::test]
+async fn ingest_rejects_a_credential_revoked_while_waiting_for_the_vault_lock() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let device = server.provision_device("device").await;
+    let envelope = set_fingerprint(
+        event(server.vault, device.id, 1, Uuid::new_v4(), 1),
+        &server.fingerprint,
+    );
+    let (holder, holder_pid) = hold_vault_lock(&server).await;
+    let task = tokio::spawn(send_detached(
+        Client::new()
+            .post(format!("{}/v1/events", server.base_url))
+            .bearer_auth(&device.token)
+            .json(&envelope),
+    ));
+    wait_for_lock_waiter(
+        &server,
+        holder_pid,
+        "SELECT key_epoch,profile_fingerprint FROM vaults",
+    )
+    .await;
+    revoke_credential_and_release(holder, device.id).await;
+
+    let (status, rejected) = finish_blocked(task).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{rejected}");
+    assert_eq!(rejected["code"], "invalid_bearer");
+    assert_eq!(ingest_state(&server).await, (0, 0));
+    assert_eq!(server.commit(&server.owner_event(1)).await, "1");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn attachment_release_rejects_a_credential_revoked_while_waiting_for_the_vault_lock() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let device = server.provision_device("device").await;
+    let attachment = Uuid::new_v4();
+    sqlx::query("INSERT INTO upload_reservations(vault_id,attachment_id,device_id,object_key,declared_bytes,declared_sha256,finalized_at,reference_tracked) VALUES($1,$2,$3,'release-key',1,$4,now(),TRUE)")
+        .bind(server.vault).bind(attachment).bind(device.id).bind(vec![1_u8; 32]).execute(&server.pool).await.unwrap();
+    sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id) VALUES($1,$2,'release-key',1,$3,$4)")
+        .bind(server.vault).bind(attachment).bind(vec![1_u8; 32]).bind(device.id).execute(&server.pool).await.unwrap();
+
+    let (holder, holder_pid) = hold_vault_lock(&server).await;
+    let task = tokio::spawn(send_detached(
+        Client::new()
+            .delete(format!("{}/v1/attachments/{attachment}", server.base_url))
+            .bearer_auth(&device.token)
+            .json(&json!({"compaction_generation":"1","release_before_cursor":"0"})),
+    ));
+    wait_for_lock_waiter(
+        &server,
+        holder_pid,
+        "SELECT compaction_generation,replay_floor_cursor FROM vaults",
+    )
+    .await;
+    revoke_credential_and_release(holder, device.id).await;
+
+    let (status, rejected) = finish_blocked(task).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{rejected}");
+    assert_eq!(rejected["code"], "invalid_bearer");
+    let (attachments, deletions): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM attachments WHERE vault_id=$1 AND attachment_id=$2), (SELECT count(*) FROM storage_deletions WHERE object_key='release-key')",
+    )
+    .bind(server.vault)
+    .bind(attachment)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!((attachments, deletions), (1, 0));
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn cross_vault_foreign_gateway_and_non_target_receipts_are_denied() {
     let _guard = TEST_LOCK.lock().await;

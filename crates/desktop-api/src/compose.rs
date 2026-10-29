@@ -148,8 +148,10 @@ fn conversation_context(
     client: &Client,
     conversation: ConversationId,
 ) -> Result<(Vec<String>, Option<Transport>), ComposeError> {
-    let messages = client.messages(conversation).map_err(ComposeError::Core)?;
-    let Some(latest) = messages.last() else {
+    let Some(latest) = client
+        .latest_message(conversation)
+        .map_err(ComposeError::Core)?
+    else {
         return Ok((Vec::new(), None));
     };
     let transport = latest.payload.transport;
@@ -159,7 +161,7 @@ fn conversation_context(
             .map_err(ComposeError::Core)?;
         return Ok((context.recipients, Some(transport)));
     }
-    Ok((other_party(latest), Some(transport)))
+    Ok((other_party(&latest), Some(transport)))
 }
 fn check_attachments(client: &Client, ids: &[String]) -> Result<Vec<AttachmentId>, ComposeError> {
     if ids.len() > MAX_ATTACHMENTS {

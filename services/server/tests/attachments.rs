@@ -429,8 +429,21 @@ async fn size_hash_and_missing_object_failures_are_typed() {
     let response = server.upload(overrun, chunked_body).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
+    let short_upload = server.reserve_id(&expected).await;
+    let response = server.upload(short_upload, b"4321".to_vec()).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["code"],
+        "ciphertext_mismatch"
+    );
+
+    // Same declared length, one flipped byte: only the digest comparison can reject it.
     let wrong_hash = server.reserve_id(&expected).await;
-    let response = server.upload(wrong_hash, b"4321".to_vec()).await;
+    let mut flipped = expected.clone();
+    flipped[expected.len() / 2] ^= 0x01;
+    assert_eq!(flipped.len(), expected.len());
+    assert_ne!(flipped, expected);
+    let response = server.upload(wrong_hash, flipped).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
         response.json::<Value>().await.unwrap()["code"],

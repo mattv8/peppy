@@ -29,7 +29,7 @@ function bridge(overrides: Partial<Parameters<typeof InstanceManagement>[0]["bri
   };
 }
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("InstanceManagement", () => {
   it("hides the roster when the instance session is unauthorized", async () => {
@@ -50,6 +50,15 @@ describe("InstanceManagement", () => {
     fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "sasha" } });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await waitFor(() => expect(mockedBridge.enrollment_sign_in).toHaveBeenCalledWith({ username: "sasha" }));
+  });
+
+  it("keeps the username and shows feedback for a resolved sign-in error stage", async () => {
+    const mockedBridge = bridge({ enrollment_management: vi.fn(async () => { throw { code: "http-401" }; }), enrollment_sign_in: vi.fn(async () => ({ mode: "community" as const, stage: "error" as const })) });
+    render(<InstanceManagement bridge={mockedBridge} />);
+    fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "sasha" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("could not sign in");
+    expect((screen.getByLabelText("Username") as HTMLInputElement).value).toBe("sasha");
   });
 
   it("keeps the displayed roster when revocation fails", async () => {
@@ -136,5 +145,50 @@ describe("InstanceManagement", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Revoke device?" })).toBeNull());
     expect(mockedBridge.enrollment_revoke_device).not.toHaveBeenCalled();
+  });
+
+  describe("sign-in outcomes (M23)", () => {
+    const signInWith = async (enrollment_sign_in: ReturnType<typeof bridge>["enrollment_sign_in"]) => {
+      const mockedBridge = bridge({ enrollment_management: vi.fn(async () => { throw { code: "http-401" }; }), enrollment_sign_in });
+      render(<InstanceManagement bridge={mockedBridge} />);
+      fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "sasha" } });
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+      await waitFor(() => expect(mockedBridge.enrollment_sign_in).toHaveBeenCalledWith({ username: "sasha" }));
+      return mockedBridge;
+    };
+
+    it.each([
+      ["a resolved error stage", vi.fn(async () => ({ mode: "community" as const, stage: "error" as const }))],
+      ["a thrown sign-in failure", vi.fn(async () => { throw new Error("network"); })],
+    ])("keeps the sign-in screen, username, and alert without loading management for %s", async (_outcome, signIn) => {
+      const mockedBridge = await signInWith(signIn);
+
+      expect(await screen.findByRole("alert")).toBeTruthy();
+      expect((screen.getByLabelText("Username") as HTMLInputElement).value).toBe("sasha");
+      expect(mockedBridge.enrollment_management).toHaveBeenCalledOnce();
+    });
+
+    it("stays quiet when a cancelled sign-in returns the existing sign-in status", async () => {
+      const mockedBridge = await signInWith(vi.fn(async () => ({ mode: "community" as const, stage: "signin" as const })));
+
+      expect(await screen.findByLabelText("Username")).toBeTruthy();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect((screen.getByLabelText("Username") as HTMLInputElement).value).toBe("sasha");
+      expect(mockedBridge.enrollment_management).toHaveBeenCalledTimes(2);
+    });
+
+    it("loads management after a successful sign-in", async () => {
+      const managementLoad = vi.fn<() => Promise<typeof management>>()
+        .mockRejectedValueOnce({ code: "http-401" })
+        .mockResolvedValue(management);
+      const mockedBridge = bridge({ enrollment_management: managementLoad });
+      render(<InstanceManagement bridge={mockedBridge} />);
+      fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "admin" } });
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+      expect(await screen.findByText("Owner laptop")).toBeTruthy();
+      expect(managementLoad).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
   });
 });

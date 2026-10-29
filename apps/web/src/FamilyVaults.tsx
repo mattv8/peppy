@@ -56,6 +56,7 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
   const [confirmDeny, setConfirmDeny] = useState<string>();
   const source = useRef<EventSource | undefined>(undefined);
   const reconnectTimer = useRef<number | undefined>(undefined);
+  const connectRef = useRef<() => void>(() => undefined);
   const delay = useRef(INITIAL_RECONNECT_DELAY_MS);
   const active = useRef(true);
   const inviteCreationInFlight = useRef(false);
@@ -77,6 +78,16 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
     source.current = undefined;
   }, []);
 
+  const scheduleReconnect = useCallback(() => {
+    if (!active.current || reconnectTimer.current !== undefined) return;
+    const currentDelay = delay.current;
+    delay.current = Math.min(delay.current * 2, MAX_RECONNECT_DELAY_MS);
+    reconnectTimer.current = window.setTimeout(() => {
+      reconnectTimer.current = undefined;
+      connectRef.current();
+    }, currentDelay);
+  }, []);
+
   const connect = useCallback(() => {
     if (!active.current || source.current) return;
     if (typeof EventSource === "undefined") {
@@ -96,18 +107,20 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
     };
     nextSource.onerror = () => {
       closeSource();
+      if (!active.current) return;
+      setPaused(true);
       void bridge.enrollment_list_vault_requests().then((nextRequests) => {
         if (!active.current) return;
         setRequests(nextRequests);
-        setPaused(true);
-        const currentDelay = delay.current;
-        delay.current = Math.min(delay.current * 2, MAX_RECONNECT_DELAY_MS);
-        reconnectTimer.current = window.setTimeout(connect, currentDelay);
+        scheduleReconnect();
       }).catch(() => {
-        if (active.current) setError("Peppy could not refresh live vault requests.");
+        if (!active.current) return;
+        setError("Peppy could not refresh live vault requests.");
+        scheduleReconnect();
       });
     };
-  }, [bridge, closeSource]);
+  }, [bridge, closeSource, scheduleReconnect]);
+  connectRef.current = connect;
 
   useEffect(() => {
     active.current = true;
@@ -117,6 +130,7 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
       active.current = false;
       closeSource();
       window.clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = undefined;
     };
   }, [closeSource, connect, refresh]);
 
@@ -184,6 +198,7 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
 
   const manualRefresh = () => {
     window.clearTimeout(reconnectTimer.current);
+    reconnectTimer.current = undefined;
     closeSource();
     delay.current = INITIAL_RECONNECT_DELAY_MS;
     setPaused(false);

@@ -56,6 +56,7 @@ internal class OwnerPhoneApprovalHost(
     private var latest: OwnerPhoneStatus? = null
     private var latestStatusJson: String? = null
     private var approvedInvitationId: String? = null
+    private var pinnedClaimDigest: String? = null
 
     fun close() = client.close()
 
@@ -90,6 +91,7 @@ internal class OwnerPhoneApprovalHost(
         val body = created.body ?: return Result.Failed("server-rejected")
         return try {
             client.consumeCreated(body)
+            pinnedClaimDigest = null
             pollLocked()
         } catch (_: Exception) {
             Result.Failed("enrollment")
@@ -101,7 +103,13 @@ internal class OwnerPhoneApprovalHost(
         val response = request("GET", invitationPath(id), null) ?: return accountRequired()
         if (response.status !in 200..299) return failed(response.status)
         val body = response.body ?: return Result.Failed("server-rejected")
-        return try { view(client.status(body), body) } catch (_: Exception) { Result.Failed("enrollment") }
+        return try {
+            view(client.status(body), body)
+        } catch (_: ClaimChangedException) {
+            Result.Failed("expired")
+        } catch (_: Exception) {
+            Result.Failed("enrollment")
+        }
     }
 
     private fun replaceInvitationLocked(method: OwnerPhoneMethod): Result {
@@ -132,7 +140,10 @@ internal class OwnerPhoneApprovalHost(
         if (status.stage != OwnerPhoneStage.WAITING && status.stage != OwnerPhoneStage.EXPIRED) return Result.Cancelled
         val response = request("DELETE", invitationPath(status.invitationId), null) ?: return accountRequired()
         return when (response.status) {
-            in 200..299, 404, 410 -> Result.Cancelled
+            in 200..299, 404, 410 -> {
+                pinnedClaimDigest = null
+                Result.Cancelled
+            }
             else -> failed(response.status)
         }
     }
@@ -153,13 +164,16 @@ internal class OwnerPhoneApprovalHost(
 
     private fun submit(status: OwnerPhoneStatus, secret: CharArray): Result {
         return try {
+            val refreshed = pollLocked()
+            val current = (refreshed as? Result.View)?.status ?: return refreshed
+            if (current.invitationId != status.invitationId || current.claimDigest != status.claimDigest) return Result.Cancelled
             val statusJson = latestStatusJson ?: return Result.Failed("enrollment-state")
-            val response = request("POST", "${invitationPath(status.invitationId)}/approve", client.approveRequest(statusJson, secret))
+            val response = request("POST", "${invitationPath(current.invitationId)}/approve", client.approveRequest(statusJson, secret))
                 ?: return accountRequired()
             if (response.status !in 200..299) return failed(response.status)
-            approvedInvitationId = status.invitationId
+            approvedInvitationId = current.invitationId
             val body = response.body
-            if (body == null) view(status.copy(stage = OwnerPhoneStage.APPROVED), statusJson)
+            if (body == null) view(current.copy(stage = OwnerPhoneStage.APPROVED), statusJson)
             else view(normalized(client.status(body)), body)
         } catch (_: Exception) {
             Result.Failed("enrollment")
@@ -175,11 +189,20 @@ internal class OwnerPhoneApprovalHost(
         ) status.copy(stage = OwnerPhoneStage.APPROVED) else status
 
     private fun view(status: OwnerPhoneStatus, statusJson: String): Result.View {
+        val digest = status.claimDigest
+        if (digest != null) {
+            if (status.invitationId != client.invitationId() ||
+                (pinnedClaimDigest != null && pinnedClaimDigest != digest)
+            ) throw ClaimChangedException()
+            pinnedClaimDigest = digest
+        }
         val normalized = normalized(status)
         latest = normalized
         latestStatusJson = statusJson
         return Result.View(normalized, if (normalized.stage == OwnerPhoneStage.WAITING) client.qrPayload() else null)
     }
+
+    private class ClaimChangedException : IllegalStateException()
 
     private fun request(method: String, path: String, body: String?): EnrollmentHttpResponse? {
         if (hosted && accountSession == null) return null

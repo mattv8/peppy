@@ -151,6 +151,16 @@ internal fun HostedEnrollmentScreen(
                 pending != null -> phase = HostedPhase.Confirm
                 account.vaultId != null -> phase = HostedPhase.ExistingVault
                 account.access == "read_write" -> {
+                    // A phrase made durable before an interrupted checkpoint write must be offered again.
+                    val candidate = client.candidatePendingSecret()
+                    if (!isCurrent(stamp)) {
+                        diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
+                        return@startWork
+                    }
+                    if (candidate != null && candidate != displayedPassphrase) {
+                        displayedPassphrase = candidate
+                        acknowledged = false
+                    }
                     if (displayedPassphrase == null) displayedPassphrase = generateHostedPassphrase()
                     phase = if (acknowledged) HostedPhase.Confirm else HostedPhase.Passphrase
                 }
@@ -171,6 +181,10 @@ internal fun HostedEnrollmentScreen(
                 HostedFailure.Kind.WRONG_ACCOUNT -> {
                     diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
                     fail(context.getString(R.string.peppy_production_account_mismatch))
+                }
+                HostedFailure.Kind.STORAGE -> {
+                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
+                    fail(context.getString(R.string.peppy_production_secure_storage_failed))
                 }
                 else -> {
                     diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
@@ -433,11 +447,15 @@ internal fun HostedEnrollmentScreen(
                                 if (isCurrent(stamp)) fail(context.getString(R.string.peppy_production_provision_retry))
                                 return@startWork
                             }
-                            client.acknowledgeEnrollment(view.vaultId, view.deviceId)
                             val unlocked = withContext(Dispatchers.IO) { NativeGateway.unlock(appContext, entered) }
+                            if (unlocked != UnlockResult.UNLOCKED) {
+                                if (isCurrent(stamp)) fail(context.getString(R.string.peppy_production_provision_retry))
+                                return@startWork
+                            }
+                            client.bindPendingSecretAndAcknowledge(view.vaultId, view.deviceId)
                             clearSecrets()
                             if (!isCurrent(stamp)) return@startWork
-                            if (unlocked == UnlockResult.UNLOCKED) GatewayWork.enqueue(appContext)
+                            GatewayWork.enqueue(appContext)
                             onEnrolled()
                         } catch (failure: HostedFailure) {
                             if (!isCurrent(stamp)) return@startWork

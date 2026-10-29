@@ -16,6 +16,15 @@ mod windows;
 
 pub const EVENT: &str = "peppy://notification-activation";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PostError {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    AwaitingAuthorization,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    NotAllowed,
+    Failed,
+}
+
 #[cfg(any(target_os = "windows", test))]
 pub(super) fn windows_audio(sound: bool) -> &'static str {
     if sound {
@@ -71,7 +80,7 @@ pub fn post(
     destination: Destination,
     title: String,
     body: String,
-) -> Result<(), ()> {
+) -> Result<(), PostError> {
     post_with_activation(
         app,
         Some(NotificationActivation {
@@ -93,6 +102,7 @@ pub fn post_test(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), 
         title.to_owned(),
         body.to_owned(),
     )
+    .map_err(|_| ())
 }
 
 fn post_with_activation(
@@ -101,7 +111,7 @@ fn post_with_activation(
     cancel: tokio_util::sync::CancellationToken,
     title: String,
     body: String,
-) -> Result<(), ()> {
+) -> Result<(), PostError> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let state = app.state::<AppState>();
@@ -122,7 +132,7 @@ fn post_with_activation(
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (activation, cancel);
-    fallback::post(app, &title, &body)
+    fallback::post(app, &title, &body).map_err(|_| PostError::Failed)
 }
 
 impl ActivationState {
@@ -292,7 +302,10 @@ mod tests {
     #[test]
     fn notification_sound_windows_requests_default_audio_only_when_enabled() {
         assert_eq!(windows_audio(false), "<audio silent=\"true\"/>");
-        assert_eq!(windows_audio(true), "<audio src=\"ms-winsoundevent:Notification.Default\"/>");
+        assert_eq!(
+            windows_audio(true),
+            "<audio src=\"ms-winsoundevent:Notification.Default\"/>"
+        );
     }
     use peppy_desktop_api::NotificationActivationDestination;
 

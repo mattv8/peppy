@@ -2,6 +2,8 @@ import { CheckpointError, RuntimeCoreError } from "./checkpoint.js";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
 
 const MAX_JSON_BYTES = 64 * 1024;
+// Must exceed the server's 15 s long-poll (?wait=15) plus margin for the bounded body read.
+const ENROLLMENT_REQUEST_TIMEOUT_MS = 25_000;
 const DEVICE_NAME = "Peppy Browser";
 
 type DeploymentMode = "community" | "hosted";
@@ -16,6 +18,7 @@ export type VaultSummary = { vaultId: string; username: string; isAdmin: boolean
 export type VaultInviteView = { inviteId: string; state: "active" | "used" | "revoked" | "expired"; expiresInSeconds: number; createdAt: string };
 export type VaultRequestView = { requestId: string; displayName: string; client: "browser" | "desktop" | "android" | "ios"; state: "pending" | "approved" | "denied" | "completed" | "expired"; createdAt: string; expiresInSeconds: number };
 export type EnrollmentIdentity = { role: "owner" | "device" | "gateway" };
+type OwnerPhoneView = { invitationId: string; sas?: string; claimDigest?: string };
 export interface EnrollmentCore { invoke(request: { command: string; args: Record<string, unknown> }): Promise<unknown>; }
 export interface EnrollmentSession {
   readonly phase: SessionPhase;
@@ -32,6 +35,7 @@ export class BrowserEnrollment {
   private csrf?: string;
   private invitationId?: string;
   private approvedInvitationId?: string;
+  private ownerClaimDigest?: string;
   private invitationGeneration = 0;
   private enrollmentClient?: { origin: string; purpose: "fresh" | "owner" };
   private addPhonePending?: Promise<EnrollmentView>;
@@ -45,7 +49,7 @@ export class BrowserEnrollment {
   private readonly fetchBase: string;
 
   /** `origin` is the durable API identity; browser fetches remain on the app-origin proxy. */
-  public constructor(private readonly core: EnrollmentCore, private readonly session: EnrollmentSession, private readonly origin: string, private readonly fetcher: typeof fetch = fetch.bind(globalThis), fetchBase = origin) { this.fetchBase = fetchBase; }
+  public constructor(private readonly core: EnrollmentCore, private readonly session: EnrollmentSession, private readonly origin: string, private readonly fetcher: typeof fetch = fetch.bind(globalThis), fetchBase = origin, private readonly signal?: AbortSignal) { this.fetchBase = fetchBase; }
 
   public view(): EnrollmentView { return { ...this.viewValue }; }
 
@@ -339,9 +343,11 @@ export class BrowserEnrollment {
           this.viewValue = { ...this.viewValue, expiresInSeconds };
           return this.view();
         }
-        const sas = await this.core.invoke({ command: "_worker_enrollment_phone_status", args: { statusJson: JSON.stringify(status) } });
+        const ownerView = await this.ownerPhoneView(status);
         if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
-        this.viewValue = { ...this.viewValue, stage: "verify_phone", verificationCode: required(sas, "sas"), expiresInSeconds };
+        const verificationCode = this.verifyOwnerClaim(invitationId, ownerView);
+        this.pinOwnerClaim(ownerView.claimDigest!);
+        this.viewValue = { ...this.viewValue, stage: "verify_phone", verificationCode, expiresInSeconds };
       } else if (status.state === "confirmed" || status.state === "consumed") {
         this.resetOwnerInvitation();
         this.viewValue = { ...this.viewValue, stage: "phone_connected", expiresInSeconds };
@@ -382,6 +388,9 @@ export class BrowserEnrollment {
       const status = await this.invitationStatus(invitationId);
       if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
       if (status.state !== "claimed") throw new Error("enrollment-state");
+      if (this.viewValue.stage !== "verify_phone" || !this.ownerClaimDigest) throw new Error("enrollment-state");
+      this.verifyPinnedOwnerClaim(invitationId, await this.ownerPhoneView(status));
+      if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
       const request = await this.rustRequest("_worker_enrollment_approve_phone_invitation", { statusJson: JSON.stringify(status) });
       if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
       await this.request(`/v1/enrollment/invitations/${encodeURIComponent(invitationId)}/approve`, "POST", request, true);
@@ -423,9 +432,11 @@ export class BrowserEnrollment {
     }
     if (!["waiting", "expired", "claimed"].includes(String(status.state))) throw new Error("enrollment-response");
     if (options.waitingOnly && status.state === "claimed") {
-      const sas = await this.core.invoke({ command: "_worker_enrollment_phone_status", args: { statusJson: JSON.stringify(status) } });
+      const ownerView = await this.ownerPhoneView(status);
       if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
-      this.viewValue = { ...this.viewValue, stage: "verify_phone", verificationCode: required(sas, "sas"), expiresInSeconds: safeInteger(status.expires_in_seconds) };
+      const verificationCode = this.verifyOwnerClaim(invitationId, ownerView);
+      this.pinOwnerClaim(ownerView.claimDigest!);
+      this.viewValue = { ...this.viewValue, stage: "verify_phone", verificationCode, expiresInSeconds: safeInteger(status.expires_in_seconds) };
       return this.view();
     }
     await this.request(`/v1/enrollment/invitations/${encodeURIComponent(invitationId)}`, "DELETE", undefined, true);
@@ -608,6 +619,7 @@ export class BrowserEnrollment {
     this.invitationGeneration += 1;
     this.invitationId = undefined;
     this.approvedInvitationId = undefined;
+    this.ownerClaimDigest = undefined;
     if (this.enrollmentClient?.purpose === "owner") this.enrollmentClient = undefined;
   }
 
@@ -645,6 +657,37 @@ export class BrowserEnrollment {
   }
 
   private isInvitationApproved(invitationId: string): boolean { return this.approvedInvitationId === invitationId; }
+
+  private async ownerPhoneView(status: Record<string, unknown>): Promise<OwnerPhoneView> {
+    const view = record(await this.core.invoke({ command: "_worker_enrollment_phone_status", args: { statusJson: JSON.stringify(status) } }));
+    const invitationId = required(view, "invitationId");
+    const claimDigest = typeof view.claimDigest === "string" && view.claimDigest ? view.claimDigest : undefined;
+    const sas = typeof view.sas === "string" && view.sas ? view.sas : undefined;
+    return { invitationId, ...(sas ? { sas } : {}), ...(claimDigest ? { claimDigest } : {}) };
+  }
+
+  private verifyOwnerClaim(invitationId: string, view: OwnerPhoneView): string {
+    if (view.invitationId !== invitationId || !view.claimDigest) throw new Error("enrollment-response");
+    const verificationCode = required(view, "sas");
+    if (this.ownerClaimDigest !== undefined && this.ownerClaimDigest !== view.claimDigest) {
+      this.resetOwnerInvitation();
+      this.viewValue = { ...this.viewValue, stage: "expired", qrPayload: undefined, verificationCode: undefined, expiresInSeconds: undefined, errorCode: "phone_claim_changed" };
+      throw new Error("enrollment-state");
+    }
+    return verificationCode;
+  }
+
+  private verifyPinnedOwnerClaim(invitationId: string, view: OwnerPhoneView): void {
+    if (view.invitationId !== invitationId || !view.claimDigest || this.ownerClaimDigest !== view.claimDigest) {
+      this.resetOwnerInvitation();
+      this.viewValue = { ...this.viewValue, stage: "expired", qrPayload: undefined, verificationCode: undefined, expiresInSeconds: undefined, errorCode: "phone_claim_changed" };
+      throw new Error("enrollment-state");
+    }
+  }
+
+  private pinOwnerClaim(claimDigest: string): void {
+    this.ownerClaimDigest ??= claimDigest;
+  }
 
   private isCurrentInvitationCreation(invitationGeneration: number): boolean {
     return this.invitationGeneration === invitationGeneration
@@ -685,22 +728,38 @@ export class BrowserEnrollment {
   }
 
   private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "DELETE", body?: unknown, authenticated = false, extraHeaders: Record<string, string> = {}): Promise<T> {
+    if (this.signal?.aborted) throw new Error("enrollment-cancelled");
     const token = authenticated ? this.session.tokenForTransport() : undefined;
     const csrfHeader = this.viewValue.mode === "hosted" ? "X-Peppy-CSRF" : "X-Peppy-CSRF-Token";
-    const response = await this.fetcher(new URL(path, this.fetchBase), {
-      method,
-      credentials: "include",
-      headers: {
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(this.csrf && method !== "GET" ? { [csrfHeader]: this.csrf } : {}),
-        ...extraHeaders,
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
+    const controller = new AbortController();
+    let abort!: (error: Error) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      abort = error => {
+        controller.abort();
+        reject(error);
+      };
     });
-    if (!response.ok) throw await HttpStatusError.fromResponse(response);
-    if (response.status === 204) return {} as T;
-    return JSON.parse(await readBoundedText(response)) as T;
+    const timeout = setTimeout(() => abort(new Error("enrollment-timeout")), ENROLLMENT_REQUEST_TIMEOUT_MS);
+    const cancel = () => abort(new Error("enrollment-cancelled"));
+    this.signal?.addEventListener("abort", cancel, { once: true });
+    try {
+      const pending = this.fetcher(new URL(path, this.fetchBase), {
+        method,
+        credentials: "include",
+        headers: {
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(this.csrf && method !== "GET" ? { [csrfHeader]: this.csrf } : {}),
+          ...extraHeaders,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+      });
+      return await Promise.race([readResponse<T>(pending, cancelled), cancelled]);
+    } finally {
+      clearTimeout(timeout);
+      this.signal?.removeEventListener("abort", cancel);
+    }
   }
 
   private captureClaimSession(response: Record<string, unknown>): void {
@@ -730,6 +789,7 @@ function isTransientVaultRequestFailure(error: unknown): boolean {
 
 function isTransientComputerFailure(error: unknown): boolean {
   return error instanceof TypeError
+    || error instanceof Error && error.message === "enrollment-timeout"
     || error instanceof HttpStatusError && (error.status === 408 || error.status === 429 || error.status >= 500);
 }
 
@@ -756,12 +816,19 @@ function privateRequest(value: unknown): Record<string, unknown> {
   return record(JSON.parse(required(value, "request")) as unknown);
 }
 
+async function readResponse<T>(pending: Promise<Response>, interrupted: Promise<never>): Promise<T> {
+  const response = await pending;
+  if (!response.ok) throw await HttpStatusError.fromResponse(response, interrupted);
+  if (response.status === 204) return {} as T;
+  return JSON.parse(await readBoundedText(response, interrupted)) as T;
+}
+
 class HttpStatusError extends Error {
   public constructor(public readonly status: number, public readonly code?: string) { super(code ?? `http-${status}`); }
 
-  public static async fromResponse(response: Response): Promise<HttpStatusError> {
+  public static async fromResponse(response: Response, interrupted: Promise<never>): Promise<HttpStatusError> {
     try {
-      const body: unknown = JSON.parse(await readBoundedText(response));
+      const body: unknown = JSON.parse(await readBoundedText(response, interrupted));
       const parsed = record(body);
       const code = typeof parsed.code === "string" ? parsed.code : parsed.error;
       if (typeof code === "string") return new HttpStatusError(response.status, code);
@@ -779,7 +846,8 @@ function hostedStage(account: Record<string, unknown>, origin: string): Enrollme
   return { mode: "hosted", stage: "locked", origin };
 }
 
-async function readBoundedText(response: Response): Promise<string> {
+/** Reads at most MAX_JSON_BYTES. `interrupted` (deadline or local stop) wins over a body that never ends. */
+async function readBoundedText(response: Response, interrupted: Promise<never>): Promise<string> {
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_JSON_BYTES)) throw new Error("enrollment-response");
   if (response.body === null) throw new Error("enrollment-response");
@@ -788,14 +856,15 @@ async function readBoundedText(response: Response): Promise<string> {
   let total = 0;
   try {
     while (true) {
-      const next = await reader.read();
+      const next = await Promise.race([reader.read(), interrupted]);
       if (next.done) break;
       total += next.value.byteLength;
       if (total > MAX_JSON_BYTES) throw new Error("enrollment-response");
       chunks.push(next.value);
     }
   } catch (error) {
-    try { await reader.cancel(); } catch {}
+    // Best-effort cancel only: an uncooperative source may never settle it, and the caller is already bounded.
+    void reader.cancel().catch(() => undefined);
     throw error;
   } finally {
     reader.releaseLock();

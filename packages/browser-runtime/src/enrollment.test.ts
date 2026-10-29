@@ -39,7 +39,7 @@ function pathOf(input: RequestInfo | URL): string { return new URL(String(input)
 
 class LifecycleCore {
   public state: "none" | "fresh" | "owner" | "owner-draft" | "owner-invitation" = "none";
-  public readonly invoke = vi.fn(async ({ command }: { command: string; args: Record<string, unknown> }) => {
+  public readonly invoke = vi.fn(async ({ command, args }: { command: string; args: Record<string, unknown> }) => {
     if (command === "_worker_enrollment_new") {
       if (this.state !== "none") throw new Error("invalid-request");
       this.state = "fresh";
@@ -73,7 +73,10 @@ class LifecycleCore {
       return { qr: "local-secret-qr" };
     }
     if (command === "_worker_enrollment_approve_phone_invitation") return { request: JSON.stringify({ transcript_hash: "hash" }) };
-    if (command === "_worker_enrollment_phone_status") return { sas: "123 456" };
+    if (command === "_worker_enrollment_phone_status") {
+      const status = JSON.parse(String(args.statusJson)) as { claim?: { device?: { device_id?: string } } };
+      return { invitationId, sas: "123 456", claimDigest: status.claim?.device?.device_id === "phone-b" ? "claim-b" : "claim-a" };
+    }
     if (command === "_worker_enrollment_pending_vault_request") return null;
     return {};
   });
@@ -180,6 +183,52 @@ describe("BrowserEnrollment", () => {
     expect(statusRequests).toBe(3);
     expect(confirmRequests).toBe(2);
     expect(session.finishComputerEnrollment).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps computer enrollment retryable when a status request reaches its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const statusPath = `/v1/enrollment/computers/${invitationId}/status`;
+      const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+        if (command === "_worker_enrollment_new") return {};
+        if (command === "_worker_enrollment_pending_vault_request") return null;
+        if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+        if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: statusPath, body: { claim_token: "private" } }) };
+        if (command === "_worker_enrollment_computer_claimant_view") return { awaitingOwner: false, state: "approved", expiresInSeconds: 60, sas: "123 456" };
+        return {};
+      }) };
+      let statusRequests = 0;
+      const fetcher = vi.fn<typeof fetch>(async input => {
+        const path = pathOf(input);
+        if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+        if (path === "/v1/instance") return json(instanceInfo(true));
+        if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+        if (path === statusPath) {
+          statusRequests += 1;
+          if (statusRequests === 1) return new Promise<Response>(() => undefined);
+          if (statusRequests === 2) return json({ state: "approved", expires_in_seconds: 60 });
+          return new Promise<Response>(() => undefined);
+        }
+        throw new Error(`unexpected ${path}`);
+      });
+
+      const waiting = new BrowserEnrollment(core, new TestSession(), origin, fetcher);
+      await waiting.discover();
+      await waiting.connectComputer();
+      const stalledPoll = waiting.computerStatus();
+      await vi.advanceTimersByTimeAsync(25_000);
+      await expect(stalledPoll).resolves.toMatchObject({ stage: "computer_waiting", errorCode: "computer_transient" });
+
+      const approved = new BrowserEnrollment(core, new TestSession(), origin, fetcher);
+      await approved.discover();
+      await approved.connectComputer();
+      await expect(approved.computerStatus()).resolves.toMatchObject({ stage: "computer_approved" });
+      const stalledConfirmation = approved.confirmComputer();
+      await vi.advanceTimersByTimeAsync(25_000);
+      await expect(stalledConfirmation).resolves.toMatchObject({ stage: "computer_approved", errorCode: "computer_transient" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("starts a fresh claimant after expiry and restores the prior locked view on cancellation", async () => {
@@ -374,6 +423,53 @@ describe("BrowserEnrollment", () => {
     await enrollment.connectComputer();
     await enrollment.computerStatus();
     await expect(enrollment.confirmComputer()).resolves.toMatchObject({ stage: "computer_error", errorCode: "computer_reopen_required" });
+  });
+
+  it("settles a locally stopped enrollment fetch without cancelling an invitation remotely", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    const controller = new AbortController();
+    const fetcher = vi.fn<typeof fetch>(() => new Promise<Response>(() => undefined));
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher, origin, controller.signal);
+
+    const discovery = enrollment.discover();
+    controller.abort();
+    await expect(discovery).resolves.toMatchObject({ stage: "error" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+  });
+
+  it("pins the displayed verified claim and rejects a replacement before approval", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const fetcher = lifecycleFetcher([
+      { state: "claimed", expires_in_seconds: 300, claim: { device: { device_id: "phone-a" } } },
+      { state: "claimed", expires_in_seconds: 299, claim: { device: { device_id: "phone-b" } } },
+    ]);
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.addPhone("transfer");
+    await expect(enrollment.status()).resolves.toMatchObject({ stage: "verify_phone", verificationCode: "123 456" });
+    await expect(enrollment.approve()).resolves.toMatchObject({ stage: "expired", errorCode: "phone_claim_changed" });
+
+    expect(core.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_approve_phone_invitation" }));
+    expect(fetcher.mock.calls.some(([input, init]) => pathOf(input) === `/v1/enrollment/invitations/${invitationId}/approve` && init?.method === "POST")).toBe(false);
+  });
+
+  it("never approves a claim before it has been displayed and pinned", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const fetcher = lifecycleFetcher([{ state: "claimed", expires_in_seconds: 300, claim: { device: { device_id: "phone-a" } } }]);
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.addPhone("transfer");
+    await expect(enrollment.approve()).resolves.toMatchObject({ stage: "error", errorCode: "enrollment-state" });
+    expect(core.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_approve_phone_invitation" }));
+    expect(fetcher.mock.calls.some(([input, init]) => pathOf(input) === `/v1/enrollment/invitations/${invitationId}/approve` && init?.method === "POST")).toBe(false);
   });
 
   it("restores community CSRF before a fresh worker sends a mutation", async () => {
@@ -635,7 +731,7 @@ describe("BrowserEnrollment", () => {
       if (command === "_worker_enrollment_create_owner") return { request: JSON.stringify({ operation_id: vaultId, setup_token: "opaque" }) };
       if (command === "_worker_enrollment_create_phone_invitation") return { request: JSON.stringify({ method: "transfer", transfer_public_key: "key", invitation_token_digest: "digest" }) };
       if (command === "_worker_enrollment_get_phone_qr") return { qr: "local-secret-qr" };
-      if (command === "_worker_enrollment_phone_status") return { sas: "123 456" };
+      if (command === "_worker_enrollment_phone_status") return { invitationId, sas: "123 456", claimDigest: "claim-a" };
       if (command === "_worker_enrollment_approve_phone_invitation") return { request: JSON.stringify({ transcript_hash: "hash", encrypted_key_package: "cipher", transfer_nonce: "nonce" }) };
       if (command === "_worker_enrollment_pending_vault_request") return null;
       return {};
@@ -755,12 +851,14 @@ describe("BrowserEnrollment", () => {
     session.identity = { role: "owner" };
     const fetcher = lifecycleFetcher([
       { state: "claimed", expires_in_seconds: 300 },
+      { state: "claimed", expires_in_seconds: 300 },
       { state: "expired", expires_in_seconds: 0 },
     ]);
     const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
 
     await enrollment.discover();
     await enrollment.addPhone("transfer");
+    await enrollment.status();
     await enrollment.approve();
     await expect(enrollment.status()).resolves.toMatchObject({ stage: "phone_approved" });
     await expect(enrollment.addPhone("transfer")).resolves.toMatchObject({ stage: "phone_approved" });
@@ -774,11 +872,13 @@ describe("BrowserEnrollment", () => {
     session.identity = { role: "owner" };
     const enrollment = new BrowserEnrollment(core, session, origin, lifecycleFetcher([
       { state: "claimed", expires_in_seconds: 300 },
+      { state: "claimed", expires_in_seconds: 300 },
       { state: "waiting", expires_in_seconds: 299 },
     ]));
 
     await enrollment.discover();
     await enrollment.addPhone("transfer");
+    await enrollment.status();
     await enrollment.approve();
     await expect(enrollment.status()).resolves.toMatchObject({ stage: "phone_approved" });
     expect(enrollment.view()).toMatchObject({ qrPayload: undefined });
@@ -790,6 +890,7 @@ describe("BrowserEnrollment", () => {
     session.phase = "ready";
     session.identity = { role: "owner" };
     const responses = [
+      json({ state: "claimed", expires_in_seconds: 300 }),
       json({ state: "claimed", expires_in_seconds: 300 }),
       new Response("temporary", { status: 503 }),
       json({ state: "expired", expires_in_seconds: 0 }),
@@ -809,6 +910,7 @@ describe("BrowserEnrollment", () => {
 
     await enrollment.discover();
     await enrollment.addPhone("transfer");
+    await enrollment.status();
     await enrollment.approve();
     await expect(enrollment.status()).resolves.toMatchObject({ stage: "phone_approved" });
     await expect(enrollment.status()).resolves.toMatchObject({ stage: "phone_approved" });
@@ -1376,6 +1478,143 @@ describe("BrowserEnrollment", () => {
       });
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects a claim replacement seen by status polling before any approval and never displays the replacement code", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const fetcher = lifecycleFetcher([
+      { state: "claimed", expires_in_seconds: 300, claim: { device: { device_id: "phone-a" } } },
+      { state: "claimed", expires_in_seconds: 299, claim: { device: { device_id: "phone-b" } } },
+    ]);
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.addPhone("transfer");
+    await expect(enrollment.status()).resolves.toMatchObject({ stage: "verify_phone", verificationCode: "123 456" });
+    const replaced = await enrollment.status();
+
+    expect(replaced).toMatchObject({ stage: "expired", errorCode: "phone_claim_changed" });
+    expect(replaced.verificationCode).toBeUndefined();
+    expect(core.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_approve_phone_invitation" }));
+    expect(fetcher.mock.calls.some(([input, init]) => pathOf(input) === `/v1/enrollment/invitations/${invitationId}/approve` && init?.method === "POST")).toBe(false);
+  });
+
+  it("approves the displayed claim when a later status poll shows the same claim", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const fetcher = lifecycleFetcher([
+      { state: "claimed", expires_in_seconds: 300, claim: { device: { device_id: "phone-a" } } },
+      { state: "claimed", expires_in_seconds: 299, claim: { device: { device_id: "phone-a" } } },
+    ]);
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.addPhone("transfer");
+    await expect(enrollment.status()).resolves.toMatchObject({ stage: "verify_phone", verificationCode: "123 456" });
+    await expect(enrollment.approve()).resolves.toMatchObject({ stage: "phone_approved" });
+    expect(core.invoke).toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_approve_phone_invitation" }));
+    expect(fetcher.mock.calls.some(([input, init]) => pathOf(input) === `/v1/enrollment/invitations/${invitationId}/approve` && init?.method === "POST")).toBe(true);
+  });
+
+  it("does not start a fetch when the enrollment worker is already stopped", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    const controller = new AbortController();
+    controller.abort();
+    const fetcher = vi.fn<typeof fetch>(async () => json(instanceInfo(true)));
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher, origin, controller.signal);
+
+    const view = await enrollment.discover();
+
+    expect(view).toMatchObject({ stage: "error", errorCode: "enrollment-cancelled" });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("settles a successful response whose body stalls after headers arrive", async () => {
+    vi.useFakeTimers();
+    try {
+      const core = new LifecycleCore();
+      const session = new TestSession();
+      const fetcher = vi.fn<typeof fetch>(async () => new Response(new ReadableStream<Uint8Array>({ start() { /* never ends */ } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+      const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+      let settled: { stage?: string } | undefined;
+
+      void enrollment.discover().then(view => { settled = view; });
+      await vi.advanceTimersByTimeAsync(25_000);
+
+      expect(settled).toMatchObject({ stage: "error" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles an error response whose body stalls after headers arrive", async () => {
+    vi.useFakeTimers();
+    try {
+      const core = new LifecycleCore();
+      const session = new TestSession();
+      const fetcher = vi.fn<typeof fetch>(async () => new Response(new ReadableStream<Uint8Array>({ start() { /* never ends */ } }), {
+        status: 500,
+      }));
+      const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+      let settled: { stage?: string } | undefined;
+
+      void enrollment.discover().then(view => { settled = view; });
+      await vi.advanceTimersByTimeAsync(25_000);
+
+      expect(settled).toMatchObject({ stage: "error" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases the add-phone singleflight after a never-settling invitation request times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const core = new LifecycleCore();
+      const session = new TestSession();
+      session.phase = "ready";
+      session.identity = { role: "owner" };
+      let invitationAttempts = 0;
+      let firstAttemptStarted!: () => void;
+      const attemptStarted = new Promise<void>(resolve => { firstAttemptStarted = resolve; });
+      const fetcher = lifecycleFetcher();
+      fetcher.mockImplementation(async (input, init) => {
+        const path = pathOf(input);
+        if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+        if (path === "/v1/instance") return json(instanceInfo(true));
+        if (path === "/v1/instance/session" && init?.method === "GET") return json({ csrf_token: "csrf" });
+        if (path === "/v1/enrollment/invitations" && init?.method === "POST") {
+          invitationAttempts += 1;
+          if (invitationAttempts === 1) {
+            firstAttemptStarted();
+            return new Promise<Response>(() => undefined);
+          }
+          return json({ invitation_id: invitationId, expires_in_seconds: 300 });
+        }
+        throw new Error(`unexpected ${path}`);
+      });
+      const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+      await enrollment.discover();
+      const first = enrollment.addPhone("transfer");
+      await attemptStarted;
+      await vi.advanceTimersByTimeAsync(25_000);
+      const timedOut = await first;
+      const retried = await enrollment.addPhone("transfer");
+
+      expect(timedOut).toMatchObject({ stage: "error", errorCode: "enrollment-timeout" });
+      expect(retried).toMatchObject({ stage: "waiting_phone", qrPayload: "local-secret-qr" });
+      expect(invitationAttempts).toBe(2);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

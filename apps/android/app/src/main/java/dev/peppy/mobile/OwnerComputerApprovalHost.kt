@@ -41,14 +41,25 @@ internal class OwnerComputerApprovalHost(
 
     private val gate = Mutex()
     private var active: OwnerComputerView? = null
+    // Defensive fallback: serialization normally makes active authoritative.
+    private var pendingInvitationId: String? = null
     private var approved = false
 
     fun close() = client.close()
+    suspend fun cancelAndClose() {
+        try {
+            cancel()
+        } finally {
+            close()
+        }
+    }
+
     suspend fun scan(qrJson: String): Result = serialized {
         try {
             val request = client.createRequest(qrJson)
+            pendingInvitationId = request.invitationId
             if (request.origin != expectedOrigin) return@serialized failAndClear("invalid-qr")
-            val created = request("POST", COMPUTER_PATH, request.requestJson) ?: return@serialized Result.Failed("offline")
+            val created = request("POST", COMPUTER_PATH, request.requestJson) ?: return@serialized failAndClear("offline")
             if (created.status !in 200..299 || created.body == null) return@serialized failAndClear(responseFailure(created.status))
             client.consumeCreated(request.invitationId, request.promptDigest, created.body)
             val view = client.view()
@@ -94,12 +105,12 @@ internal class OwnerComputerApprovalHost(
 
     suspend fun cancel(): Result = serialized {
         val current = active
-        if (approved) return@serialized current?.let(Result::Approved) ?: Result.Failed("enrollment-state")
-        try { client.cancel() } catch (_: Exception) { return@serialized Result.Failed("enrollment") }
+        if (approved) return@serialized current?.let(Result::Approved) ?: Result.Cancelled
+        val invitationId = current?.invitationId ?: pendingInvitationId
+        runCatching { client.cancel() }
         active = null
-        if (current == null) return@serialized Result.Cancelled
-        val response = request("DELETE", "$COMPUTER_PATH/${current.invitationId}", null) ?: return@serialized Result.Failed("offline")
-        if (response.status !in 200..299 && response.status !in setOf(404, 410)) return@serialized Result.Failed(responseFailure(response.status))
+        pendingInvitationId = null
+        invitationId?.let { id -> runCatching { request("DELETE", "$COMPUTER_PATH/$id", null) } }
         Result.Cancelled
     }
 
@@ -111,6 +122,7 @@ internal class OwnerComputerApprovalHost(
     private fun failAndClear(code: String): Result.Failed {
         try { client.cancel() } catch (_: Exception) { }
         active = null
+        pendingInvitationId = null
         approved = false
         return Result.Failed(code)
     }

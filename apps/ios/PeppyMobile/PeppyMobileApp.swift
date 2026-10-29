@@ -42,6 +42,7 @@ struct DeviceView: View {
     @State private var showingOwnerComputerApproval = false
     @State private var ownerComputerApprovalHost: OwnerComputerApprovalHost?
     @State private var showingHostedEnrollment = false
+    @State private var opensPhoneScannerAfterHostedDismissal = false
     @State private var enrollmentLoaded = false
     @State private var hostedAccountClient: HostedAccountClient?
     @State private var selectedTab = "sync"
@@ -77,8 +78,14 @@ struct DeviceView: View {
             model.setForegroundActive(phase == .active)
             if phase == .background { model.scheduleContactsBackgroundWork() }
         }
-        .fullScreenCover(isPresented: $showingHostedEnrollment) {
-            HostedEnrollmentView(model: model) {}
+        .fullScreenCover(isPresented: $showingHostedEnrollment, onDismiss: {
+            guard opensPhoneScannerAfterHostedDismissal else { return }
+            opensPhoneScannerAfterHostedDismissal = false
+            showingPhoneEnrollment = true
+        }) {
+            HostedEnrollmentView(model: model) {
+                opensPhoneScannerAfterHostedDismissal = true
+            }
         }
         .fullScreenCover(isPresented: $showingSelfHostedEnrollment) {
             SelfHostedEnrollmentView(model: model, isPresented: $showingSelfHostedEnrollment)
@@ -95,7 +102,9 @@ struct DeviceView: View {
                 )
             }
         }
-        .sheet(isPresented: $showingOwnerComputerApproval) {
+        .sheet(isPresented: $showingOwnerComputerApproval, onDismiss: {
+            ownerComputerApprovalHost = nil
+        }) {
             if let ownerComputerApprovalHost {
                 OwnerComputerApprovalView(host: ownerComputerApprovalHost, isPresented: $showingOwnerComputerApproval)
             }
@@ -528,6 +537,7 @@ struct SettingsView: View {
     @Bindable var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var vaultDeleteText = ""
+    @State private var deletingVault = false
     @State private var showingVaultDelete = false
 
     var body: some View {
@@ -567,14 +577,34 @@ struct SettingsView: View {
                     ServerOfflineBanner(colors: PeppyTokens.colors(for: colorScheme), announcesTransition: false)
                 }
             }
-            .sheet(isPresented: $showingVaultDelete, onDismiss: { vaultDeleteText = "" }) {
+            .sheet(isPresented: $showingVaultDelete, onDismiss: {
+                vaultDeleteText = ""
+                deletingVault = false
+            }) {
                 NavigationStack { Form {
                     Section("Type ERASE to confirm") {
                         TextField("Type ERASE", text: $vaultDeleteText).autocorrectionDisabled().accessibilityIdentifier("vault-delete-confirm-field")
-                        Button("Delete vault", role: .destructive) { Task { await model.deleteVault(); showingVaultDelete = false } }
-                            .disabled(vaultDeleteText != "ERASE" || model.activity != .idle).accessibilityIdentifier("vault-delete-final-button")
+                        Button("Delete vault", role: .destructive) {
+                            guard !deletingVault else { return }
+                            deletingVault = true
+                            Task {
+                                await model.deleteVault()
+                                deletingVault = false
+                                showingVaultDelete = false
+                            }
+                        }
+                        .disabled(vaultDeleteText != "ERASE" || model.activity != .idle || deletingVault)
+                        .accessibilityIdentifier("vault-delete-final-button")
                     }
-                }.navigationTitle("Delete vault?").toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { vaultDeleteText = ""; showingVaultDelete = false } } } }
+                }.navigationTitle("Delete vault?").toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Cancel") {
+                            vaultDeleteText = ""
+                            deletingVault = false
+                            showingVaultDelete = false
+                        }
+                    }
+                } }
             }
     }
 }

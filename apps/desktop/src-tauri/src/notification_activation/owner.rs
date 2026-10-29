@@ -65,14 +65,14 @@ impl Signal {
 }
 
 enum Command {
-    Post(Post, SyncSender<Result<(), ()>>),
+    Post(Post, SyncSender<Result<(), PostError>>),
     Wake,
 }
 
 /// Only a bounded background banner drain waits here, never the UI or an OS
 /// callback. Dropping/timing out a receipt cancels this post, not its Session.
 pub struct Acceptance {
-    result: mpsc::Receiver<Result<(), ()>>,
+    result: mpsc::Receiver<Result<(), PostError>>,
     cancel: CancellationToken,
     wake: SyncSender<Command>,
     stopped: Arc<AtomicBool>,
@@ -80,14 +80,15 @@ pub struct Acceptance {
 }
 
 impl Acceptance {
-    pub fn wait(self) -> Result<(), ()> {
+    pub fn wait(self) -> Result<(), PostError> {
         self.wait_for(ACCEPTANCE_TIMEOUT)
     }
 
-    fn wait_for(mut self, timeout: std::time::Duration) -> Result<(), ()> {
-        let result = await_platform_acceptance(&self.result, timeout);
+    fn wait_for(mut self, timeout: std::time::Duration) -> Result<(), PostError> {
+        let result =
+            await_platform_acceptance(&self.result, timeout).map_err(|_| PostError::Failed)?;
         if self.cancel.is_cancelled() || self.stopped.load(Ordering::Acquire) {
-            return Err(());
+            return Err(PostError::Failed);
         }
         self.accepted = result.is_ok();
         result
@@ -103,11 +104,11 @@ impl Drop for Acceptance {
     }
 }
 
-pub(super) fn await_platform_acceptance(
-    result: &mpsc::Receiver<Result<(), ()>>,
+pub(super) fn await_platform_acceptance<E>(
+    result: &mpsc::Receiver<Result<(), E>>,
     timeout: std::time::Duration,
-) -> Result<(), ()> {
-    result.recv_timeout(timeout).map_err(|_| ())?
+) -> Result<Result<(), E>, ()> {
+    result.recv_timeout(timeout).map_err(|_| ())
 }
 
 pub struct Owner {
@@ -125,8 +126,15 @@ struct Entry<T> {
 
 trait Backend {
     type Item;
-    fn post(&mut self, id: &str, title: &str, body: &str, sound: bool, signal: Signal)
-        -> Result<Self::Item, ()>;
+    fn ensure_authorized(&mut self) -> Result<(), PostError>;
+    fn post(
+        &mut self,
+        id: &str,
+        title: &str,
+        body: &str,
+        sound: bool,
+        signal: Signal,
+    ) -> Result<Self::Item, PostError>;
     fn remove(&mut self, item: &Self::Item) -> bool;
 }
 
@@ -139,8 +147,11 @@ impl Backend for platform::Backend {
         body: &str,
         sound: bool,
         signal: Signal,
-    ) -> Result<Self::Item, ()> {
-        self.post(id, title, body, sound, signal)
+    ) -> Result<Self::Item, PostError> {
+        platform::Backend::post(self, id, title, body, sound, signal)
+    }
+    fn ensure_authorized(&mut self) -> Result<(), PostError> {
+        platform::Backend::ensure_authorized(self)
     }
     fn remove(&mut self, item: &Self::Item) -> bool {
         self.remove(item)
@@ -155,13 +166,14 @@ struct Registry<B: Backend> {
 }
 
 impl<B: Backend> Registry<B> {
-    fn post(&mut self, post: Post) -> Result<(), ()> {
+    fn post(&mut self, post: Post) -> Result<(), PostError> {
         if post.cancel.is_cancelled() {
-            return Err(());
+            return Err(PostError::Failed);
         }
+        self.backend.ensure_authorized()?;
         if self.entries.len() == CAPACITY {
             if !self.backend.remove(&self.entries.front().unwrap().handle) {
-                return Err(());
+                return Err(PostError::Failed);
             }
             self.entries.pop_front();
         }
@@ -244,7 +256,7 @@ fn serve<B: Backend>(
         if let Command::Post(post, reply) = command {
             let result = registry.post(post);
             let _ = reply.try_send(if stop.load(Ordering::Acquire) {
-                Err(())
+                Err(PostError::Failed)
             } else {
                 result
             });
@@ -283,9 +295,9 @@ impl Owner {
         })
     }
 
-    pub fn submit(&self, mut post: Post) -> Result<Acceptance, ()> {
+    pub fn submit(&self, mut post: Post) -> Result<Acceptance, PostError> {
         if self.stopped.load(Ordering::Acquire) {
-            return Err(());
+            return Err(PostError::Failed);
         }
         post.cancel = post.cancel.child_token();
         let (reply, result) = mpsc::sync_channel(1);
@@ -298,7 +310,7 @@ impl Owner {
         };
         self.sender
             .try_send(Command::Post(post, reply))
-            .map_err(|_| ())?;
+            .map_err(|_| PostError::Failed)?;
         Ok(acceptance)
     }
     pub fn wake(&self) {
@@ -324,6 +336,7 @@ mod tests {
         sounds: Vec<bool>,
         log: Arc<Mutex<Vec<String>>>,
         fail_post: bool,
+        post_outcomes: VecDeque<Result<(), PostError>>,
         fail_remove: bool,
         reject_after: Option<usize>,
         acceptance: Option<BackendAcceptanceGate>,
@@ -340,15 +353,30 @@ mod tests {
     }
     impl Backend for TestBackend {
         type Item = TestItem;
-        fn post(&mut self, id: &str, _: &str, _: &str, sound: bool, signal: Signal) -> Result<TestItem, ()> {
+        fn ensure_authorized(&mut self) -> Result<(), PostError> {
+            Ok(())
+        }
+        fn post(
+            &mut self,
+            id: &str,
+            _: &str,
+            _: &str,
+            sound: bool,
+            signal: Signal,
+        ) -> Result<TestItem, PostError> {
             self.sounds.push(sound);
+            if let Some(outcome) = self.post_outcomes.pop_front() {
+                outcome?;
+            }
             if self.fail_post || self.reject_after == Some(self.callbacks.len()) {
                 signal.retire();
-                return Err(());
+                return Err(PostError::Failed);
             }
             if let Some((started, result)) = self.acceptance.take() {
                 started.send(()).unwrap();
-                await_platform_acceptance(&result, PLATFORM_TIMEOUT)?;
+                await_platform_acceptance(&result, PLATFORM_TIMEOUT)
+                    .map_err(|_| PostError::Failed)?
+                    .map_err(|_| PostError::Failed)?;
             }
             self.callbacks.insert(id.into(), signal);
             Ok(TestItem {
@@ -410,7 +438,7 @@ mod tests {
                 Err(mpsc::TryRecvError::Empty)
             ));
             complete.send(outcome).unwrap();
-            assert_eq!(receipt.wait(), outcome);
+            assert_eq!(receipt.wait().map_err(|_| ()), outcome);
             owner.stop();
         }
     }
@@ -607,6 +635,126 @@ mod tests {
             session.status.lock().unwrap().work_error,
             Some("notification-post")
         );
+    }
+
+    #[test]
+    fn notification_drain_not_allowed_acknowledges_and_posts_the_next_candidate() {
+        let (_fixture, session, settings) = durable_candidates(2);
+        let owner = test_owner(
+            TestBackend {
+                post_outcomes: [Err(PostError::NotAllowed), Ok(())].into(),
+                ..Default::default()
+            },
+            0,
+        );
+        assert!(!drain_to_owner(&session, &settings, &owner).unwrap());
+        owner.stop();
+        assert!(session
+            .client
+            .pending_banner_candidates(100)
+            .unwrap()
+            .is_empty());
+        assert_eq!(session.status.lock().unwrap().work_error, None);
+    }
+
+    #[test]
+    fn notification_drain_awaiting_authorization_holds_candidate_without_error() {
+        let (_fixture, session, settings) = durable_candidates(1);
+        assert!(!crate::notifications::drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, _, _| Err(PostError::AwaitingAuthorization),
+        )
+        .unwrap());
+        assert_eq!(
+            session.client.pending_banner_candidates(100).unwrap().len(),
+            1
+        );
+        assert_eq!(session.status.lock().unwrap().work_error, None);
+    }
+
+    #[test]
+    fn notification_drain_awaiting_authorization_holds_later_candidates() {
+        let (_fixture, session, settings) = durable_candidates(2);
+        let posts = std::cell::Cell::new(0);
+        assert!(!crate::notifications::drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, _, _| {
+                posts.set(posts.get() + 1);
+                Err(PostError::AwaitingAuthorization)
+            },
+        )
+        .unwrap());
+        assert_eq!(posts.get(), 1);
+        assert_eq!(
+            session.client.pending_banner_candidates(100).unwrap().len(),
+            2
+        );
+        assert_eq!(session.status.lock().unwrap().work_error, None);
+    }
+
+    #[test]
+    fn notification_drain_posts_held_candidate_after_authorization_grants() {
+        let (_fixture, session, settings) = durable_candidates(1);
+        let await_authorization = || Err(PostError::AwaitingAuthorization);
+        assert!(!crate::notifications::drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, _, _| await_authorization(),
+        )
+        .unwrap());
+        let posted = std::cell::Cell::new(0);
+        assert!(!crate::notifications::drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, _, _| {
+                posted.set(posted.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap());
+        assert_eq!(posted.get(), 1);
+        assert!(session
+            .client
+            .pending_banner_candidates(100)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn notification_drain_acknowledges_held_candidate_after_authorization_denies() {
+        let (_fixture, session, settings) = durable_candidates(1);
+        assert!(!crate::notifications::drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, _, _| Err(PostError::AwaitingAuthorization),
+        )
+        .unwrap());
+        assert!(!crate::notifications::drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, _, _| Err(PostError::NotAllowed),
+        )
+        .unwrap());
+        assert!(session
+            .client
+            .pending_banner_candidates(100)
+            .unwrap()
+            .is_empty());
+        assert_eq!(session.status.lock().unwrap().work_error, None);
     }
 
     #[test]

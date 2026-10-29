@@ -644,16 +644,25 @@ struct NativeContactsCoordinator {
         switch observed {
         case .none:
             guard corePhoto || storedHash != nil else { return }
-            _ = try capture(book: book, entries: [Self.entry(contact, photo: .remove, hash: nil)])
-            report.photosRemoved += 1
+            do {
+                _ = try capture(book: book, entries: [Self.entry(contact, photo: .remove, hash: nil)])
+                report.photosRemoved += 1
+            } catch MobileBindingsError.InvalidRequest {
+                report.photoFailures += 1
+            }
         case .tooLarge:
             report.photoFailures += 1
         case let .data(data):
             let hash = ContactPhotoSource.sourceHash(data)
             if hash == storedHash && corePhoto { return }
             guard let attachmentId = prepare(data) else { report.photoFailures += 1; return }
-            _ = try capture(book: book, entries: [Self.entry(contact, photo: .set(attachmentId), hash: hash)])
-            report.photosCaptured += 1
+            do {
+                _ = try capture(book: book, entries: [Self.entry(contact, photo: .set(attachmentId), hash: hash)])
+                report.photosCaptured += 1
+            } catch MobileBindingsError.InvalidRequest {
+                // One malformed provider image must not keep the bounded photo sweep at this key.
+                report.photoFailures += 1
+            }
         }
     }
 

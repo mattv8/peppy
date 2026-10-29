@@ -209,6 +209,15 @@ class WorktreeSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(picker.SelectionError, "git status --porcelain=v1 -z: fatal: bad index file"):
                 picker.is_dirty(worktree)
 
+    def test_origin_head_failure_surfaces_its_git_diagnostic(self):
+        picker = load_picker()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            with self.assertRaisesRegex(picker.SelectionError, "could not check origin/HEAD.*fatal: not a git repository") as raised:
+                picker.origin_head_exists(root)
+            self.assertNotIn("b'", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

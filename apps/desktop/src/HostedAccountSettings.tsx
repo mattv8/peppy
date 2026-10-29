@@ -48,7 +48,8 @@ export function HostedAccountSettings() {
   }, [load]);
 
   useEffect(() => {
-    if (!focusAfterAction.current || loading || pending) return;
+    // An earlier render's queued effect can run after an action starts, before pending commits.
+    if (!focusAfterAction.current || loading || pending || pendingRef.current) return;
     const nextButton = account?.signedIn ? signOutButton.current : signInButton.current;
     if (nextButton && !nextButton.disabled) nextButton.focus();
     else statusHeading.current?.focus();

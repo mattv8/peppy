@@ -2,7 +2,7 @@
 
 Follow the canonical [contributing workflow](../../CONTRIBUTING.md) for shared setup and checks.
 
-`peppy-mobile-bindings` is the UniFFI 0.32.2 facade over the shared SQLCipher client, Rust-owned gateway policy, and `../hosted-onboarding` preview policy. Native hosts provide HTTP transport, OS scheduling, carrier effects, current OS facts, and secure persistence; the binding provides no implicit HTTP client, callbacks, or runtime.
+`peppy-mobile-bindings` is the UniFFI 0.32.2 facade over the shared SQLCipher client and Rust-owned gateway policy. Native hosts provide HTTP transport, OS scheduling, carrier effects, current OS facts, and secure persistence; the binding provides no implicit HTTP client, callbacks, or runtime.
 
 ## Native boundary
 
@@ -19,9 +19,13 @@ Follow the canonical [contributing workflow](../../CONTRIBUTING.md) for shared s
 
 `NativeGatewayPlatform` and `gateway_capabilities` keep platform limits explicit. iOS hosts report no carrier executor or notification listener in this product build; Android must not infer RCS or privileged carrier access from SIM/default-app state.
 
-Pairing helpers produce Rust/protocol-owned canonical proof bytes and SAS-related material. Native hosts own their signing keys. The QR contract belongs to the enrollment host: it is JSON containing exactly `https_origin` and `intent_token`; it must not carry credentials, passphrases, vault metadata, or private key material. Hosts retain the existing manual passphrase-unlock boundary.
+Enrollment helpers in the `newenrollment` module produce Rust-owned SAS material (`phone_sas`) and related enrollment values. Native hosts own their signing keys. The `connect_phone` QR is JSON with exactly `version`, `purpose`, `origin`, `invitation_token`, and `transfer_public_key` (`PhonePairingQr` in `crates/hosted-api`); unknown fields are rejected. It must not carry credentials, passphrases, vault metadata, or private key material. Hosts retain the existing manual passphrase-unlock boundary.
 
 The binding handles encrypted vault records only. Relay providers and carrier transport are host/service boundaries: content-free wake hints do not authorize carrier work, and carrier SMS/MMS bodies remain outside Peppy's encrypted transport boundary.
+
+## History checkpoint compatibility
+
+Malformed or overflowing saved SMS/MMS history positions now return a database error instead of restarting capture from zero. Existing corrupt positions can therefore stop history capture after an upgrade; this change does not repair those records or reconstruct state deleted by an older release. Valid provider IDs retain their full unsigned 64-bit range; signed local ordering values must fit in a signed 64-bit integer.
 
 ## Generate bindings
 

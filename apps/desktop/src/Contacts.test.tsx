@@ -171,6 +171,120 @@ describe("ContactsView", () => {
     expect(navigated).toBe(true);
   });
 
+  it("shows the dirty Back confirmation inside the compact detail overlay", async () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn((query: string) => ({
+      matches: query === "(max-width: 560px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    try {
+      const { container } = render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      fireEvent.click(screen.getByLabelText("Edit contact"));
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Unsaved" } });
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+      const panel = container.querySelector("#contacts-detail-panel");
+      expect(panel?.querySelector("#contacts-unsaved-changes")).toBeInTheDocument();
+      expect(container.querySelectorAll("#contacts-unsaved-changes")).toHaveLength(1);
+
+      fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+      expect(container.querySelector("#contacts-unsaved-changes")).toBeNull();
+      expect(screen.getByLabelText("Given name")).toHaveValue("Unsaved");
+
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+      expect(container.querySelector("#contacts-detail-panel")).toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Aurora Chen/ })));
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
+  });
+
+  it("moves compact detail focus into the overlay and returns it to the visible row", async () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn((query: string) => ({
+      matches: query === "(max-width: 560px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    try {
+      const { container } = render(<ContactsView />);
+      const row = await screen.findByRole("button", { name: /Aurora Chen/ });
+      fireEvent.click(row);
+      const back = await screen.findByRole("button", { name: "Back" });
+      await waitFor(() => expect(document.activeElement).toBe(back));
+      expect(container.querySelector("#contacts-center-pane")).toHaveAttribute("inert");
+
+      fireEvent.click(back);
+      await waitFor(() => expect(document.activeElement).toBe(row));
+      expect(container.querySelector("#contacts-center-pane")).not.toHaveAttribute("inert");
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
+  });
+
+  it("keeps a target failure visible in the compact detail overlay", async () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn((query: string) => ({
+      matches: query === "(max-width: 560px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    try {
+      const { container, rerender } = render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      rerender(<ContactsView target={{ bookId: "missing-book", contactId: "missing", requestId: 70 }} />);
+
+      const panel = container.querySelector("#contacts-detail-panel");
+      await waitFor(() => expect(panel?.querySelector("#contacts-target-error")).toHaveTextContent("The requested contact book is no longer available."));
+      expect(container.querySelector("#contacts-center-pane #contacts-target-error")).toBeNull();
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
+  });
+
+  it("returns compact create-form Back focus to New contact", async () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn((query: string) => ({
+      matches: query === "(max-width: 560px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    try {
+      render(<ContactsView />);
+      const newContact = await screen.findByRole("button", { name: "New contact" });
+      fireEvent.click(newContact);
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Avery" } });
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+      await waitFor(() => expect(document.activeElement).toBe(newContact));
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
+  });
+
   describe("initial load", () => {
     it("loads and displays contact books", async () => {
       render(<ContactsView />);
@@ -294,10 +408,12 @@ describe("ContactsView", () => {
       await waitFor(() => {
         expect(screen.getByRole("form")).toHaveAccessibleName("Create contact");
       });
+      expect(screen.getByLabelText("Recently deleted contacts")).toBeDisabled();
     });
 
     it("calls submit_contact_edit with create kind", async () => {
       render(<ContactsView />);
+      await screen.findByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -320,6 +436,7 @@ describe("ContactsView", () => {
 
     it("includes changed fields in patches", async () => {
       render(<ContactsView />);
+      await screen.findByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -342,6 +459,7 @@ describe("ContactsView", () => {
 
     it("disables save when name is empty", async () => {
       render(<ContactsView />);
+      await screen.findByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -507,6 +625,7 @@ describe("ContactsView", () => {
   describe("phone management", () => {
     it("adds phone numbers in create form", async () => {
       render(<ContactsView />);
+      await screen.findByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -526,6 +645,7 @@ describe("ContactsView", () => {
 
     it("removes phone numbers", async () => {
       render(<ContactsView />);
+      await screen.findByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -606,6 +726,7 @@ describe("ContactsView", () => {
   describe("state management", () => {
     it("closes editor on cancel", async () => {
       render(<ContactsView />);
+      await screen.findByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -625,10 +746,11 @@ describe("ContactsView", () => {
       vi.mocked(bridge.list_contacts).mockResolvedValue([mockContactAurora]);
 
       render(<ContactsView />);
+      await screen.findByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
-      const reloadInput = screen.getByLabelText("Given name");
+      const reloadInput = await screen.findByLabelText("Given name");
       fireEvent.change(reloadInput, { target: { value: "Test" } });
 
       fireEvent.click(screen.getByText("Save"));
@@ -752,6 +874,7 @@ describe("ContactsView", () => {
 
     it("form inputs have labels that activate focus via htmlFor", async () => {
       render(<ContactsView />);
+      await screen.findByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -1477,5 +1600,281 @@ describe("ContactsView", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Automatic" }));
     expect(onSelectTone).toHaveBeenCalledWith("+12025550123", null);
     expect(screen.getByText(/Tied to the saved number/)).toBeVisible();
+  });
+
+  describe("book pinning after book refreshes (H10)", () => {
+    const restorableBook = { ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canRestore: true } };
+    const otherBook: ContactBookView = { ...restorableBook, id: "book-iphone", deviceName: "iPhone" };
+    const otherBookContact: ContactView = { ...mockContactRiver, id: "iphone-contact", bookId: "book-iphone", displayName: "iPhone Person" };
+    const deletedFromPixel = { id: "deleted-pixel", bookId: "book-pixel8", displayName: "Old Friend", deletedAt: "yesterday" };
+
+    let hint: (() => void) | undefined;
+    let books: ContactBookView[];
+
+    beforeEach(() => {
+      hint = undefined;
+      books = [restorableBook, otherBook];
+      vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+      vi.mocked(bridge.list_contact_books).mockImplementation(async () => books);
+      vi.mocked(bridge.list_contacts).mockImplementation(async bookId => bookId === "book-iphone"
+        ? [otherBookContact]
+        : [mockContactAurora, mockContactRiver]);
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue(null);
+    });
+
+    const removePixelBook = async (remaining: ContactBookView[]) => {
+      books = remaining;
+      act(() => hint?.());
+      await waitFor(() => expect(screen.queryByRole("button", { name: /Pixel 8/ })).not.toBeInTheDocument());
+    };
+    const saveButton = () => document.querySelector<HTMLButtonElement>('[data-action="save-edit"]')!;
+
+    it.each(["manual", "prefilled"])("never submits a dirty %s create draft to a fallback book after its book disappears", async mode => {
+      render(<ContactsView target={mode === "prefilled" ? { kind: "create", phone: "+18014320853", requestId: 81 } : undefined} />);
+      await screen.findByRole("button", { name: /Aurora Chen/ });
+      if (mode === "manual") fireEvent.click(screen.getByLabelText("New contact"));
+      fireEvent.change(await screen.findByLabelText("Given name"), { target: { value: "Draft for Pixel" } });
+
+      await removePixelBook([otherBook]);
+
+      expect(screen.getByLabelText("Given name")).toHaveValue("Draft for Pixel");
+      if (mode === "prefilled") expect(screen.getByLabelText("Phone 1 number")).toHaveValue("+18014320853");
+      expect(saveButton()).toBeDisabled();
+      expect(screen.getByRole("alert")).toHaveTextContent("This contact book is no longer available. Your draft is still open.");
+      fireEvent.click(saveButton());
+      await act(async () => { await Promise.resolve(); });
+      expect(bridge.submit_contact_edit).not.toHaveBeenCalled();
+    });
+
+    it.each(["before refresh starts", "while refresh is pending", "after refresh completes"])(
+      "keeps a rejected save visible after a background refresh hint: rejection %s",
+      async rejectionOrder => {
+        const initialBooks = deferred<ContactBookView[]>();
+        const refreshedBooks = deferred<ContactBookView[]>();
+        const refreshedPage = deferred<ContactView[]>();
+        const submit = deferred<Awaited<ReturnType<typeof bridge.submit_contact_edit>>>();
+        vi.mocked(bridge.list_contact_books)
+          .mockReturnValueOnce(initialBooks.promise)
+          .mockReturnValueOnce(refreshedBooks.promise);
+        vi.mocked(bridge.submit_contact_edit).mockReturnValue(submit.promise);
+        render(<ContactsView />);
+
+        const create = screen.getByLabelText("New contact");
+        expect(create).toBeDisabled();
+        await act(async () => initialBooks.resolve(books));
+        await waitFor(() => expect(create).toBeEnabled());
+        await screen.findByRole("button", { name: /Aurora Chen/ });
+        fireEvent.click(create);
+        const givenName = screen.getByLabelText("Given name");
+        fireEvent.change(givenName, { target: { value: "Draft for Pixel" } });
+        fireEvent.click(screen.getByRole("button", { name: "Save" }));
+        expect(bridge.submit_contact_edit).toHaveBeenCalledWith(expect.objectContaining({
+          kind: "create", targetBookId: "book-pixel8",
+        }));
+        expect(saveButton()).toBeDisabled();
+
+        const rejectSave = async () => {
+          await act(async () => submit.resolve({ state: "rejected", reason: "The phone refused this save." }));
+          expect(screen.getByRole("alert")).toHaveTextContent("The phone refused this save.");
+        };
+        if (rejectionOrder === "before refresh starts") await rejectSave();
+
+        vi.mocked(bridge.list_contacts).mockReturnValueOnce(refreshedPage.promise);
+        act(() => hint?.());
+        await waitFor(() => expect(bridge.list_contact_books).toHaveBeenCalledTimes(2));
+        await waitFor(() => expect(bridge.list_contacts).toHaveBeenCalledTimes(2));
+        if (rejectionOrder === "while refresh is pending") await rejectSave();
+
+        await act(async () => {
+          refreshedBooks.resolve([otherBook, { ...restorableBook, contactCount: 3 }]);
+          refreshedPage.resolve([{ ...mockContactAurora, displayName: "Refreshed Aurora" }, mockContactRiver]);
+        });
+        expect(screen.getByRole("button", { name: /Pixel 8/ })).toHaveTextContent("3");
+        expect(screen.getByRole("button", { name: /Refreshed Aurora/ })).toBeInTheDocument();
+        if (rejectionOrder === "after refresh completes") await rejectSave();
+
+        expect(screen.getByLabelText("Given name")).toBe(givenName);
+        expect(givenName).toHaveValue("Draft for Pixel");
+        expect(screen.getByRole("alert")).toHaveTextContent("The phone refused this save.");
+        expect(saveButton()).toBeEnabled();
+        fireEvent.click(saveButton());
+        await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(2));
+        expect(vi.mocked(bridge.submit_contact_edit).mock.calls[1][0]).toMatchObject({
+          kind: "create", targetBookId: "book-pixel8",
+          patches: expect.arrayContaining([{ field: "givenName", value: "Draft for Pixel" }]),
+        });
+        expect(screen.getByLabelText("Given name")).toHaveValue("Draft for Pixel");
+      },
+    );
+
+    it("clears a stale clean detail and list when every book disappears", async () => {
+      const { container } = render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      expect(screen.getByRole("heading", { name: "Aurora Chen" })).toBeInTheDocument();
+
+      await removePixelBook([]);
+
+      await waitFor(() => expect(screen.queryByRole("button", { name: /Aurora Chen/ })).not.toBeInTheDocument());
+      expect(screen.queryByRole("heading", { name: "Aurora Chen" })).not.toBeInTheDocument();
+      expect(container.querySelector("#contacts-detail-panel")).toBeNull();
+    });
+
+    it("keeps New contact unavailable while no contact book exists", async () => {
+      books = [];
+      render(<ContactsView />);
+      await waitFor(() => expect(bridge.list_contact_books).toHaveBeenCalled());
+      await act(async () => { await Promise.resolve(); });
+
+      const create = screen.getByLabelText("New contact");
+      expect(create).toBeDisabled();
+      fireEvent.click(create);
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.queryByRole("form")).not.toBeInTheDocument();
+      expect(bridge.submit_contact_edit).not.toHaveBeenCalled();
+    });
+
+    it("deletes the open contact against its own book after the current book falls back", async () => {
+      vi.mocked(bridge.submit_contact_edit).mockResolvedValue({ state: "pending", requestId: "delete-1" });
+      render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      fireEvent.click(screen.getByLabelText("Edit contact"));
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Unsaved" } });
+
+      await removePixelBook([otherBook]);
+      fireEvent.click(screen.getByText("Cancel"));
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+      expect(await screen.findByRole("heading", { name: "Aurora Chen" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText("Delete contact"));
+      fireEvent.click(screen.getByLabelText("Confirm delete"));
+
+      await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledOnce());
+      expect(vi.mocked(bridge.submit_contact_edit).mock.calls[0][0]).toMatchObject({ kind: "delete", targetBookId: "book-pixel8", contactId: "contact-aurora" });
+    });
+
+    it("ignores a delayed restore list for the previous book after selecting another book", async () => {
+      const pending = deferred<typeof deletedFromPixel[]>();
+      vi.mocked(bridge.list_restorable_contacts).mockReturnValueOnce(pending.promise);
+      const { container } = render(<ContactsView />);
+      await screen.findByRole("button", { name: /Aurora Chen/ });
+
+      fireEvent.click(screen.getByLabelText("Recently deleted contacts"));
+      expect(bridge.list_restorable_contacts).toHaveBeenCalledWith("book-pixel8");
+      fireEvent.click(screen.getByRole("button", { name: /iPhone/ }));
+      await screen.findByRole("button", { name: /iPhone Person/ });
+      await act(async () => pending.resolve([deletedFromPixel]));
+
+      expect(container.querySelector("#contacts-restore-panel")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Restore Old Friend" })).not.toBeInTheDocument();
+      expect(bridge.restore_contact).not.toHaveBeenCalled();
+    });
+
+    it("keeps Recently deleted available beside a wide contact detail", async () => {
+      const originalMatchMedia = window.matchMedia;
+      window.matchMedia = vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })) as unknown as typeof window.matchMedia;
+      try {
+        vi.mocked(bridge.list_restorable_contacts).mockResolvedValueOnce([deletedFromPixel]);
+        render(<ContactsView />);
+        fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+        const recentlyDeleted = screen.getByLabelText("Recently deleted contacts");
+        expect(recentlyDeleted).toBeEnabled();
+        fireEvent.click(recentlyDeleted);
+        expect(await screen.findByRole("dialog", { name: "Recently deleted contacts" })).toBeInTheDocument();
+      } finally {
+        window.matchMedia = originalMatchMedia;
+      }
+    });
+
+    it("closes Recently deleted before opening a linked contact in the compact overlay", async () => {
+      const originalMatchMedia = window.matchMedia;
+      window.matchMedia = vi.fn((query: string) => ({
+        matches: query === "(max-width: 560px)",
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })) as unknown as typeof window.matchMedia;
+      try {
+        vi.mocked(bridge.list_restorable_contacts).mockResolvedValueOnce([deletedFromPixel]);
+        const { container, rerender } = render(<ContactsView />);
+        fireEvent.click(await screen.findByLabelText("Recently deleted contacts"));
+        await screen.findByRole("dialog", { name: "Recently deleted contacts" });
+
+        rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 71 }} />);
+        await screen.findByRole("region", { name: "Contact detail" });
+        expect(container.querySelector("#contacts-restore-panel")).toBeNull();
+        expect(container.querySelectorAll("#contacts-error")).toHaveLength(0);
+        expect(container.querySelectorAll("#contacts-notice")).toHaveLength(0);
+      } finally {
+        window.matchMedia = originalMatchMedia;
+      }
+    });
+
+    it("restores against the listed book and drops its late outcome after a book switch", async () => {
+      const outcome = deferred<Awaited<ReturnType<typeof bridge.restore_contact>>>();
+      vi.mocked(bridge.list_restorable_contacts).mockResolvedValueOnce([deletedFromPixel]);
+      vi.mocked(bridge.restore_contact).mockReturnValueOnce(outcome.promise);
+      const { container } = render(<ContactsView />);
+      await screen.findByRole("button", { name: /Aurora Chen/ });
+
+      fireEvent.click(screen.getByLabelText("Recently deleted contacts"));
+      fireEvent.click(await screen.findByRole("button", { name: "Restore Old Friend" }));
+      fireEvent.click(screen.getByRole("button", { name: /iPhone/ }));
+      await screen.findByRole("button", { name: /iPhone Person/ });
+      await act(async () => outcome.resolve({ state: "rejected", reason: "Pixel restore was rejected." }));
+
+      expect(bridge.restore_contact).toHaveBeenCalledOnce();
+      expect(bridge.restore_contact).toHaveBeenCalledWith("book-pixel8", "deleted-pixel");
+      expect(bridge.restore_contact).not.toHaveBeenCalledWith("book-iphone", expect.anything());
+      expect(container.querySelector("#contacts-error")).toBeNull();
+    });
+
+    it("shows a rejected delete outside the editor as an alert", async () => {
+      vi.mocked(bridge.submit_contact_edit).mockResolvedValue({ state: "rejected", reason: "The phone refused this delete." });
+      render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      fireEvent.click(screen.getByLabelText("Delete contact"));
+      fireEvent.click(screen.getByLabelText("Confirm delete"));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("The phone refused this delete.");
+      expect(screen.queryByRole("form")).not.toBeInTheDocument();
+    });
+
+    it("shows a failed restorable-contact list outside the editor as an alert", async () => {
+      vi.mocked(bridge.list_restorable_contacts).mockRejectedValueOnce(new Error("Deleted contacts are unavailable."));
+      render(<ContactsView />);
+      await screen.findByRole("button", { name: /Aurora Chen/ });
+      fireEvent.click(screen.getByLabelText("Recently deleted contacts"));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Deleted contacts are unavailable.");
+    });
+
+    it("keeps a rejected restore error visible inside the recently deleted panel", async () => {
+      vi.mocked(bridge.list_restorable_contacts).mockResolvedValueOnce([deletedFromPixel]);
+      vi.mocked(bridge.restore_contact).mockResolvedValueOnce({ state: "rejected", reason: "The phone refused this restore." });
+      const { container } = render(<ContactsView />);
+      await screen.findByRole("button", { name: /Aurora Chen/ });
+
+      fireEvent.click(screen.getByLabelText("Recently deleted contacts"));
+      fireEvent.click(await screen.findByRole("button", { name: "Restore Old Friend" }));
+
+      const panel = container.querySelector("#contacts-restore-panel");
+      expect(await screen.findByRole("alert")).toHaveTextContent("The phone refused this restore.");
+      expect(panel?.querySelector("#contacts-error")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(panel?.querySelector("#contacts-error")).toBeNull();
+    });
   });
 });

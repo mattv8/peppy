@@ -582,6 +582,103 @@ describe("App search navigation", () => {
     });
   });
 
+  it("retries a failed newer page in the newer direction, never as older history (M27)", async () => {
+    const loadHistory = vi.spyOn(bridge, "load_history");
+    const newerRetry = deferred<{ conversationId: string; messages: MessageView[]; hasOlder: boolean; hasNewer: boolean }>();
+    vi.mocked(bridge.load_message_window)
+      .mockResolvedValueOnce({ conversationId: "conv-aurora", messages: [message("newer-target")], hasOlder: true, hasNewer: true })
+      .mockRejectedValueOnce({ code: "network", message: "offline" })
+      .mockReturnValueOnce(newerRetry.promise);
+    render(<App hostKind="browser" />);
+    await screen.findAllByText("Can you send over the estimate?");
+    await activate({ kind: "message", conversationId: "conv-aurora", messageId: "newer-target", title: "Aurora", snippet: "target", timestamp: "1788435180000" });
+    await screen.findByText("newer-target");
 
+    fireEvent.click(screen.getByRole("button", { name: "Load newer messages" }));
+    const retry = await screen.findByRole("button", { name: "Retry loading newer messages" });
+    retry.focus();
+    fireEvent.click(retry);
 
+    const loadNewer = screen.getByRole("button", { name: "Load newer messages" });
+    expect(loadNewer).toBeDisabled();
+    expect(document.getElementById("history-load-newer-indicator")).toHaveTextContent("Loading newer messages…");
+    expect(document.getElementById("history-load-band")).toHaveFocus();
+    fireEvent.click(loadNewer);
+    expect(bridge.load_message_window).toHaveBeenCalledTimes(3);
+    await act(async () => newerRetry.resolve({ conversationId: "conv-aurora", messages: [message("newer-row")], hasOlder: true, hasNewer: false }));
+
+    await screen.findByText("newer-row");
+    const directions = vi.mocked(bridge.load_message_window).mock.calls.map(([input]) => input.direction);
+    expect(directions).toEqual(["around", "newer", "newer"]);
+    expect(bridge.load_message_window).toHaveBeenLastCalledWith({ direction: "newer", conversationId: "conv-aurora", messageId: "newer-target" });
+    expect(loadHistory).not.toHaveBeenCalled();
+    expect(document.getElementById("history-load-error")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry loading newer messages" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load older messages" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Retry loading older messages" })).not.toBeInTheDocument();
+  });
+
+  it("clears a newer-page error when returning to the latest messages", async () => {
+    snapshot = {
+      ...snapshot,
+      conversations: snapshot.conversations.map((conversation) =>
+        conversation.id === "conv-aurora" ? { ...conversation, hasOlderMessages: true } : conversation,
+      ),
+    };
+    vi.mocked(bridge.load_message_window)
+      .mockResolvedValueOnce({ conversationId: "conv-aurora", messages: [message("newer-target")], hasOlder: true, hasNewer: true })
+      .mockRejectedValueOnce({ code: "network", message: "offline" });
+    render(<App hostKind="browser" />);
+    await screen.findAllByText("Can you send over the estimate?");
+    await activate({ kind: "message", conversationId: "conv-aurora", messageId: "newer-target", title: "Aurora", snippet: "target", timestamp: "1788435180000" });
+    await screen.findByText("newer-target");
+
+    fireEvent.click(screen.getByRole("button", { name: "Load newer messages" }));
+    await screen.findByRole("button", { name: "Retry loading newer messages" });
+    fireEvent.click(screen.getByRole("button", { name: "Go to latest" }));
+
+    await waitFor(() => expect(document.getElementById("detached-history-status")).not.toBeInTheDocument());
+    expect(document.getElementById("history-load-error")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry loading newer messages" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load older messages" })).toBeEnabled();
+  });
+
+  it("uses the older retry after a conversation-changed older page follows a newer error", async () => {
+    vi.mocked(bridge.load_message_window)
+      .mockResolvedValueOnce({ conversationId: "conv-aurora", messages: [message("newer-target")], hasOlder: true, hasNewer: true })
+      .mockRejectedValueOnce({ code: "network", message: "offline" })
+      .mockResolvedValueOnce({ conversationId: "conv-aurora", messages: [message("newer-row")], hasOlder: true, hasNewer: false });
+    vi.spyOn(bridge, "load_history").mockResolvedValueOnce({ conversationId: "other-conversation", messages: [], hasMore: true });
+    render(<App hostKind="browser" />);
+    await screen.findAllByText("Can you send over the estimate?");
+    await activate({ kind: "message", conversationId: "conv-aurora", messageId: "newer-target", title: "Aurora", snippet: "target", timestamp: "1788435180000" });
+    await screen.findByText("newer-target");
+
+    fireEvent.click(screen.getByRole("button", { name: "Load newer messages" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry loading newer messages" }));
+    await screen.findByText("newer-row");
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+
+    expect(await screen.findByRole("button", { name: "Retry loading older messages" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Retry loading newer messages" })).not.toBeInTheDocument();
+  });
+
+  it("retries a failed older detached page in the older direction (M27)", async () => {
+    vi.mocked(bridge.load_message_window)
+      .mockResolvedValueOnce({ conversationId: "conv-aurora", messages: [message("older-target")], hasOlder: true, hasNewer: true })
+      .mockRejectedValueOnce({ code: "network", message: "offline" })
+      .mockResolvedValueOnce({ conversationId: "conv-aurora", messages: [message("older-row")], hasOlder: false, hasNewer: true });
+    render(<App hostKind="browser" />);
+    await screen.findAllByText("Can you send over the estimate?");
+    await activate({ kind: "message", conversationId: "conv-aurora", messageId: "older-target", title: "Aurora", snippet: "target", timestamp: "1788435180000" });
+    await screen.findByText("older-target");
+
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry loading older messages" }));
+
+    await screen.findByText("older-row");
+    const directions = vi.mocked(bridge.load_message_window).mock.calls.map(([input]) => input.direction);
+    expect(directions).toEqual(["around", "older", "older"]);
+    expect(screen.queryByRole("button", { name: "Retry loading newer messages" })).not.toBeInTheDocument();
+  });
 });

@@ -180,7 +180,8 @@ impl ServerBuilder {
                 claim_policy,
                 row_security: self.row_security,
             },
-        );
+        )
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         maintenance.db = maintenance_db;
         let router = Router::new()
             .route("/healthz", get(health::liveness))

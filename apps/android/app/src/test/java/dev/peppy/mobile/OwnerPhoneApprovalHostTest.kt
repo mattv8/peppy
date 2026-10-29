@@ -22,6 +22,7 @@ class OwnerPhoneApprovalHostTest {
         var matches = true
         var approvals = 0
         var method = OwnerPhoneMethod.TRANSFER
+        var approvedStatus: OwnerPhoneStatus? = null
         override fun createInvitationRequest(method: OwnerPhoneMethod) = "create"
         override fun consumeCreated(createdJson: String) = Unit
         override fun qrPayload() = "qr"
@@ -29,7 +30,11 @@ class OwnerPhoneApprovalHostTest {
         override fun invitationId() = current.invitationId
         override fun method() = method
         override fun secretMatches(secret: CharArray) = matches
-        override fun approveRequest(statusJson: String, secret: CharArray): String { approvals++; current = current.copy(stage = OwnerPhoneStage.CONNECTED); return "approved" }
+        override fun approveRequest(statusJson: String, secret: CharArray): String {
+            approvals++
+            current = approvedStatus ?: current.copy(stage = OwnerPhoneStage.CONNECTED)
+            return "approved"
+        }
         override fun close() = Unit
     }
 
@@ -122,7 +127,7 @@ class OwnerPhoneApprovalHostTest {
         assertEquals(0, approvePosts(transport))
     }
 
-    @Test fun `claim changed during the prompt is cancelled without an approval post`() = runBlocking {
+    @Test fun `claim changed during the prompt reaches restartable expired state without an approval post`() = runBlocking {
         val secure = MemoryStore()
         val secrets = VaultSecretStore(secure)
         val (_, client, transport) = fixture()
@@ -131,10 +136,47 @@ class OwnerPhoneApprovalHostTest {
             client.current = client.current.copy(claimDigest = "changed")
             "secret".toCharArray()
         })
-        assertEquals(OwnerPhoneApprovalHost.Result.Cancelled, result)
+        assertEquals(OwnerPhoneApprovalHost.Result.Failed("expired"), result)
         assertEquals(0, client.approvals)
         assertEquals(0, approvePosts(transport))
         assertEquals(StoredSecret.Missing, secrets.read("vault", "device"))
+    }
+
+    @Test fun `null digest terminal statuses do not discard a verified claim`() = runBlocking {
+        val (host, client, transport) = fixture()
+        client.current = client.current.copy(stage = OwnerPhoneStage.WAITING, claimDigest = null)
+        assertTrue(host.poll() is OwnerPhoneApprovalHost.Result.View)
+
+        client.current = client.current.copy(stage = OwnerPhoneStage.VERIFY, claimDigest = "claim-a")
+        assertTrue(host.poll() is OwnerPhoneApprovalHost.Result.View)
+        client.approvedStatus = client.current.copy(stage = OwnerPhoneStage.APPROVED)
+
+        val result = host.approve(SecretPrompt { "secret".toCharArray() })
+        assertEquals(OwnerPhoneStage.APPROVED, (result as OwnerPhoneApprovalHost.Result.View).status.stage)
+        client.current = client.current.copy(stage = OwnerPhoneStage.CONNECTED, claimDigest = null)
+        assertEquals(OwnerPhoneStage.CONNECTED, (host.poll() as OwnerPhoneApprovalHost.Result.View).status.stage)
+        assertEquals(1, approvePosts(transport))
+    }
+
+    @Test fun `a changed displayed claim never posts for stored shared or prompted approval and restart remains usable`() = runBlocking {
+        listOf("stored", "shared", "prompted").forEach { path ->
+            val secure = MemoryStore()
+            val secrets = VaultSecretStore(secure)
+            val (host, client, transport) = fixture()
+            if (path == "stored") secrets.saveIfMissing("vault", "device", "secret".toCharArray())
+            if (path == "shared") client.method = OwnerPhoneMethod.SHARED_SECRET
+            client.current = client.current.copy(claimDigest = "claim-a")
+            assertTrue(host.poll() is OwnerPhoneApprovalHost.Result.View)
+            client.current = client.current.copy(claimDigest = "claim-b")
+
+            val result = host.approve(SecretPrompt { "secret".toCharArray() })
+
+            assertEquals(OwnerPhoneApprovalHost.Result.Failed("expired"), result)
+            assertEquals(path, 0, approvePosts(transport))
+            transport.calls.clear()
+            assertTrue(host.restart(OwnerPhoneMethod.TRANSFER) is OwnerPhoneApprovalHost.Result.View)
+            assertTrue(path, transport.calls.any { it == "POST /v1/enrollment/invitations none" })
+        }
     }
 
     @Test fun `failing save still approves a correct prompted secret`() = runBlocking {

@@ -32,7 +32,7 @@ use uuid::Uuid;
 use super::sync::parse_cursor;
 use super::{
     ApiError, ApiResult, ApiState, Operation, attachment_quota, auth_with_mode, authorize,
-    authorize_resolved, database_unavailable, insert_error,
+    authorize_resolved, database_unavailable, insert_error, revalidate_principal,
 };
 use crate::scope;
 use crate::storage::{ObjectRange, Storage, StorageError};
@@ -860,6 +860,7 @@ pub(super) async fn release_attachment(
     .fetch_one(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "attachment_release_vault_lock"))?;
+    revalidate_principal(&mut tx, &principal).await?;
     let attachment = sqlx::query("SELECT a.object_key,r.reference_tracked FROM attachments a JOIN upload_reservations r ON r.vault_id=a.vault_id AND r.attachment_id=a.attachment_id AND r.object_key=a.object_key AND r.finalized_at IS NOT NULL WHERE a.vault_id=$1 AND a.attachment_id=$2 FOR UPDATE OF a")
         .bind(principal.vault)
         .bind(attachment_id)

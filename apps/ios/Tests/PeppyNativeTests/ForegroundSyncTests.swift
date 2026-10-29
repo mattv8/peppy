@@ -127,6 +127,23 @@ import Testing
         try client.dispose()
     }
 
+    /// Answers only envelope uploads; the capability probe and receive keep their normal routes.
+    func answerUploads(_ server: FakeServer, _ status: Int, _ body: String) {
+        server.mutate { $0.override = { request in
+            request.method == "POST" && request.url.path == "/v1/events"
+                ? HTTPResponse(status: status, url: request.url, body: Data(body.utf8))
+                : nil
+        } }
+    }
+
+    /// Requests of one pass: the probe answered normally, then exactly one upload attempt.
+    func uploadPass(_ server: FakeServer, since mark: Int) throws -> (upload: Int, paths: [String]) {
+        let paths = Array(server.paths.dropFirst(mark))
+        #expect(paths.first == "POST /v1/compaction/capability", "the capability probe ran and passed")
+        #expect(paths.filter { $0 == "POST /v1/events" }.count == 1, "the pass reached the upload")
+        return (try #require(paths.firstIndex(of: "POST /v1/events")), paths)
+    }
+
     @Test func aRefusedUploadStaysQueuedAndReceiveStillRuns() async throws {
         let server = try FakeServer(passphrase: passphrase)
         let producer = try openUnlockedClient(server, passphrase: passphrase)
@@ -135,22 +152,84 @@ import Testing
 
         let client = try openUnlockedClient(server, passphrase: passphrase)
         _ = try capture(client, "refused by the server")
-        server.mutate { $0.override = { request in
-            request.method == "POST"
-                ? HTTPResponse(status: 422, url: request.url, body: Data("{\"code\":\"invalid_envelope\"}".utf8))
-                : nil
-        } }
+        answerUploads(server, 422, "{\"code\":\"invalid_envelope\"}")
+        let mark = server.paths.count
         let report = try await sync(client, server)
         #expect(report.uploadRefused == .server(status: 422, code: "invalid_envelope"))
         #expect(report.uploaded == 0 && !report.complete)
         #expect(report.journaled == 1 && report.applied == 1)
         #expect(try client.messages(conversationId: captured.conversationId).map(\.body) == ["from the producer"])
         #expect(try client.pendingOutboxJson().count == 1, "refused work is kept, not acknowledged")
+        let pass = try uploadPass(server, since: mark)
+        #expect(pass.paths[(pass.upload + 1)...].contains("GET /v1/events"), "receive ran after the refusal")
+        try producer.dispose()
+        try client.dispose()
+    }
 
+    @Test func coded403And409UploadsStayQueuedWhileAuthAndBodiless403RemainFatal() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        let captured = try capture(producer, "from the producer")
+        _ = try await sync(producer, server)
+
+        let client = try openUnlockedClient(server, passphrase: passphrase)
+        _ = try capture(client, "refused by the server")
+
+        for (status, code) in [(403, "operation_not_permitted"), (409, "conflict")] {
+            answerUploads(server, status, "{\"code\":\"\(code)\"}")
+            let mark = server.paths.count
+            let report = try await sync(client, server)
+            #expect(report.uploadRefused == .server(status: status, code: code))
+            #expect(report.uploaded == 0 && !report.complete)
+            #expect(try client.messages(conversationId: captured.conversationId).map(\.body) == ["from the producer"])
+            #expect(try client.pendingOutboxJson().count == 1, "refused work is kept, not acknowledged")
+            let pass = try uploadPass(server, since: mark)
+            #expect(pass.paths[(pass.upload + 1)...].contains("GET /v1/events"), "receive ran after a \(status) refusal")
+        }
+
+        for (status, body, fatal) in [(401, "{}", ClientError.unauthorized), (403, "", ClientError.forbidden)] {
+            answerUploads(server, status, body)
+            let mark = server.paths.count
+            await #expect(throws: fatal) { try await sync(client, server) }
+            #expect(try client.pendingOutboxJson().count == 1)
+            let pass = try uploadPass(server, since: mark)
+            #expect(pass.upload == pass.paths.count - 1, "a fatal \(status) upload stops the pass before receive")
+        }
+        try producer.dispose()
+        try client.dispose()
+    }
+
+    @Test func capabilityProbeCoded403FailsClosedWhileBodiless403IsFatal() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        let captured = try capture(producer, "from the producer")
+        _ = try await sync(producer, server)
+
+        let client = try openUnlockedClient(server, passphrase: passphrase)
+        _ = try capture(client, "uploaded despite the policy")
         server.mutate { $0.override = { request in
-            request.method == "POST" ? HTTPResponse(status: 401, url: request.url, body: Data("{}".utf8)) : nil
+            request.url.path == "/v1/compaction/capability"
+                ? HTTPResponse(status: 403, url: request.url, body: Data("{\"code\":\"operation_not_permitted\"}".utf8))
+                : nil
         } }
-        await #expect(throws: ClientError.unauthorized) { try await sync(client, server) }
+        var mark = server.paths.count
+        let report = try await sync(client, server)
+        let readiness = try NativeContactsCoordinator.object(client.contactSyncReadinessJson())
+        #expect(readiness["server_supported"] as? Bool == false, "a coded probe denial fails closed as unsupported")
+        #expect(report.uploaded == 1)
+        #expect(try client.messages(conversationId: captured.conversationId).map(\.body) == ["from the producer"])
+        let pass = Array(server.paths.dropFirst(mark))
+        #expect(pass.first == "POST /v1/compaction/capability")
+        #expect(!pass.contains("GET /v1/snapshot"))
+        #expect(pass.contains("POST /v1/events") && pass.contains("GET /v1/events"), "upload and receive still ran")
+
+        _ = try capture(client, "kept")
+        server.mutate { $0.override = { request in
+            request.url.path == "/v1/compaction/capability" ? HTTPResponse(status: 403, url: request.url, body: Data()) : nil
+        } }
+        mark = server.paths.count
+        await #expect(throws: ClientError.forbidden) { try await sync(client, server) }
+        #expect(Array(server.paths.dropFirst(mark)) == ["POST /v1/compaction/capability"])
         #expect(try client.pendingOutboxJson().count == 1)
         try producer.dispose()
         try client.dispose()

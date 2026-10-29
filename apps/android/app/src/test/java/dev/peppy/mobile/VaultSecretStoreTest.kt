@@ -125,4 +125,62 @@ class VaultSecretStoreTest {
 
         assertEquals(StoredSecret.Missing, store.readPending("https://enroll.example"))
     }
+
+    private val origin = "https://peppy.pro"
+
+    @Test fun accountPendingSecretAcceptsOnlyMissingOrMatchingValues() {
+        val store = VaultSecretStore(MemorySecureStore())
+        assertTrue(store.savePending(origin, "account-a", "first".toCharArray()))
+        assertTrue(store.savePending(origin, "account-a", "first".toCharArray()))
+        assertFalse(store.savePending(origin, "account-a", "second".toCharArray()))
+        assertEquals("first", String((store.readPending(origin, "account-a") as StoredSecret.Present).value))
+        assertEquals(StoredSecret.Missing, store.readPending(origin, "account-b"))
+        assertEquals(StoredSecret.Missing, store.readPending(origin))
+    }
+
+    @Test fun unreadableAccountPendingSecretIsNeverReplaced() {
+        val secure = MemorySecureStore()
+        val store = VaultSecretStore(secure)
+        store.savePending(origin, "account-a", "first".toCharArray())
+        secure.failRead = true
+        assertFalse(store.savePending(origin, "account-a", "second".toCharArray()))
+        assertFalse(store.movePendingToBinding(origin, "account-a", "vault", "device"))
+        secure.failRead = false
+        assertEquals("first", String((store.readPending(origin, "account-a") as StoredSecret.Present).value))
+        assertEquals(StoredSecret.Missing, store.read("vault", "device"))
+    }
+
+    @Test fun accountPendingMoveVerifiesTheBindingBeforeRemovingPending() {
+        val store = VaultSecretStore(MemorySecureStore())
+        store.savePending(origin, "account-a", "secret".toCharArray())
+        assertTrue(store.movePendingToBinding(origin, "account-a", "vault", "device"))
+        assertEquals("secret", String((store.read("vault", "device") as StoredSecret.Present).value))
+        assertEquals(StoredSecret.Missing, store.readPending(origin, "account-a"))
+        assertTrue(store.movePendingToBinding(origin, "account-a", "vault", "device"))
+        assertFalse(store.movePendingToBinding(origin, "account-a", "other-vault", "device"))
+    }
+
+    @Test fun accountPendingMoveNeverOverwritesADifferentBinding() {
+        val store = VaultSecretStore(MemorySecureStore())
+        store.saveIfMissing("vault", "device", "bound".toCharArray())
+        store.savePending(origin, "account-a", "secret".toCharArray())
+        assertFalse(store.movePendingToBinding(origin, "account-a", "vault", "device"))
+        assertEquals("bound", String((store.read("vault", "device") as StoredSecret.Present).value))
+        assertEquals("secret", String((store.readPending(origin, "account-a") as StoredSecret.Present).value))
+    }
+
+    @Test fun accountPendingMoveAdoptsOnlyItsOwnAccount() {
+        val store = VaultSecretStore(MemorySecureStore())
+        store.savePending(origin, "account-a", "secret".toCharArray())
+        assertFalse(store.movePendingToBinding(origin, "account-b", "vault", "device"))
+        assertEquals(StoredSecret.Missing, store.read("vault", "device"))
+    }
+
+    @Test fun failedAccountBindingWriteKeepsPending() {
+        val secure = MemorySecureStore().apply { failWriteKeyPrefix = "vault-secret:v2:" }
+        val store = VaultSecretStore(secure)
+        store.savePending(origin, "account-a", "secret".toCharArray())
+        assertFalse(store.movePendingToBinding(origin, "account-a", "vault", "device"))
+        assertEquals("secret", String((store.readPending(origin, "account-a") as StoredSecret.Present).value))
+    }
 }

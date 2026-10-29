@@ -1,9 +1,9 @@
 use crate::{
     draft_event_target_labels_after_save, load_state_for_window, save_draft_for_window,
     secure_store::MemoryStore,
-    send_draft_for_window,
+    send_draft_for_window, session_for_update_flush, session_is_current,
     tests::{fixture_at, gateway, input, open, routed, Fixture, PHRASE},
-    AppState,
+    AppState, BridgeError,
 };
 use peppy_client_core::IncomingSms;
 use std::sync::{
@@ -43,6 +43,27 @@ fn incoming(session: &crate::session::Session, sender: &str, body: &str) -> Stri
         .unwrap()
         .conversation_id
         .to_string()
+}
+
+#[tokio::test]
+async fn update_flush_rejects_a_cancelled_retained_session() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    let state = state(&fixture);
+    *state.session.lock().await = Some(session.clone());
+
+    let active = session_for_update_flush(&state).await.unwrap();
+    assert!(Arc::ptr_eq(&active, &session));
+    assert!(session_is_current(&state, &session).await);
+
+    session.cancel.cancel();
+
+    assert!(!session_is_current(&state, &session).await);
+    let error = match session_for_update_flush(&state).await {
+        Ok(_) => panic!("a cancelled retained session must not accept an update flush"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, BridgeError::no_session().code);
 }
 
 #[tokio::test]

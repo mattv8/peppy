@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -300,15 +301,19 @@ class AndroidHelperTests(unittest.TestCase):
             )
             adb.chmod(0o755); emulator.chmod(0o755)
             env = os.environ.copy()
-            env.pop("PEPPY_ANDROID_SERIAL", None)
+            for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT", "PEPPY_ANDROID_SERIAL", "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_BOOT_TIMEOUT", "PEPPY_ANDROID_ARTIFACTS"):
+                env.pop(name, None)
             env.update({"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_AVD": "test-avd", "PEPPY_ANDROID_BOOT_TIMEOUT": "5", "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "STARTED": str(state), "EMULATOR_PID": str(pid_path)})
             child, terminal = pty.fork()
             if child == 0:
                 os.execvpe("bash", ["bash", str(ROOT / "infra/dev/android.sh"), "emulator"], env)
             output = ""
+            deadline = time.monotonic() + 30
             try:
                 while "Android emulator ready:" not in output:
-                    readable, _, _ = select.select([terminal], [], [], 5)
+                    remaining = deadline - time.monotonic()
+                    self.assertGreater(remaining, 0, "helper did not report emulator readiness before the PTY deadline")
+                    readable, _, _ = select.select([terminal], [], [], min(remaining, 5))
                     self.assertTrue(readable, "helper did not report emulator readiness")
                     output += os.read(terminal, 4096).decode(errors="replace")
                 self.assertTrue(pid_path.exists())

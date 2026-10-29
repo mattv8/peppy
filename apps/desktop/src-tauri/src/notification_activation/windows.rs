@@ -1,12 +1,12 @@
-use super::owner::Signal;
+use super::{owner::Signal, PostError};
 use windows::{
     core::{IInspectable, HSTRING},
     Data::Xml::Dom::XmlDocument,
     Foundation::TypedEventHandler,
     Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
     UI::Notifications::{
-        ToastDismissalReason, ToastDismissedEventArgs, ToastFailedEventArgs, ToastNotification,
-        ToastNotificationManager, ToastNotifier,
+        NotificationSetting, ToastDismissalReason, ToastDismissedEventArgs, ToastFailedEventArgs,
+        ToastNotification, ToastNotificationManager, ToastNotifier,
     },
 };
 
@@ -70,8 +70,17 @@ impl Backend {
         body: &str,
         sound: bool,
         signal: Signal,
-    ) -> Result<Item, ()> {
-        self.post_inner(id, title, body, sound, signal).map_err(|_| ())
+    ) -> Result<Item, PostError> {
+        self.post_inner(id, title, body, sound, signal)
+            .map_err(|_| PostError::Failed)
+    }
+
+    pub fn ensure_authorized(&mut self) -> Result<(), PostError> {
+        match self.notifier.Setting() {
+            Ok(NotificationSetting::Enabled) => Ok(()),
+            Ok(_) => Err(PostError::NotAllowed),
+            Err(_) => Err(PostError::Failed),
+        }
     }
 
     fn post_inner(

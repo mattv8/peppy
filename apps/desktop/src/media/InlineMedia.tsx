@@ -11,9 +11,10 @@ export type InlineMediaProps = {
   retryKey?: unknown;
 };
 
-function duration(durationMs?: number): string | undefined {
-  if (durationMs === undefined) return undefined;
-  return `${Math.floor(durationMs / 60_000)}:${String(Math.floor((durationMs % 60_000) / 1_000)).padStart(2, "0")}`;
+function duration(durationMs?: string): string | undefined {
+  const parsedDuration = Number(durationMs);
+  if (!durationMs || !Number.isFinite(parsedDuration) || parsedDuration < 0) return undefined;
+  return `${Math.floor(parsedDuration / 60_000)}:${String(Math.floor((parsedDuration % 60_000) / 1_000)).padStart(2, "0")}`;
 }
 
 export function InlineMedia({ attachment, requestOriginal, checkOriginal, releaseMedia, retryKey }: InlineMediaProps) {
@@ -24,6 +25,7 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
   const requestVersion = useRef(0);
   const requested = useRef(false);
   const mediaKind = attachment.mediaType.startsWith("video/") ? "video" : attachment.mediaType.startsWith("audio/") ? "audio" : undefined;
+  const mediaDuration = duration(attachment.mediaMeta?.durationMs);
   const load = async () => {
     const version = ++requestVersion.current;
     requested.current = true;
@@ -64,7 +66,7 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
   if (url) return mediaKind === "video" ? <video data-inline-media controls autoPlay preload="metadata" src={url} aria-label={attachment.name || "Video"} /> : <audio data-inline-media controls autoPlay preload="metadata" src={url} aria-label={attachment.name || "Audio"} />;
   return <div data-inline-media>
     <button type="button" className="media-play-trigger" data-media-play-trigger data-media-kind={mediaKind} data-attachment-id={attachment.id} aria-busy={loading || undefined} aria-label={`Play ${mediaKind}: ${attachment.name || mediaKind}`} onClick={() => void load()}>{loading || pending ? "Downloading…" : `Play ${mediaKind}`}</button>
-    {duration(attachment.durationMs) && <span data-media-duration>{duration(attachment.durationMs)}</span>}
+    {mediaDuration && <span data-media-duration>{mediaDuration}</span>}
     {error && <p role="alert">{error}</p>}
   </div>;
 }

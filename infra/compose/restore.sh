@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Restore only into a fresh, distinct Compose project. Existing volumes are never changed.
 set -euo pipefail
+umask 077
 
 usage() { echo "usage: $0 BACKUP_DIRECTORY NEW_COMPOSE_PROJECT" >&2; exit 64; }
 test "$#" = 2 || usage
@@ -32,20 +33,43 @@ if len(checksum_entries) != 4 or set(checksum_entries) != required:
     raise SystemExit("manifest.sha256 must list each required artifact exactly once")
 PY
 ( cd "$archive" && shasum -a 256 -c manifest.sha256 )
+postgres_image=$(python3 - "$archive/manifest.json" <<'PY'
+import json, re, sys
+image = json.load(open(sys.argv[1]))["images"]["running_ids"]["postgres"]
+if not isinstance(image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+    raise SystemExit("backup PostgreSQL image ID must be a pinned sha256 digest")
+print(image)
+PY
+)
 source_project=$(python3 - "$archive/manifest.json" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1]))["source_project"])
 PY
 )
 test "$target_project" != "$source_project" || { echo "restore target must differ from source project" >&2; exit 64; }
-compose=(docker compose --project-name "$target_project" --project-directory "$root" --env-file "$root/.env" -f "$root/docker-compose.yml")
+compose=(docker compose --project-name "$target_project" --project-directory "$root" --env-file "$root/.env")
 config=$(mktemp); volumes_file=$(mktemp); trap 'rm -f "$config" "$volumes_file"' EXIT
 "${compose[@]}" config --format json > "$config"
+target_postgres_image=$(python3 - "$config" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["services"]["postgres"].get("image", ""))
+PY
+)
+if ! local_postgres_id=$(docker image inspect --format '{{.Id}}' "$postgres_image") || test "$local_postgres_id" != "$postgres_image"; then
+  echo "backup PostgreSQL image is not available locally: $postgres_image" >&2
+  exit 65
+fi
+if test -n "$target_postgres_image"; then
+  if ! target_postgres_id=$(docker image inspect --format '{{.Id}}' "$target_postgres_image") || test "$target_postgres_id" != "$postgres_image"; then
+    echo "target PostgreSQL image does not match backup: $target_postgres_image" >&2
+    exit 65
+  fi
+fi
 python3 - "$config" "$archive/manifest.json" <<'PY'
 import json,sys
 c=json.load(open(sys.argv[1])); m=json.load(open(sys.argv[2]))
 for service in ("postgres", "seaweedfs"):
-    if c["services"][service]["image"] != m["images"]["configured"][service]: raise SystemExit(f"target {service} image does not match backup")
+    if c["services"][service].get("image", "") != m["images"]["configured"][service]: raise SystemExit(f"target {service} image does not match backup")
 PY
 python3 - "$config" > "$volumes_file" <<'PY'
 import json,sys
@@ -63,14 +87,9 @@ for volume in "${volumes[@]}"; do
 done
 
 "${compose[@]}" create postgres seaweedfs >/dev/null
-pg_volume=${volumes[0]}; data_volume=${volumes[1]}; home_volume=${volumes[2]}
-postgres_image=$(python3 - "$config" <<'PY'
-import json,sys
-print(json.load(open(sys.argv[1]))["services"]["postgres"]["image"])
-PY
-)
-docker run --rm -v "$data_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" tar -C /destination -xzf /backup/seaweed-data.tar.gz
-docker run --rm -v "$home_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" tar -C /destination -xzf /backup/seaweed-home.tar.gz
+data_volume=${volumes[1]}; home_volume=${volumes[2]}
+docker run --pull never --rm -v "$data_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" tar -C /destination -xzf /backup/seaweed-data.tar.gz
+docker run --pull never --rm -v "$home_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" tar -C /destination -xzf /backup/seaweed-home.tar.gz
 if ! "${compose[@]}" up --wait postgres; then
   echo "PostgreSQL startup failed; restore aborted before pg_restore" >&2
   exit 74

@@ -231,7 +231,7 @@ impl AppState {
         entries.retain(|_, value| {
             now.duration_since(value.window).unwrap_or_default() <= ADMISSION_WINDOW
         });
-        if entries.len() >= ADMISSION_MAP_CAP {
+        if entries.len() >= ADMISSION_MAP_CAP && !entries.contains_key(&key) {
             return Err(ApiError {
                 code: "rate_limited",
             });
@@ -1555,23 +1555,37 @@ mod tests {
 
     #[tokio::test]
     async fn admission_map_cap_protects_against_unbounded_ipv6_state() {
-        let (pool, schema) = test_pool().await;
-        let fake = Arc::new(FakeProvider::default());
-        let (_base, task) = serve(AppState::with_provider(pool.clone(), fake.clone())).await;
-        let _client = reqwest::Client::builder()
-            .pool_max_idle_per_host(0)
-            .build()
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost:1/unused")
             .unwrap();
-
-        // Simulate 4096 different IPs at the cap (we'll test by checking the state,
-        // but in a real scenario unique IPs from IPv6 etc. would fill the map).
-        // For this test, we verify the cap mechanism works by exhausting the map.
-        // We can't easily test with 4096 unique IPs in a test, but we verify
-        // the ADMISSION_MAP_CAP constant is set correctly.
-        assert_eq!(ADMISSION_MAP_CAP, 4096);
-
-        task.abort();
-        cleanup(pool, schema).await;
+        let state = AppState::with_provider(pool, Arc::new(FakeProvider::default()));
+        for segment in 0..ADMISSION_MAP_CAP as u16 {
+            state
+                .admit(SocketAddr::new(
+                    IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, segment)),
+                    1,
+                ))
+                .await
+                .unwrap();
+        }
+        assert!(
+            state
+                .admit(SocketAddr::new(
+                    IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0)),
+                    1,
+                ))
+                .await
+                .is_ok()
+        );
+        assert!(
+            state
+                .admit(SocketAddr::new(
+                    IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 4096)),
+                    1,
+                ))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

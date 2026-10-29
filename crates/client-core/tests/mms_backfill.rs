@@ -37,6 +37,177 @@ fn live_plan(plans: &[MmsBackfillScanPlan]) -> &MmsBackfillScanPlan {
         .unwrap()
 }
 
+fn migrated_recheck_cursor(legacy: &str) -> Option<String> {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    client
+        .migrate_mms_backfill_state(
+            "phone-install",
+            "sim-1",
+            MmsLegacyBackfillState {
+                history_baseline: Some("100".into()),
+                import_history: Some(false),
+                recheck_cursor: Some(legacy.into()),
+            },
+        )
+        .unwrap();
+    client
+        .mms_backfill_status("phone-install", "sim-1")
+        .unwrap()
+        .recheck_cursor
+}
+
+#[test]
+fn legacy_padded_or_signed_recheck_cursor_normalizes_instead_of_resetting() {
+    assert_eq!(migrated_recheck_cursor("+5"), Some("5".into()));
+    assert_eq!(migrated_recheck_cursor("05"), Some("5".into()));
+}
+
+#[test]
+fn legacy_padded_baseline_migrates_to_its_canonical_value() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    client
+        .migrate_mms_backfill_state(
+            "phone-install",
+            "sim-1",
+            MmsLegacyBackfillState {
+                history_baseline: Some("+100".into()),
+                import_history: Some(false),
+                recheck_cursor: None,
+            },
+        )
+        .unwrap();
+    let plans = client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "101")
+        .unwrap();
+    assert_eq!(
+        history_plan(&plans).history_upper_bound.as_deref(),
+        Some("100")
+    );
+}
+
+#[test]
+fn new_provider_ids_must_be_canonical_decimal() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    for bad in ["+5", "05", "-5", "", "18446744073709551616"] {
+        assert!(
+            client
+                .plan_mms_backfill_scans("phone-install", "sim-1", bad)
+                .is_err(),
+            "observed maximum {bad:?} accepted"
+        );
+        assert!(
+            client
+                .advance_mms_backfill_page("phone-install", "sim-1", MmsBackfillPhase::History, bad)
+                .is_err(),
+            "checkpoint {bad:?} accepted"
+        );
+        assert!(
+            !client
+                .mms_backfill_status("phone-install", "sim-1")
+                .unwrap()
+                .baseline_initialized,
+            "rejected observed maximum {bad:?} initialized state"
+        );
+    }
+    let maximum = u64::MAX.to_string();
+    let above_signed = (i64::MAX as u64 + 1).to_string();
+    client
+        .plan_mms_backfill_scans("phone-install", "sim-1", &above_signed)
+        .unwrap();
+    client
+        .advance_mms_backfill_page("phone-install", "sim-1", MmsBackfillPhase::Live, &maximum)
+        .unwrap();
+    let plans = client
+        .plan_mms_backfill_scans("phone-install", "sim-1", &maximum)
+        .unwrap();
+    assert_eq!(live_plan(&plans).cursor.as_deref(), Some(maximum.as_str()));
+}
+
+#[test]
+fn legacy_local_order_cursor_rejects_values_outside_signed_storage() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+
+    assert_eq!(
+        client.migrate_mms_backfill_state(
+            "phone-install",
+            "sim-1",
+            MmsLegacyBackfillState {
+                history_baseline: Some(u64::MAX.to_string()),
+                import_history: Some(false),
+                recheck_cursor: Some(u64::MAX.to_string()),
+            },
+        ),
+        Err(Error::InvalidRequest("MMS recheck cursor"))
+    );
+    assert!(
+        client
+            .mms_backfill_status("phone-install", "sim-1")
+            .unwrap()
+            .history_upper_bound
+            .is_none()
+    );
+}
+
+#[test]
+fn stored_local_order_overflow_fails_closed_without_resetting_recheck() {
+    for (index, stored) in [u64::MAX.to_string(), "18446744073709551616".into()]
+        .into_iter()
+        .enumerate()
+    {
+        let dir = TempDir::new().unwrap();
+        let vault = Vault::new();
+        let cfg = config(&dir, &format!("stored-order-{index}"), &vault);
+        let client = unlocked(&cfg, &vault);
+        client
+            .plan_mms_backfill_scans("phone-install", "sim-1", "100")
+            .unwrap();
+        drop(client);
+
+        let connection = rusqlite::Connection::open(&cfg.database_path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE mms_backfill_scopes SET pending_recheck_cursor=? WHERE source_generation='phone-install' AND subscription_id='sim-1'",
+                [&stored],
+            )
+            .unwrap();
+        drop(connection);
+
+        let client = open(&cfg);
+        assert_eq!(
+            client.mms_backfill_recheck_requests("phone-install", "sim-1"),
+            Err(Error::Database)
+        );
+        drop(client);
+        let connection = rusqlite::Connection::open(&cfg.database_path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+            )
+            .unwrap();
+        let retained: String = connection
+            .query_row(
+                "SELECT pending_recheck_cursor FROM mms_backfill_scopes WHERE source_generation='phone-install' AND subscription_id='sim-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, stored);
+    }
+}
+
 #[test]
 fn absent_migration_is_not_zero_and_restart_keeps_frozen_baseline() {
     let dir = TempDir::new().unwrap();
@@ -421,6 +592,44 @@ fn provider_wide_scope_observes_actual_subscription_acquisitions() {
             .requests
             .len(),
         1
+    );
+}
+
+#[test]
+fn recheck_is_scoped_to_its_subscription_while_provider_scope_sees_all() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "8")
+        .unwrap();
+    client
+        .plan_mms_backfill_scans("phone-install", "sim-2", "8")
+        .unwrap();
+    client
+        .plan_mms_backfill_scans("phone-install", "android-mms-provider", "8")
+        .unwrap();
+    client.begin_mms_acquisition(input("sim-one")).unwrap();
+    let mut other = input("sim-two");
+    other.source.subscription_id = "sim-2".into();
+    client.begin_mms_acquisition(other).unwrap();
+
+    let ids = |scope: &str| {
+        let mut ids = client
+            .mms_backfill_recheck_requests("phone-install", scope)
+            .unwrap()
+            .requests
+            .into_iter()
+            .map(|request| request.provider_message_id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids("sim-1"), vec!["sim-one".to_string()]);
+    assert_eq!(ids("sim-2"), vec!["sim-two".to_string()]);
+    assert_eq!(
+        ids("android-mms-provider"),
+        vec!["sim-one".to_string(), "sim-two".to_string()]
     );
 }
 

@@ -36,7 +36,9 @@ validate_package_metadata() {
 validate_output_directory() {
   local parent base staged_real out_real
   parent=$(dirname "$out_dir"); base=$(basename "$out_dir")
-  [ -n "$base" ] && [ "$base" != . ] && [ "$base" != / ] || fail 'unsafe repository output directory'
+  if [ -z "$base" ] || [ "$base" = . ] || [ "$base" = / ]; then
+    fail 'unsafe repository output directory'
+  fi
   [ -d "$parent" ] || fail 'repository output parent directory not found'
   [ ! -e "$out_dir" ] || fail 'repository output directory must not already exist'
   staged_real=$(cd "$staged_dir" && pwd -P); out_real=$(cd "$parent" && pwd -P)/$base
@@ -58,7 +60,9 @@ validate_output_directory
 
 deb=$(require_one_file "$staged_dir" "peppy-$version-linux-x86_64.deb")
 rpm_file=$(require_one_file "$staged_dir" "peppy-$version-linux-x86_64.rpm")
-[ -f "$staged_dir/SHA256SUMS" ] && [ -f "$staged_dir/SHA256SUMS.sig" ] || fail 'signed staged SHA256SUMS is required'
+if [ ! -f "$staged_dir/SHA256SUMS" ] || [ ! -f "$staged_dir/SHA256SUMS.sig" ]; then
+  fail 'signed staged SHA256SUMS is required'
+fi
 gpgv --keyring "$PEPPY_RELEASE_VERIFY_KEYRING" "$staged_dir/SHA256SUMS.sig" "$staged_dir/SHA256SUMS"
 (cd "$staged_dir" && sha256sum --check --strict SHA256SUMS)
 require_checksum "$deb"; require_checksum "$rpm_file"
@@ -68,7 +72,8 @@ temporary_out=''
 rpm_db=$(mktemp -d); trap 'rm -rf "$rpm_db" "$temporary_out"' EXIT
 rpm --dbpath "$rpm_db" --initdb
 rpm --dbpath "$rpm_db" --import "$PEPPY_RPM_VERIFY_KEYRING"
-rpm --dbpath "$rpm_db" --checksig "$rpm_file" >/dev/null || fail 'RPM signature is not trusted by the dedicated RPM keyring'
+rpm_signature=$(rpm --dbpath "$rpm_db" --checksig "$rpm_file") || fail 'RPM signature is not trusted by the dedicated RPM keyring'
+grep -Eq '(^|[[:space:]])signatures? OK([[:space:]]|$)' <<<"$rpm_signature" || fail 'RPM is unsigned or its signature is not trusted by the dedicated RPM keyring'
 
 temporary_out=$(mktemp -d "$(dirname "$out_dir")/.peppy-repository.XXXXXX")
 mkdir -p "$temporary_out/apt/pool/$channel" "$temporary_out/rpm/$channel"

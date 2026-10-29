@@ -82,6 +82,12 @@ commits atomically; checkpoint failures terminate the session without automatic 
 `BrowserScheduler` coordinates network activity, enrollment, and polling with
 backoff. Device tokens and network state remain worker-private.
 
+Phone-approval status is locally validated by Rust as an owner view. The worker
+pins the first displayed claim digest for an invitation and requires that same
+digest again before approval. A changed claim returns the existing restartable
+invitation state; stopping a worker aborts local requests and does not cancel
+an invitation remotely.
+
 Nonsecret notification display preferences use a separate `IndexedDbNotificationSettings`
 record and are persisted to encrypted IndexedDB before success is reported; encrypted
 message/domain state remains Rust-owned.

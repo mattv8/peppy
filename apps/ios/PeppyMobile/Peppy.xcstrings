@@ -4801,6 +4801,16 @@
         }
       }
     },
+    "peppy.enrollment_camera_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Camera is unavailable. Try again or cancel."
+          }
+        }
+      }
+    },
     "peppy.enrollment_setup_open": {
       "localizations": {
         "en": {

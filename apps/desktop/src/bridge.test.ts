@@ -25,7 +25,24 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
-import { fixtureBridge, missingHostBridge, tauriBridge } from "./bridge";
+import { fixtureBridge, missingHostBridge, normalizeComputerClaimant, tauriBridge } from "./bridge";
+
+describe("native computer claimant normalization", () => {
+  const nativeView = (stage: string, errorCode?: string) => ({ stage, invitationId: "id", qrPayload: null, awaitingOwner: false, state: "consumed" as const, expiresInSeconds: 0, verificationCode: null, errorCode });
+
+  it("normalizes a retained claimant from existing discovery, including finishing diagnostics", async () => {
+    invokeMock.mockResolvedValueOnce({ mode: "community", stage: "locked", computerClaimant: nativeView("finishing", "host-state") });
+    expect(await tauriBridge.enrollment_discover("https://community.example")).toMatchObject({ computerClaimant: { stage: "computer_finishing", errorCode: "host-state" } });
+    expect(invokeMock).toHaveBeenCalledWith("enrollment_discover", { origin: "https://community.example" });
+    invokeMock.mockClear();
+  });
+
+  it("preserves terminal native errors instead of treating them as expired", () => {
+    expect(normalizeComputerClaimant(nativeView("error", "computer_remote_consumed"))).toMatchObject({ stage: "computer_error", errorCode: "computer_remote_consumed" });
+    expect(normalizeComputerClaimant(nativeView("unknown"))).toMatchObject({ stage: "computer_error", errorCode: "computer_verification_failed" });
+    expect(normalizeComputerClaimant(nativeView("expired"))).toMatchObject({ stage: "computer_expired" });
+  });
+});
 
 describe("bridge subscriptions", () => {
   beforeEach(() => {

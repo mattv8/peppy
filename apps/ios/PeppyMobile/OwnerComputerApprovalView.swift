@@ -46,15 +46,21 @@ struct OwnerComputerApprovalView: View {
                         Button(String(localized: "peppy.owner_computer_done_cta", table: "Peppy")) { isPresented = false }
                             .accessibilityIdentifier("owner-computer-done")
                     } else {
-                        Button(String(localized: "peppy.cancel", table: "Peppy")) { Task { await cancel() } }
-                            .disabled(busy)
+                        Button(String(localized: "peppy.cancel", table: "Peppy")) { leaveFlow() }
                             .accessibilityIdentifier("owner-computer-cancel")
                     }
                 }
             }
         }
+        .interactiveDismissDisabled(!approved)
         .accessibilityIdentifier("owner-computer-screen")
         .sheet(isPresented: $showingPhrasePrompt) { phrasePrompt }
+        .onChange(of: errorCode) { _, errorCode in
+            guard let errorCode else { return }
+            #if canImport(UIKit)
+            UIAccessibility.post(notification: .announcement, argument: message(for: errorCode))
+            #endif
+        }
         .onDisappear {
             phrase = ""
             phraseContinuation?.resume(returning: nil)
@@ -195,16 +201,9 @@ struct OwnerComputerApprovalView: View {
         continuation?.resume(returning: value)
     }
 
-    private func cancel() async {
-        guard !busy else { return }
-        busy = true
-        defer { busy = false }
-        let result = await host.cancel()
-        switch result {
-        case .cancelled: isPresented = false
-        case let .failed(error): errorCode = error
-        case .view, .approved: errorCode = "enrollment-state"
-        }
+    private func leaveFlow() {
+        isPresented = false
+        Task { await host.cancel() }
     }
 
     private func openSettings() {

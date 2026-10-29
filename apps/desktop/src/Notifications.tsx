@@ -122,6 +122,20 @@ export function NotificationsView({
   }, [locked, focusRequestId, focusKey, focusRowShown]);
 
   useEffect(() => {
+    const shownKeys = new Set(shown.map(notification => notificationTuple(
+      notification.target.sourceDeviceId,
+      notification.target.notificationKey,
+      notification.target.lifetime,
+    )));
+    visible.current.forEach((_, key) => {
+      if (!shownKeys.has(key)) visible.current.delete(key);
+    });
+    seen.current.forEach((key) => {
+      if (!shownKeys.has(key)) seen.current.delete(key);
+    });
+    inFlight.current.forEach((key) => {
+      if (!shownKeys.has(key)) inFlight.current.delete(key);
+    });
     const flushSeen = () => {
       if (!document.hasFocus() || document.visibilityState !== "visible") return;
       const targets = [...visible.current.entries()]
@@ -143,8 +157,10 @@ export function NotificationsView({
     };
     const feed = feedRef.current;
     if (!feed || typeof IntersectionObserver === "undefined") return;
+    let current = true;
     const observer = new IntersectionObserver(
       (entries) => {
+        if (!current) return;
         entries.forEach((entry) => {
           const row = entry.target as HTMLElement;
           const target = JSON.parse(
@@ -170,6 +186,7 @@ export function NotificationsView({
     document.addEventListener("visibilitychange", flushSeen);
     flushSeen();
     return () => {
+      current = false;
       observer.disconnect();
       window.removeEventListener("focus", flushSeen);
       document.removeEventListener("visibilitychange", flushSeen);

@@ -427,7 +427,7 @@ impl ZbusPackageKit {
                     biased;
                     signal = errors.next() => match signal {
                         Some(signal) => error = packagekit_error(&signal),
-                        None => return Err(TransactionEvent::CompletionUnknown("PackageKit closed its error stream while selecting a trusted update".into())),
+                        None => return Err(TransactionEvent::FinishedFailed("PackageKit closed its error stream while selecting a trusted update".into())),
                     },
                     signal = packages.next() => match signal {
                         Some(signal) => {
@@ -444,7 +444,7 @@ impl ZbusPackageKit {
                                 }
                             }
                         },
-                        None => return Err(TransactionEvent::CompletionUnknown("PackageKit closed its package stream while selecting a trusted update".into())),
+                        None => return Err(TransactionEvent::FinishedFailed("PackageKit closed its package stream while selecting a trusted update".into())),
                     },
                     signal = finished.next() => match signal {
                         Some(signal) => match terminal_event(&signal, error) {
@@ -461,11 +461,11 @@ impl ZbusPackageKit {
                             },
                             event => return Err(event),
                         },
-                        None => return Err(TransactionEvent::CompletionUnknown("PackageKit closed its completion stream while selecting a trusted update".into())),
+                        None => return Err(TransactionEvent::FinishedFailed("PackageKit closed its completion stream while selecting a trusted update".into())),
                     },
                 }
             }
-        }).await.map_err(|_| TransactionEvent::CompletionUnknown("PackageKit trusted update selection timed out".into()))?
+        }).await.map_err(|_| TransactionEvent::FinishedFailed("PackageKit trusted update selection timed out".into()))?
     }
 
     async fn update_trusted_package(

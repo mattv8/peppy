@@ -5,7 +5,7 @@
 mod common;
 use common::*;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use tempfile::TempDir;
 
 const BOOK: &str = "book1";
@@ -673,4 +673,320 @@ fn snapshot_tombstone_before_book_state_keeps_restore_data() {
             .list_restorable_contacts_json(&json!({"book_id": BOOK}).to_string()),
     );
     assert_eq!(restorable["contacts"][0]["id"], "c1");
+}
+
+/// Every log record as an uncompacted snapshot (the server has not compacted them yet).
+fn full(log: &[Envelope]) -> Vec<SnapshotRecord> {
+    log.iter()
+        .enumerate()
+        .map(|(index, envelope)| SnapshotRecord {
+            cursor: Cursor(index as u64 + 1),
+            envelope: envelope.clone(),
+        })
+        .collect()
+}
+
+/// A phone without server compaction support posts a mail notification (n1) and mutes news
+/// (purging its unsent n2 post): every record it uploads is header-free. Returns the phone id.
+fn legacy_posts_and_mute(p: &mut Pair) -> String {
+    let phone_id = p.owner_cfg.device_id.to_string();
+    p.owner.set_server_compaction_supported(false).unwrap();
+    p.owner
+        .capture_notification(notification("n1", "com.example.mail", "first"))
+        .unwrap();
+    p.owner
+        .capture_notification(notification("n2", "com.example.news", "headline"))
+        .unwrap();
+    p.owner
+        .set_app_muted(&phone_id, "com.example.news", "News", true)
+        .unwrap();
+    p.server.upload(&p.owner);
+    assert!(p.server.log.iter().all(|e| e.compaction.is_none()));
+    phone_id
+}
+
+#[test]
+fn applied_legacy_notification_and_mute_survive_authoritative_snapshot() {
+    let mut p = pair();
+    legacy_posts_and_mute(&mut p);
+    p.server.sync(&p.peer);
+    assert_eq!(
+        shown(&p.peer),
+        ["n1"],
+        "the mute purged the unsent news post"
+    );
+    assert_eq!(muted(&p.peer, "com.example.news"), Some(true));
+
+    let high_water = p.server.log.len();
+    import(&p.peer, &compact(&p.server.log, true), high_water, Some(30));
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(shown(&p.peer), ["n1"], "legacy post is not absent");
+    assert_eq!(muted(&p.peer, "com.example.news"), Some(true));
+    assert_eq!(p.peer.quarantined().unwrap(), vec![]);
+}
+
+#[test]
+fn applied_legacy_tone_survives_authoritative_snapshot() {
+    let mut p = pair();
+    let seed = "+15555550109";
+    p.owner.set_server_compaction_supported(false).unwrap();
+    p.owner.set_conversation_tone(seed, Some(47)).unwrap();
+    p.server.upload(&p.owner);
+    assert!(p.server.log.iter().all(|e| e.compaction.is_none()));
+    p.server.sync(&p.peer);
+    assert_eq!(
+        p.peer.conversation_tones().unwrap(),
+        BTreeMap::from([(seed.to_owned(), 47)])
+    );
+
+    let high_water = p.server.log.len();
+    import(&p.peer, &compact(&p.server.log, true), high_water, Some(34));
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(
+        p.peer.conversation_tones().unwrap(),
+        BTreeMap::from([(seed.to_owned(), 47)]),
+        "the applied legacy tone is not absent"
+    );
+}
+
+#[test]
+fn newer_compactable_removal_and_filter_win_over_preserved_legacy_state() {
+    let mut p = pair();
+    let phone_id = legacy_posts_and_mute(&mut p);
+    p.server.sync(&p.peer);
+    let legacy = p.server.log.len();
+
+    // The phone gains compaction support; the peer is offline for its newer writes.
+    connect(&p.owner);
+    p.owner.remove_notification("n1", "n1-1").unwrap();
+    p.owner
+        .set_app_muted(&phone_id, "com.example.news", "News", false)
+        .unwrap();
+    p.server.upload(&p.owner);
+    assert!(
+        p.server.log[legacy..]
+            .iter()
+            .all(|e| e.compaction.is_some())
+    );
+
+    let high_water = p.server.log.len();
+    import(&p.peer, &full(&p.server.log), high_water, Some(31));
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert!(shown(&p.peer).is_empty(), "the staged removal wins");
+    assert_eq!(muted(&p.peer, "com.example.news"), Some(false));
+}
+
+#[test]
+fn newer_compactable_tone_wins_over_preserved_legacy_tone() {
+    let mut p = pair();
+    let seed = "+15555550110";
+    p.owner.set_server_compaction_supported(false).unwrap();
+    p.owner.set_conversation_tone(seed, Some(48)).unwrap();
+    p.server.upload(&p.owner);
+    p.server.sync(&p.peer);
+
+    connect(&p.owner);
+    p.owner.set_conversation_tone(seed, Some(49)).unwrap();
+    p.server.upload(&p.owner);
+    assert!(
+        p.server.log[1..]
+            .iter()
+            .all(|envelope| envelope.compaction.is_some())
+    );
+
+    let high_water = p.server.log.len();
+    import(&p.peer, &full(&p.server.log), high_water, Some(35));
+    settle(&p.peer);
+    assert_eq!(
+        p.peer.conversation_tones().unwrap(),
+        BTreeMap::from([(seed.to_owned(), 49)])
+    );
+}
+
+#[test]
+fn fresh_device_applies_pending_legacy_records_after_promotion() {
+    let mut p = pair();
+    legacy_posts_and_mute(&mut p);
+    let fresh_cfg = config(&p._dir, "fresh", &p.vault);
+    let fresh = unlocked(&fresh_cfg, &p.vault);
+    let high_water = p.server.log.len();
+    import(&fresh, &compact(&p.server.log, true), high_water, Some(32));
+    let total = settle(&fresh);
+    assert_eq!(
+        state(&fresh),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert!(total.applied > 0, "legacy records apply live");
+    assert_eq!(shown(&fresh), ["n1"]);
+    assert_eq!(muted(&fresh, "com.example.news"), Some(true));
+}
+
+#[test]
+fn unreadable_legacy_record_does_not_fail_projection() {
+    let mut p = pair();
+    legacy_posts_and_mute(&mut p);
+    p.server.sync(&p.peer);
+    // An unrelated header-free record of an epoch this device never unlocked.
+    let mut unreadable = p.server.log[0].clone();
+    unreadable.envelope_id = EnvelopeId::new();
+    unreadable.key_epoch = 99;
+    p.server.log.push(unreadable);
+
+    let high_water = p.server.log.len();
+    import(&p.peer, &full(&p.server.log), high_water, Some(33));
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(shown(&p.peer), ["n1"]);
+    assert_eq!(muted(&p.peer, "com.example.news"), Some(true));
+}
+
+#[test]
+fn only_the_applied_legacy_wire_keeps_its_state() {
+    let mut p = pair();
+    let phone_id = p.owner_cfg.device_id.to_string();
+    p.owner.set_server_compaction_supported(false).unwrap();
+    p.owner
+        .capture_notification(notification("n1", "com.example.mail", "first"))
+        .unwrap();
+    p.server.upload(&p.owner);
+    assert_eq!(p.server.log.len(), 1);
+    p.owner
+        .set_app_muted(&phone_id, "com.example.news", "News", true)
+        .unwrap();
+    p.server.upload(&p.owner);
+    p.server.sync(&p.peer);
+    assert_eq!(shown(&p.peer), ["n1"]);
+
+    // Altered bytes at an already journaled cursor are rejected outright.
+    let mut tampered = p.server.log[0].clone();
+    *tampered.ciphertext.last_mut().unwrap() ^= 0x55;
+    let high_water = p.server.log.len() + 1;
+    let session = p
+        .peer
+        .begin_snapshot_with_compaction(
+            Cursor(high_water as u64),
+            1,
+            SnapshotPurpose::Resync,
+            Some(34),
+        )
+        .unwrap();
+    assert!(
+        p.peer
+            .append_snapshot_page(
+                session.generation,
+                &[SnapshotRecord {
+                    cursor: Cursor(1),
+                    envelope: tampered.clone(),
+                }],
+            )
+            .is_err()
+    );
+
+    // The same altered record at a new cursor is never applied, so the post it claims to
+    // reproduce has no provenance and is absent; the applied mute keeps its own.
+    let mut records = full(&p.server.log);
+    records[0] = SnapshotRecord {
+        cursor: Cursor(high_water as u64),
+        envelope: tampered,
+    };
+    records.sort_by_key(|r| r.cursor.0);
+    import(&p.peer, &records, high_water, Some(35));
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert!(
+        shown(&p.peer).is_empty(),
+        "tampered wire grants no exemption"
+    );
+    assert_eq!(muted(&p.peer, "com.example.news"), Some(true));
+}
+
+/// Like `settle`, but one record per step, so draining, staging and live apply interleave.
+fn settle_one_by_one(client: &Client) {
+    loop {
+        let step = client.apply_pending(1).unwrap();
+        if step.applied + step.drained + step.quarantined + step.superseded == 0
+            && step.snapshot_remaining == 0
+        {
+            return;
+        }
+    }
+}
+
+#[test]
+fn fresh_device_keeps_legacy_state_applied_while_snapshot_drains() {
+    let mut p = pair();
+    legacy_posts_and_mute(&mut p);
+    let fresh_cfg = config(&p._dir, "fresh", &p.vault);
+    let fresh = unlocked(&fresh_cfg, &p.vault);
+    let high_water = p.server.log.len();
+    assert!(high_water > 1, "the drain must take several steps");
+    import(&fresh, &compact(&p.server.log, true), high_water, Some(36));
+    settle_one_by_one(&fresh);
+    assert_eq!(
+        state(&fresh),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(shown(&fresh), ["n1"]);
+    assert_eq!(muted(&fresh, "com.example.news"), Some(true));
+}
+
+#[test]
+fn legacy_state_applied_after_unlock_during_staging_survives_promotion() {
+    let mut p = pair();
+    legacy_posts_and_mute(&mut p);
+    // Locked: the header-free records are journaled but stay pending.
+    let locked_cfg = config(&p._dir, "locked", &p.vault);
+    let locked = open(&locked_cfg);
+    p.server.sync(&locked);
+    // Compactable records keep the projection staging for several steps after unlock.
+    connect(&p.owner);
+    for key in ["c1", "c2", "c3"] {
+        p.owner
+            .capture_notification(notification(key, "com.example.chat", key))
+            .unwrap();
+    }
+    p.server.upload(&p.owner);
+    let high_water = p.server.log.len();
+    let records = compact(&p.server.log, true);
+    assert!(
+        records
+            .iter()
+            .filter(|r| r.envelope.compaction.is_some())
+            .count()
+            > 1
+    );
+    import(&locked, &records, high_water, Some(37));
+    settle(&locked);
+    assert_eq!(
+        state(&locked),
+        Some((SnapshotProjectionState::Staging, None))
+    );
+    drop(locked);
+
+    let unlocked_client = unlocked(&locked_cfg, &p.vault);
+    settle_one_by_one(&unlocked_client);
+    assert_eq!(
+        state(&unlocked_client),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(shown(&unlocked_client), ["c1", "c2", "c3", "n1"]);
+    assert_eq!(muted(&unlocked_client, "com.example.news"), Some(true));
 }

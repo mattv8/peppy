@@ -102,7 +102,7 @@ describe("BrowserScheduler", () => {
       download: async () => new Uint8Array(),
     };
     await new BrowserScheduler(session, transport).poll();
-    expect(contexts).toEqual([{ devices, capabilities, connection: "connected" }]);
+    expect(contexts).toEqual([{ devices, capabilities, connection: "connected", outboxRejected: false }]);
   });
 
   it("reports gateway HTTP failures as offline server context", async () => {
@@ -210,6 +210,197 @@ describe("BrowserScheduler", () => {
     replayed = mutations.includes("ingest_batch");
     expect(mutations).not.toContain("ack_outbox");
     expect(replayed).toBe(true);
+  });
+
+  it.each([403, 409])("retains a rejected %i outbox envelope while receiving inbound events", async status => {
+    const mutations: Array<[string, Record<string, unknown>]> = [];
+    const events = [{ cursor: "1", envelope: {} }];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => command === "pending_outbox" ? { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] } : command === "receive_cursor" ? { cursor: "0" } : { uploads: [] },
+      mutate: async (command: string, args: Record<string, unknown>) => { mutations.push([command, args]); return { applied: 0, quarantined: 0, drained: 0 }; },
+    };
+    const result = await new BrowserScheduler(session, {
+      json: async (path: string) => {
+        if (path === "/v1/events") throw new (await import("./transport.js")).TransportError("status", status, "blocked");
+        if (path.startsWith("/v1/events?")) return { events, next_after: null };
+        return {};
+      }, upload: async () => undefined, download: async () => new Uint8Array(),
+    }).poll();
+    expect(result.connection).toBe("connected");
+    expect(mutations.map(([command]) => command)).not.toContain("ack_outbox");
+    expect(mutations).toContainEqual(["ingest_batch", { events }]);
+  });
+
+  it("treats an outbox 401 as fatal revocation without acknowledging or replaying", async () => {
+    const mutations: string[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => command === "pending_outbox" ? { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] } : command === "receive_cursor" ? { cursor: "0" } : { uploads: [] },
+      mutate: async (command: string) => { mutations.push(command); return { applied: 0, quarantined: 0, drained: 0 }; },
+    };
+    const { TransportError } = await import("./transport.js");
+    const scheduler = new BrowserScheduler(session, {
+      json: async (path: string) => {
+        if (path === "/v1/events") throw new TransportError("revoked");
+        return {};
+      }, upload: async () => undefined, download: async () => new Uint8Array(),
+    });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "revoked" });
+    expect(mutations).not.toContain("ack_outbox");
+    expect(mutations).not.toContain("ingest");
+  });
+
+  it.each([403, 502])("does not classify a bodiless %i proxy failure as revoked or acknowledge its envelope", async status => {
+    const mutations: string[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => command === "pending_outbox" ? { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] } : command === "receive_cursor" ? { cursor: "0" } : { uploads: [] },
+      mutate: async (command: string) => { mutations.push(command); return { applied: 0, quarantined: 0, drained: 0 }; },
+    };
+    const { TransportError } = await import("./transport.js");
+    const result = await new BrowserScheduler(session, {
+      json: async (path: string) => {
+        if (path === "/v1/events") throw new TransportError("status", status);
+        return {};
+      }, upload: async () => undefined, download: async () => new Uint8Array(),
+    }).poll();
+
+    expect(result.connection).not.toBe("revoked");
+    expect(mutations).not.toContain("ack_outbox");
+  });
+
+  it.each([403, 409])("reports a coded %i outbox refusal as connected with a sanitized outbox-rejected flag", async status => {
+    const mutations: Array<[string, Record<string, unknown>]> = [];
+    const contexts: Record<string, unknown>[] = [];
+    const events = [{ cursor: "1", envelope: {} }];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args: Record<string, unknown>) => {
+        if (command === "pending_outbox") return { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
+        return { uploads: [] };
+      },
+      mutate: async (command: string, args: Record<string, unknown>) => { mutations.push([command, args]); return { applied: 0, quarantined: 0, drained: 0 }; },
+    };
+    const { TransportError } = await import("./transport.js");
+    const result = await new BrowserScheduler(session, {
+      json: async (path: string) => {
+        if (path === "/v1/events") throw new TransportError("status", status, "blocked");
+        if (path.startsWith("/v1/events?")) return { events, next_after: null };
+        return {};
+      }, upload: async () => undefined, download: async () => new Uint8Array(),
+    }).poll();
+
+    expect(result).toEqual({ connection: "connected" });
+    expect(mutations.map(([command]) => command)).not.toContain("ack_outbox");
+    expect(mutations).toContainEqual(["ingest_batch", { events }]);
+    expect(contexts.at(-1)).toMatchObject({ connection: "connected", outboxRejected: true });
+    expect(JSON.stringify(contexts)).not.toContain(String(status));
+  });
+
+  it("clears the outbox-rejected flag after the next pass delivers the envelope", async () => {
+    let refusing = true;
+    const acked: string[] = [];
+    const contexts: Record<string, unknown>[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args: Record<string, unknown>) => {
+        if (command === "pending_outbox") return { envelopes: acked.length > 0 ? [] : [{ envelope_id: "outbox-1", purpose: "event" }] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
+        return { uploads: [] };
+      },
+      mutate: async (command: string, args: Record<string, unknown>) => {
+        if (command === "ack_outbox") acked.push(String(args.envelopeId));
+        return { applied: 0, quarantined: 0, drained: 0 };
+      },
+    };
+    const { TransportError } = await import("./transport.js");
+    const scheduler = new BrowserScheduler(session, {
+      json: async (path: string, request: { method: string }) => {
+        if (path === "/v1/events" && request.method === "POST" && refusing) throw new TransportError("status", 403, "blocked");
+        if (path === "/v1/events" && request.method === "POST") return {};
+        if (path.startsWith("/v1/events?")) return { events: [], next_after: null };
+        return {};
+      }, upload: async () => undefined, download: async () => new Uint8Array(),
+    });
+
+    await scheduler.poll();
+    expect(contexts.at(-1)).toMatchObject({ outboxRejected: true });
+    refusing = false;
+    await scheduler.poll();
+    expect(acked).toEqual(["outbox-1"]);
+    expect(contexts.at(-1)).toMatchObject({ connection: "connected", outboxRejected: false });
+  });
+
+  it("does not flag a code-less 403 proxy refusal as an outbox rejection", async () => {
+    const contexts: Record<string, unknown>[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args: Record<string, unknown>) => {
+        if (command === "pending_outbox") return { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
+        return { uploads: [] };
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    const { TransportError } = await import("./transport.js");
+    const result = await new BrowserScheduler(session, {
+      json: async (path: string) => {
+        if (path === "/v1/events") throw new TransportError("status", 403);
+        if (path.startsWith("/v1/events?")) return { events: [], next_after: null };
+        return {};
+      }, upload: async () => undefined, download: async () => new Uint8Array(),
+    }).poll();
+
+    expect(result.connection).not.toBe("revoked");
+    expect(contexts.at(-1)).toMatchObject({ outboxRejected: false });
+  });
+
+  it("keeps an outbox 401 fatal without publishing an outbox-rejected context", async () => {
+    const contexts: Record<string, unknown>[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args: Record<string, unknown>) => {
+        if (command === "pending_outbox") return { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
+        return { uploads: [] };
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    const { TransportError } = await import("./transport.js");
+    const result = await new BrowserScheduler(session, {
+      json: async (path: string) => {
+        if (path === "/v1/events") throw new TransportError("revoked");
+        return {};
+      }, upload: async () => undefined, download: async () => new Uint8Array(),
+    }).poll();
+
+    expect(result).toEqual({ connection: "revoked" });
+    expect(contexts.some(context => context.outboxRejected === true)).toBe(false);
+  });
+
+  it("publishes a clean connected context when the outbox is empty", async () => {
+    const contexts: Record<string, unknown>[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args: Record<string, unknown>) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
+        return { uploads: [] };
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    const result = await new BrowserScheduler(session, { json: async () => ({ events: [] }), upload: async () => undefined, download: async () => new Uint8Array() }).poll();
+
+    expect(result).toEqual({ connection: "connected" });
+    expect(contexts.at(-1)).toMatchObject({ connection: "connected", outboxRejected: false });
   });
 
   it("continues with later uploads after one attachment fails", async () => {

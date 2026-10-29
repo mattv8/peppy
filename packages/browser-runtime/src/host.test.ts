@@ -1283,4 +1283,41 @@ describe("browser host RPC", () => {
     const response = await dispatchBrowserRpc(new FakeSession(), { id: 7, command: "load_state", args: { value: "x".repeat(1024 * 1024) } });
     expect(response).toMatchObject({ id: 7, ok: false, error: { code: "invalid-request" } });
   });
+
+  it("serializes an exported-dispatcher request exactly once", async () => {
+    let serializations = 0;
+    const session = new FakeSession();
+    const args = { probe: { toJSON() { serializations += 1; return "probe"; } } };
+
+    await expect(dispatchBrowserRpc(session, { id: 8, command: "load_state", args })).resolves.toMatchObject({ id: 8, ok: true });
+    expect(serializations).toBe(1);
+  });
+
+  it("serializes an attached-port request exactly once before dispatch", async () => {
+    let serializations = 0;
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 8, command: "load_state", args: { probe: { toJSON() { serializations += 1; return "probe"; } } } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 8));
+
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 8, ok: true }));
+    expect(serializations).toBe(1);
+  });
+
+  it("rejects an unallowlisted command without touching the session", async () => {
+    const session = new FakeSession();
+    await expect(dispatchBrowserRpc(session, { id: 9, command: "not_allowlisted", args: {} }))
+      .resolves.toMatchObject({ id: 9, ok: false, error: { code: "invalid-request" } });
+    expect(session.calls).toEqual([]);
+  });
+
+  it("rejects an oversized draft before any session call", async () => {
+    const session = new FakeSession();
+    await expect(dispatchBrowserRpc(session, { id: 10, command: "save_draft", args: { input: { text: "x".repeat(1024 * 1024) } } }))
+      .resolves.toMatchObject({ id: 10, ok: false, error: { code: "invalid-request" } });
+    expect(session.calls).toEqual([]);
+  });
 });

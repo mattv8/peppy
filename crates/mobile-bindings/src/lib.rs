@@ -10,9 +10,9 @@ use peppy_client_core::{
     MmsBackfillRecheckOutcome, MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome,
     MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource,
     NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
-    PermitBlock, PermitDecision, ReceivedCommand, SendResult, SmsAcquisitionInput,
-    SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource,
-    Transport, VaultCheckHeader, VaultId,
+    PermitBlock, PermitDecision, QuarantineReason, ReceivedCommand, SendResult, SendState,
+    SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan,
+    SmsSource, Transport, VaultCheckHeader, VaultId,
 };
 use std::{
     fmt,
@@ -746,10 +746,7 @@ fn parse_id<T: FromStr>(value: &str) -> Result<T, MobileBindingsError> {
 }
 
 fn parse_cursor(value: String) -> Result<peppy_client_core::Cursor, MobileBindingsError> {
-    value
-        .parse::<u64>()
-        .map(peppy_client_core::Cursor)
-        .map_err(|_| MobileBindingsError::InvalidRequest)
+    parse_canonical_u64(&value).map(peppy_client_core::Cursor)
 }
 
 fn parse_canonical_u64(value: &str) -> Result<u64, MobileBindingsError> {
@@ -760,6 +757,35 @@ fn parse_canonical_u64(value: &str) -> Result<u64, MobileBindingsError> {
         return Err(MobileBindingsError::InvalidRequest);
     }
     Ok(parsed)
+}
+
+/// Stable host-facing names; these exact strings are part of the native contract.
+fn send_state_name(state: SendState) -> &'static str {
+    match state {
+        SendState::QueuedLocal => "QueuedLocal",
+        SendState::AcceptedServer => "AcceptedServer",
+        SendState::PersistedGateway => "PersistedGateway",
+        SendState::AttemptRecorded => "AttemptRecorded",
+        SendState::SubmittedToOs => "SubmittedToOs",
+        SendState::Sent => "Sent",
+        SendState::Delivered => "Delivered",
+        SendState::FailedBeforeSubmission => "FailedBeforeSubmission",
+        SendState::FailedConfirmed => "FailedConfirmed",
+        SendState::OutcomeUnknown => "OutcomeUnknown",
+    }
+}
+
+/// Stable host-facing names; these exact strings are part of the native contract.
+fn quarantine_reason_name(reason: QuarantineReason) -> &'static str {
+    match reason {
+        QuarantineReason::MalformedEnvelope => "MalformedEnvelope",
+        QuarantineReason::WrongVault => "WrongVault",
+        QuarantineReason::EnvelopeConflict => "EnvelopeConflict",
+        QuarantineReason::ProfileMismatch => "ProfileMismatch",
+        QuarantineReason::AuthenticationFailed => "AuthenticationFailed",
+        QuarantineReason::InvalidPayload => "InvalidPayload",
+        QuarantineReason::PayloadConflict => "PayloadConflict",
+    }
 }
 
 fn notification_target(value: NativeNotificationTarget) -> NotificationTarget {
@@ -876,7 +902,9 @@ fn message_view(message: Message) -> NativeMessage {
             peppy_client_core::Direction::Incoming
         ),
         seen: message.seen,
-        send_state: message.send_state.map(|state| format!("{state:?}")),
+        send_state: message
+            .send_state
+            .map(|state| send_state_name(state).to_owned()),
         sent_at_ms: message.payload.sent_at_ms.filter(|time| *time > 0),
     }
 }
@@ -977,7 +1005,7 @@ fn permit_view(decision: PermitDecision) -> NativePermit {
         PermitDecision::AlreadyAttempted(state) => NativePermit {
             state: NativePermitState::AlreadyAttempted,
             command: None,
-            existing_send_state: Some(format!("{state:?}")),
+            existing_send_state: Some(send_state_name(state).to_owned()),
         },
         PermitDecision::Blocked(block) => NativePermit {
             state: match block {
@@ -2620,7 +2648,7 @@ impl NativeClient {
             },
             peppy_client_core::IngestResult::Quarantined(reason) => NativeIngestResult {
                 state: NativeIngestState::Quarantined,
-                quarantine_reason: Some(format!("{reason:?}")),
+                quarantine_reason: Some(quarantine_reason_name(reason).to_owned()),
             },
         })
     }
@@ -2853,7 +2881,7 @@ impl NativeClient {
         with_client(&self.client, |client| {
             client.record_send_result(command_id, send_result(result))
         })
-        .map(|state| format!("{state:?}"))
+        .map(|state| send_state_name(state).to_owned())
     }
 
     /// Sensitive bytes for Android Keystore/iOS Keychain/native secure storage only.
@@ -3089,6 +3117,72 @@ impl NativePlaintextHandle {
 mod tests {
     use super::*;
 
+    /// Removes a temporary database, its SQLite sidecars and its `.media` root when the test ends,
+    /// including after a failed assertion. Declare it before any client that opens the database.
+    struct TempDatabase(std::path::PathBuf);
+
+    impl TempDatabase {
+        fn new(file_name: String) -> Self {
+            Self(std::env::temp_dir().join(file_name))
+        }
+    }
+
+    impl std::ops::Deref for TempDatabase {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TempDatabase {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDatabase {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let mut name = self.0.clone().into_os_string();
+                name.push(suffix);
+                let _ = std::fs::remove_file(std::path::PathBuf::from(name));
+            }
+            let mut media = self.0.clone().into_os_string();
+            media.push(".media");
+            let _ = std::fs::remove_dir_all(std::path::PathBuf::from(media));
+        }
+    }
+
+    /// Removes a temporary directory tree when the test ends, including after a failed assertion.
+    struct TempRoot(std::path::PathBuf);
+
+    impl TempRoot {
+        fn new(name: String) -> Self {
+            Self(std::env::temp_dir().join(name))
+        }
+    }
+
+    impl std::ops::Deref for TempRoot {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TempRoot {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn native_transport_strings_match_carrier_dispatch_contract() {
         assert_eq!(transport_name(Transport::Sms), "sms");
@@ -3097,8 +3191,7 @@ mod tests {
     }
     #[test]
     fn mms_own_address_forwards_to_core() {
-        let path =
-            std::env::temp_dir().join(format!("peppy-mobile-mms-own-{}.db", uuid::Uuid::new_v4()));
+        let path = TempDatabase::new(format!("peppy-mobile-mms-own-{}.db", uuid::Uuid::new_v4()));
         let client = open_native_client(NativeOpenConfig {
             database_path: path.to_string_lossy().into_owned(),
             vault_id: uuid::Uuid::new_v4().to_string(),
@@ -3114,15 +3207,12 @@ mod tests {
             client.mms_own_address("sim-1".into()).unwrap(),
             Some("+15555550100".to_string())
         );
-        let _ = std::fs::remove_file(path);
     }
     #[test]
     fn contact_repair_and_projection_status_forward_to_core() {
+        let path = TempDatabase::new(format!("peppy-mobile-repair-{}.db", uuid::Uuid::new_v4()));
         let client = open_native_client(NativeOpenConfig {
-            database_path: std::env::temp_dir()
-                .join(format!("peppy-mobile-repair-{}.db", uuid::Uuid::new_v4()))
-                .to_string_lossy()
-                .into_owned(),
+            database_path: path.to_string_lossy().into_owned(),
             vault_id: uuid::Uuid::new_v4().to_string(),
             device_id: uuid::Uuid::new_v4().to_string(),
             database_key: vec![9; 32],
@@ -3153,7 +3243,7 @@ mod tests {
     fn contact_sync_request_methods_forward_json_to_core() {
         let vault_id = uuid::Uuid::new_v4().to_string();
         let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
-        let path = std::env::temp_dir().join(format!(
+        let path = TempDatabase::new(format!(
             "peppy-mobile-contact-sync-{}.db",
             uuid::Uuid::new_v4()
         ));
@@ -3183,13 +3273,81 @@ mod tests {
         }
 
         client.dispose().unwrap();
-        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn send_and_quarantine_names_keep_native_contract_strings() {
+        let send_states = [
+            (SendState::QueuedLocal, "QueuedLocal"),
+            (SendState::AcceptedServer, "AcceptedServer"),
+            (SendState::PersistedGateway, "PersistedGateway"),
+            (SendState::AttemptRecorded, "AttemptRecorded"),
+            (SendState::SubmittedToOs, "SubmittedToOs"),
+            (SendState::Sent, "Sent"),
+            (SendState::Delivered, "Delivered"),
+            (SendState::FailedBeforeSubmission, "FailedBeforeSubmission"),
+            (SendState::FailedConfirmed, "FailedConfirmed"),
+            (SendState::OutcomeUnknown, "OutcomeUnknown"),
+        ];
+        for (state, name) in send_states {
+            assert_eq!(send_state_name(state), name);
+        }
+        let reasons = [
+            (QuarantineReason::MalformedEnvelope, "MalformedEnvelope"),
+            (QuarantineReason::WrongVault, "WrongVault"),
+            (QuarantineReason::EnvelopeConflict, "EnvelopeConflict"),
+            (QuarantineReason::ProfileMismatch, "ProfileMismatch"),
+            (
+                QuarantineReason::AuthenticationFailed,
+                "AuthenticationFailed",
+            ),
+            (QuarantineReason::InvalidPayload, "InvalidPayload"),
+            (QuarantineReason::PayloadConflict, "PayloadConflict"),
+        ];
+        for (reason, name) in reasons {
+            assert_eq!(quarantine_reason_name(reason), name);
+        }
+    }
+
+    #[test]
+    fn cursor_inputs_reject_noncanonical_values_and_accept_canonical_zero() {
+        let path = TempDatabase::new(format!("peppy-mobile-cursor-{}.db", uuid::Uuid::new_v4()));
+        let client = open_native_client(NativeOpenConfig {
+            database_path: path.to_string_lossy().into_owned(),
+            vault_id: uuid::Uuid::new_v4().to_string(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            database_key: vec![5; 32],
+        })
+        .unwrap();
+        // Same canonical parser as the other cursor-bearing native entry points.
+        for bad in ["+1", "01", "", "18446744073709551616"] {
+            assert!(
+                matches!(
+                    client.begin_snapshot(bad.into(), 0, NativeSnapshotPurpose::Resync),
+                    Err(MobileBindingsError::InvalidRequest)
+                ),
+                "begin_snapshot accepted {bad:?}"
+            );
+            assert!(
+                matches!(
+                    client.ingest_raw(Vec::new(), bad.into()),
+                    Err(MobileBindingsError::InvalidRequest)
+                ),
+                "ingest_raw accepted {bad:?}"
+            );
+        }
+        assert!(
+            client
+                .begin_snapshot("0".into(), 0, NativeSnapshotPurpose::Resync)
+                .is_ok()
+        );
     }
 
     #[test]
     fn closed_handle_is_typed() {
+        let path = TempDatabase::new(format!("peppy-mobile-{}.db", uuid::Uuid::new_v4()));
         let client = open_native_client(NativeOpenConfig {
-            database_path: format!("/tmp/peppy-mobile-{}.db", uuid::Uuid::new_v4()),
+            database_path: path.to_string_lossy().into_owned(),
             vault_id: uuid::Uuid::new_v4().to_string(),
             device_id: uuid::Uuid::new_v4().to_string(),
             database_key: vec![7; 32],
@@ -3268,8 +3426,7 @@ mod tests {
 
         let vault_id = uuid::Uuid::new_v4().to_string();
         let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
-        let path =
-            std::env::temp_dir().join(format!("peppy-mobile-lifetime-{}.db", uuid::Uuid::new_v4()));
+        let path = TempDatabase::new(format!("peppy-mobile-lifetime-{}.db", uuid::Uuid::new_v4()));
         let native = open_native_client(NativeOpenConfig {
             database_path: path.to_string_lossy().into_owned(),
             vault_id,
@@ -3349,7 +3506,6 @@ mod tests {
                 .iter()
                 .any(|item| item.conversation_id.to_string() == captured.conversation_id)
         );
-        let _ = std::fs::remove_file(path);
     }
 
     fn provider_inbox_row(
@@ -3381,7 +3537,7 @@ mod tests {
 
     #[test]
     fn receiver_broadcast_then_provider_row_is_one_message() {
-        let path = std::env::temp_dir().join(format!("peppy-sms-c2-{}.db", uuid::Uuid::new_v4()));
+        let path = TempDatabase::new(format!("peppy-sms-c2-{}.db", uuid::Uuid::new_v4()));
         let native = open_at(
             &path,
             &uuid::Uuid::new_v4().to_string(),
@@ -3419,12 +3575,11 @@ mod tests {
         assert_eq!(messages.len(), 1);
         // The user sees the local receipt time, not the skewed SMSC time.
         assert_eq!(messages[0].sent_at_ms, Some(smsc - 3_600_000 + 400));
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn provider_row_then_receiver_broadcast_and_redelivery_are_one_message() {
-        let path = std::env::temp_dir().join(format!("peppy-sms-c2b-{}.db", uuid::Uuid::new_v4()));
+        let path = TempDatabase::new(format!("peppy-sms-c2b-{}.db", uuid::Uuid::new_v4()));
         let native = open_at(
             &path,
             &uuid::Uuid::new_v4().to_string(),
@@ -3484,14 +3639,13 @@ mod tests {
             .unwrap();
         assert_eq!(second.message_id, again.message_id);
         assert_eq!(native.messages(provider.conversation_id).unwrap().len(), 2);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn gateway_send_and_its_provider_row_are_one_message_through_the_bridge() {
         let vault_id = uuid::Uuid::new_v4().to_string();
         let gateway_id = uuid::Uuid::new_v4().to_string();
-        let root = std::env::temp_dir().join(format!("peppy-sms-c1-{}", uuid::Uuid::new_v4()));
+        let root = TempRoot::new(format!("peppy-sms-c1-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
         let desktop = open_at(
@@ -3577,7 +3731,6 @@ mod tests {
                 .len(),
             1
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     fn open_at(path: &std::path::Path, vault_id: &str, device_id: &str) -> Arc<NativeClient> {
@@ -3625,7 +3778,7 @@ mod tests {
         const CAPTURES: usize = MAX_SEAL_BATCH + 44;
         const LIMIT: u64 = 20;
         let vault_id = uuid::Uuid::new_v4().to_string();
-        let root = std::env::temp_dir().join(format!("peppy-mobile-seal-{}", uuid::Uuid::new_v4()));
+        let root = TempRoot::new(format!("peppy-mobile-seal-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
         let unlock = |client: &NativeClient| {
@@ -3696,7 +3849,6 @@ mod tests {
         assert_eq!(first, before);
         assert_eq!(reopened.pending_outbox_json_batch(500).unwrap(), before);
         assert_eq!(reopened.pending_outbox_json().unwrap(), before);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3704,8 +3856,7 @@ mod tests {
         let vault_id = uuid::Uuid::new_v4().to_string();
         let desktop_id = uuid::Uuid::new_v4().to_string();
         let gateway_id = uuid::Uuid::new_v4().to_string();
-        let root =
-            std::env::temp_dir().join(format!("peppy-native-facade-{}", uuid::Uuid::new_v4()));
+        let root = TempRoot::new(format!("peppy-native-facade-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let desktop_path = root.join("desktop.db");
         let gateway_path = root.join("gateway.db");
@@ -3816,7 +3967,6 @@ mod tests {
                 .state,
             NativePermitState::AlreadyAttempted
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 }
 

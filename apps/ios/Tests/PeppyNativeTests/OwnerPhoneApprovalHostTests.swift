@@ -107,6 +107,35 @@ import Testing
         #expect(transport.requests == ["GET \(invitePath)", "GET \(invitePath)"])
     }
 
+    @Test func displayedClaimDigestCannotBeReplacedBeforeApproval() async {
+        let secure = OwnerFaultyStore(); secure.seed(account, "vault secret")
+        let producer = OwnerProducerFake(); let transport = OwnerTransportFake()
+        let approver = host(producer, transport, secure)
+        _ = await approver.poll()
+        producer.value = .init(invitationId: "invite", stage: .verify, expiresInSeconds: 30, sas: "654321", claimDigest: "other")
+
+        #expect(await approver.approve(prompt: { nil }) == .cancelled)
+        #expect(producer.approvedSecrets.isEmpty)
+        #expect(transport.requests == ["GET \(invitePath)", "GET \(invitePath)"])
+    }
+
+    @Test func pollClaimReplacementCancelsWithoutPosting() async {
+        let producer = OwnerProducerFake(); let transport = OwnerTransportFake(); let approver = host(producer, transport)
+        _ = await approver.poll()
+        producer.value = .init(invitationId: "invite", stage: .verify, expiresInSeconds: 30, sas: "654321", claimDigest: "other")
+        #expect(await approver.poll() == .cancelled)
+        #expect(!transport.requests.contains { $0.hasPrefix("POST") })
+    }
+
+    @Test func repollingThePinnedClaimStillApproves() async {
+        let secure = OwnerFaultyStore(); secure.seed(account, "vault secret")
+        let producer = OwnerProducerFake(); let transport = OwnerTransportFake(); let approver = host(producer, transport, secure)
+        _ = await approver.poll()
+        _ = await approver.poll()
+        #expect(await approver.approve(prompt: { nil }) == .view(approved(producer), qr: nil))
+        #expect(transport.requests.contains("POST \(approvePath)"))
+    }
+
     @Test func failingWriteStillApprovesAndSavesNothing() async {
         let secure = OwnerFaultyStore(); secure.failWrites = true
         let producer = OwnerProducerFake(); let transport = OwnerTransportFake(); let prompt = PromptScript(["vault secret"])
@@ -123,6 +152,15 @@ import Testing
         #expect(secure.reads == 0)
         #expect(prompt.asked == 0)
         #expect(producer.approvedSecrets == [""])
+    }
+
+    @Test func sharedSecretClaimReplacementCancelsWithoutApproving() async {
+        let producer = OwnerProducerFake(method: .sharedSecret); let transport = OwnerTransportFake()
+        let approver = host(producer, transport)
+        _ = await approver.poll()
+        producer.value = .init(invitationId: "invite", stage: .verify, expiresInSeconds: 30, sas: "654321", claimDigest: "other")
+        #expect(await approver.approve(prompt: { nil }) == .cancelled)
+        #expect(producer.approvedSecrets.isEmpty)
     }
 
     @Test func approvalRequiresVerifyStage() async {

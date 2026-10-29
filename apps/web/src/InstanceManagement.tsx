@@ -81,7 +81,10 @@ export function InstanceManagement({ bridge, accountUrl }: { bridge: ManagementB
     setScreen("loading");
     try {
       const enrollment = await bridge.enrollment_sign_in({ username });
-      if (enrollment.mode === "hosted") setScreen("hosted");
+      if (enrollment.stage === "error") {
+        setError("Peppy could not sign in to this server.");
+        setScreen("sign-in");
+      } else if (enrollment.mode === "hosted") setScreen("hosted");
       else await loadManagement();
     } catch {
       setError("Peppy could not sign in to this server.");

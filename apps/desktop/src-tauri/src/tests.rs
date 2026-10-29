@@ -12,8 +12,8 @@ use crate::{
     session::{open_session, DraftInput, Notifier, Session},
 };
 use peppy_client_core::{
-    ComposeDraftUpdate, Direction, IncomingSms, KeyProfile, MmsAcquisitionInput, MmsSource,
-    Transport, VaultCheckHeader,
+    ComposeDraftUpdate, DeviceId, Direction, GatewayRoute, IncomingSms, KeyProfile,
+    MmsAcquisitionInput, MmsSource, OutgoingSms, Transport, VaultCheckHeader,
 };
 use peppy_crypto::{create_vault_check_header, derive_root_key};
 use std::{path::Path, sync::Arc};
@@ -861,6 +861,70 @@ fn attachment_scope_accepts_own_conversation_and_rejects_foreign_conversation() 
 }
 
 #[test]
+fn attachment_scope_excludes_thumbnail_only_references() {
+    let f = fixture();
+    let session = open(&f, &f.binding, &[]);
+    unlock(&session, &f);
+    let original_path = f.dir.path().join("scope-original.png");
+    let thumbnail_path = f.dir.path().join("scope-thumbnail.png");
+    std::fs::write(&original_path, sample_png(2, 2)).unwrap();
+    std::fs::write(&thumbnail_path, sample_png(1, 1)).unwrap();
+    let original = session.prepare_attachment(&original_path).unwrap();
+    let thumbnail = session.prepare_attachment(&thumbnail_path).unwrap();
+    let acquisition = session
+        .client
+        .begin_mms_acquisition(MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "desktop-native-test".into(),
+                subscription_id: "sim-1".into(),
+                provider_message_id: "scope-thumbnail".into(),
+                provider_thread_id: Some("scope-thumbnail-thread".into()),
+            },
+            direction: Direction::Incoming,
+            sender_address: Some("+12025550123".into()),
+            recipients: vec![],
+            subject: None,
+            body: "thumbnail scope".into(),
+            imported: false,
+            observed_at_ms: 1,
+            transaction_id: None,
+        })
+        .unwrap();
+    let original_id = original.id.parse().unwrap();
+    let thumbnail_id = thumbnail.id.parse().unwrap();
+    session
+        .client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "original", original_id)
+        .unwrap();
+    session
+        .client
+        .set_mms_acquisition_part_metadata(
+            &acquisition.acquisition_id,
+            "original",
+            Some(2),
+            Some(2),
+            None,
+            Some(thumbnail_id),
+        )
+        .unwrap();
+    session
+        .client
+        .mark_attachment_uploaded(thumbnail_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    let conversation = session
+        .client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap()
+        .conversation_id;
+    assert!(session
+        .attachment_in_conversation(&original.id, conversation)
+        .unwrap());
+    assert!(!session
+        .attachment_in_conversation(&thumbnail.id, conversation)
+        .unwrap());
+}
+
+#[test]
 fn legacy_gateway_cache_without_mms_version_is_normalized_to_mms_denied() {
     let f = fixture();
     let data_dir = f.binding.data_dir(f.dir.path());
@@ -1195,6 +1259,53 @@ fn mark_seen_rejects_oversized_batches_before_parsing() {
         session.mark_seen(&ids).unwrap_err().message,
         "Too many message IDs in one request."
     );
+}
+
+#[test]
+fn snapshot_pending_count_is_exact_beyond_the_old_batch_cap() {
+    const QUEUED: usize = 1_001;
+    let f = fixture();
+    let session = open(&f, &f.binding, &[]);
+    unlock(&session, &f);
+    let received = session
+        .client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+15555550100".into(),
+            body: "pending count target".into(),
+            provider_message_id: Some("pending-count-target".into()),
+            imported: false,
+        })
+        .unwrap();
+    let route = GatewayRoute {
+        gateway_device_id: DeviceId::new(),
+        subscription_id: "sim-1".into(),
+    };
+    let baseline = session.client.pending_outbox_count().unwrap();
+    for sequence in 0..QUEUED {
+        session
+            .client
+            .queue_send(
+                OutgoingSms {
+                    conversation_id: received.conversation_id,
+                    recipients: vec!["+15555550100".into()],
+                    body: format!("queued-{sequence}"),
+                },
+                route.clone(),
+            )
+            .unwrap();
+    }
+    let (snapshot, _) = session
+        .snapshot(
+            Some(&received.conversation_id.to_string()),
+            None,
+            crate::head(),
+            None,
+            crate::notifications::NotificationPreferences::default(),
+        )
+        .unwrap();
+    assert!(baseline + QUEUED > 200);
+    assert_eq!(snapshot.pending_count, (baseline + QUEUED) as u64);
 }
 
 #[test]
@@ -1962,10 +2073,9 @@ mod real_server {
 
         // Public copy: separate re-encoded upload; retrievable without credentials.
         let remote = sender
-            .remote_ids
-            .lock()
+            .client
+            .attachment_remote_object_id(attachment)
             .unwrap()
-            .get(attachment)
             .expect("upload recorded the server object");
         let copy = crate::create_public_copy(&sender, attachment, "holiday photo.png", &remote)
             .await
@@ -2209,14 +2319,16 @@ mod real_server {
         // The receiving desktop never uploaded this object; its server ID came from the
         // authenticated download metadata.
         let remote = receiver
-            .remote_ids
-            .lock()
+            .client
+            .attachment_remote_object_id(attachment)
             .unwrap()
-            .get(attachment)
             .expect("download recorded the server object ID");
         assert_eq!(
             Some(remote.clone()),
-            sender.remote_ids.lock().unwrap().get(attachment)
+            sender
+                .client
+                .attachment_remote_object_id(attachment)
+                .unwrap()
         );
 
         // Explicit native publication path (the command adds the native confirmation dialog).

@@ -47,7 +47,8 @@ public actor OwnerComputerApprovalHost {
     private let isHosted: Bool
     private let accountSession: String?
     private var approvedPrompt: OwnerComputerApproval?
-    private var localFlowCleared = false
+    private var pendingInvitationID: String?
+    private var operationTail: Task<Void, Never>?
 
     public init(
         producer: any OwnerComputerProducer,
@@ -69,27 +70,37 @@ public actor OwnerComputerApprovalHost {
     }
 
     public func scan(qr: String) async -> OwnerComputerResult {
+        await serialized { await self.scanRequest(qr: qr) }
+    }
+
+    private func scanRequest(qr: String) async -> OwnerComputerResult {
         guard authorized else { return .failed("account-required") }
+        var createdPrompt = false
         do {
             let prompt = try producer.createRequest(qr: qr)
+            createdPrompt = true
             guard prompt.origin == origin else {
-                try producer.cancel()
-                return .failed("invalid-computer-qr")
+                return failAndClear("invalid-computer-qr")
             }
+            pendingInvitationID = prompt.invitationID
             let response = try await send("POST", "/v1/enrollment/computers", prompt.requestJSON)
-            guard let response else { return .failed("offline") }
-            if let error = code(response.status) { return .failed(error) }
+            guard let response else { return failAndClear("offline") }
+            if let error = code(response.status) { return failAndClear(error) }
             try producer.consumeCreated(invitationID: prompt.invitationID, promptDigest: prompt.promptDigest, response: response.body)
             guard let view = try approval(), view.invitationID == prompt.invitationID, view.promptDigest == prompt.promptDigest else {
-                return .failed("enrollment-state")
+                return failAndClear("enrollment-state")
             }
             return .view(view)
         } catch {
-            return .failed(errorCode(error))
+            return createdPrompt ? failAndClear(errorCode(error)) : .failed(errorCode(error))
         }
     }
 
-    public func approve(codesMatch: Bool, prompt: @escaping () async -> String?) async -> OwnerComputerResult {
+    public func approve(codesMatch: Bool, prompt: @escaping @Sendable () async -> String?) async -> OwnerComputerResult {
+        await serialized { await self.approveRequest(codesMatch: codesMatch, prompt: prompt) }
+    }
+
+    private func approveRequest(codesMatch: Bool, prompt: @escaping @Sendable () async -> String?) async -> OwnerComputerResult {
         guard codesMatch else { return .failed("codes-do-not-match") }
         do {
             guard let initial = try approval() else { return .failed("enrollment-state") }
@@ -119,43 +130,51 @@ public actor OwnerComputerApprovalHost {
             let response = try await send("POST", path(fresh.invitationID, "approve"), request)
             guard let response else { return .failed("offline") }
             if let error = code(response.status) { return .failed(error) }
+            approvedPrompt = fresh
             guard let current = try approval(), current.invitationID == fresh.invitationID, current.promptDigest == fresh.promptDigest else {
                 return .cancelled
             }
-            approvedPrompt = fresh
             return .approved
         } catch {
             return .failed(errorCode(error))
         }
     }
 
-    /// Cancellation always clears the local QR secret and pending handoff state, including network failures.
     public func cancel() async -> OwnerComputerResult {
-        if approvedPrompt != nil { return .cancelled }
-        defer { try? producer.cancel() }
-        do {
-            guard let active = try approval() else { return .cancelled }
-            let response = try await send("DELETE", path(active.invitationID), nil)
-            guard let response else { return .failed("offline") }
-            if response.status == 404 || response.status == 410 { return .cancelled }
-            if let error = code(response.status) { return .failed(error) }
-            return .cancelled
-        } catch {
-            return .failed(errorCode(error))
-        }
+        await serialized { await self.cancelRequest() }
     }
 
-    /// Clears Rust's local prompt, nonce and cached approval body without changing server state.
+    private func cancelRequest() async -> OwnerComputerResult {
+        if approvedPrompt != nil { return .cancelled }
+        let invitationID = ((try? approval()) ?? nil)?.invitationID ?? pendingInvitationID
+        clear()
+        pendingInvitationID = nil
+        if let invitationID { _ = try? await send("DELETE", path(invitationID), nil) }
+        return .cancelled
+    }
+
     private func clear() {
-        guard !localFlowCleared else { return }
-        localFlowCleared = true
         try? producer.cancel()
     }
 
-    /// Closing an approved surface must not revoke the server enrollment or discard its local transcript.
-    public func dismiss() {
-        guard approvedPrompt == nil else { return }
+    private func failAndClear(_ error: String) -> OwnerComputerResult {
         clear()
+        pendingInvitationID = nil
+        return .failed(error)
+    }
+
+    public func dismiss() async {
+        _ = await serialized { await self.cancelRequest() }
+    }
+
+    private func serialized<Result: Sendable>(_ operation: @escaping @Sendable () async -> Result) async -> Result {
+        let previous = operationTail
+        let task = Task { [previous] in
+            await previous?.value
+            return await operation()
+        }
+        operationTail = Task { _ = await task.value }
+        return await task.value
     }
 
     private var authorized: Bool { !isHosted || accountSession != nil }

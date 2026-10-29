@@ -264,7 +264,11 @@ impl Client {
         legacy: MmsLegacyBackfillState,
     ) -> Result<(), Error> {
         validate_scope(generation, scope)?;
-        validate_optional_id(legacy.history_baseline.as_deref(), "MMS baseline")?;
+        let history_baseline = legacy
+            .history_baseline
+            .as_deref()
+            .map(|value| legacy_id(value, "MMS baseline"))
+            .transpose()?;
         if legacy
             .recheck_cursor
             .as_deref()
@@ -289,9 +293,9 @@ impl Client {
             // mark history complete.
             tx.execute(
                 "INSERT INTO mms_backfill_scopes(source_generation,subscription_id,history_upper_bound,history_complete,pending_recheck_cursor,migration_done,history_descending) VALUES(?,?,?,?,?,1,1)",
-                params![generation, scope, legacy.history_baseline, false, recheck_cursor],
+                params![generation, scope, history_baseline, false, recheck_cursor],
             )?;
-            if let Some(bound) = legacy.history_baseline {
+            if let Some(bound) = history_baseline {
                 ensure_checkpoint(&tx, generation, scope, false, &bound)?;
                 ensure_checkpoint(&tx, generation, scope, true, "")?;
             }
@@ -314,6 +318,7 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        normalize_stored_history_state(&tx, generation, scope)?;
         ensure_scope(&tx, generation, scope, observed_max_id)?;
         let (baseline, complete, pause, recheck_cursor, descending, floor, history_cursor) =
             scope_row(&tx, generation, scope)?;
@@ -429,7 +434,11 @@ impl Client {
             )?
         } else {
             match current.as_deref() {
-                Some(current) => id_number(provider_id)? > id_number(current)?,
+                Some(current) => {
+                    crate::history_import::canonical_provider_id(provider_id)
+                        .ok_or(Error::InvalidRequest("MMS checkpoint"))?
+                        > stored_id_number(current)?
+                }
                 None => true,
             }
         };
@@ -467,7 +476,12 @@ impl Client {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (baseline, _, _, _, _, _, _) = scope_row(&tx, generation, scope)?;
-        if baseline.as_deref() != Some(bound) || pending_acquisitions(&tx, generation, scope)? {
+        let baseline = baseline.as_deref().ok_or(Error::Database)?;
+        if crate::history_import::stored_provider_id(baseline)?
+            != crate::history_import::canonical_provider_id(bound)
+                .ok_or(Error::InvalidRequest("MMS scan bound"))?
+            || pending_acquisitions(&tx, generation, scope)?
+        {
             tx.commit()?;
             return Ok(false);
         }
@@ -492,8 +506,12 @@ impl Client {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (_, _, _, legacy_cursor, _, _, _) = scope_row(&tx, generation, scope)?;
+        // Values stored before migration normalization may still carry a sign or padding; they
+        // keep their position instead of restarting from zero.
         let legacy_cursor = legacy_cursor
-            .and_then(|value| value.parse::<i64>().ok())
+            .as_deref()
+            .map(crate::history_import::stored_local_order)
+            .transpose()?
             .unwrap_or_default();
         let (pending_cursor, completed_cursor) =
             recheck_cursors(&tx, generation, scope, legacy_cursor)?;
@@ -501,6 +519,7 @@ impl Client {
         let (mut requests, pending_next) = recheck_partition(
             &tx,
             generation,
+            scope,
             "state='pending'",
             pending_cursor,
             pending_budget,
@@ -508,6 +527,7 @@ impl Client {
         let (completed, completed_next) = recheck_partition(
             &tx,
             generation,
+            scope,
             "state='complete'",
             completed_cursor,
             MAX_MMS_BACKFILL_RECHECK - requests.len(),
@@ -904,8 +924,11 @@ fn resolve_legacy_recheck_cursor(
     let Some(cursor) = cursor else {
         return Ok(None);
     };
-    if cursor.parse::<i64>().is_ok() {
-        return Ok(Some(cursor.into()));
+    if let Some(order) = crate::history_import::normalized_local_order(cursor) {
+        return Ok(Some(order));
+    }
+    if crate::history_import::looks_numeric(cursor) {
+        return Err(Error::InvalidRequest("MMS recheck cursor"));
     }
     let order = conn
         .query_row(
@@ -928,7 +951,9 @@ fn rewind_live_checkpoint_on_regression(
     let Some(live) = checkpoint(conn, generation, scope, false)? else {
         return Ok(());
     };
-    if id_number(observed_max_id)? < id_number(&live)? {
+    let observed = crate::history_import::canonical_provider_id(observed_max_id)
+        .ok_or(Error::InvalidRequest("MMS observed maximum"))?;
+    if observed < crate::history_import::stored_provider_id(&live)? {
         conn.execute(
             "UPDATE mms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=0",
             params![observed_max_id, generation, scope],
@@ -1099,9 +1124,63 @@ fn store_recheck_cursors(
 
 type RecheckRow = (String, i64, String, Direction, MmsAcquisitionState);
 
+fn legacy_id(value: &str, name: &'static str) -> Result<String, Error> {
+    crate::history_import::normalized_provider_id(value).ok_or(Error::InvalidRequest(name))
+}
+
+fn normalize_stored_history_state(
+    conn: &Connection,
+    generation: &str,
+    scope: &str,
+) -> Result<(), Error> {
+    let state: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT history_upper_bound,history_floor,history_cursor FROM mms_backfill_scopes WHERE source_generation=? AND subscription_id=?",
+            params![generation, scope],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((upper, floor, cursor)) = state {
+        let normalize = |value: Option<String>| -> Result<Option<String>, Error> {
+            value
+                .map(|value| {
+                    crate::history_import::normalized_provider_id(&value).ok_or(Error::Database)
+                })
+                .transpose()
+        };
+        conn.execute(
+            "UPDATE mms_backfill_scopes SET history_upper_bound=?,history_floor=?,history_cursor=? WHERE source_generation=? AND subscription_id=?",
+            params![normalize(upper)?, normalize(floor)?, normalize(cursor)?, generation, scope],
+        )?;
+    }
+
+    let mut statement = conn.prepare(
+        "SELECT imported,provider_message_id FROM mms_scan_checkpoints WHERE source_generation=? AND subscription_id=?",
+    )?;
+    let checkpoints = statement
+        .query_map(params![generation, scope], |row| {
+            Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (imported, value) in checkpoints {
+        if value.is_empty() {
+            continue;
+        }
+        let normalized =
+            crate::history_import::normalized_provider_id(&value).ok_or(Error::Database)?;
+        conn.execute(
+            "UPDATE mms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=?",
+            params![normalized, generation, scope, imported],
+        )?;
+    }
+    Ok(())
+}
+
 fn recheck_partition(
     conn: &Connection,
     generation: &str,
+    scope: &str,
     state_predicate: &str,
     cursor: i64,
     limit: usize,
@@ -1110,15 +1189,21 @@ fn recheck_partition(
         return Ok((Vec::new(), Some(cursor)));
     }
     let query = format!(
-        "SELECT acquisition_id,local_order,provider_message_id,direction,state FROM mms_acquisitions WHERE source_generation=? AND {state_predicate} AND local_order>? ORDER BY local_order LIMIT ?"
+        "SELECT acquisition_id,local_order,provider_message_id,direction,state FROM mms_acquisitions WHERE source_generation=? AND (subscription_id=? OR ?='android-mms-provider') AND {state_predicate} AND local_order>? ORDER BY local_order LIMIT ?"
     );
     let mut statement = conn.prepare(&query)?;
     let mut rows = statement
-        .query_map(params![generation, cursor, limit], decode_recheck_row)?
+        .query_map(
+            params![generation, scope, scope, cursor, limit],
+            decode_recheck_row,
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     if rows.is_empty() && cursor != 0 {
         rows = statement
-            .query_map(params![generation, 0, limit], decode_recheck_row)?
+            .query_map(
+                params![generation, scope, scope, 0, limit],
+                decode_recheck_row,
+            )?
             .collect::<Result<Vec<_>, _>>()?;
     }
     let next = rows.last().map(|row| row.1);
@@ -1717,24 +1802,14 @@ fn validate_scope(generation: &str, scope: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_optional_id(value: Option<&str>, name: &'static str) -> Result<(), Error> {
-    value
-        .map(|value| validate_id(value, name))
-        .transpose()
-        .map(|_| ())
-}
-
 fn validate_id(value: &str, name: &'static str) -> Result<(), Error> {
-    if value.parse::<u64>().is_err() {
-        return Err(Error::InvalidRequest(name));
-    }
-    Ok(())
+    crate::history_import::canonical_provider_id(value)
+        .map(|_| ())
+        .ok_or(Error::InvalidRequest(name))
 }
 
-fn id_number(value: &str) -> Result<u64, Error> {
-    value
-        .parse()
-        .map_err(|_| Error::InvalidRequest("MMS checkpoint"))
+fn stored_id_number(value: &str) -> Result<u64, Error> {
+    crate::history_import::stored_provider_id(value)
 }
 
 #[cfg(test)]

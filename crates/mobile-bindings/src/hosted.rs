@@ -225,6 +225,28 @@ pub fn restore_hosted_provisioning(
     }))
 }
 
+/// Restores a protected local hosted checkpoint for an exact canonical identity.
+/// This is structural validation only; hosts must keep checkpoint bytes in protected
+/// local storage and verify recovered secrets against the current vault header.
+#[uniffi::export]
+pub fn restore_hosted_provisioning_for_identity(
+    checkpoint_bytes: Vec<u8>,
+    expected_origin: String,
+    expected_vault_id: String,
+    expected_device_id: String,
+) -> Result<std::sync::Arc<NativeHostedProvisioning>, MobileBindingsError> {
+    let provisioning = hc::restore_for_identity(
+        checkpoint_bytes,
+        &expected_origin,
+        &expected_vault_id,
+        &expected_device_id,
+    )
+    .map_err(convert_error)?;
+    Ok(std::sync::Arc::new(NativeHostedProvisioning {
+        inner: Mutex::new(provisioning),
+    }))
+}
+
 // Method implementations
 
 #[uniffi::export]
@@ -473,6 +495,38 @@ mod tests {
                 checkpoint,
                 ORIGIN.into(),
                 uuid::Uuid::new_v4().to_string()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn identity_restore_wraps_the_native_structural_checkpoint_helper() {
+        let prepared = prepare_hosted_provisioning(
+            ORIGIN.into(),
+            uuid::Uuid::new_v4().to_string(),
+            PASSPHRASE.into(),
+            NativeHostedClientKind::Android,
+            "test device".into(),
+        )
+        .expect("valid local preparation");
+        let view = prepared.view();
+        let checkpoint = prepared.checkpoint().unwrap();
+
+        let restored = restore_hosted_provisioning_for_identity(
+            checkpoint.clone(),
+            ORIGIN.into(),
+            view.vault_id.clone(),
+            view.device_id.clone(),
+        )
+        .expect("exact identity restores without an account session");
+        assert_eq!(restored.view(), view);
+        assert!(
+            restore_hosted_provisioning_for_identity(
+                checkpoint,
+                ORIGIN.into(),
+                uuid::Uuid::new_v4().to_string(),
+                view.device_id,
             )
             .is_err()
         );

@@ -166,7 +166,7 @@ internal object SmsNativeCapture : SmsCaptureRunner {
         val capabilities = connectivity?.getNetworkCapabilities(connectivity.activeNetwork)
         val unmetered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true
         val battery = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val charging = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+        val charging = (battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
         return NativeHistoryImportConditions(unmetered, charging)
     }
 }

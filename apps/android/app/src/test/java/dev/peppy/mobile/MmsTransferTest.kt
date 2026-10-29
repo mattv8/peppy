@@ -22,6 +22,16 @@ class MmsTransferTest {
     private val id = "11111111-1111-1111-1111-111111111111"
     private val sha = "a".repeat(64)
 
+    @Test fun successfulTransferPassClearsStaleHealthFailures() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val health = MmsTransferHealth(context)
+        health.record(listOf(MmsTransferFailure(id, "upload", "transient")))
+
+        health.record(emptyList())
+
+        assertTrue(health.reasons().isEmpty())
+    }
+
     @Test fun finalizeFailureDoesNotMarkAndRetryUsesSameId() {
         val file = Files.createTempFile("cipher", ".bin").toFile().apply { writeText("cipher") }
         val client = fakeClient(listOf(cipher()))

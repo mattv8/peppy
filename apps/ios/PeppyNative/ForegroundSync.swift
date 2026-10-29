@@ -161,7 +161,7 @@ struct ForegroundSync: Sendable {
             }
             let path = envelope["purpose"] as? String == "command" ? "/v1/commands" : "/v1/events"
             do {
-                let accepted = try await server.post(path, json: data, meter: &pass.meter)
+                let accepted = try await server.post(path, json: data, preserveCodedForbidden: true, meter: &pass.meter)
                 _ = try accepted.decimal("cursor")
             } catch let error as ClientError where Self.refusesEnvelopeOnly(error) {
                 // Keep the envelope queued and in order; receive still runs.

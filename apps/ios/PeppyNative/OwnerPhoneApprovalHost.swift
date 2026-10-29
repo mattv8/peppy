@@ -72,6 +72,9 @@ public actor OwnerPhoneApprovalHost {
     private let shouldRotate: @Sendable (OwnerPhoneStage, Int, OwnerPhoneMethod, OwnerPhoneMethod) -> Bool
     /// Set once an approval succeeds. The invitation then never reports Verify or Expired again.
     private var approvedInvitationId: String?
+    /// The first locally verified claimant is the one the owner saw. A later response must not
+    /// silently replace it before approval.
+    private var displayedClaim: (invitationId: String, digest: String)?
 
     public init(
         producer: any OwnerPhoneProducer,
@@ -106,6 +109,7 @@ public actor OwnerPhoneApprovalHost {
             guard let response else { return .failed("offline") }
             if let error = code(response.status) { return .failed(error) }
             try producer.consumeCreated(response.body)
+            displayedClaim = nil
             let created = OwnerPhoneStatus(
                 invitationId: try producer.invitationId(),
                 stage: .waiting,
@@ -125,6 +129,7 @@ public actor OwnerPhoneApprovalHost {
             let qr = status.stage == .waiting ? try producer.qrPayload() : nil
             return .view(status, qr: qr)
         } catch let failure as Failure {
+            if failure.code == "claim-mismatch" { return .cancelled }
             return .failed(failure.code)
         } catch {
             return .failed(errorCode(error))
@@ -146,6 +151,7 @@ public actor OwnerPhoneApprovalHost {
             }
             return await start(method: requested)
         } catch let failure as Failure {
+            if failure.code == "claim-mismatch" { return .cancelled }
             return .failed(failure.code)
         } catch {
             return .failed(errorCode(error))
@@ -182,6 +188,7 @@ public actor OwnerPhoneApprovalHost {
             _ = secrets.saveIfMissing(secret, for: identity)
             return try await submit(fresh, freshJSON, secret)
         } catch let failure as Failure {
+            if failure.code == "claim-mismatch" { return .cancelled }
             return .failed(failure.code)
         } catch {
             return .failed(errorCode(error))
@@ -220,7 +227,19 @@ public actor OwnerPhoneApprovalHost {
         let response = try await send("GET", path(try producer.invitationId()), nil)
         guard let response else { throw Failure("offline") }
         if let error = code(response.status) { throw Failure(error) }
-        return (normalized(try producer.status(response.body)), response.body)
+        let status = normalized(try producer.status(response.body))
+        let activeInvitationID = try producer.invitationId()
+        guard status.invitationId == activeInvitationID else {
+            throw Failure("enrollment-state")
+        }
+        if let digest = status.claimDigest {
+            if let displayedClaim,
+               displayedClaim.invitationId != status.invitationId || displayedClaim.digest != digest {
+                throw Failure("claim-mismatch")
+            }
+            displayedClaim = (status.invitationId, digest)
+        }
+        return (status, response.body)
     }
 
     private func submit(_ status: OwnerPhoneStatus, _ json: String, _ secret: String) async throws -> OwnerPhoneResult {

@@ -42,7 +42,8 @@ class MmsProviderReader(context: Context) {
     }
     fun read(id: Long): MmsProviderRecord? {
         valid(id)
-        resolver.query(Uri.withAppendedPath(MMS, "$id"), MESSAGE, null, null, null)?.use { c ->
+        (resolver.query(Uri.withAppendedPath(MMS, "$id"), MESSAGE, null, null, null)
+            ?: throw MmsProviderException("MMS provider returned no message cursor")).use { c ->
             if (!c.moveToFirst()) return null
             val type = c.long("m_type")?.toInt(); val addresses = addresses(id)
             val expiryMs = expiryMs(c.long("exp"))
@@ -77,7 +78,8 @@ class MmsProviderReader(context: Context) {
     }
     private fun parts(message: Long): PartResult {
         val values = mutableListOf<MmsProviderPart>(); var error: String? = null
-        resolver.query(PART, PART_COLUMNS, "mid=?", arrayOf("$message"), "seq ASC, _id ASC")?.use { c -> while (c.moveToNext()) {
+        (resolver.query(PART, PART_COLUMNS, "mid=?", arrayOf("$message"), "seq ASC, _id ASC")
+            ?: throw MmsProviderException("MMS provider returned no parts cursor")).use { c -> while (c.moveToNext()) {
             if (values.size >= MAX_PARTS) { error = "too_many_parts"; continue }; val id = c.long("_id") ?: continue; valid(id)
             val name = c.string("name") ?: c.string("fn"); if (name != null && exceedsUtf8Limit(name, MAX_STRING)) { error = "metadata_overflow"; continue }
             values += MmsProviderPart(id, c.long("seq")?.toInt(), bounded(c.string("ct")), name, c.long("chset")?.toInt(), bounded(c.string("text")), partUri(id))
@@ -85,7 +87,8 @@ class MmsProviderReader(context: Context) {
     }
     private fun addresses(message: Long): AddressResult {
         val from = mutableListOf<String>(); val to = mutableListOf<String>(); val cc = mutableListOf<String>(); val bcc = mutableListOf<String>(); var error: String? = null
-        resolver.query(Uri.withAppendedPath(Uri.withAppendedPath(MMS, "$message"), "addr"), arrayOf("address", "type"), "type IN (137,151,130,129)", null, null)?.use { c -> val a = c.getColumnIndexOrThrow("address"); val t = c.getColumnIndexOrThrow("type"); while (c.moveToNext()) {
+        (resolver.query(Uri.withAppendedPath(Uri.withAppendedPath(MMS, "$message"), "addr"), arrayOf("address", "type"), "type IN (137,151,130,129)", null, null)
+            ?: throw MmsProviderException("MMS provider returned no address cursor")).use { c -> val a = c.getColumnIndexOrThrow("address"); val t = c.getColumnIndexOrThrow("type"); while (c.moveToNext()) {
             val value = c.getString(a) ?: continue; if (exceedsUtf8Limit(value, MAX_STRING) || from.size + to.size + cc.size + bcc.size >= MAX_ADDRESSES) { error = "address_overflow"; continue }; when (c.getInt(t)) { 137 -> from += value; 151 -> to += value; 130 -> cc += value; 129 -> bcc += value }
         } }; return AddressResult(from, to, cc, bcc, error)
     }

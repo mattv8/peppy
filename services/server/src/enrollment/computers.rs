@@ -28,7 +28,11 @@ use uuid::Uuid;
 
 use crate::{
     api::{EnrollmentAuthorization, EnrollmentAuthorizationRequest, EnrollmentOperation},
-    enrollment::{client_kind_name, validate_device_name},
+    enrollment::{
+        client_kind_name,
+        owner_authorization::{OwnerAuthorizationError, OwnerCredential, resolve_owner_credential},
+        validate_device_name,
+    },
     scope,
 };
 
@@ -389,11 +393,8 @@ async fn cancel(
     Ok(StatusCode::NO_CONTENT)
 }
 
-struct Owner {
-    vault_id: Uuid,
-    device_id: Uuid,
-    token_digest: Vec<u8>,
-}
+type Owner = OwnerCredential;
+
 async fn authorize_owner(
     state: &ComputerEnrollmentRouterState,
     headers: &HeaderMap,
@@ -404,23 +405,21 @@ async fn authorize_owner(
     } else {
         None
     };
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .filter(|v| v.len() == 96 && v.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or(unauthorized("invalid_bearer"))?;
-    let digest = Sha256::digest(token.as_bytes());
-    let row = sqlx::query("SELECT c.vault_id,c.device_id,c.token_digest FROM device_credentials c JOIN devices d ON d.vault_id=c.vault_id AND d.device_id=c.device_id WHERE c.token_digest=$1 AND c.revoked_at IS NULL AND d.revoked_at IS NULL AND d.role='owner'").bind(digest.as_slice()).fetch_optional(&state.db).await.map_err(database)?.ok_or(unauthorized("owner_required"))?;
-    let owner = Owner {
-        vault_id: row.get("vault_id"),
-        device_id: row.get("device_id"),
-        token_digest: row.get("token_digest"),
-    };
+    let owner = resolve_owner_credential(&state.db, state.hosted, headers)
+        .await
+        .map_err(owner_authorization)?;
     if hosted.is_some_and(|value| value.vault_id != owner.vault_id) {
         return Err(Error(StatusCode::FORBIDDEN, "foreign_vault"));
     }
     Ok(owner)
+}
+
+fn owner_authorization(error: OwnerAuthorizationError) -> Error {
+    match error {
+        OwnerAuthorizationError::InvalidBearer => unauthorized("invalid_bearer"),
+        OwnerAuthorizationError::OwnerRequired => unauthorized("owner_required"),
+        OwnerAuthorizationError::Database(error) => database(error),
+    }
 }
 async fn authorize_claim_hosted(
     state: &ComputerEnrollmentRouterState,

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Create a consistent Compose backup without deleting data or creating volumes.
 set -euo pipefail
+umask 077
 
 usage() { echo "usage: $0 DESTINATION_DIRECTORY" >&2; exit 64; }
 test "$#" = 1 || usage
@@ -8,7 +9,7 @@ root=$(pwd -P)
 destination_arg=$1
 destination=$(cd "$destination_arg" && pwd -P) || { echo "destination must already exist" >&2; exit 64; }
 test -f "$root/.env" || { echo ".env is required" >&2; exit 64; }
-compose=(docker compose --project-directory "$root" --env-file "$root/.env" -f "$root/docker-compose.yml")
+compose=(docker compose --project-directory "$root" --env-file "$root/.env")
 config=$(mktemp)
 layout_file=$(mktemp)
 state_file=$(mktemp)
@@ -36,12 +37,12 @@ PY
 )
 postgres_image=$(python3 - "$config" <<'PY'
 import json, sys
-print(json.load(open(sys.argv[1]))["services"]["postgres"]["image"])
+print(json.load(open(sys.argv[1]))["services"]["postgres"].get("image", ""))
 PY
 )
 seaweed_image=$(python3 - "$config" <<'PY'
 import json, sys
-print(json.load(open(sys.argv[1]))["services"]["seaweedfs"]["image"])
+print(json.load(open(sys.argv[1]))["services"]["seaweedfs"].get("image", ""))
 PY
 )
 
@@ -78,29 +79,38 @@ for service, valid_states in allowed.items():
         raise SystemExit(f"{service} is in invalid state for backup: {state}")
 PYSTATE
 
-# Compare every source container with its configured image before stopping anything.
+# Compare every source container with the effective configured image before stopping anything.
+# Compose names an unnamed build output as ${project}-${service}.
 verify_image() {
   service=$1
   configured_image=$2
   container=$("${compose[@]}" ps --all -q "$service")
   test -n "$container" || { echo "source container is missing: $service" >&2; return 67; }
-  running_id=$(docker inspect --format '{{.Image}}' "$container")
-  configured_id=$(docker image inspect --format '{{.Id}}' "$configured_image")
-  test "$running_id" = "$configured_id" || {
-    echo "$service container image mismatch (configured: $configured_image, running: $running_id)" >&2
+  if ! running_id=$(docker inspect --format '{{.Image}}' "$container") || test -z "$running_id"; then
+    echo "could not inspect source image for $service" >&2
     return 67
-  }
+  fi
+  expected_image=${configured_image:-"${project}-${service}"}
+  if ! configured_id=$(docker image inspect --format '{{.Id}}' "$expected_image") || test -z "$configured_id"; then
+    echo "configured image is unavailable for $service: $expected_image" >&2
+    return 67
+  fi
+  if test "$running_id" != "$configured_id"; then
+    echo "$service container image mismatch (configured: $expected_image, running: $running_id)" >&2
+    return 67
+  fi
+  printf '%s\n' "$configured_id"
 }
-verify_image postgres "$postgres_image"
-verify_image seaweedfs "$seaweed_image"
+if ! postgres_id=$(verify_image postgres "$postgres_image"); then exit 67; fi
+verify_image seaweedfs "$seaweed_image" >/dev/null
 api_container=$("${compose[@]}" ps --all -q api)
 if test -n "$api_container"; then
   api_image=$(python3 - "$config" <<'PYIMG'
 import json, sys
-print(json.load(open(sys.argv[1]))["services"]["api"]["image"])
+print(json.load(open(sys.argv[1]))["services"]["api"].get("image", ""))
 PYIMG
   )
-  verify_image api "$api_image"
+  verify_image api "$api_image" >/dev/null || exit 67
 fi
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -133,8 +143,8 @@ for entry in "${layout[@]}"; do
   IFS=$'\t' read -r service target volume <<< "$entry"
   test "$service" = seaweedfs || continue
   archive=$([[ "$target" = /data ]] && echo seaweed-data.tar.gz || echo seaweed-home.tar.gz)
-  docker run --rm -v "$volume:/source:ro" -v "$backup_dir:/backup" "$postgres_image" \
-    tar --sparse -C /source -czf "/backup/$archive" .
+  docker run --rm -v "$volume:/source:ro" "$postgres_id" \
+    tar --sparse -C /source -czf - . > "$backup_dir/$archive"
 done
 postgres_container=$("${compose[@]}" ps --all -q postgres)
 seaweed_container=$("${compose[@]}" ps --all -q seaweedfs)
@@ -151,4 +161,5 @@ json.dump({"format_version": 2, "created_at_utc": stamp, "source_project": proje
            "artifacts": ["postgres.dump", "seaweed-data.tar.gz", "seaweed-home.tar.gz"]}, open(out, "w"), sort_keys=True)
 PY
 ( cd "$backup_dir" && shasum -a 256 manifest.json postgres.dump seaweed-data.tar.gz seaweed-home.tar.gz > manifest.sha256 )
+chmod 600 "$backup_dir"/*
 echo "Backup written to $backup_dir" >&2

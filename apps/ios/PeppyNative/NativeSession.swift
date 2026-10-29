@@ -150,7 +150,7 @@ public actor NativeSession {
 
     /// Re-reads the active enrollment's profile, epoch and role from the server with the stored token.
     public func refreshEnrollment() async throws -> SessionStatus {
-        try await changeEnrollment {
+        return try await changeEnrollment {
             guard let identity = try self.store.activeIdentity() else { throw ClientError.notEnrolled }
             let verified = try await EnrollmentVerifier(transport: self.transport).verify(
                 origin: try ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: self.allowLoopbackHTTP),
@@ -565,10 +565,88 @@ public actor NativeSession {
 
     public func ownerVaultSecret() throws -> String {
         guard let record else { throw ClientError.notEnrolled }
-        guard let secret = try VaultSecretStore(secure: store.secure).read(record.identity) else {
+        let secrets = VaultSecretStore(secure: store.secure)
+        if let secret = try secrets.read(record.identity) {
+            // A previous repair may have stored the binding before cleanup failed. Retry cleanup,
+            // but never make an already verified binding unavailable to reveal.
+            _ = try? repairHostedVaultSecret(record: record)
+            return secret
+        }
+        return try repairHostedVaultSecret(record: record)
+    }
+
+    private func repairHostedVaultSecret(record: EnrollmentRecord) throws -> String {
+        let checkpointAccount = HostedProvisioningStorage.checkpointAccount(origin: record.identity.origin)
+        guard let checkpoint = try HostedProvisioningStorage.withLock({ try store.secure.read(checkpointAccount) }) else {
             throw ClientError.missingSecret("vault shared secret")
         }
-        return secret
+        let provisioning: NativeHostedProvisioning
+        do {
+            provisioning = try restoreHostedProvisioningForIdentity(
+                checkpointBytes: checkpoint,
+                expectedOrigin: record.identity.origin,
+                expectedVaultId: record.identity.vaultId,
+                expectedDeviceId: record.identity.deviceId
+            )
+        } catch {
+            throw ClientError.wrap(error)
+        }
+        let scope = HostedProvisioningStorage.pendingScope(
+            origin: record.identity.origin,
+            accountID: provisioning.view().accountId
+        )
+        let secrets = VaultSecretStore(secure: store.secure)
+        let snapshot = try HostedProvisioningStorage.withLock { () -> (pending: Data?, binding: Data?) in
+            guard try store.secure.read(checkpointAccount) == checkpoint else { throw ClientError.identityMismatch }
+            return (
+                try secrets.pendingData(origin: scope),
+                try store.secure.read(record.identity.account("vault-secret-v2"))
+            )
+        }
+        if let pending = snapshot.pending, let binding = snapshot.binding, pending != binding {
+            throw ClientError.identityMismatch
+        }
+        let candidateData = snapshot.binding ?? snapshot.pending
+        guard let candidateData, !candidateData.isEmpty,
+              let candidate = String(data: candidateData, encoding: .utf8), !candidate.isEmpty else {
+            throw ClientError.missingSecret("vault shared secret")
+        }
+        let verifier: NativeEnrollmentClient
+        do {
+            verifier = try newNativeExistingOwnerEnrollmentClient(
+                origin: record.identity.origin,
+                kind: .ios,
+                deviceName: "Peppy iOS",
+                profileJson: record.profileJson,
+                headerJson: record.headerJson
+            )
+            guard try verifier.ownerPassphraseMatches(passphrase: candidate) else {
+                throw ClientError.core(.WrongPassphrase)
+            }
+        } catch {
+            throw ClientError.wrap(error)
+        }
+        guard self.record?.identity == record.identity else { throw ClientError.identityMismatch }
+        try HostedProvisioningStorage.withLock {
+            guard try store.secure.read(checkpointAccount) == checkpoint,
+                  try secrets.pendingData(origin: scope) == snapshot.pending,
+                  try store.secure.read(record.identity.account("vault-secret-v2")) == snapshot.binding else {
+                throw ClientError.identityMismatch
+            }
+            if snapshot.binding == nil {
+                guard try secrets.saveVerifiedBindingIfMissing(candidate, for: record.identity) else {
+                    throw ClientError.identityMismatch
+                }
+            }
+            guard try secrets.read(record.identity) == candidate else { throw ClientError.identityMismatch }
+            if snapshot.pending == candidateData {
+                try secrets.deletePending(origin: scope)
+                guard try secrets.pendingData(origin: scope) == nil else { throw ClientError.identityMismatch }
+            }
+            guard try store.secure.read(checkpointAccount) == checkpoint else { throw ClientError.identityMismatch }
+            try store.secure.delete(checkpointAccount)
+        }
+        return candidate
     }
 
     /// A network confirmation failure may retain Rust's prepared request for one deliberate retry.
@@ -635,6 +713,7 @@ public actor NativeSession {
             // A 401 for this identity is already proof its credential is unusable; archive it.
             guard (200..<300).contains(response.status) || response.status == 401 else { throw ClientError.server(status: response.status, code: nil) }
             guard try self.store.activeIdentity() == active else { throw ClientError.identityMismatch }
+            try? self.retireRelayWakeContexts()
             self.close()
             try self.store.deactivate()
             return self.status
@@ -648,6 +727,7 @@ public actor NativeSession {
             let storedIdentity = try self.store.activeIdentity()
             let expected = self.record?.identity ?? storedIdentity
             guard expected == nil || storedIdentity == expected else { throw ClientError.identityMismatch }
+            try? self.retireRelayWakeContexts()
             self.close()
             try self.store.deactivate()
             return self.status
@@ -691,13 +771,21 @@ public actor NativeSession {
         }
     }
 
-    public func deleteVault(vaultId: String) async throws {
-        guard let record else { throw ClientError.notEnrolled }
-        var meter = RequestMeter(limit: 2)
-        let server = try authenticatedServer(record.identity)
-        let response = try await server.exchange("DELETE", "/v1/vault", body: try JSONSerialization.data(withJSONObject: ["vault_id": vaultId]), contentType: "application/json", limit: ServerClient.maxSmallBytes, meter: &meter)
-        guard (200..<300).contains(response.status) else { throw ClientError.server(status: response.status, code: nil) }
-        _ = try await disconnect()
+    public func deleteVault(vaultId: String) async throws -> SessionStatus {
+        try await changeEnrollment {
+            guard let record = self.record else { throw ClientError.notEnrolled }
+            var meter = RequestMeter(limit: 2)
+            let server = try self.authenticatedServer(record.identity)
+            let response = try await server.exchange("DELETE", "/v1/vault", body: try JSONSerialization.data(withJSONObject: ["vault_id": vaultId]), contentType: "application/json", limit: ServerClient.maxSmallBytes, meter: &meter)
+            guard (200..<300).contains(response.status) else { throw ClientError.server(status: response.status, code: nil) }
+            // The vault is gone, so a normal device revoke cannot be retried. The durable relay
+            // retirement queue survives a lost cleanup response and drains after deactivation.
+            try self.retireRelayWakeContexts()
+            guard try self.store.activeIdentity() == record.identity else { throw ClientError.identityMismatch }
+            self.close()
+            try self.store.deactivate()
+            return self.status
+        }
     }
 
     /// Authenticated server publication deliberately receives only the route ID and wake
@@ -960,8 +1048,8 @@ public actor NativeSession {
         }
     }
 
-    /// Unlocks with the vault's existing shared passphrase. The passphrase is passed to the core
-    /// once and never stored; only the core's opaque key cache is kept in the Keychain.
+    /// Unlocks with the vault's existing shared passphrase. After core verification, its exact
+    /// value may be saved in the native-only device binding; only opaque key caches are otherwise kept.
     ///
     /// Only this manual unlock activates the server-verified epoch of the current record (a no-op
     /// when it is already active). Import, refresh and key-cache restoration never activate an epoch.
@@ -969,6 +1057,9 @@ public actor NativeSession {
         guard let client, let record else { throw ClientError.notEnrolled }
         do {
             try client.unlock(profileJson: record.profileJson, headerJson: record.headerJson, passphrase: passphrase)
+            HostedProvisioningStorage.withLock {
+                _ = try? VaultSecretStore(secure: store.secure).saveVerifiedBindingIfMissing(passphrase, for: record.identity)
+            }
             try client.activateVerifiedEpoch(epoch: record.keyEpoch)
             let cache = try client.exportNativeKeyCacheForNativeStorage(epoch: record.keyEpoch)
             try store.saveKeyCache(cache, epoch: record.keyEpoch, for: record.identity)

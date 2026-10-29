@@ -437,3 +437,59 @@ async fn hosted_app_origin_is_authorized_by_policy_not_compared_to_api_origin() 
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn phone_claim_failures_carry_matching_error_and_code_fields() {
+    let (mut app, pool, schema, owner_token, _) = fixture().await;
+    let invitation_token_digest = URL_SAFE_NO_PAD.encode(Sha256::digest([6; 32]));
+    let create = CreateInvitationRequest {
+        method: EnrollmentMethod::Transfer,
+        transfer_public_key: URL_SAFE_NO_PAD.encode([7; 32]),
+        invitation_token_digest: invitation_token_digest.clone(),
+    };
+    let (next, status, _) = request(
+        app,
+        Request::post("/v1/enrollment/invitations")
+            .header("authorization", format!("Bearer {owner_token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&create).unwrap()))
+            .unwrap(),
+    )
+    .await;
+    app = next;
+    assert_eq!(status, StatusCode::OK);
+    let claim = serde_json::json!({
+        "invitation_token_digest": invitation_token_digest,
+        "claim_authenticator": URL_SAFE_NO_PAD.encode([5; 32]),
+        "device": {"device_id": Uuid::new_v4(), "kind":"android", "name":"phone", "signing_public_key":URL_SAFE_NO_PAD.encode([8;32])},
+        "transfer_public_key": URL_SAFE_NO_PAD.encode([9;32]),
+        "credential_digest": "22".repeat(32)
+    });
+    let claim_request = |body: &serde_json::Value| {
+        Request::post("/v1/enrollment/invitations/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let (next, status, claimed) = request(app, claim_request(&claim)).await;
+    app = next;
+    assert_eq!(status, StatusCode::OK);
+    assert!(claimed["claim_secret"].is_string());
+
+    let (next, status, replayed) = request(app, claim_request(&claim)).await;
+    app = next;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(replayed["error"], "claim_secret_not_replayable");
+    assert_eq!(replayed["code"], "claim_secret_not_replayable");
+
+    let mut competing = claim.clone();
+    competing["claim_authenticator"] = serde_json::json!(URL_SAFE_NO_PAD.encode([4; 32]));
+    let (_, status, competing) = request(app, claim_request(&competing)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(competing["error"], "invitation_already_claimed");
+    assert_eq!(competing["code"], "invitation_already_claimed");
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+}

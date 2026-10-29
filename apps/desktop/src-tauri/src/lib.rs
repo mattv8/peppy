@@ -174,6 +174,8 @@ pub struct AppState {
     app_lock_storage_available: AtomicBool,
     app_lock_attempts: Arc<app_lock::Attempts>,
     media_capabilities: Mutex<HashMap<String, MediaCapability>>,
+    /// How long a retiring session's workers may take to release the shared store.
+    session_drain_timeout: std::time::Duration,
     media_read_budget: Arc<MediaReadBudget>,
     update_safety: update_safety::SafetyGate,
     updates: updates::UpdateManager,
@@ -319,7 +321,7 @@ fn remember_composer_target(
 impl AppState {
     pub fn new(root: PathBuf, store: Arc<dyn SecretStore>, notifier: Notifier) -> Self {
         let notifications = Arc::new(NotificationSettings::load(&root));
-        Self {
+        let state = Self {
             config_path: root.join("server.json"),
             root,
             store,
@@ -341,10 +343,18 @@ impl AppState {
             app_lock_storage_available: AtomicBool::new(true),
             app_lock_attempts: Arc::new(app_lock::Attempts::default()),
             media_capabilities: Mutex::new(HashMap::new()),
+            session_drain_timeout: std::time::Duration::from_secs(30),
             media_read_budget: Arc::new(MediaReadBudget::new(MAX_CONCURRENT_MEDIA_READS)),
             update_safety: update_safety::SafetyGate::default(),
             updates: updates::UpdateManager::new(env!("CARGO_PKG_VERSION").into()),
+        };
+        if let Err(error) = enrollment::computer::recover_computer_install_rollback(&state) {
+            eprintln!(
+                "peppy: pending computer enrollment rollback was not completed: {}",
+                error.code
+            );
         }
+        state
     }
 
     fn config(&self) -> BridgeResult<HostConfig> {
@@ -362,8 +372,7 @@ impl AppState {
         Ok(config)
     }
 
-    async fn close_session_preserving_heads(&self, preserve_heads: bool) {
-        let _opening = self.session_open_lock.lock().await;
+    async fn retire_session_preserving_heads(&self, preserve_heads: bool) -> bool {
         if let Ok(mut scopes) = self.composer_scopes.lock() {
             scopes.clear();
         }
@@ -372,14 +381,27 @@ impl AppState {
                 generation.invalidate();
             }
         }
-        {
-            let mut active = self.session.lock().await;
-            if let Some(session) = active.take() {
-                session.cancel.cancel();
+        let session = self.session.lock().await.take();
+        self.revoke_media_capabilities();
+        if let Some(session) = session {
+            session.cancel.cancel();
+            if !sync::drain(&session, self.session_drain_timeout).await {
+                // Keep a cancelled session in the slot until its workers release the shared
+                // store; otherwise a later opener could create a concurrent Session.
+                let mut current = self.session.lock().await;
+                if current.is_none() {
+                    *current = Some(session);
+                }
+                return false;
             }
         }
-        self.revoke_media_capabilities();
         self.notification_activation.retire();
+        true
+    }
+
+    async fn close_session_preserving_heads(&self, preserve_heads: bool) {
+        let _opening = self.session_open_lock.lock().await;
+        let _ = self.retire_session_preserving_heads(preserve_heads).await;
     }
 
     async fn close_session(&self) {
@@ -399,18 +421,40 @@ impl AppState {
     /// Opens the active session while an existing operation admission remains held.
     pub(crate) async fn session_admitted(
         &self,
+        operation: &update_safety::OperationGuard,
+    ) -> BridgeResult<Option<Arc<Session>>> {
+        self.session_admitted_for_computer(operation, None).await
+    }
+
+    async fn session_admitted_for_computer(
+        &self,
         _operation: &update_safety::OperationGuard,
+        computer_attempt: Option<uuid::Uuid>,
     ) -> BridgeResult<Option<Arc<Session>>> {
         let _opening = self.session_open_lock.lock().await;
         let config = self.config()?;
         let Some(binding) = config.active_binding().cloned() else {
-            if let Some(old) = self.session.lock().await.take() {
+            // Bind the taken session first: a guard in the `if let` scrutinee would stay locked
+            // for the whole block and deadlock the timeout path below.
+            let old = self.session.lock().await.take();
+            if let Some(old) = old {
                 old.cancel.cancel();
+                // Revoke before draining: a timeout below must not leave the old session's
+                // plaintext reachable through media tokens.
+                self.revoke_media_capabilities();
+                if !sync::drain(&old, self.session_drain_timeout).await {
+                    let mut current = self.session.lock().await;
+                    if current.is_none() {
+                        *current = Some(old);
+                    }
+                    return Ok(None);
+                }
             }
             self.notification_activation.retire();
             self.revoke_media_capabilities();
             return Ok(None);
         };
+        enrollment::computer::check_computer_install_access(self, &binding, computer_attempt)?;
         let retiring = {
             let mut current = self.session.lock().await;
             if let Some(existing) = current.as_ref() {
@@ -427,7 +471,7 @@ impl AppState {
         if let Some(retiring) = retiring {
             self.notification_activation.retire();
             self.revoke_media_capabilities();
-            if !sync::drain(&retiring, std::time::Duration::from_secs(30)).await {
+            if !sync::drain(&retiring, self.session_drain_timeout).await {
                 // Keep the retiring session observable while its workers own
                 // storage. `session_open_lock` serializes every opener, so a
                 // timeout must never leave an empty slot that admits another.
@@ -446,7 +490,7 @@ impl AppState {
             }
         }
         if let Ok(mut scopes) = self.composer_scopes.lock() {
-            composer_scope::clear_for_binding(&mut scopes, &binding);
+            composer_scope::retain_for_binding(&mut scopes, &binding);
         }
         let epochs = config
             .known(&binding)
@@ -475,6 +519,14 @@ impl AppState {
 
     async fn require_session(&self) -> BridgeResult<Arc<Session>> {
         self.session().await?.ok_or_else(BridgeError::no_session)
+    }
+
+    async fn uncancelled_session(&self) -> Option<Arc<Session>> {
+        self.session
+            .lock()
+            .await
+            .clone()
+            .filter(|session| !session.cancel.is_cancelled())
     }
 
     fn revoke_media_capabilities(&self) {
@@ -506,9 +558,11 @@ async fn release_media_capabilities(state: &AppState, capabilities: ReleasedMedi
     for (session, attachment) in capabilities {
         let active = state.session.lock().await;
         let current = !state.app_locked.load(Ordering::Acquire)
-            && active
-                .as_ref()
-                .is_some_and(|candidate| Arc::ptr_eq(candidate, &session));
+            && active.as_ref().is_some_and(|candidate| {
+                !candidate.cancel.is_cancelled()
+                    && !session.cancel.is_cancelled()
+                    && Arc::ptr_eq(candidate, &session)
+            });
         drop(active);
         if current {
             let _ = blocking(move || {
@@ -1098,12 +1152,11 @@ fn open_external_url(
 }
 
 async fn session_is_current(state: &AppState, session: &Arc<Session>) -> bool {
-    state
-        .session
-        .lock()
-        .await
-        .as_ref()
-        .is_some_and(|current| Arc::ptr_eq(current, session))
+    state.session.lock().await.as_ref().is_some_and(|current| {
+        !current.cancel.is_cancelled()
+            && !session.cancel.is_cancelled()
+            && Arc::ptr_eq(current, session)
+    })
 }
 
 #[tauri::command]
@@ -1193,8 +1246,8 @@ async fn activate_native_credential(
     };
     let result = async {
         state.update_config(|config| config.select_origin(&credential.origin))?;
-        verify_import(state, &credential).await?;
-        activate_import_locked(state, credential.clone(), Some(operation)).await
+        verify_import(state, &credential, None).await?;
+        activate_import_locked(state, credential.clone(), Some(operation), None).await
     }
     .await;
     if let Err(error) = result {
@@ -1216,16 +1269,22 @@ async fn verify_and_activate_test_credential(
     state: &AppState,
     credential: Arc<credentials::ImportedCredential>,
 ) -> BridgeResult<()> {
-    verify_import(state, &credential).await?;
+    verify_import(state, &credential, None).await?;
     activate_import(state, credential).await
 }
 
 async fn verify_import(
     state: &AppState,
     credential: &Arc<credentials::ImportedCredential>,
+    computer_attempt: Option<uuid::Uuid>,
 ) -> BridgeResult<()> {
     // Refuse before any network use: the token must never be sent to a non-configured origin.
     check_configured_origin(state, credential)?;
+    enrollment::computer::check_computer_install_access(
+        state,
+        &credential.binding(),
+        computer_attempt,
+    )?;
     let (store, check) = (state.store.clone(), credential.clone());
     blocking(move || check_origin_binding(&*store, &check)).await?;
     let api = net::Api::new(&credential.origin, &credential.device_token)?;
@@ -1255,17 +1314,19 @@ async fn activate_import(
     credential: Arc<credentials::ImportedCredential>,
 ) -> BridgeResult<()> {
     let _import = state.import_lock.lock().await;
-    activate_import_locked(state, credential, None).await
+    activate_import_locked(state, credential, None, None).await
 }
 
 async fn activate_import_locked(
     state: &AppState,
     credential: Arc<credentials::ImportedCredential>,
     operation: Option<&update_safety::OperationGuard>,
+    computer_attempt: Option<uuid::Uuid>,
 ) -> BridgeResult<()> {
     // Re-checked under the lock: the origin may have changed while the credential was verified.
     check_configured_origin(state, &credential)?;
     let binding = credential.binding();
+    enrollment::computer::check_computer_install_access(state, &binding, computer_attempt)?;
     let previous = state.config()?;
     let preserve_heads = previous.active_binding() == Some(&binding);
     let (store, root, keyed, stored) = (
@@ -1287,7 +1348,11 @@ async fn activate_import_locked(
     })?;
     state.close_session_preserving_heads(preserve_heads).await;
     let open_session = match operation {
-        Some(operation) => state.session_admitted(operation).await,
+        Some(operation) => {
+            state
+                .session_admitted_for_computer(operation, computer_attempt)
+                .await
+        }
         None => state.session().await,
     };
     if let Err(error) = open_session {
@@ -1605,6 +1670,13 @@ fn emit_saved_draft(
     }
 }
 
+async fn session_for_update_flush(state: &AppState) -> BridgeResult<Arc<Session>> {
+    state
+        .uncancelled_session()
+        .await
+        .ok_or_else(BridgeError::no_session)
+}
+
 #[tauri::command]
 async fn save_draft(
     window: tauri::WebviewWindow,
@@ -1615,12 +1687,7 @@ async fn save_draft(
     // that still owes its update draft flush. It must not create or replace a session.
     let update_flush = lifecycle::update_flush_pending(window.app_handle(), window.label());
     let (_operation, session) = if update_flush {
-        let session = state
-            .session
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(BridgeError::no_session)?;
+        let session = session_for_update_flush(&state).await?;
         (None, session)
     } else {
         let operation = admit_update_operation(&state)?;
@@ -1650,8 +1717,10 @@ async fn discard_draft(
     require_main(window.label())?;
     let session = state.require_session_admitted(&operation).await?;
     let conversation_id = input.conversation_id.clone();
+    let binding = session.binding.clone();
     blocking(move || session.discard_draft(&input)).await?;
-    if let Err(error) = heads_runtime::forget_deleted_conversation(&app, &conversation_id) {
+    if let Err(error) = heads_runtime::forget_deleted_conversation(&app, &binding, &conversation_id)
+    {
         eprintln!(
             "could not clear deleted conversation pin: {}",
             error.message
@@ -2656,9 +2725,11 @@ async fn open_media(
         Some((info, plaintext)) => {
             let active = state.session.lock().await;
             if state.app_locked.load(Ordering::Acquire)
-                || !active
-                    .as_ref()
-                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+                || !active.as_ref().is_some_and(|current| {
+                    !current.cancel.is_cancelled()
+                        && !session.cancel.is_cancelled()
+                        && Arc::ptr_eq(current, &session)
+                })
             {
                 drop(active);
                 let release = session.clone();
@@ -2757,9 +2828,11 @@ async fn close_media(
     for session in released_sessions {
         let active = state.session.lock().await;
         let current = !state.app_locked.load(Ordering::Acquire)
-            && active
-                .as_ref()
-                .is_some_and(|candidate| Arc::ptr_eq(candidate, &session));
+            && active.as_ref().is_some_and(|candidate| {
+                !candidate.cancel.is_cancelled()
+                    && !session.cancel.is_cancelled()
+                    && Arc::ptr_eq(candidate, &session)
+            });
         drop(active);
         if current {
             blocking(move || {
@@ -2904,10 +2977,11 @@ where
         )
     };
     let active = tauri::async_runtime::block_on(state.session.lock());
-    if !active
-        .as_ref()
-        .is_some_and(|session| Arc::ptr_eq(session, &capability_session))
-        || capability_window != webview_label
+    if !active.as_ref().is_some_and(|session| {
+        !session.cancel.is_cancelled()
+            && !capability_session.cancel.is_cancelled()
+            && Arc::ptr_eq(session, &capability_session)
+    }) || capability_window != webview_label
         || !(request.method() == tauri::http::Method::GET
             || request.method() == tauri::http::Method::HEAD)
     {
@@ -2967,9 +3041,11 @@ where
     }
     let active = tauri::async_runtime::block_on(state.session.lock());
     if state.app_locked.load(Ordering::Acquire)
-        || !active
-            .as_ref()
-            .is_some_and(|session| Arc::ptr_eq(session, &capability_session))
+        || !active.as_ref().is_some_and(|session| {
+            !session.cancel.is_cancelled()
+                && !capability_session.cancel.is_cancelled()
+                && Arc::ptr_eq(session, &capability_session)
+        })
     {
         return tauri::http::Response::builder()
             .status(403)
@@ -3336,6 +3412,59 @@ mod media_protocol_tests {
     }
 
     #[test]
+    fn cancelled_retained_session_cannot_serve_media() {
+        let harness = ProtocolHarness::new(b"retiring");
+        assert_eq!(harness.respond(Method::GET, None).status(), StatusCode::OK);
+
+        harness.session.cancel.cancel();
+
+        assert_eq!(
+            harness.respond(Method::GET, None).status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn removed_binding_revokes_media_even_when_the_old_session_is_still_draining() {
+        let mut harness = ProtocolHarness::new(b"retiring");
+        Arc::get_mut(&mut harness.state)
+            .expect("the harness owns its state")
+            .session_drain_timeout = Duration::from_millis(20);
+        assert_eq!(
+            harness.respond(Method::GET, None).status(),
+            StatusCode::OK,
+            "the token is valid before the binding is removed"
+        );
+        let (release_worker, worker_released) = tokio::sync::oneshot::channel::<()>();
+        tauri::async_runtime::block_on(async {
+            harness.session.track_worker(tokio::spawn(async move {
+                let _ = worker_released.await;
+            }));
+        });
+
+        // The harness root has no configuration, so no binding is active.
+        let opened = tauri::async_runtime::block_on(harness.state.session()).unwrap();
+
+        assert!(opened.is_none());
+        assert_eq!(
+            harness.respond(Method::GET, None).status(),
+            StatusCode::NOT_FOUND
+        );
+        tauri::async_runtime::block_on(async {
+            let retained = harness.state.session.lock().await.clone();
+            let retained = retained.expect("a draining session keeps its slot");
+            assert!(Arc::ptr_eq(&retained, &harness.session));
+            assert!(retained.cancel.is_cancelled());
+        });
+
+        release_worker.send(()).unwrap();
+        assert!(tauri::async_runtime::block_on(harness.state.session())
+            .unwrap()
+            .is_none());
+        assert!(tauri::async_runtime::block_on(harness.state.session.lock()).is_none());
+    }
+
+    #[test]
     fn capacity_eviction_and_window_teardown_release_core_leases() {
         let harness = ProtocolHarness::new(b"first");
         let (window_attachment, window_token, evicted) =
@@ -3488,11 +3617,16 @@ async fn publish_attachment(
             "Only images available on this device can be shared as a public copy.",
         ));
     }
-    let remote = session
-        .remote_ids
-        .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .get(attachment)
+    let remote = blocking({
+        let session = session.clone();
+        move || {
+            session
+                .client
+                .attachment_remote_object_id(attachment)
+                .map_err(core_error)
+        }
+    })
+    .await?
         .ok_or_else(|| {
             BridgeError::new(
                 "public-copy-unavailable",
@@ -4911,6 +5045,7 @@ pub fn run() {
             enrollment::computer::enrollment_computer_claimant_status,
             enrollment::computer::enrollment_confirm_computer_claimant,
             enrollment::computer::enrollment_cancel_computer_claimant,
+            enrollment::computer::enrollment_discard_computer_claimant,
             enrollment::enrollment_add_phone,
             enrollment::enrollment_rotate_phone,
             enrollment::enrollment_cancel_phone,

@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
@@ -91,13 +92,14 @@ class HostedEnrollmentScreenLayoutTest {
                 safeAreaInsets = representativeSafeAreaInsets(),
                 contentTag = "hosted-enrollment-top-aligned-content",
             ) {
+                Box(Modifier.fillMaxWidth().height(1.dp).testTag("hosted-layout-top-marker"))
                 Button(modifier = Modifier.testTag("hosted-layout-top-aligned-action"), onClick = {}) {
                     Text("Continue")
                 }
             }
         }
 
-        val actionTop = composeRule.onNodeWithTag("hosted-layout-top-aligned-action")
+        val actionTop = composeRule.onNodeWithTag("hosted-layout-top-marker")
             .fetchSemanticsNode().boundsInRoot.top
         val rootTop = composeRule.onRoot().fetchSemanticsNode().boundsInRoot.top
         val expectedTop = rootTop + representativeTopInsetPx() + contentPaddingPx()
@@ -129,12 +131,8 @@ class HostedEnrollmentScreenLayoutTest {
         }
 
         val lastAction = composeRule.onNodeWithTag("hosted-layout-last-action")
-        val beforeScroll = lastAction.fetchSemanticsNode().boundsInRoot.top
-
+        lastAction.assertIsNotDisplayed()
         lastAction.performScrollTo()
-
-        val afterScroll = lastAction.fetchSemanticsNode().boundsInRoot.top
-        assertTrue("Tall content did not scroll to its last action", afterScroll < beforeScroll)
         lastAction.assertIsDisplayed()
     }
 
@@ -155,12 +153,8 @@ class HostedEnrollmentScreenLayoutTest {
         }
 
         val lastAction = composeRule.onNodeWithTag("hosted-layout-centered-last-action")
-        val beforeScroll = lastAction.fetchSemanticsNode().boundsInRoot.top
-
+        lastAction.assertIsNotDisplayed()
         lastAction.performScrollTo()
-
-        val afterScroll = lastAction.fetchSemanticsNode().boundsInRoot.top
-        assertTrue("Centered overflow content did not scroll to its last action", afterScroll < beforeScroll)
         lastAction.assertIsDisplayed()
     }
 

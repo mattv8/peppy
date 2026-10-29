@@ -11,6 +11,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.generateHostedPassphrase
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -22,12 +23,24 @@ class HostedAccountClientTest {
     private class Store : HostedSecureStore {
         val values = mutableMapOf<String, ByteArray>()
         var failWrite: String? = null
-        override fun read(key: String) = synchronized(values) { values[key]?.clone() }
+        var failRead: String? = null
+        var failRemove: String? = null
+        val writes = mutableListOf<String>()
+        override fun read(key: String) = synchronized(values) {
+            if (key == failRead) throw IOException("secure store unavailable")
+            values[key]?.clone()
+        }
         override fun write(key: String, value: ByteArray) = synchronized(values) {
             if (key == failWrite) throw IOException("secure store unavailable")
+            writes += key
             values[key] = value.clone()
         }
-        override fun remove(key: String) { synchronized(values) { values.remove(key) } }
+        override fun remove(key: String) {
+            synchronized(values) {
+                if (key == failRemove) throw IOException("secure store unavailable")
+                values.remove(key)
+            }
+        }
     }
     private class Server : HostedTransport {
         var accountId = UUID.randomUUID().toString()
@@ -45,6 +58,7 @@ class HostedAccountClientTest {
         var accountResponse = 200
         var sessionToken = "a"
         var beforeGrant: (() -> Unit)? = null
+        var onAccount: (() -> Unit)? = null
         var grantCount = 0
         val completeBodies = mutableListOf<String>()
         val calls = mutableListOf<String>()
@@ -57,6 +71,7 @@ class HostedAccountClientTest {
                     val responseCode = accountResponse
                     beforeAccount?.invoke()
                     if (responseCode != 200) return HttpResult(responseCode, """{"error":"unauthorized"}""")
+                    onAccount?.invoke()
                     HttpResult(200, JSONObject().put("account_id", accountId)
                         .put("classification", if (vaultId == null) "incomplete" else "existing")
                         .put("entitlement", "active").put("access", access)
@@ -108,8 +123,13 @@ class HostedAccountClientTest {
         val store = Store()
         val server = Server()
         var now = 0L
-        val client = HostedAccountClient(store, server) { now }
+        var client = HostedAccountClient(store, server) { now }
         suspend fun login() = client.finishGoogleSignIn(server.accountId, "provider-token")
+        fun restart() { client = HostedAccountClient(store, server) { now } }
+        fun pendingKey(accountId: String = server.accountId) =
+            VaultSecretStore(store).pendingAccount(HostedAccountClient.ORIGIN, accountId)
+        fun pending(accountId: String = server.accountId) = store.values[pendingKey(accountId)]?.toString(Charsets.UTF_8)
+        fun binding(vaultId: String, deviceId: String) = store.values[VaultSecretStore(store).account(vaultId, deviceId)]?.toString(Charsets.UTF_8)
     }
     private suspend inline fun <reified T : Throwable> rejects(crossinline block: suspend () -> Unit) {
         try { block() } catch (error: Throwable) { assertTrue("Expected ${T::class}, got ${error::class}", error is T); return }
@@ -128,8 +148,10 @@ class HostedAccountClientTest {
         val credential = CredentialParser.parse(f.client.completeVault(phrase))!!
         assertEquals(prepared.vaultId, credential.vaultId)
         assertEquals(prepared.deviceId, credential.deviceId)
-        f.client.acknowledgeEnrollment(prepared.vaultId, prepared.deviceId)
+        f.client.bindPendingSecretAndAcknowledge(prepared.vaultId, prepared.deviceId)
         assertNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+        assertEquals(phrase, f.binding(prepared.vaultId, prepared.deviceId))
+        assertNull(f.pending())
     }
 
     @Test fun storeFailurePreventsFollowingRemoteWrite() = runBlocking {
@@ -270,5 +292,135 @@ class HostedAccountClientTest {
         val first = JSONObject(f.server.completeBodies[0]); val second = JSONObject(f.server.completeBodies[1])
         assertNotEquals(first.remove("grant"), second.remove("grant"))
         assertEquals(first.toString(), second.toString())
+    }
+
+    @Test fun pendingSecretIsDurableBeforeTheCheckpointAndSurvivesRestartAndSignOut() = runBlocking {
+        val f = Fixture(); f.login()
+        f.store.failWrite = HostedAccountClient.CHECKPOINT_KEY
+        rejects<IOException> { f.client.prepareVault(phrase) }
+        assertNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+        assertEquals(phrase, f.pending())
+        assertEquals(0, f.server.grantCount)
+        f.store.failWrite = null
+        f.client.signOut(); f.restart(); f.login()
+        assertEquals(phrase, f.client.candidatePendingSecret())
+        rejects<HostedFailure> { f.client.prepareVault(generateHostedPassphrase()) }
+        assertNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+        assertEquals(phrase, f.pending())
+        val prepared = f.client.prepareVault(phrase)
+        CredentialParser.parse(f.client.completeVault(phrase))!!
+        f.client.bindPendingSecretAndAcknowledge(prepared.vaultId, prepared.deviceId)
+        assertEquals(phrase, f.binding(prepared.vaultId, prepared.deviceId))
+        assertNull(f.client.candidatePendingSecret())
+    }
+
+    @Test fun pendingSecretWriteFailureStopsBeforeTheCheckpoint() = runBlocking {
+        val f = Fixture(); f.login()
+        f.store.failWrite = f.pendingKey()
+        rejects<HostedFailure> { f.client.prepareVault(phrase) }
+        assertNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+        assertEquals(0, f.server.grantCount)
+    }
+
+    @Test fun pendingSecretIsScopedToItsAccount() = runBlocking {
+        val f = Fixture(); f.login()
+        val first = f.server.accountId
+        f.store.failWrite = HostedAccountClient.CHECKPOINT_KEY
+        rejects<IOException> { f.client.prepareVault(phrase) }
+        f.store.failWrite = null
+        f.server.accountId = UUID.randomUUID().toString(); f.login()
+        assertNull(f.client.candidatePendingSecret())
+        val other = generateHostedPassphrase()
+        f.client.prepareVault(other)
+        assertEquals(other, f.pending())
+        assertEquals(phrase, f.pending(first))
+    }
+
+    @Test fun checkpointWithoutPendingSecretPersistsItBeforeAnyPost() = runBlocking {
+        val f = Fixture(); f.login(); val prepared = f.client.prepareVault(phrase)
+        f.store.values.remove(f.pendingKey())
+        f.client.prepareVault(phrase)
+        assertEquals(phrase, f.pending())
+        f.store.values.remove(f.pendingKey())
+        f.server.beforeGrant = { assertEquals(phrase, f.pending()) }
+        CredentialParser.parse(f.client.completeVault(phrase))!!
+        assertEquals(1, f.server.grantCount)
+        f.client.bindPendingSecretAndAcknowledge(prepared.vaultId, prepared.deviceId)
+        assertEquals(phrase, f.binding(prepared.vaultId, prepared.deviceId))
+    }
+
+    @Test fun wrongPhraseNeverPersistsPendingOrPosts() = runBlocking {
+        val f = Fixture(); f.login(); f.client.prepareVault(phrase)
+        f.store.values.remove(f.pendingKey())
+        val wrong = generateHostedPassphrase()
+        rejects<HostedFailure> { f.client.prepareVault(wrong) }
+        rejects<HostedFailure> { f.client.completeVault(wrong) }
+        assertNull(f.pending())
+        assertEquals(0, f.server.grantCount)
+    }
+
+    @Test fun unreadablePendingSecretBlocksTheGrant() = runBlocking {
+        val f = Fixture(); f.login(); f.client.prepareVault(phrase)
+        f.store.failRead = f.pendingKey()
+        rejects<HostedFailure> { f.client.completeVault(phrase) }
+        rejects<HostedFailure> { f.client.candidatePendingSecret() }
+        assertEquals(0, f.server.grantCount)
+        assertTrue(f.server.completeBodies.isEmpty())
+    }
+
+    @Test fun canceledPreparationWritesNoSecretOrCheckpoint() = runBlocking {
+        val f = Fixture(); f.login()
+        f.server.onAccount = { f.client.cancelPendingWork() }
+        rejects<kotlinx.coroutines.CancellationException> { f.client.prepareVault(phrase) }
+        assertNull(f.pending())
+        assertNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+    }
+
+    @Test fun bindingVerifiesTheCheckpointIdentityBeforeMovingTheSecret() = runBlocking {
+        val f = Fixture(); f.login(); val prepared = f.client.prepareVault(phrase); f.client.completeVault(phrase)
+        val checkpoint = f.store.read(HostedAccountClient.CHECKPOINT_KEY)
+        rejects<HostedFailure> { f.client.bindPendingSecretAndAcknowledge(prepared.vaultId, "other-device") }
+        rejects<HostedFailure> { f.client.bindPendingSecretAndAcknowledge("other-vault", prepared.deviceId) }
+        assertTrue(f.store.writes.none { it.startsWith("vault-secret:v2:") })
+        assertEquals(phrase, f.pending())
+        assertArrayEquals(checkpoint, f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+        f.server.accountId = UUID.randomUUID().toString(); f.login()
+        rejects<HostedFailure> { f.client.bindPendingSecretAndAcknowledge(prepared.vaultId, prepared.deviceId) }
+        assertNull(f.binding(prepared.vaultId, prepared.deviceId))
+        assertArrayEquals(checkpoint, f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+    }
+
+    @Test fun missingCheckpointBindsNothing() = runBlocking {
+        val f = Fixture(); f.login()
+        assertTrue(VaultSecretStore(f.store).savePending(HostedAccountClient.ORIGIN, f.server.accountId, phrase.toCharArray()))
+        f.client.bindPendingSecretAndAcknowledge("vault", "device")
+        assertNull(f.binding("vault", "device"))
+        assertEquals(phrase, f.pending())
+    }
+
+    @Test fun existingDifferentBindingIsNeverOverwrittenAndKeepsTheCheckpoint() = runBlocking {
+        val f = Fixture(); f.login(); val prepared = f.client.prepareVault(phrase); f.client.completeVault(phrase)
+        val key = VaultSecretStore(f.store).account(prepared.vaultId, prepared.deviceId)
+        f.store.values[key] = "bound".toByteArray()
+        rejects<HostedFailure> { f.client.bindPendingSecretAndAcknowledge(prepared.vaultId, prepared.deviceId) }
+        assertEquals("bound", f.binding(prepared.vaultId, prepared.deviceId))
+        assertEquals(phrase, f.pending())
+        assertNotNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+    }
+
+    @Test fun failedPendingRemovalKeepsTheCheckpointAndRetryCompletes() = runBlocking {
+        val f = Fixture(); f.login(); val prepared = f.client.prepareVault(phrase); f.client.completeVault(phrase)
+        f.store.failRemove = f.pendingKey()
+        rejects<HostedFailure> { f.client.bindPendingSecretAndAcknowledge(prepared.vaultId, prepared.deviceId) }
+        assertNotNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+        assertEquals(phrase, f.binding(prepared.vaultId, prepared.deviceId))
+        f.store.failRemove = HostedAccountClient.CHECKPOINT_KEY
+        rejects<IOException> { f.client.bindPendingSecretAndAcknowledge(prepared.vaultId, prepared.deviceId) }
+        assertNull(f.pending())
+        assertNotNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+        f.store.failRemove = null
+        f.client.bindPendingSecretAndAcknowledge(prepared.vaultId, prepared.deviceId)
+        assertNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+        assertEquals(phrase, f.binding(prepared.vaultId, prepared.deviceId))
     }
 }

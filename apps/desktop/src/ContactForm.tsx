@@ -74,6 +74,7 @@ export function ContactForm({
   bookCapabilities,
   toneControl,
   savedToneSeed,
+  saveDisabled = false,
   createPrefill,
 }: {
   initial?: ContactView;
@@ -86,6 +87,7 @@ export function ContactForm({
   bookCapabilities?: { canWrite: boolean; supportsNotes: boolean; supportsPhoto: boolean; supportsBirthday?: boolean };
   toneControl?: { value?: number; pending?: boolean; error?: string; disabled?: boolean; onSelect(index: number | null): void };
   savedToneSeed?: string;
+  saveDisabled?: boolean;
   createPrefill?: { phone: string };
 }) {
   const rowSequence = useRef(0);
@@ -293,7 +295,7 @@ export function ContactForm({
         <button
           data-action="save-edit"
           className="primary-button"
-          disabled={!displayName.trim() || displayName === "#" || busy || fieldReadOnly}
+          disabled={!displayName.trim() || displayName === "#" || busy || fieldReadOnly || saveDisabled}
           onClick={() => onSave({
             ...draft,
             phones: draft.phones.map(({ editorKey: _key, ...value }) => value),

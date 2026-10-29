@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import QRCode from "qrcode";
 import { BusyIndicator } from "@peppy/desktop-ui";
-import { bridge, type ComputerClaimantView, type EnrollmentView, type HostedAccountView } from "./bridge";
+import { bridge, discardComputerClaimant as discardNativeComputerClaimant, type ComputerClaimantView, type EnrollmentView, type HostedAccountView } from "./bridge";
 import { peppyCopy, type PeppyCopyKey } from "./generated/peppyCopy";
 import "./setup-landing.css";
 
@@ -9,7 +9,7 @@ type Mode = "hosted" | "self-hosted";
 type HostedPath = "chooser" | "existing" | "new";
 type Route = "checking" | "chooser" | "new" | "enrollment" | "lapsed" | "billing" | "provisioning" | "passphrase";
 type Method = "transfer" | "shared_secret";
-type Stage = EnrollmentView["stage"] | ComputerClaimantView["stage"];
+type Stage = EnrollmentView["stage"] | ComputerClaimantView["stage"] | "computer_claim_error";
 type InvitationAttempt = "idle" | "starting" | "active" | "stopped";
 type PendingOperation = { id: number; label: PeppyCopyKey };
 type EnrollmentOperation = { action: (isCurrent: () => boolean) => Promise<EnrollmentView>; retry: () => void; label: PeppyCopyKey; startOver?: boolean; reconcileCreateOwner?: boolean };
@@ -48,10 +48,21 @@ const diagnosticErrorCodes = new Set<string>([
   "invalid_setup_token", "instance_already_claimed", "invite_invalid", "vault_owner_required",
   "username_taken", "invalid_username", "vault_request_completed", "request_completed_without_material", "vault-secret-unavailable", "hosted-checkpoint-invalid",
   "vault_not_found", "request_not_found", "request_not_approved", "operation_conflict", "admin-password-length",
-  "owner-status-pending",
+  "owner-status-pending", "identity-preserved", "computer-discard-ownership-unproven", "session-draining", "filesystem", "computer_transient",
 ]);
 const diagnosticErrorCode = (code: unknown): string => typeof code === "string" && diagnosticErrorCodes.has(code) ? code : "unavailable";
 const thrownErrorCode = (error: unknown): string => typeof error === "object" && error !== null && "code" in error ? diagnosticErrorCode(error.code) : "unavailable";
+const computerFailureMessage = (errorCode: string, finishing: boolean) => {
+  if (["offline", "network", "server-rejected", "server-response", "computer_transient"].includes(errorCode)) return copy(finishing ? "computer_finishing_retry_body" : "computer_approved_transient_body");
+  if (errorCode === "identity-preserved") return copy("computer_error_identity_preserved");
+  if (errorCode === "secure-store-unavailable") return copy("computer_error_secure_store");
+  if (errorCode === "hosted-session-required") return copy("computer_error_hosted_session_required");
+  return enrollmentErrorMessage(errorCode);
+};
+const computerDiscardFailureMessage = (errorCode: string) => copy(errorCode === "computer-discard-ownership-unproven" ? "computer_discard_error_ownership"
+  : errorCode === "session-draining" ? "computer_discard_error_draining"
+    : errorCode === "secure-store-unavailable" ? "computer_discard_error_secure_store"
+      : ["host-state", "host-config", "filesystem"].includes(errorCode) ? "computer_discard_error_filesystem" : "computer_discard_error_generic");
 
 const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "offline") return "Peppy could not connect to the server. Check the server address, that the server is running, and its HTTPS certificate, then try again.";
@@ -125,6 +136,14 @@ function Stage({ stage, setupMode, children }: { stage: Stage; setupMode?: "open
   return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage} data-setup-mode={setupMode}>{children}</div>;
 }
 
+function DiscardComputerClaimant({ confirming, busy, onConfirming, onDiscard }: { confirming: boolean; busy: boolean; onConfirming(value: boolean): void; onDiscard(): Promise<void> }) {
+  const safeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (confirming) safeButton.current?.focus(); }, [confirming]);
+  const cancel = () => { if (busy) return; onConfirming(false); requestAnimationFrame(() => document.getElementById("computer-discard-button")?.focus()); };
+  if (confirming) return <div id="computer-discard-confirm" role="group" aria-label={copy("computer_discard_confirm_label")} onKeyDown={event => { if (event.key === "Escape") cancel(); }}><p id="computer-discard-confirm-body">{copy("computer_discard_confirm_body")}</p><button id="computer-discard-confirm-button" className="destructive-button" aria-describedby="computer-discard-confirm-body" disabled={busy} onClick={() => void onDiscard()}>{copy("computer_discard_confirm_yes")}</button><button ref={safeButton} id="computer-discard-cancel-button" className="secondary-button" aria-describedby="computer-discard-confirm-body" disabled={busy} onClick={cancel}>{copy("computer_discard_confirm_no")}</button></div>;
+  return <button id="computer-discard-button" className="secondary-button" disabled={busy} onClick={() => onConfirming(true)}>{copy("computer_discard_cta")}</button>;
+}
+
 export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEstablished = false, addingPhone = false, connectionPending = false, onExit, onDeferPhone, onJoined, onInitialEnrollmentStart, fixedOrigin, accountUrl, newIdentity = false, hostKind = "native" }: {
   mode: Mode;
   onMode(mode: Mode): void;
@@ -145,13 +164,19 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const [account, setAccount] = useState<HostedAccountView | null>(null);
   const [accountLoading, setAccountLoading] = useState(!fixedOrigin && mode === "hosted" && !enrolledWithoutPhone);
   const [accountError, setAccountError] = useState(false);
+  const [signOutError, setSignOutError] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   const [signInError, setSignInError] = useState(false);
   const [recoveryPending, setRecoveryPending] = useState(false);
   const [hostedPath, setHostedPath] = useState<HostedPath>("chooser");
   const [view, setView] = useState<EnrollmentView | null>(null);
   const [computerClaimant, setComputerClaimant] = useState<ComputerClaimantView | null>(null);
   const [computerClaimantError, setComputerClaimantError] = useState<string | null>(null);
+  const [computerClaimantErrorCode, setComputerClaimantErrorCode] = useState<string | null>(null);
   const [computerPollError, setComputerPollError] = useState(false);
+  const [finishAttempted, setFinishAttempted] = useState(false);
+  const [computerDiscardConfirming, setComputerDiscardConfirming] = useState(false);
+  const [computerClaimantCanDiscard, setComputerClaimantCanDiscard] = useState(false);
   const [continueInBrowser, setContinueInBrowser] = useState(false);
   const [narrowBrowser, setNarrowBrowser] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(max-width: 640px)")?.matches === true);
   const [qr, setQr] = useState("");
@@ -189,6 +214,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const inviteLinkInput = useRef<HTMLInputElement>(null);
   const joined = useRef(false);
   const computerJoined = useRef(false);
+  const computerEpoch = useRef(0);
+  const computerMutationInFlight = useRef(false);
+  const computerFailureFocus = useRef<string | null>(null);
+  const computerFinishFailures = useRef(0);
   const provisioning = useRef(false);
   const discoverStarted = useRef(false);
   const fixedStarted = useRef(false);
@@ -306,6 +335,17 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     setBusy(false);
     setPendingOperation(null);
     setInvitationState("idle");
+    computerEpoch.current += 1;
+    computerMutationInFlight.current = false;
+    setComputerClaimant(null);
+    setComputerClaimantError(null);
+    setComputerClaimantErrorCode(null);
+    setComputerPollError(false);
+    setFinishAttempted(false);
+    setComputerDiscardConfirming(false);
+    setComputerClaimantCanDiscard(false);
+    computerFinishFailures.current = 0;
+    void bridge.enrollment_cancel_computer().catch(() => undefined);
   };
   const refreshAccount = async () => {
     const epoch = ++accountFetchEpoch.current;
@@ -329,12 +369,44 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       }
     }
   };
+  const signOut = async () => {
+    setSignOutError(false);
+    setSigningOut(true);
+    try {
+      await bridge.hosted_sign_out();
+      await refreshAccount();
+    } catch {
+      setSignOutError(true);
+    } finally {
+      setSigningOut(false);
+    }
+  };
 
-  const discover = (origin?: string) => runEnrollment({ action: () => bridge.enrollment_discover(origin), retry: () => discover(origin), label: "production_pairing_connecting" });
+  const restoreComputerClaimant = (next: EnrollmentView) => {
+    if (hostKind === "native" && next.computerClaimant) {
+      computerEpoch.current += 1;
+      setComputerClaimant(next.computerClaimant);
+      const retained = ["computer_approved", "computer_finishing"].includes(next.computerClaimant.stage);
+      setFinishAttempted(retained);
+      setComputerClaimantCanDiscard(retained);
+      if (next.computerClaimant.errorCode && next.computerClaimant.errorCode !== "computer_transient") {
+        const errorCode = diagnosticErrorCode(next.computerClaimant.errorCode);
+        setComputerClaimantErrorCode(errorCode);
+        setComputerClaimantError(computerFailureMessage(errorCode, next.computerClaimant.stage === "computer_finishing"));
+      }
+    }
+    return next;
+  };
+  const discover = (origin?: string) => runEnrollment({ action: async isCurrent => {
+    const next = await bridge.enrollment_discover(origin);
+    return isCurrent() ? restoreComputerClaimant(next) : next;
+  }, retry: () => discover(origin), label: "production_pairing_connecting" });
   const discoverHosted = () => runEnrollment({
     action: async isCurrent => {
       const origin = await bridge.hosted_origin_url();
-      return isCurrent() ? bridge.enrollment_discover(origin) : failedView();
+      if (!isCurrent()) return failedView();
+      const next = await bridge.enrollment_discover(origin);
+      return isCurrent() ? restoreComputerClaimant(next) : next;
     },
     retry: discoverHosted,
     label: "production_pairing_connecting",
@@ -358,38 +430,71 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     onInitialEnrollmentStart?.();
     return runEnrollment({ action: () => bridge.enrollment_connect_shared_secret(vaultOwner ? { vaultOwner } : undefined), retry: connectSharedSecret, label: "production_pairing_connecting" });
   };
-  const applyComputerClaimant = (next: ComputerClaimantView) => {
+  const applyComputerClaimant = (next: ComputerClaimantView, epoch = computerEpoch.current, fromPoll = false) => {
+    if (!mounted.current || epoch !== computerEpoch.current) return;
     setComputerPollError(false);
-    setComputerClaimant(current => (current && (current.stage === "computer_approved" || current.stage === "computer_finishing") && next.stage === "computer_expired" ? current : next));
+    setComputerClaimant(current => epoch !== computerEpoch.current || !current || current.stage === "computer_connected" ? current : fromPoll && (current.stage === "computer_approved" || current.stage === "computer_finishing") && ["computer_waiting", "computer_expired"].includes(next.stage) ? current : next);
   };
   const beginComputerClaimant = async () => {
+    const epoch = ++computerEpoch.current;
     setComputerClaimantError(null);
+    setComputerClaimantErrorCode(null);
+    setFinishAttempted(false);
+    setComputerDiscardConfirming(false);
+    setComputerClaimantCanDiscard(false);
+    computerFinishFailures.current = 0;
     const pendingId = beginPending("production_pairing_preparing");
     try {
-      applyComputerClaimant(await bridge.enrollment_connect_computer());
+      const next = await bridge.enrollment_connect_computer();
+      if (epoch === computerEpoch.current) setComputerClaimant(next);
     } catch (error) {
-      setComputerClaimantError(enrollmentErrorMessage(thrownErrorCode(error)));
+      if (!mounted.current || epoch !== computerEpoch.current) return;
+      const errorCode = thrownErrorCode(error);
+      setComputerClaimantErrorCode(errorCode);
+      setComputerClaimantError(errorCode === "identity-preserved" ? copy("computer_error_identity_preserved") : enrollmentErrorMessage(errorCode));
     } finally {
       endPending(pendingId);
     }
   };
   const finishComputerClaimant = async () => {
+    if (computerMutationInFlight.current) return;
+    computerMutationInFlight.current = true;
+    const epoch = ++computerEpoch.current;
+    setComputerDiscardConfirming(false);
+    setFinishAttempted(true);
+    setComputerClaimantError(null);
+    setComputerClaimantErrorCode(null);
+    const showFailure = (errorCode: string, failureStage = computerClaimant?.stage) => {
+      computerFinishFailures.current += 1;
+      setComputerClaimantErrorCode(errorCode);
+      setComputerClaimantError(computerFailureMessage(errorCode, failureStage === "computer_finishing"));
+      setComputerClaimantCanDiscard(computerFinishFailures.current >= 2 || !["offline", "network", "server-rejected", "server-response", "computer_transient"].includes(errorCode));
+      computerFailureFocus.current = failureStage === "computer_finishing" ? "computer-finishing-retry-button" : "computer-finish-button";
+    };
     const pendingId = beginPending("production_pairing_finishing");
     try {
-      applyComputerClaimant(await bridge.enrollment_confirm_computer());
+      const next = await bridge.enrollment_confirm_computer();
+      applyComputerClaimant(next, epoch);
+      if (mounted.current && epoch === computerEpoch.current && next.errorCode && ["computer_approved", "computer_finishing"].includes(next.stage)) showFailure(diagnosticErrorCode(next.errorCode), next.stage);
     } catch (error) {
-      setComputerClaimantError(enrollmentErrorMessage(thrownErrorCode(error)));
+      if (mounted.current && epoch === computerEpoch.current) showFailure(thrownErrorCode(error));
     } finally {
+      if (epoch === computerEpoch.current) computerMutationInFlight.current = false;
       endPending(pendingId);
     }
   };
   const reopenComputerClaimant = () => window.location.reload();
+  const retryConnectedComputer = () => {
+    setComputerClaimantError(null);
+    void Promise.resolve(onJoined()).catch(() => setComputerClaimantError(copy("computer_connected_open_error")));
+  };
   const cancelComputerClaimant = async () => {
     if (computerClaimant?.stage !== "computer_waiting") return;
+    const epoch = ++computerEpoch.current;
     const pendingId = beginPending("production_pairing_cancelling");
     try {
       await bridge.enrollment_cancel_computer();
-      setComputerClaimant(null);
+      if (epoch === computerEpoch.current) setComputerClaimant(null);
       return true;
     } catch (error) {
       setComputerClaimantError(enrollmentErrorMessage(thrownErrorCode(error)));
@@ -399,15 +504,54 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     return false;
   };
   const useComputerPhraseInstead = async () => {
-    if (!await cancelComputerClaimant()) return;
+    computerEpoch.current += 1;
+    setComputerClaimant(null);
+    setComputerClaimantError(null);
+    setFinishAttempted(false);
+    try {
+      await bridge.enrollment_cancel_computer();
+    } catch (error) {
+      const errorCode = thrownErrorCode(error);
+      setComputerClaimantErrorCode(errorCode);
+      setComputerClaimantError(enrollmentErrorMessage(errorCode));
+      return;
+    }
     void connectSharedSecret();
   };
+  const discardComputerClaimant = async () => {
+    if (computerMutationInFlight.current) return;
+    computerMutationInFlight.current = true;
+    const epoch = ++computerEpoch.current;
+    const pendingId = beginPending("computer_discard_pending");
+    try {
+      await discardNativeComputerClaimant();
+      if (!mounted.current || epoch !== computerEpoch.current) return;
+      setComputerClaimant(null);
+      setComputerClaimantError(null);
+      setComputerClaimantErrorCode(null);
+      setFinishAttempted(false);
+      setComputerDiscardConfirming(false);
+      setComputerClaimantCanDiscard(false);
+      computerFinishFailures.current = 0;
+    } catch (error) {
+      if (!mounted.current || epoch !== computerEpoch.current) return;
+      const errorCode = thrownErrorCode(error);
+      setComputerClaimantErrorCode(errorCode);
+      setComputerClaimantError(computerDiscardFailureMessage(errorCode));
+      setComputerDiscardConfirming(false);
+      computerFailureFocus.current = "computer-discard-button";
+    } finally {
+      if (epoch === computerEpoch.current) computerMutationInFlight.current = false;
+      endPending(pendingId);
+    }
+  };
   const retryComputerStatus = async () => {
+    const epoch = computerEpoch.current;
     setComputerPollError(false);
     try {
-      applyComputerClaimant(await bridge.enrollment_computer_status());
+      applyComputerClaimant(await bridge.enrollment_computer_status(), epoch, true);
     } catch {
-      setComputerPollError(true);
+      if (mounted.current && epoch === computerEpoch.current) setComputerPollError(true);
     }
   };
   const beginVaultRequest = () => {
@@ -815,12 +959,15 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     return () => window.clearInterval(timer);
   }, [stage]);
   useEffect(() => {
-    if (!computerClaimant || !["computer_waiting", "computer_approved"].includes(computerClaimant.stage)) return;
+    if (!computerClaimant || finishAttempted || !["computer_waiting", "computer_approved"].includes(computerClaimant.stage)) return;
+    const epoch = computerEpoch.current;
     const timer = window.setInterval(() => {
-      void bridge.enrollment_computer_status().then(applyComputerClaimant).catch(() => setComputerPollError(true));
+      void bridge.enrollment_computer_status().then(next => applyComputerClaimant(next, epoch, true)).catch(() => {
+        if (epoch === computerEpoch.current && computerClaimant.stage === "computer_waiting") setComputerPollError(true);
+      });
     }, pollIntervalMs);
     return () => window.clearInterval(timer);
-  }, [computerClaimant?.stage]);
+  }, [computerClaimant?.stage, finishAttempted]);
   useEffect(() => {
     const invitation = stage === "waiting_phone" ? view?.qrPayload : stage === "expired" ? `expired:${view?.qrPayload ?? ""}` : null;
     const nearExpiry = stage === "waiting_phone" && (view?.expiresInSeconds ?? Infinity) <= 15;
@@ -870,6 +1017,15 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       else bodyRef.current?.querySelector<HTMLElement>("h2")?.focus();
     });
   }, [fixedOrigin, mode, route, stage, computerClaimant?.stage, connectedOrigin, community, recoveryActive]);
+  useEffect(() => {
+    if (busy || !computerFailureFocus.current) return;
+    const target = computerFailureFocus.current;
+    computerFailureFocus.current = null;
+    requestAnimationFrame(() => document.getElementById(target)?.focus());
+  }, [busy, computerClaimantError]);
+  useEffect(() => {
+    if (!busy && !computerClaimant && computerClaimantError) requestAnimationFrame(() => bodyRef.current?.querySelector<HTMLElement>("#enrollment-computer_claim_error h2")?.focus());
+  }, [busy, computerClaimant, computerClaimantError]);
 
   const recordModeChoice = (next: Mode) => {
     if (!fixedOrigin) window.localStorage.setItem("peppy.setup.mode", next);
@@ -957,7 +1113,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       : null;
     return (
       <>
-        {computerClaimant ? renderComputerClaimant(computerClaimant) : computerClaimantError ? <Stage stage="locked"><Heading>Something went wrong</Heading><p id="computer-claimant-error" role="alert">{computerClaimantError}</p><div className="enrollment-actions"><button id="computer-retry-button" className="primary-button" disabled={busy} onClick={() => void beginComputerClaimant()}>Retry</button></div></Stage> : view ? renderStage(view) : <p id="enrollment-checking" role="status">Checking this server…</p>}
+        {computerClaimant ? renderComputerClaimant(computerClaimant) : computerClaimantError ? <Stage stage="computer_claim_error"><Heading>{copy("computer_error_heading")}</Heading><p id="computer-claimant-error" role="alert">{computerClaimantError}</p><div className="enrollment-actions">{computerClaimantErrorCode !== "identity-preserved" && <button id="computer-retry-button" className="primary-button" disabled={busy} onClick={() => void beginComputerClaimant()}>{copy("computer_retry_cta")}</button>}{computerClaimantErrorCode !== "enrollment-state" && <button id="computer-use-phrase-button" className={computerClaimantErrorCode === "identity-preserved" ? "primary-button" : "secondary-button"} disabled={busy} onClick={() => void useComputerPhraseInstead()}>{copy("computer_use_phrase_cta")}</button>}</div></Stage> : view ? renderStage(view) : <p id="enrollment-checking" role="status">Checking this server…</p>}
+        {computerClaimantErrorCode && <p id="computer-error-code" className="setup-hint" data-error-code={computerClaimantErrorCode}>Error code: {computerClaimantErrorCode}</p>}
         {back}
       </>
     );
@@ -981,21 +1138,21 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const renderComputerClaimant = (claimant: ComputerClaimantView): ReactNode => {
     if (claimant.stage === "computer_waiting") return <Stage stage={claimant.stage}><Heading>{connectHeading}</Heading><p>{copy("computer_waiting_instructions")}</p>{qrState === "generating" && <BusyIndicator id="computer-qr-generating" label={copy("computer_qr_generating")} />}{qrState === "error" && <p id="computer-qr-error" role="alert">{copy("computer_qr_error")} <button className="secondary-button" onClick={() => setQrRetry(current => current + 1)}>{copy("computer_retry_cta")}</button></p>}{computerPollError && <p id="computer-status-error" role="alert">{copy("computer_status_error")} <button className="secondary-button" onClick={() => void retryComputerStatus()}>Retry</button></p>}{qr && <div id="computer-qr-hero"><img id="computer-qr-image" src={qr} alt="" aria-hidden="true" /><span className="visually-hidden" role="img" aria-label={copy("computer_qr_accessibility")} />{(claimant.expiresInSeconds ?? 0) > 0 && <span id="computer-countdown" role="timer" aria-live="off">{copy("computer_expires_in")} {claimant.expiresInSeconds}s</span>}</div>}<p className="setup-hint">{copy("computer_qr_hint")}</p>{hostKind === "browser" && <p id="computer-browser-restart-notice" className="setup-notice">{copy("computer_browser_phrase_hint")}</p>}<div className="enrollment-actions"><button id="computer-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelComputerClaimant()}>{copy("computer_cancel_cta")}</button><button id="computer-use-phrase-button" className="secondary-button" disabled={busy} onClick={() => void useComputerPhraseInstead()}>{copy("computer_use_phrase_cta")}</button></div></Stage>;
     if (claimant.stage === "computer_approved") {
-      const transient = claimant.errorCode === "computer_transient";
-      return <Stage stage={claimant.stage}><Heading>{copy("computer_approved_heading")}</Heading><p>{copy("computer_approved_body")}</p>{claimant.verificationCode && <div id="computer-verification" role="group" aria-labelledby="computer-verification-caption"><p id="computer-verification-caption" className="setup-hint">Verification code</p><output id="computer-verification-code" aria-label={`Verification code: ${claimant.verificationCode}`}>{claimant.verificationCode}</output></div>}{transient && <p id="computer-approved-transient" role="alert">{copy("computer_approved_transient_body")}</p>}{computerClaimantError && <p id="computer-confirm-error" role="alert">{computerClaimantError}</p>}<div className="enrollment-actions"><button id="computer-finish-button" className="primary-button" disabled={busy} onClick={() => void finishComputerClaimant()}>{copy(transient ? "computer_finishing_retry_cta" : "computer_finish_cta")}</button></div></Stage>;
+      const retry = claimant.errorCode === "computer_transient" || Boolean(computerClaimantError);
+      return <Stage stage={claimant.stage}><Heading>{copy("computer_approved_heading")}</Heading><p>{copy("computer_approved_body")}</p>{claimant.verificationCode && <div id="computer-verification" role="group" aria-labelledby="computer-verification-caption"><p id="computer-verification-caption" className="setup-hint">Verification code</p><output id="computer-verification-code" aria-label={`Verification code: ${claimant.verificationCode}`}>{claimant.verificationCode}</output></div>}{claimant.errorCode === "computer_transient" && <p id="computer-approved-transient" role="alert">{copy("computer_approved_transient_body")}</p>}{computerClaimantError && <p id="computer-confirm-error" role="alert">{computerClaimantError}</p>}<div className="enrollment-actions"><button id="computer-finish-button" className="primary-button" disabled={busy} onClick={() => void finishComputerClaimant()}>{copy(retry ? "computer_finishing_retry_cta" : "computer_finish_cta")}</button>{computerClaimantCanDiscard && <DiscardComputerClaimant confirming={computerDiscardConfirming} busy={busy} onConfirming={setComputerDiscardConfirming} onDiscard={discardComputerClaimant} />}</div></Stage>;
     }
-    if (claimant.stage === "computer_finishing") return <Stage stage={claimant.stage}><Heading>{copy("computer_finishing_heading")}</Heading>{claimant.errorCode === "computer_transient" ? <><p id="computer-finishing-error" role="alert">{copy("computer_finishing_retry_body")}</p><div className="enrollment-actions"><button id="computer-finishing-retry-button" className="primary-button" disabled={busy} onClick={() => void finishComputerClaimant()}>{copy("computer_finishing_retry_cta")}</button></div></> : <BusyIndicator id="computer-finishing-status" label="Installing verified connection" />}</Stage>;
-    if (claimant.stage === "computer_connected") return <Stage stage={claimant.stage}><Heading>{copy("computer_connected_heading")}</Heading><p role="status">{copy("computer_connected_body")}</p>{computerClaimantError && <p id="computer-connected-error" role="alert">{computerClaimantError}</p>}</Stage>;
+    if (claimant.stage === "computer_finishing") return <Stage stage={claimant.stage}><Heading>{copy("computer_finishing_heading")}</Heading>{busy && <BusyIndicator id="computer-finishing-status" label={copy(pendingOperation?.label ?? "production_pairing_finishing")} />}{!busy && !computerClaimantError && <p>{copy("computer_finishing_retry_body")}</p>}{computerClaimantError && <p id="computer-finishing-error" role="alert">{computerClaimantError}</p>}<div className="enrollment-actions"><button id="computer-finishing-retry-button" className="primary-button" disabled={busy} onClick={() => void finishComputerClaimant()}>{copy("computer_finishing_retry_cta")}</button>{computerClaimantCanDiscard && <DiscardComputerClaimant confirming={computerDiscardConfirming} busy={busy} onConfirming={setComputerDiscardConfirming} onDiscard={discardComputerClaimant} />}</div></Stage>;
+    if (claimant.stage === "computer_connected") return <Stage stage={claimant.stage}><Heading>{copy("computer_connected_heading")}</Heading><p role="status">{copy("computer_connected_body")}</p>{computerClaimantError && <><p id="computer-connected-error" role="alert">{computerClaimantError}</p><button id="computer-connected-retry-button" className="primary-button" disabled={busy} onClick={retryConnectedComputer}>{copy("computer_retry_cta")}</button></>}</Stage>;
     if (claimant.stage === "computer_error") {
       const recovery = claimant.errorCode === "computer_reopen_required";
       const errorKey = claimant.errorCode === "foreign_vault" ? "computer_error_foreign_vault"
         : claimant.errorCode === "computer_reopen_required" ? "computer_error_reopen_required"
           : claimant.errorCode === "computer_remote_consumed" ? "computer_error_remote_consumed"
             : "computer_error_verification_failed";
-      return <Stage stage={claimant.stage}><Heading>{copy("computer_error_heading")}</Heading><p id="computer-stage-error" role="alert">{copy(errorKey)}</p><div className="enrollment-actions"><button id="computer-error-action" className="primary-button" disabled={busy} onClick={recovery ? reopenComputerClaimant : () => void beginComputerClaimant()}>{copy(recovery ? "computer_reopen_cta" : "computer_restart_cta")}</button></div></Stage>;
+      return <Stage stage={claimant.stage}><Heading>{copy("computer_error_heading")}</Heading><p id="computer-stage-error" role="alert">{copy(errorKey)}</p><div className="enrollment-actions"><button id="computer-error-action" className="primary-button" disabled={busy} onClick={recovery ? reopenComputerClaimant : () => void beginComputerClaimant()}>{copy(recovery ? "computer_reopen_cta" : "computer_restart_cta")}</button>{!recovery && <button id="computer-use-phrase-button" className="secondary-button" disabled={busy} onClick={() => void useComputerPhraseInstead()}>{copy("computer_use_phrase_cta")}</button>}</div></Stage>;
     }
     const denied = claimant.stage === "computer_denied";
-    return <Stage stage={claimant.stage}><Heading>{copy(denied ? "computer_denied_heading" : "computer_expired_heading")}</Heading><p role="alert">{copy(denied ? "computer_denied_body" : "computer_expired_body")}</p><div className="enrollment-actions"><button id="computer-restart-button" className="primary-button" disabled={busy} onClick={() => void beginComputerClaimant()}>{copy("computer_restart_cta")}</button></div></Stage>;
+    return <Stage stage={claimant.stage}><Heading>{copy(denied ? "computer_denied_heading" : "computer_expired_heading")}</Heading><p role="alert">{copy(denied ? "computer_denied_body" : "computer_expired_body")}</p><div className="enrollment-actions"><button id="computer-restart-button" className="primary-button" disabled={busy} onClick={() => void beginComputerClaimant()}>{copy("computer_restart_cta")}</button><button id="computer-use-phrase-button" className="secondary-button" disabled={busy} onClick={() => void useComputerPhraseInstead()}>{copy("computer_use_phrase_cta")}</button></div></Stage>;
   };
 
   const renderStage = (view: EnrollmentView): ReactNode => {
@@ -1228,7 +1385,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       {route === "chooser" && <div id="hosted-path-chooser">{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}<div className="chooser-buttons"><button ref={choice} id="hosted-choice-existing" className="chooser-button" onClick={chooseExisting}><span className="chooser-button-label">{copy("setup_choice_existing")}</span><span className="chooser-button-hint">{copy("setup_choice_existing_hint")}</span></button><button id="hosted-choice-new" className="chooser-button" onClick={chooseNew}><span className="chooser-button-label">{copy("setup_choice_new")}</span><span className="chooser-button-hint">{copy("setup_choice_new_hint")}</span></button></div></div>}
       {route === "new" && <section id="hosted-signin-panel" data-section="signin"><h2 tabIndex={-1}>Sign in to your Peppy account</h2><p>{copy("hosted_sign_in_body")} Signing in does not unlock your vault.</p><button id="hosted-signin-google-button" className="primary-button" disabled={!account?.available || busy} onClick={() => void signIn()}>{copy("hosted_sign_in_google")}</button>{account && !account.available && <p id="hosted-signin-unavailable" role="alert">{copy("production_hosted_unavailable")}</p>}{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}{signInError && <p id="hosted-signin-error" role="alert">{copy("production_signin_failed")} <button className="secondary-button" onClick={() => void signIn()}>{copy("try_again")}</button></p>}<button id="setup-back-button" className="secondary-button" onClick={backToChooser}>{copy("back")}</button></section>}
       {route === "enrollment" && <div id="enrollment-panel">{renderEnrollment()}</div>}
-      {route === "lapsed" && <section id="hosted-lapsed-card"><h2 tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" onClick={() => void bridge.hosted_sign_out()}>{copy("settings_server_sign_out")}</button></section>}
+      {route === "lapsed" && <section id="hosted-lapsed-card"><h2 tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" disabled={signingOut} onClick={() => void signOut()}>{copy("settings_server_sign_out")}</button>{signOutError && <p id="hosted-signout-error" role="alert">{copy("hosted_account_check_failed")}</p>}</section>}
       {route === "billing" && <section id="hosted-billing-card"><h2 tabIndex={-1}>{copy("hosted_subscribe_headline")}</h2><p>{copy("production_billing_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button></section>}
       {route === "provisioning" && <section id="hosted-provisioning-card"><h2 tabIndex={-1}>{copy("provisioning_headline")}</h2><div role="progressbar" aria-label={copy("provisioning_headline")} /><p>{copy("setup_provisioning_body")}</p>{provisionError !== null && <p id="hosted-provision-error" role="alert">{copy("production_provision_retry")}</p>}{provisionError !== null && <p id="hosted-provision-error-code" className="setup-hint" data-error-code={provisionError}>Error code: {provisionError}</p>}{provisionError !== null && <button id="hosted-provision-retry-button" className="secondary-button" disabled={busy} onClick={startProvisioning}>{copy("production_provision_resume")}</button>}</section>}
       {route === "passphrase" && <section id="hosted-passphrase-card"><h2 tabIndex={-1}>{copy("hosted_create_vault_headline")}</h2><p>{copy("hosted_create_vault_body")}</p><button id="passphrase-native-cta-button" className="primary-button" disabled={busy} onClick={startProvisioning}>{copy(provisionError === null ? "production_create_vault" : "try_again")}</button>{provisionError !== null && <p id="hosted-passphrase-error" role="alert">{copy("hosted_create_vault_error")}</p>}{provisionError !== null && <p id="hosted-passphrase-error-code" className="setup-hint" data-error-code={provisionError}>Error code: {provisionError}</p>}</section>}

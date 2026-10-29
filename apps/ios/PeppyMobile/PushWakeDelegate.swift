@@ -40,30 +40,39 @@ final class PushWakeDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
               let peppy = userInfo["peppy"] as? [AnyHashable: Any],
               let kind = peppy["kind"] as? String else { completion.complete(false); return }
         let cancellation = BackgroundWakeCancellation()
-        let background = application.beginBackgroundTask(withName: "peppy-push-wake") {
-            Task { @MainActor in
-                cancellation.expire()
-                completion.complete(false)
+        var background: UIBackgroundTaskIdentifier = .invalid
+        let lifecycle = BackgroundWakeLifecycle(
+            complete: { completion.complete($0) },
+            end: { [weak application] in
+                guard background != .invalid else { return }
+                application?.endBackgroundTask(background)
+                background = .invalid
+            }
+        )
+        background = application.beginBackgroundTask(withName: "peppy-push-wake") {
+            MainActor.assumeIsolated {
+                lifecycle.expire(cancellation)
             }
         }
-        let task = Task { @MainActor [weak application] in
-            defer { if background != .invalid { application?.endBackgroundTask(background) } }
-            guard !Task.isCancelled else { return }
+        let task = Task { @MainActor in
+            guard !Task.isCancelled else { lifecycle.finish(false); return }
             let model = Self.model
+            let succeeded: Bool
             switch kind {
             case "challenge":
                 let value = peppy["value"] as? String ?? ""
                 // A cold APNs launch runs before SwiftUI's startup task. Restore the native
                 // identity/runtime first so an otherwise valid challenge is not discarded.
                 await model?.reconcileWakeRegistration()
-                completion.complete((try? await model?.relay?.confirm(challenge: value)) ?? false)
+                succeeded = (try? await model?.relay?.confirm(challenge: value)) ?? false
             case "wake":
                 // Both passes are bounded by their native coordinators; cancellation propagates on expiry.
                 let synced = await model?.wakeSync() ?? false
                 let contactsDone = await model?.wakeContacts() ?? true
-                completion.complete(synced || contactsDone)
-            default: completion.complete(false)
+                succeeded = synced || contactsDone
+            default: succeeded = false
             }
+            lifecycle.finish(succeeded)
         }
         cancellation.install(task)
     }

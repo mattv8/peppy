@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MediaPanel } from "./MediaPanel";
 
@@ -11,7 +11,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("MediaPanel", () => {
   it("loads newest-first pages and retries failures", async () => {

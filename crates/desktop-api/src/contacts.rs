@@ -1062,7 +1062,7 @@ pub fn recipient_view(
     avatar: &mut dyn FnMut(AttachmentId) -> Option<String>,
 ) -> Option<Value> {
     let address = str_field(row, "address")?;
-    let mut out = json!({"address": address, "displayName": str_field(row, "display_name").filter(|n| !n.is_empty()).unwrap_or(address), "number": str_field(row, "value").unwrap_or(address), "normalized": row.get("normalized").and_then(Value::as_bool) == Some(true), "contactId": str_field(row, "contact_id")?, "phoneId": str_field(row, "phone_id")?});
+    let mut out = json!({"address": address, "bookId": str_field(row, "book_id")?, "displayName": str_field(row, "display_name").filter(|n| !n.is_empty()).unwrap_or(address), "number": str_field(row, "value").unwrap_or(address), "normalized": row.get("normalized").and_then(Value::as_bool) == Some(true), "contactId": str_field(row, "contact_id")?, "phoneId": str_field(row, "phone_id")?});
     if let Some(label) = str_field(row, "label") {
         out["label"] = json!(display_label(label));
     }
@@ -1133,6 +1133,28 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn recipient_view_preserves_book_identity() {
+        let view = recipient_view(
+            &json!({
+                "address": "+12025550100",
+                "book_id": "book-a",
+                "contact_id": "contact-a",
+                "phone_id": "phone-a",
+                "display_name": "Ada",
+                "value": "+12025550100",
+                "normalized": true,
+            }),
+            &mut |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(view["bookId"], "book-a");
+        assert_eq!(view["contactId"], "contact-a");
+        assert_eq!(view["phoneId"], "phone-a");
+        assert_eq!(view["address"], "+12025550100");
     }
 
     #[test]

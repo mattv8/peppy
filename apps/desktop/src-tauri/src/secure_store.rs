@@ -11,6 +11,11 @@ use zeroize::{Zeroize, Zeroizing};
 pub trait SecretStore: Send + Sync {
     fn get(&self, account: &str) -> BridgeResult<Option<Zeroizing<Vec<u8>>>>;
     fn set(&self, account: &str, secret: &[u8]) -> BridgeResult<()>;
+    /// Removes a secret. Stores without a physical delete primitive use an empty tombstone,
+    /// which every credential reader treats as absent.
+    fn delete(&self, account: &str) -> BridgeResult<()> {
+        self.set(account, b"")
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -362,6 +367,40 @@ mod bundled {
                 .insert(account.scope.clone(), CachedRecord::Record(record));
             Ok(())
         }
+
+        fn remove(&self, account: &Account, legacy_account: &str) -> BridgeResult<()> {
+            let _serialized = BUNDLED_WRITE
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let _lock = self.lock_file()?;
+            let mut record = match self.read_fresh(account)? {
+                CachedRecord::Record(record) => record,
+                CachedRecord::Poisoned => return Err(invalid_record()),
+            };
+            record.0.remove(&account.field);
+            if record.0.is_empty() {
+                self.inner
+                    .delete(&account.record_account)
+                    .map_err(|error| {
+                        unavailable_from_inner(error, SecureStoreOperation::BundledRecordWrite)
+                    })?;
+            } else {
+                let bytes = encode_record(&record)?;
+                self.inner
+                    .set(&account.record_account, &bytes)
+                    .map_err(|error| {
+                        unavailable_from_inner(error, SecureStoreOperation::BundledRecordWrite)
+                    })?;
+            }
+            self.inner.delete(legacy_account).map_err(|error| {
+                unavailable_from_inner(error, SecureStoreOperation::LegacyWrite)
+            })?;
+            self.cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert(account.scope.clone(), CachedRecord::Record(record));
+            Ok(())
+        }
     }
 
     impl<S: SecretStore> SecretStore for BundledStore<S> {
@@ -435,6 +474,18 @@ mod bundled {
                 }),
             }
         }
+
+        fn delete(&self, account: &str) -> BridgeResult<()> {
+            if account.starts_with("secrets:") {
+                return Err(unavailable(SecureStoreOperation::AccountRejected));
+            }
+            match parse_account(account) {
+                Some(parsed) => self.remove(&parsed, account),
+                None => self.inner.delete(account).map_err(|error| {
+                    unavailable_from_inner(error, SecureStoreOperation::PassthroughWrite)
+                }),
+            }
+        }
     }
 }
 
@@ -480,6 +531,14 @@ impl SecretStore for KeyringStore {
             Ok(())
         } else {
             Err(unavailable(SecureStoreOperation::KeyringVerify))
+        }
+    }
+    fn delete(&self, account: &str) -> BridgeResult<()> {
+        let entry = keyring::Entry::new(&self.service, account)
+            .map_err(|_| unavailable(SecureStoreOperation::KeyringEntry))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(unavailable(SecureStoreOperation::KeyringWrite)),
         }
     }
 }
@@ -548,6 +607,10 @@ impl SecretStore for MemoryStore {
             .lock()
             .unwrap()
             .insert(account.to_owned(), secret.to_vec());
+        Ok(())
+    }
+    fn delete(&self, account: &str) -> BridgeResult<()> {
+        self.0.lock().unwrap().remove(account);
         Ok(())
     }
 }
@@ -630,6 +693,22 @@ mod bundled_tests {
     }
     fn bundled<S: SecretStore>(inner: S, path: PathBuf) -> BundledStore<S> {
         BundledStore::new(inner, path)
+    }
+
+    #[test]
+    fn bundled_delete_removes_the_target_field_without_touching_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = bundled(MemoryStore::default(), dir.path().join("lock"));
+        store.set(&account("db-key"), b"key").unwrap();
+        store.set(&account("credential"), b"credential").unwrap();
+
+        store.delete(&account("credential")).unwrap();
+
+        assert!(store.get(&account("credential")).unwrap().is_none());
+        assert_eq!(
+            store.get(&account("db-key")).unwrap().unwrap().as_slice(),
+            b"key"
+        );
     }
 
     #[test]

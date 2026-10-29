@@ -120,6 +120,87 @@ func syntheticImage(_ type: UTType = .png, side: Int = 96, red: CGFloat = 0.8) -
         #expect(await provider.photoReads == 3, "each photo was read exactly once")
     }
 
+    @Test func oversizedPhotoDoesNotBlockLaterApprovedPhotoCapture() async throws {
+        let png = try #require(syntheticImage())
+        let oversized = Data(count: ContactsLimits.maxPhotoBytes + 1)
+        let (coordinator, _, client) = try await owner(
+            sampleContacts(2),
+            photos: ["os-c0": oversized, "os-c1": png],
+            budget: ContactsPhotoBudget(reads: 2, sweep: 100)
+        )
+
+        let report = try await coordinator.run(reason: .foreground, isCancelled: { false })
+        #expect(report.photoFailures == 1)
+        #expect(report.photosCaptured == 1)
+        let bookId = try #require(report.bookId)
+        #expect(try view(client, bookId).contacts.contains { ($0["photo"] as? [String: Any])?["attachment_id"] != nil })
+    }
+
+    /// Core `InvalidRequest` from a photo capture (set and remove) is counted, the sweep moves
+    /// past the contact, and later photo work plus an approved request in the same pass continue.
+    @Test func invalidRequestFromPhotoCaptureDoesNotStopLaterWork() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let deviceId = UUID().uuidString.lowercased()
+        let client = try openUnlockedClient(server, passphrase: passphrase, deviceId: deviceId)
+        let base = WritableFakeProvider()
+        // History stays off, so every pass is a complete fetchPage scan followed by a full photo sweep.
+        await base.configure { $0.book = sampleContacts(4); $0.photos = ["os-c0": syntheticImage(red: 0.1)!] }
+        let provider = RereadDriftProvider(base)
+        var coordinator = NativeContactsCoordinator(
+            client: client, deviceId: deviceId, provider: provider, preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        )
+        coordinator.scratch = temporaryDirectory()
+        coordinator.photoBudget = ContactsPhotoBudget(reads: 10, sweep: 100)
+        let first = try await coordinator.run(reason: .foreground, isCancelled: { false })
+        #expect(first.outcome == .completed && first.photosCaptured == 1)
+        let bookId = try #require(first.bookId)
+        func photo(_ given: String) throws -> [String: Any]? {
+            try view(client, bookId).contacts.first { ($0["name"] as? [String: Any])?["given"] as? String == given }?["photo"] as? [String: Any]
+        }
+
+        // A peer's edit of os-c1, approved by the owner before the failing pass.
+        try coordinator.setRemoteEdits("confirm")
+        let target = try #require(try view(client, bookId).contacts.first { ($0["name"] as? [String: Any])?["given"] as? String == "Given1" })
+        let requester = try openUnlockedClient(server, passphrase: passphrase)
+        let requestId = UUID().uuidString.lowercased()
+        _ = try requester.requestContactEdit(inputJson: NativeContactsCoordinator.json([
+            "schema_version": 1, "request_id": requestId, "target_owner": deviceId, "book_id": bookId, "kind": "update",
+            "contact_id": target["id"]!, "base_revision": target["revision"]!,
+            "patches": [["op": "replace", "path": "name.given", "value": "Augusta"]],
+        ]))
+        for device in [requester, client] {
+            _ = try await ForegroundSync(client: device, server: serverClient(server), vaultId: server.vaultId).run()
+        }
+        let waiting = try await coordinator.run(reason: .foreground, isCancelled: { false })
+        #expect(waiting.awaitingApproval == [requestId])
+        try coordinator.decide(requestId, approve: true)
+
+        // os-c0 loses its photo (remove intent) and os-c2 gains one (set intent), but both are
+        // edited again before the photo reread so the core rejects their entries; os-c3's new
+        // photo is valid and comes later in the same sweep.
+        await base.setPhoto("os-c0", nil)
+        await base.setPhoto("os-c2", syntheticImage(red: 0.5)!)
+        await base.setPhoto("os-c3", syntheticImage(red: 0.9)!)
+        await provider.drift(["os-c0", "os-c2"])
+        let failing = try await coordinator.run(reason: .foreground, isCancelled: { false })
+        #expect(failing.photoFailures == 2)
+        #expect(failing.photosRemoved == 0 && failing.photosCaptured == 1)
+        #expect(!failing.photoWorkRemaining, "the sweep advanced past both rejected contacts")
+        #expect(failing.applied == 1 && failing.failed == 0, "the approved request still ran after the photo work")
+        #expect(await base.book.first { $0.id == "os-c1" }?.givenName == "Augusta")
+        #expect(try photo("Given0")?["attachment_id"] != nil, "the rejected removal changed nothing")
+        #expect(try photo("Given2") == nil, "the rejected set changed nothing")
+        #expect(try photo("Given3")?["attachment_id"] != nil)
+
+        // Once the contacts are representable again, the next sweep captures both changes.
+        await provider.drift([])
+        let recovered = try await coordinator.run(reason: .foreground, isCancelled: { false })
+        #expect(recovered.photoFailures == 0 && recovered.photosRemoved == 1 && recovered.photosCaptured == 1)
+        #expect(try photo("Given0") == nil)
+        #expect(try photo("Given2")?["attachment_id"] != nil)
+        try requester.dispose()
+    }
+
     @Test func aLatchedRepairBlocksEffectsUntilAFencedSnapshotPromotes() async throws {
         let (coordinator, provider, client) = try await owner(sampleContacts(2), photos: [:])
         try client.requestContactRepair()
@@ -135,6 +216,35 @@ func syntheticImage(_ type: UTType = .png, side: Int = 96, red: CGFloat = 0.8) -
         let resumed = try await coordinator.run(reason: .foreground, isCancelled: { false })
         #expect(resumed.outcome == .completed && resumed.captured == 2)
     }
+}
+
+/// Delegates to the fake store, but `contact(id:)` (the photo path's reread) returns a version of
+/// each drifted contact edited after the scan to carry more email values than the core accepts.
+actor RereadDriftProvider: ContactsProvider {
+    private let base: WritableFakeProvider
+    private var drifted: Set<String> = []
+
+    init(_ base: WritableFakeProvider) { self.base = base }
+    func drift(_ ids: Set<String>) { drifted = ids }
+
+    func contact(id: String) async throws -> PlatformContact? {
+        guard var contact = try await base.contact(id: id) else { return nil }
+        if drifted.contains(id) {
+            contact.emails = (0..<21).map { ContactField(id: "drift-\($0)", label: nil, value: "d\($0)@example.test") }
+        }
+        return contact
+    }
+    func access() async throws -> ContactsAccess { try await base.access() }
+    func containers() async throws -> [ContactContainer] { try await base.containers() }
+    func fetchAll(isCancelled: @Sendable () -> Bool) async throws -> ContactsFetch { try await base.fetchAll(isCancelled: isCancelled) }
+    func fetchPage(after: String?, limit: Int, isCancelled: @Sendable () -> Bool) async throws -> ContactsPage {
+        try await base.fetchPage(after: after, limit: limit, isCancelled: isCancelled)
+    }
+    func historyToken() async -> Data? { await base.historyToken() }
+    func photo(id: String, thumbnail: Bool) async throws -> ContactPhotoRead { try await base.photo(id: id, thumbnail: thumbnail) }
+    func save(_ write: ContactsWrite) async throws -> ContactsWriteResult { try await base.save(write) }
+    func changes(since token: Data, limit: Int) async -> ContactsHistoryChanges { await base.changes(since: token, limit: limit) }
+    func identifiers(matchingName name: String) async throws -> [String]? { try await base.identifiers(matchingName: name) }
 }
 
 /// Real core + fake HTTP server: reserve/upload/finalize/references order, peer photo edits,

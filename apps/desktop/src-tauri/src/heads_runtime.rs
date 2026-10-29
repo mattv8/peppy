@@ -535,6 +535,21 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         .into_iter()
         .map(|head| (head.id.clone(), head))
         .collect();
+    // The core resolution above is authoritative for this binding. Only now may stale persisted
+    // pins be pruned; doing it before a successful resolution makes transient failures consume
+    // capacity permanently.
+    for stale_pin in pins
+        .iter()
+        .filter(|pin| !data.contains_key(&pin.conversation_id))
+    {
+        if runtime(app)
+            .pins
+            .remove(&binding, &stale_pin.conversation_id)
+            .is_err()
+        {
+            return;
+        }
+    }
     let wanted: HashMap<String, (Pin, HeadData)> = pins
         .into_iter()
         .filter_map(|pin| {
@@ -1609,20 +1624,16 @@ pub async fn dismiss(app: &AppHandle, conversation_id: &str) -> BridgeResult<()>
 
 /// A deleted local draft cannot retain a persistent floating-head pin. The normal state hint
 /// refresh hides any native head and updates the tray after this durable cleanup.
-pub fn forget_deleted_conversation(app: &AppHandle, conversation_id: &str) -> BridgeResult<()> {
+pub fn forget_deleted_conversation(
+    app: &AppHandle,
+    binding: &crate::credentials::Binding,
+    conversation_id: &str,
+) -> BridgeResult<()> {
     let _operation = crate::admit_update_operation(&app.state::<AppState>())?;
-    let binding = runtime(app)
-        .state
-        .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .binding
-        .clone();
-    if let Some(binding) = binding {
-        runtime(app)
-            .pins
-            .remove(&binding, conversation_id)
-            .map_err(|message| BridgeError::new("heads", message))?;
-    }
+    runtime(app)
+        .pins
+        .remove(binding, conversation_id)
+        .map_err(|message| BridgeError::new("heads", message))?;
     if let Ok(mut state) = runtime(app).state.lock() {
         state.heads.remove(conversation_id);
     }

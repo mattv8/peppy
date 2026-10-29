@@ -325,7 +325,8 @@ pub(crate) fn router_with_initialized_storage(
                 .expect("setup token configuration must be valid"),
             row_security: false,
         },
-    );
+    )
+    .expect("router helper requires a valid enrollment origin");
     maintenance.start();
     router
 }
@@ -353,7 +354,8 @@ pub fn router_with_options(db: PgPool, options: TransportOptions) -> Router {
                 .expect("setup token configuration must be valid"),
             row_security: false,
         },
-    );
+    )
+    .expect("router helper requires a valid enrollment origin");
     maintenance.start();
     router
 }
@@ -378,7 +380,8 @@ pub fn router_with_options_and_relay(
                 .expect("setup token configuration must be valid"),
             row_security: false,
         },
-    );
+    )
+    .expect("router helper requires a valid enrollment origin");
     maintenance.start();
     router
 }
@@ -445,7 +448,7 @@ pub(crate) fn build_router(
     explicit_relay_url: Option<url::Url>,
     push_advertisement: PushConfigAdvertisement,
     authorization: RouterAuthorization,
-) -> (Router, Maintenance) {
+) -> Result<(Router, Maintenance), &'static str> {
     let RouterAuthorization {
         policy,
         enrollment: enrollment_authorization,
@@ -571,48 +574,57 @@ pub(crate) fn build_router(
         claim_policy,
         trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs.clone()),
     });
-    let router = match invitation_origin.as_ref().and_then(|origin| {
-        crate::enrollment::manual::EnrollmentRouterState::new(
-            db.clone(),
-            enrollment_authorization.clone(),
-            row_security,
-            origin.clone(),
-        )
-        .ok()
-        .map(|state| state.with_trusted_proxy_cidrs(trusted_proxy_cidrs.clone()))
-    }) {
+    let manual_state = invitation_origin
+        .as_ref()
+        .map(|origin| {
+            crate::enrollment::manual::EnrollmentRouterState::new(
+                db.clone(),
+                enrollment_authorization.clone(),
+                row_security,
+                origin.clone(),
+            )
+            .map_err(|_| "PUBLIC_API_URL produced an invalid manual-enrollment origin")
+            .map(|state| state.with_trusted_proxy_cidrs(trusted_proxy_cidrs.clone()))
+        })
+        .transpose()?;
+    let router = match manual_state {
         Some(state) => router.merge(crate::enrollment::manual::router(state)),
         None => router,
     };
-    let router = match invitation_origin.and_then(|origin| {
-        crate::enrollment::invitations::InvitationRouterState::new(
-            db.clone(),
-            enrollment_authorization.clone(),
-            row_security,
-            origin,
-        )
-        .ok()
-    }) {
-        Some(state) => router.merge(crate::enrollment::invitations::router(state)),
-        None => router,
-    };
-    let router = match config
-        .as_ref()
-        .and_then(|config| config.public_api_url.as_ref())
-        .map(|origin| origin.origin().ascii_serialization())
-        .and_then(|origin| {
-            crate::enrollment::computers::ComputerEnrollmentRouterState::new(
+    let invitation_state = invitation_origin
+        .map(|origin| {
+            crate::enrollment::invitations::InvitationRouterState::new(
                 db.clone(),
-                enrollment_authorization,
+                enrollment_authorization.clone(),
                 row_security,
                 origin,
             )
-            .ok()
-        }) {
+            .map_err(|_| "PUBLIC_API_URL produced an invalid phone-enrollment origin")
+        })
+        .transpose()?;
+    let router = match invitation_state {
+        Some(state) => router.merge(crate::enrollment::invitations::router(state)),
+        None => router,
+    };
+    let computer_enrollment_state = config
+        .as_ref()
+        .and_then(|config| config.public_api_url.as_ref())
+        .map(|origin| origin.origin().ascii_serialization())
+        .map(|origin| {
+            crate::enrollment::computers::ComputerEnrollmentRouterState::new(
+                db.clone(),
+                enrollment_authorization.clone(),
+                row_security,
+                origin,
+            )
+            .map_err(|_| "PUBLIC_API_URL produced an invalid computer-enrollment origin")
+        })
+        .transpose()?;
+    let router = match computer_enrollment_state {
         Some(state) => router.merge(crate::enrollment::computers::router(state)),
         None => router,
     };
-    (
+    Ok((
         router,
         Maintenance {
             db,
@@ -621,7 +633,7 @@ pub(crate) fn build_router(
             options,
             relay_url,
         },
-    )
+    ))
 }
 
 #[derive(Debug)]
@@ -718,18 +730,31 @@ pub(super) fn validate_claim_material(
     ))
 }
 
+/// Admission public key, credential digest and check header, in that order.
+type OwnerMaterial = ([u8; 32], [u8; 32], Vec<u8>);
+
 pub(super) fn validate_owner_material(
     material: &VaultMaterial,
     credential_digest: &str,
-) -> Result<([u8; 32], [u8; 32]), ApiError> {
+) -> Result<OwnerMaterial, ApiError> {
     validate_profile(&material.profile, &material.fingerprint, material.key_epoch)
         .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "invalid_vault_material"))?;
+    let check_header = URL_SAFE_NO_PAD
+        .decode(&material.check_header)
+        .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "invalid_vault_material"))?;
+    if check_header.is_empty() || check_header.len() > 1_048_576 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_vault_material",
+        ));
+    }
     Ok((
         decode_b64url(
             &material.admission_public_key,
             "invalid_admission_public_key",
         )?,
         decode_hex_digest(credential_digest)?,
+        check_header,
     ))
 }
 
@@ -1305,6 +1330,9 @@ pub(super) async fn instance_revoke_device(
     .execute(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "instance_revoke_credential"))?;
+    revoke_wake_effects(&mut tx, vault_id, device_id)
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_revoke_wake_effects"))?;
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "instance_revoke_commit"))?;
@@ -1313,8 +1341,41 @@ pub(super) async fn instance_revoke_device(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn revoke_wake_effects(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    vault_id: Uuid,
+    device_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE device_wake_routes SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL")
+        .bind(vault_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM device_wake_jobs WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn database_error_kind(error: &sqlx::Error) -> &'static str {
+    match error {
+        sqlx::Error::PoolTimedOut => "pool_timed_out",
+        sqlx::Error::PoolClosed => "pool_closed",
+        sqlx::Error::Io(_) => "io",
+        sqlx::Error::WorkerCrashed => "worker_crashed",
+        sqlx::Error::Database(_) => "database",
+        _ => "other",
+    }
+}
+
 pub(super) fn database_unavailable(error: &sqlx::Error, operation: &'static str) -> ApiError {
-    tracing::warn!(operation, error_kind = %error, "database operation failed");
+    tracing::warn!(
+        operation,
+        kind = database_error_kind(error),
+        "database operation failed"
+    );
     ApiError(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable")
 }
 
@@ -1782,13 +1843,9 @@ async fn revoke_device(
     .execute(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "revoke_credential"))?;
-    sqlx::query("UPDATE device_wake_routes SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL").bind(p.vault).bind(device_id).execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "revoke_wake_route"))?;
-    sqlx::query("DELETE FROM device_wake_jobs WHERE vault_id=$1 AND device_id=$2")
-        .bind(p.vault)
-        .bind(device_id)
-        .execute(&mut *tx)
+    revoke_wake_effects(&mut tx, p.vault, device_id)
         .await
-        .map_err(|error| database_unavailable(&error, "revoke_wake_job"))?;
+        .map_err(|error| database_unavailable(&error, "revoke_wake_effects"))?;
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "revoke_commit"))?;
@@ -1920,6 +1977,8 @@ pub async fn delete_vault_in_transaction(
         "upload_reservations",
         "outbox_jobs",
         "vault_key_profiles",
+        "phone_invitations",
+        "computer_enrollments",
         "device_credentials",
         "devices",
     ] {
@@ -2077,6 +2136,19 @@ async fn ingest(
     let digest = e
         .wire_digest()
         .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "invalid_envelope"))?;
+    if e.producer_sequence.0 > i64::MAX as u64
+        || e.compaction.as_ref().is_some_and(|compaction| {
+            compaction
+                .supersedes
+                .iter()
+                .any(|reference| reference.producer_sequence.0 > i64::MAX as u64)
+        })
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_envelope",
+        ));
+    }
     let mut tx = scope::begin(&s.db, p.vault)
         .await
         .map_err(|error| database_unavailable(&error, "ingest_begin"))?;
@@ -2090,6 +2162,7 @@ async fn ingest(
     .fetch_one(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "ingest_vault_lock"))?;
+    revalidate_principal(&mut tx, &p).await?;
     // Identity lives in the immutable records, which outlive transport-log
     // pruning. A retry stays observable after a key epoch or route changes.
     let compacted=sqlx::query("SELECT original_cursor,cipher_digest FROM compacted_records WHERE vault_id=$1 AND producer_device_id=$2 AND (producer_sequence=$3 OR envelope_id=$4 OR (command_id IS NOT NULL AND command_id=$5)) LIMIT 1").bind(p.vault).bind(p.device).bind(e.producer_sequence.0 as i64).bind(e.envelope_id.0).bind(e.command_id.map(|v|v.0)).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "ingest_compacted_duplicate_lookup"))?;
@@ -2278,8 +2351,17 @@ fn spawn_wake_maintenance(
                 let lease = Uuid::new_v4();
                 let row = sqlx::query("WITH due AS (SELECT j.vault_id,j.device_id FROM device_wake_jobs j JOIN device_wake_routes r ON r.vault_id=j.vault_id AND r.device_id=j.device_id WHERE j.available_at<=now() AND (j.lease_until IS NULL OR j.lease_until<=now()) AND r.revoked_at IS NULL ORDER BY j.available_at LIMIT 1 FOR UPDATE OF j SKIP LOCKED) UPDATE device_wake_jobs j SET lease_token=$1,lease_until=now()+($2 * interval '1 second'),last_attempt_at=now() FROM due JOIN device_wake_routes r ON r.vault_id=due.vault_id AND r.device_id=due.device_id WHERE j.vault_id=due.vault_id AND j.device_id=due.device_id RETURNING j.vault_id,j.device_id,j.cursor,j.job_id,j.opaque_nonce,j.attempts,j.created_at > now()-($3 * interval '1 hour') fresh,r.route_id,r.generation,r.wake_credential")
                     .bind(lease).bind(WAKE_LEASE_SECONDS).bind(WAKE_MAX_AGE_HOURS).fetch_optional(&db).await;
-                let Ok(Some(row)) = row else {
-                    break;
+                let row = match row {
+                    Ok(Some(row)) => row,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(
+                            operation = "wake_lease",
+                            kind = database_error_kind(&error),
+                            "database operation failed"
+                        );
+                        break;
+                    }
                 };
                 let vault: Uuid = row.get("vault_id");
                 let device: Uuid = row.get("device_id");
