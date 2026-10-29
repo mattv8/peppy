@@ -38,9 +38,10 @@ class ContributionPolicyTest < Minitest::Test
     assert_equal ['pull_request'], review.fetch('rules').map { |entry| entry['type'] }
     parameters = rule(review, 'pull_request').fetch('parameters')
 
-    assert_equal %w[allowed_merge_methods dismiss_stale_reviews_on_push require_code_owner_review require_extra_approval_for_unattributed_changes require_last_push_approval required_approving_review_count], parameters.keys.sort
+    assert_equal %w[allowed_merge_methods dismiss_stale_reviews_on_push require_code_owner_review require_extra_approval_for_unattributed_changes require_last_push_approval required_approving_review_count required_review_thread_resolution], parameters.keys.sort
     assert_equal %w[merge rebase], parameters['allowed_merge_methods']
     assert_equal 1, parameters['required_approving_review_count']
+    assert_equal false, parameters['required_review_thread_resolution']
     assert_equal true, parameters['require_code_owner_review']
     assert_equal true, parameters['require_extra_approval_for_unattributed_changes']
     assert_equal true, parameters['dismiss_stale_reviews_on_push']
