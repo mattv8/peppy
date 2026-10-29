@@ -521,6 +521,25 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   overflow-wrap: anywhere;
   flex-wrap: wrap;
 }
+.message-row[data-sender-gutter] { --message-sender-indent: 32px; }
+.message-sender-line { display: flex; align-items: flex-end; gap: 8px; width: 100%; min-width: 0; }
+.message-sender-line > .message-bubble,
+.message-sender-line > article { flex: 0 1 auto; min-width: 0; }
+.message-sender-avatar,
+.message-sender-gutter { flex: 0 0 24px; width: 24px; }
+.message-sender-avatar { display: flex; height: 24px; border-radius: 50%; line-height: 0; }
+.message-sender-gutter { height: 0; }
+.message-sender-avatar[data-clickable] { cursor: pointer; }
+.message-sender-avatar[data-clickable]:hover { outline: 2px solid var(--peppy-border-strong); outline-offset: 1px; }
+.message-sender-label { display: block; max-width: min(76%, 620px); margin: -2px 0 0 calc(var(--message-sender-indent, 0px) - 4px); padding: 2px 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--peppy-text-secondary); font: inherit; font-size: 12px; font-weight: 700; line-height: 16px; text-align: left; }
+.message-sender-label[data-sender-known="false"] { font-weight: 400; font-variant-numeric: tabular-nums; }
+button.message-sender-label { appearance: none; border: 0; border-radius: var(--peppy-radius-sm); background: none; cursor: pointer; }
+button.message-sender-label:hover { color: var(--peppy-text-primary); text-decoration: underline; text-underline-offset: 2px; }
+button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus-ring); outline-offset: 1px; }
+.message-sender-label[data-plain] { cursor: default; }
+.message-bubble > .sr-only { user-select: none; }
+.message-row[data-sender-gutter] > .message-meta,
+.message-row[data-sender-gutter][data-message-group] > [data-message-row] { margin-left: var(--message-sender-indent); }
 .message-meta-status {
   display: flex;
   align-items: center;
@@ -540,6 +559,11 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .message-bubble[data-peppy-tone] .message-subject { color: inherit; }
 @media (forced-colors: active) {
   .message-bubble[data-peppy-tone] { background: Canvas; color: CanvasText; border-color: CanvasText; }
+  .message-sender-label { color: CanvasText; }
+  button.message-sender-label { color: LinkText; text-decoration: underline; }
+  button.message-sender-label:hover { color: LinkText; }
+  button.message-sender-label:focus-visible { outline-color: Highlight; }
+  .message-sender-avatar[data-clickable]:hover { outline-color: Highlight; }
 }
 @media (forced-colors: active) {
   .message-meta[data-status="failed-before-submit"],

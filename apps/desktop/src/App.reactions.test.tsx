@@ -510,11 +510,18 @@ describe("App reactions", () => {
     await screen.findByRole("button", { name: "Sam Rivera reacted 😆 to “plan?”" });
   });
 
-  it("keeps an unresolved group sender address distinct from the group name", async () => {
+  it("uses resolved contact names and formatted unresolved numbers for group reaction actors", async () => {
     const senderAddress = "+15555550142";
     snapshot.conversations[0] = { ...snapshot.conversations[0], name: "Weekend group", participants: [senderAddress, "+15555550143"] };
-    renderMessages([message("target", "plan?"), message("reaction", "Reacted 😆 to “plan?”", { senderAddress })]);
-    await screen.findByRole("button", { name: `${senderAddress} reacted 😆 to “plan?”` });
+    snapshot.contactResolution = { [senderAddress]: { bookId: "book-1", contactId: "contact-1", displayName: "Ada" } };
+    const unresolvedAddress = "+18015551234";
+    renderMessages([
+      message("target", "plan?"),
+      message("resolved-reaction", "Reacted 😆 to “plan?”", { senderAddress }),
+      message("unresolved-reaction", "Reacted 👍 to “plan?”", { senderAddress: unresolvedAddress }),
+    ]);
+    await screen.findByRole("button", { name: "Ada reacted 😆 to “plan?”" });
+    await screen.findByRole("button", { name: "(801) 555-1234 reacted 👍 to “plan?”" });
   });
 
   it("focuses and clears the highlight when a linked notice opens", async () => {

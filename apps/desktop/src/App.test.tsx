@@ -40,6 +40,191 @@ const findEmptyConversationAction = () => waitFor(() => {
   expect(action).toBeVisible();
   return action!;
 });
+
+describe("group sender attribution", () => {
+  it("shows sender labels and run avatars only for group conversations", async () => {
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [
+        { id: "sender-first", revision: "1", sender: "other", senderAddress: "+18015551234", body: "First", timestamp: "1788434460000", attachments: [] },
+        { id: "sender-last", revision: "2", sender: "other", senderAddress: "+18015551234", body: "Last", timestamp: "1788434461000", attachments: [] },
+      ],
+    };
+    host.contactResolution = { "+18015551234": { bookId: "book-1", contactId: "contact-1", displayName: "Ada" } };
+    render(<App />);
+
+    await screen.findByText("First");
+    expect(document.querySelector('[data-sender-label="+18015551234"]')).toHaveTextContent("Ada");
+    expect(document.querySelector('[data-message-row="sender-first"]')).toHaveAttribute("data-sender-run-start");
+    expect(document.querySelector('[data-message-row="sender-last"]')).toHaveAttribute("data-sender-run-end");
+    expect(document.querySelector('[data-message-row="sender-first"] [data-sender-avatar]')).toBeNull();
+    expect(document.querySelector('[data-message-row="sender-last"] [data-sender-avatar="+18015551234"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-message-row="sender-first"] .sr-only')).toHaveTextContent("From Ada:");
+  });
+
+  it("opens an unknown sender in a prefilled Contacts create form", async () => {
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [{ id: "unknown-sender", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Hello", timestamp: "1788434460000", attachments: [] }],
+    };
+    render(<App />);
+
+    fireEvent.click((await screen.findByText("(801) 555-1234")).closest("button")!);
+
+    expect(await screen.findByRole("form", { name: "Create contact" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Phone 1 number")).toHaveValue("+18015551234");
+  });
+
+  it("opens a known sender's contact target", async () => {
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [{ id: "known-sender", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Hello", timestamp: "1788434460000", attachments: [] }],
+    };
+    host.contactResolution = { "+18015551234": { bookId: "book-1", contactId: "contact-1", displayName: "Ada" } };
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open Ada in Contacts" }));
+
+    expect(await screen.findByRole("region", { name: "Contacts browser" })).toBeInTheDocument();
+  });
+
+  it("blocks sender navigation when flushing the active draft fails", async () => {
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [{ id: "failed-sender", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Hello", timestamp: "1788434460000", attachments: [] }],
+    };
+    render(<App />);
+    await waitFor(() => expect(document.querySelector('[data-message-id="failed-sender"]')).toBeInTheDocument());
+    host.failSaves = { code: "offline", message: "offline" };
+    type("Unsaved draft");
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalled());
+
+    fireEvent.click((await screen.findByText("(801) 555-1234")).closest("button")!);
+
+    expect(await screen.findByText("Sender not opened: offline")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Contacts browser" })).not.toBeInTheDocument();
+  });
+
+  it("renders sender labels and avatars as non-interactive while the vault is locked", async () => {
+    host.encryption = { state: "locked" };
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [{ id: "locked-sender", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Hello", timestamp: "1788434460000", attachments: [] }],
+    };
+    render(<App />);
+
+    const label = await screen.findByText("(801) 555-1234");
+    expect(label.tagName).toBe("SPAN");
+    expect(document.querySelector("[data-sender-avatar]")).not.toHaveAttribute("data-clickable");
+  });
+
+  it("keeps sender labels while hiding persisted sender avatars", async () => {
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ groupSenderAvatars: false }));
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [{ id: "sender-hidden-avatar", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Hello", timestamp: "1788434460000", attachments: [] }],
+    };
+    render(<App />);
+
+    expect(await screen.findByText("(801) 555-1234")).toBeInTheDocument();
+    expect(document.querySelector("[data-sender-avatar]")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-sender-gutter]")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const avatars = await screen.findByRole("checkbox", { name: "Show sender avatars in group conversations" });
+    expect(avatars).not.toBeChecked();
+    fireEvent.click(avatars);
+    expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ groupSenderAvatars: true });
+  });
+
+  it("ends sender runs after visible compact timestamps but not when compact timestamps are disabled", async () => {
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [
+        { id: "sender-time-first", revision: "1", sender: "other", senderAddress: "+18015551234", body: "First", timestamp: "1788434460000", attachments: [] },
+        { id: "sender-time-second", revision: "2", sender: "other", senderAddress: "+18015551234", body: "Second", timestamp: "1788441660000", attachments: [] },
+        { id: "sender-time-third", revision: "3", sender: "other", senderAddress: "+18015551234", body: "Third", timestamp: "1788448860000", attachments: [] },
+      ],
+    };
+    const view = render(<App />);
+    await screen.findByText("Third");
+    expect(document.querySelector('[data-message-row="sender-time-first"]')).toHaveAttribute("data-sender-run-end");
+    expect(document.querySelectorAll("[data-sender-label]")).toHaveLength(3);
+
+    view.unmount();
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ compactTimestamps: false }));
+    render(<App />);
+    await screen.findByText("Third");
+    expect(document.querySelector('[data-message-row="sender-time-first"]')).not.toHaveAttribute("data-sender-run-end");
+    expect(document.querySelectorAll("[data-sender-label]")).toHaveLength(1);
+  });
+
+  it("breaks same-sender runs at reaction notices", async () => {
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [
+        { id: "before-reaction", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Before", timestamp: "1788434460000", attachments: [] },
+        { id: "reaction-boundary", revision: "2", sender: "other", senderAddress: "+18015551234", body: "Reacted 😆 to “Before”", timestamp: "1788434461000", attachments: [] },
+        { id: "after-reaction", revision: "3", sender: "other", senderAddress: "+18015551234", body: "After", timestamp: "1788434462000", attachments: [] },
+      ],
+    };
+    render(<App />);
+
+    await screen.findByText("After");
+    expect(document.querySelector('[data-message-row="before-reaction"]')).toHaveAttribute("data-sender-run-end");
+    expect(document.querySelector('[data-message-row="after-reaction"]')).toHaveAttribute("data-sender-run-start");
+    expect(document.querySelectorAll("[data-sender-label]")).toHaveLength(2);
+  });
+
+  it("keeps same-sender messages within an hour in one compact timestamp run", async () => {
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [
+        { id: "hidden-time-first", revision: "1", sender: "other", senderAddress: "+18015551234", body: "First", timestamp: "1788434460000", attachments: [] },
+        { id: "hidden-time-last", revision: "2", sender: "other", senderAddress: "+18015551234", body: "Last", timestamp: "1788434520000", attachments: [] },
+      ],
+    };
+    render(<App />);
+
+    await screen.findByText("Last");
+    expect(document.querySelector('[data-message-row="hidden-time-first"]')).not.toHaveAttribute("data-sender-run-end");
+    expect(document.querySelector('[data-message-row="hidden-time-last"]')).toHaveAttribute("data-sender-run-end");
+    expect(document.querySelectorAll("[data-sender-label]")).toHaveLength(1);
+  });
+
+  it("wires sender run edges, labels, and avatars through grouped images", async () => {
+    const image = (id: string) => ({ id: `${id}-image`, name: `${id}.jpg`, mediaType: "image/jpeg", byteSize: 1, state: "ready" as const });
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234", "+18015551235"],
+      messages: [
+        { id: "image-run-first", revision: "1", sender: "other", senderAddress: "+18015551234", body: "", timestamp: "1788434460000", transport: "mms", attachments: [image("first")] },
+        { id: "image-run-last", revision: "2", sender: "other", senderAddress: "+18015551234", body: "", timestamp: "1788434461000", transport: "mms", attachments: [image("last")] },
+        { id: "after-images", revision: "3", sender: "other", senderAddress: "+18015551234", body: "After images", timestamp: "1788434462000", attachments: [] },
+      ],
+    };
+    host.contactResolution = { "+18015551234": { bookId: "book-1", contactId: "contact-1", displayName: "Ada" } };
+    render(<App />);
+
+    await screen.findByText("After images");
+    const imageGroup = document.querySelector('[data-message-group="image-run-first"]')!;
+    expect(imageGroup).toHaveAttribute("data-sender-run-start");
+    expect(imageGroup).not.toHaveAttribute("data-sender-run-end");
+    expect(imageGroup.querySelector('[data-sender-label="+18015551234"]')).toHaveTextContent("Ada");
+    expect(imageGroup.querySelector("[data-sender-avatar]")).toBeNull();
+    expect(document.querySelector('[data-message-row="after-images"]')).toHaveAttribute("data-sender-run-end");
+    expect(document.querySelector('[data-message-row="after-images"] [data-sender-avatar="+18015551234"]')).toBeInTheDocument();
+  });
+});
 const SMS_ONLY: GatewayView = {
   id: "gw-phone",
   name: "Phone",
