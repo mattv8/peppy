@@ -80,6 +80,8 @@ pub struct EnrollmentView {
     owner_resume_pending: bool,
     can_connect_computer: bool,
     new_identity: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    computer_claimant: Option<computer::ComputerClaimantView>,
 }
 
 impl Controller {
@@ -203,6 +205,10 @@ impl Controller {
                 && self.owner_resume,
             can_connect_computer: self.can_connect_computer,
             new_identity: self.new_identity,
+            computer_claimant: self
+                .computer_claimant
+                .as_ref()
+                .map(computer::ClaimantState::resume_view),
         }
     }
 
@@ -232,6 +238,12 @@ fn setup_code_required(controller: &std::sync::Mutex<Controller>) -> BridgeResul
 /// cannot join, so it is replaced in memory; its protected checkpoint stays in secure storage and
 /// is offered again by the next discovery.
 fn admission_client(controller: &mut Controller) -> BridgeResult<&mut EnrollmentClient> {
+    if controller.computer_claimant.is_some() {
+        return Err(BridgeError::new(
+            "enrollment-state",
+            "Finish or discard the computer connection first.",
+        ));
+    }
     let origin = controller.origin()?.to_owned();
     let pending_owner = controller
         .client
@@ -1011,6 +1023,22 @@ fn device_request(
     Ok(request)
 }
 
+pub(super) fn native_identity_credential(
+    identity: &NativeEnrollmentIdentity,
+) -> BridgeResult<Zeroizing<Vec<u8>>> {
+    let metadata = identity.metadata();
+    Ok(Zeroizing::new(
+        serde_json::to_vec(&ImportedCredential {
+            version: 1,
+            origin: identity.origin().to_owned(),
+            vault_id: metadata.vault_id.to_string(),
+            device_id: metadata.device_id.to_string(),
+            device_token: identity.device_credential_for_native_secure_store(),
+        })
+        .map_err(|_| enrollment_error())?,
+    ))
+}
+
 async fn install_identity(
     app: &AppHandle,
     state: &AppState,
@@ -1019,26 +1047,38 @@ async fn install_identity(
     expected_binding: Option<crate::credentials::Binding>,
     allow_prepared_target_retry: bool,
 ) -> BridgeResult<()> {
+    let _import = state.import_lock.lock().await;
+    install_identity_locked(
+        app,
+        state,
+        identity,
+        passphrase,
+        expected_binding,
+        allow_prepared_target_retry,
+        None,
+    )
+    .await
+}
+
+async fn install_identity_locked(
+    app: &AppHandle,
+    state: &AppState,
+    identity: &mut NativeEnrollmentIdentity,
+    passphrase: Option<Zeroizing<String>>,
+    expected_binding: Option<crate::credentials::Binding>,
+    allow_prepared_target_retry: bool,
+    computer_attempt: Option<uuid::Uuid>,
+) -> BridgeResult<()> {
     let operation = crate::admit_update_operation(state)?;
     let metadata = identity.metadata().clone();
     let origin = identity.origin().to_owned();
     let vault_secret = passphrase.clone();
-    let credential = identity.device_credential_for_native_secure_store();
-    let portable = Zeroizing::new(
-        serde_json::to_vec(&ImportedCredential {
-            version: 1,
-            origin: identity.origin().to_owned(),
-            vault_id: metadata.vault_id.to_string(),
-            device_id: metadata.device_id.to_string(),
-            device_token: credential,
-        })
-        .map_err(|_| enrollment_error())?,
-    );
+    let portable = native_identity_credential(identity)?;
     let credential = std::sync::Arc::new(parse_credential(&portable)?);
     drop(portable);
-    let _import = state.import_lock.lock().await;
     let previous = state.config()?;
     let target_binding = credential.binding();
+    computer::check_computer_install_access(state, &target_binding, computer_attempt)?;
     let installed_target_matches = || {
         prepared_target_retry_matches(
             &*state.store,
@@ -1063,8 +1103,8 @@ async fn install_identity(
     };
     let result = async {
         state.update_config(|config| config.select_origin(&credential.origin))?;
-        crate::verify_import(state, &credential).await?;
-        crate::activate_import_locked(state, credential, Some(&operation)).await
+        crate::verify_import(state, &credential, computer_attempt).await?;
+        crate::activate_import_locked(state, credential, Some(&operation), computer_attempt).await
     }
     .await;
     if let Err(error) = result {
@@ -1076,7 +1116,10 @@ async fn install_identity(
         permit.finish().await?;
     }
     (state.notifier)();
-    let session = state.require_session_admitted(&operation).await?;
+    let session = state
+        .session_admitted_for_computer(&operation, computer_attempt)
+        .await?
+        .ok_or_else(BridgeError::no_session)?;
     if identity
         .activate_verified_handoff(&session.client)
         .map_err(|_| enrollment_error())?
@@ -1202,6 +1245,31 @@ pub(crate) fn save_verified_vault_secret_if_empty(
     Ok(())
 }
 
+fn discovery_origin(state: &AppState, origin: Option<String>) -> BridgeResult<String> {
+    Ok(match origin {
+        Some(value) => origin::validate_origin(&value)?,
+        None => {
+            let retained_origin = {
+                let controller = state
+                    .enrollment
+                    .lock()
+                    .map_err(|_| BridgeError::host_state())?;
+                controller
+                    .computer_claimant
+                    .as_ref()
+                    .and(controller.origin.clone())
+            };
+            if let Some(origin) = retained_origin {
+                return Ok(origin);
+            }
+            state
+                .config()?
+                .origin
+                .ok_or_else(|| BridgeError::new("server-required", "Enter a server URL first."))?
+        }
+    })
+}
+
 #[tauri::command]
 pub async fn enrollment_discover(
     window: WebviewWindow,
@@ -1210,13 +1278,17 @@ pub async fn enrollment_discover(
 ) -> BridgeResult<EnrollmentView> {
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
-    let selected = match origin {
-        Some(value) => origin::validate_origin(&value)?,
-        None => state
-            .config()?
-            .origin
-            .ok_or_else(|| BridgeError::new("server-required", "Enter a server URL first."))?,
-    };
+    let _import = state.import_lock.lock().await;
+    let selected = discovery_origin(&state, origin)?;
+    if let Some(view) = computer::retained_discovery_view(
+        &*state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?,
+        &selected,
+    )? {
+        return Ok(view);
+    }
     let discovery_epoch = cancel_owner_operation(&state.enrollment)?;
     let response = fetch_instance(selected.clone()).await?;
     let saved_identity = saved_identity_for_origin(&state, &selected)?;
@@ -2595,6 +2667,12 @@ fn finish_enrollment_cancel(
     cancelled_invitation: Option<uuid::Uuid>,
 ) -> BridgeResult<()> {
     let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    if controller.computer_claimant.is_some() {
+        return Err(BridgeError::new(
+            "enrollment-state",
+            "Use the computer connection's own cancel or discard action.",
+        ));
+    }
     if controller.operation_epoch != expected_epoch
         || cancelled_invitation.is_some_and(|id| controller.invitation_id != Some(id))
     {
@@ -3174,6 +3252,7 @@ pub async fn enrollment_cancel(
 ) -> BridgeResult<()> {
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
+    let _import = state.import_lock.lock().await;
     retire_surfaced_phone_completion(&state.enrollment)?;
     let epoch = begin_owner_operation(&state.enrollment)?;
     let id = state

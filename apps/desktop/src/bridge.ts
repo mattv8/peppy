@@ -44,7 +44,7 @@ import type {
   ContactResolutionMap,
   BridgeError,
   HostedAccountView,
-  EnrollmentView,
+  EnrollmentView as SharedEnrollmentView,
   ComputerClaimantView,
   HostedPreviewView,
   AppLockStatus,
@@ -64,7 +64,7 @@ import type {
   StartHistorySearchInput,
   MessageWindowRequest,
   MessageWindow,
-  DesktopBridge,
+  DesktopBridge as SharedDesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
 
@@ -108,7 +108,6 @@ export {
   type ContactResolutionMap,
   type BridgeError,
   type HostedAccountView,
-  type EnrollmentView,
   type ComputerClaimantView,
   type HostedPreviewView,
   type AppLockStatus,
@@ -128,8 +127,10 @@ export {
   type StartHistorySearchInput,
   type MessageWindowRequest,
   type MessageWindow,
-  type DesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
+
+export type EnrollmentView = SharedEnrollmentView & { computerClaimant?: ComputerClaimantView };
+export type DesktopBridge = Omit<SharedDesktopBridge, "enrollment_discover"> & { enrollment_discover(origin?: string): Promise<EnrollmentView> };
 
 const fixtureMessages: MessageView[] = [
   { id: "message-aurora-1", revision: "1", sender: "other", body: "Can you send over the estimate?", timestamp: "1788434460000", attachments: [] },
@@ -494,30 +495,40 @@ export const fixtureBridge: DesktopBridge = {
 const invoke = async <T>(command: string, args?: Record<string, unknown>) => (await import("@tauri-apps/api/core")).invoke<T>(command, args);
 /** Native claimant response, normalized before it reaches shared UI. */
 type NativeComputerClaimantView = {
-  stage: "waiting_owner" | "compare_codes" | "finishing" | "connected" | "denied" | "expired";
+  stage: "waiting_owner" | "compare_codes" | "finishing" | "connected" | "denied" | "expired" | "error" | string;
   invitationId: string;
   qrPayload: string | null;
   awaitingOwner: boolean;
   state: "waiting" | "claimed" | "approved" | "confirmed" | "consumed" | "denied" | "expired";
   expiresInSeconds: number;
   verificationCode: string | null;
+  errorCode?: ComputerClaimantView["errorCode"];
 };
-const normalizeComputerClaimant = (view: NativeComputerClaimantView): ComputerClaimantView => ({
+export const normalizeComputerClaimant = (view: NativeComputerClaimantView): ComputerClaimantView => ({
   stage: view.stage === "waiting_owner" ? "computer_waiting"
     : view.stage === "compare_codes" ? "computer_approved"
       : view.stage === "finishing" ? "computer_finishing"
         : view.stage === "connected" ? "computer_connected"
-          : view.stage === "denied" ? "computer_denied" : "computer_expired",
+          : view.stage === "denied" ? "computer_denied"
+            : view.stage === "expired" ? "computer_expired" : "computer_error",
   qrPayload: view.qrPayload ?? undefined,
   verificationCode: view.verificationCode ?? undefined,
   expiresInSeconds: view.expiresInSeconds,
   awaitingOwner: view.awaitingOwner,
   computerClaimant: true,
+  errorCode: view.stage === "error" || !["waiting_owner", "compare_codes", "finishing", "connected", "denied", "expired"].includes(view.stage) ? view.errorCode ?? "computer_verification_failed" : view.errorCode,
 });
+const discoverEnrollment = async (origin?: string): Promise<EnrollmentView> => {
+  const { computerClaimant, ...view } = await invoke<SharedEnrollmentView & { computerClaimant?: NativeComputerClaimantView | null }>("enrollment_discover", { origin });
+  return { ...view, ...(computerClaimant ? { computerClaimant: normalizeComputerClaimant(computerClaimant) } : {}) };
+};
 const beginComputerClaimant = () => invoke<NativeComputerClaimantView>("enrollment_begin_computer_claimant").then(normalizeComputerClaimant);
 const computerClaimantStatus = () => invoke<NativeComputerClaimantView>("enrollment_computer_claimant_status").then(normalizeComputerClaimant);
 const confirmComputerClaimant = () => invoke<NativeComputerClaimantView>("enrollment_confirm_computer_claimant").then(normalizeComputerClaimant);
 const cancelComputerClaimant = () => invoke<void>("enrollment_cancel_computer_claimant");
+export const discardComputerClaimant = () => "__TAURI_INTERNALS__" in window
+  ? invoke<void>("enrollment_discard_computer_claimant")
+  : bridge.enrollment_cancel_computer();
 export const renewHostedSession = () => "__TAURI_INTERNALS__" in window
   ? invoke<void>("hosted_session_renew")
   : Promise.resolve();
@@ -530,7 +541,7 @@ export const tauriBridge: DesktopBridge = {
   hydrate_media_preview: (messageId, id) => invoke("hydrate_media_preview", { messageId, id }),
   copy_attachment_image: id => invoke("copy_attachment_image", { id }),
   load_state: (conversationId, historyFromMessageId, options) => invoke("load_state", { conversationId, historyFromMessageId, metadataOnly: options?.metadataOnly }), search_local: input => invoke("search_local", { input }), advance_search_index: input => invoke("advance_search_index", { input }), get_history_search: () => invoke("get_history_search"), start_history_search: ({ operationId }) => invoke("start_history_search", { input: { operationId } }), cancel_history_search: ({ attemptId }) => invoke("cancel_history_search", { input: { attemptId } }), load_message_window: input => invoke("load_message_window", { input }), open_external_url: url => invoke("open_external_url", { url }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), mark_all_read: () => invoke("mark_all_read"), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), open_notification_settings: () => invoke("open_notification_settings"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_drafts: listener => subscribeWindowEvent("peppy://draft", payload => { if (isDraft(payload)) listener(payload); }), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
-   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), enrollment_discover: origin => invoke("enrollment_discover", { origin }), enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
+   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
   enrollment_connect_computer: beginComputerClaimant,
   enrollment_computer_status: computerClaimantStatus,
   enrollment_confirm_computer: confirmComputerClaimant,

@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import QRCode from "qrcode";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridge, type EnrollmentView, type HostedAccountView } from "./bridge";
+import * as bridgeModule from "./bridge";
 import { peppyCopy } from "./generated/peppyCopy";
 import { SetupLanding } from "./SetupLanding";
 
@@ -2342,6 +2343,215 @@ describe("SetupLanding", () => {
 
       await waitFor(() => expect(bridge.enrollment_confirm_computer).toHaveBeenCalledOnce());
       expect(bridge.enrollment_computer_status).not.toHaveBeenCalled();
+    });
+
+    it("keeps a native finishing failure actionable and stops polling after Finish", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_finishing", awaitingOwner: false, computerClaimant: true });
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockRejectedValue({ code: "offline" });
+      const status = vi.spyOn(bridge, "enrollment_computer_status");
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Retry finishing" }));
+
+      expect((await screen.findByRole("alert")).textContent).toBe(peppyCopy.computer_finishing_retry_body);
+      expect(screen.getByRole("button", { name: "Retry finishing" })).toBeEnabled();
+      expect(status).not.toHaveBeenCalled();
+    });
+
+    it.each(["computer_approved", "computer_finishing"] as const)("restores retained %s on discovery without starting a replacement", async stage => {
+      const claimant = { stage, awaitingOwner: false, computerClaimant: true as const, errorCode: "host-state" };
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue({ ...view({ stage: "locked" }), computerClaimant: claimant });
+      const begin = vi.spyOn(bridge, "enrollment_connect_computer");
+      const first = renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+      expect(await screen.findByRole("button", { name: "Retry finishing" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Discard this attempt" })).toBeEnabled();
+      first.unmount();
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+      expect(await screen.findByRole("button", { name: "Retry finishing" })).toBeEnabled();
+      expect(begin).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Connect this computer" })).not.toBeInTheDocument();
+    });
+
+    it("synchronously refuses duplicate discard and competing Finish before React renders busy", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true });
+      const finish = vi.spyOn(bridge, "enrollment_confirm_computer").mockRejectedValue({ code: "host-state" });
+      const removal = deferred<void>();
+      const discard = vi.spyOn(bridgeModule, "discardComputerClaimant").mockReturnValue(removal.promise);
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Finish connection" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Discard this attempt" }));
+      const yes = screen.getByRole("button", { name: "Discard attempt" });
+      const retry = screen.getByRole("button", { name: "Retry finishing" });
+      act(() => { yes.click(); yes.click(); retry.click(); });
+      expect(discard).toHaveBeenCalledOnce();
+      expect(finish).toHaveBeenCalledOnce();
+      await act(async () => removal.resolve());
+    });
+
+    it("serializes deferred discard, blocks Escape, and restores focus after refusal", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true });
+      const finish = vi.spyOn(bridge, "enrollment_confirm_computer").mockRejectedValue({ code: "secure-store-unavailable" });
+      const removal = deferred<void>();
+      const discard = vi.spyOn(bridgeModule, "discardComputerClaimant").mockReturnValue(removal.promise);
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Finish connection" }));
+      const retry = await screen.findByRole("button", { name: "Retry finishing" });
+      await waitFor(() => expect(retry).toHaveFocus());
+      fireEvent.click(screen.getByRole("button", { name: "Discard this attempt" }));
+      const safe = screen.getByRole("button", { name: "Keep trying" });
+      expect(safe).toHaveFocus();
+      fireEvent.keyDown(safe, { key: "Escape" });
+      await waitFor(() => expect(screen.getByRole("button", { name: "Discard this attempt" })).toHaveFocus());
+      fireEvent.click(screen.getByRole("button", { name: "Discard this attempt" }));
+      const yes = screen.getByRole("button", { name: "Discard attempt" });
+      act(() => { yes.click(); yes.click(); retry.click(); });
+      expect(discard).toHaveBeenCalledOnce();
+      expect(finish).toHaveBeenCalledOnce();
+      expect(yes).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Keep trying" })).toBeDisabled();
+      fireEvent.keyDown(document.getElementById("computer-discard-confirm")!, { key: "Escape" });
+      expect(screen.getByRole("button", { name: "Discard attempt" })).toBeInTheDocument();
+      await act(async () => removal.reject({ code: "computer-discard-ownership-unproven" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(/could not safely discard/i);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Discard this attempt" })).toHaveFocus());
+      expect(screen.getByRole("button", { name: "Retry finishing" })).toBeEnabled();
+    });
+
+    it("does not let an old discard completion clear a replacement flow", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      const begin = vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValueOnce({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true }).mockResolvedValue({ stage: "computer_waiting", qrPayload: "replacement", awaitingOwner: true, computerClaimant: true });
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockRejectedValue({ code: "host-state" });
+      const removal = deferred<void>();
+      vi.spyOn(bridgeModule, "discardComputerClaimant").mockReturnValue(removal.promise);
+      renderLanding({ newIdentity: true });
+      await chooseExisting();
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Finish connection" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Discard this attempt" }));
+      fireEvent.click(screen.getByRole("button", { name: "Discard attempt" }));
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      await chooseExisting();
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      expect(await screen.findByRole("button", { name: "Cancel connection" })).toBeEnabled();
+      expect(begin).toHaveBeenCalledTimes(2);
+      await act(async () => removal.resolve());
+      expect(screen.getByRole("button", { name: "Cancel connection" })).toBeEnabled();
+    });
+
+    it("accepts expiry returned by Finish rather than applying the poll-only expiry guard", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true });
+      const finish = deferred<bridgeModule.ComputerClaimantView>();
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockReturnValue(finish.promise);
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Finish connection" }));
+      await act(async () => finish.resolve({ stage: "computer_expired", awaitingOwner: false, computerClaimant: true }));
+      expect(screen.getByRole("button", { name: "Start again" })).toBeEnabled();
+    });
+
+    it("closes confirmation on retry and returns focus only after deferred finish fails", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true });
+      const nextFinish = deferred<bridgeModule.ComputerClaimantView>();
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockRejectedValueOnce({ code: "secure-store-unavailable" }).mockReturnValue(nextFinish.promise);
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Finish connection" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Discard this attempt" }));
+      expect(screen.getByRole("button", { name: "Keep trying" })).toHaveFocus();
+      fireEvent.click(screen.getByRole("button", { name: "Retry finishing" }));
+      expect(screen.queryByRole("button", { name: "Keep trying" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Finish connection" })).toBeDisabled();
+      await act(async () => nextFinish.reject({ code: "secure-store-unavailable" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Retry finishing" })).toHaveFocus());
+    });
+
+    it.each(["finish", "replacement", "connected", "stale-error"])("fences manual status retry across %s", async outcome => {
+      const poll = capturePoll();
+      const manual = deferred<bridgeModule.ComputerClaimantView>();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_waiting", qrPayload: "qr", awaitingOwner: true, computerClaimant: true });
+      vi.spyOn(bridge, "enrollment_cancel_computer").mockResolvedValue();
+      const status = vi.spyOn(bridge, "enrollment_computer_status").mockRejectedValueOnce({ code: "offline" }).mockReturnValueOnce(manual.promise).mockResolvedValue({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true });
+      const finishing = deferred<bridgeModule.ComputerClaimantView>();
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockReturnValue(finishing.promise);
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true, onJoined: vi.fn() });
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      await poll();
+      fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+      expect(status).toHaveBeenCalledTimes(2);
+      if (outcome === "replacement" || outcome === "stale-error") {
+        fireEvent.click(screen.getByRole("button", { name: "Cancel connection" }));
+        fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      } else {
+        await poll();
+        fireEvent.click(await screen.findByRole("button", { name: "Finish connection" }));
+        if (outcome === "connected") await act(async () => finishing.resolve({ stage: "computer_connected", awaitingOwner: false, computerClaimant: true }));
+      }
+      await act(async () => outcome === "stale-error" ? manual.reject({ code: "offline" }) : manual.resolve({ stage: "computer_expired", awaitingOwner: false, computerClaimant: true }));
+      expect(screen.queryByRole("heading", { name: "Connection expired" })).not.toBeInTheDocument();
+      expect(document.getElementById("computer-status-error")).not.toBeInTheDocument();
+      if (outcome === "connected") expect(screen.getByRole("heading", { name: "Connected" })).toBeInTheDocument();
+    });
+
+    it("focuses the returned finishing stage after a native diagnostic response", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true });
+      const finish = deferred<bridgeModule.ComputerClaimantView>();
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockReturnValue(finish.promise);
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Finish connection" }));
+      await act(async () => finish.resolve({ stage: "computer_finishing", awaitingOwner: false, computerClaimant: true, errorCode: "secure-store-unavailable" }));
+      expect(screen.getByRole("alert")).toHaveTextContent(peppyCopy.computer_error_secure_store);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Retry finishing" })).toHaveFocus());
+      expect(screen.getByRole("button", { name: "Discard this attempt" })).toBeEnabled();
+    });
+
+    it("focuses a begin error heading", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockRejectedValue({ code: "identity-preserved" });
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Connection needs attention" })).toHaveFocus());
+    });
+
+    it.each(["session-draining", "secure-store-unavailable", "host-state"])("keeps recovery actions with accurate discard diagnostic %s", async code => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_finishing", awaitingOwner: false, computerClaimant: true });
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockRejectedValue({ code: "host-state" });
+      vi.spyOn(bridgeModule, "discardComputerClaimant").mockRejectedValue({ code });
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Retry finishing" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Discard this attempt" }));
+      fireEvent.click(screen.getByRole("button", { name: "Discard attempt" }));
+      await waitFor(() => expect(document.getElementById("computer-error-code")).toHaveAttribute("data-error-code", code));
+      expect(screen.getByRole("alert")).toHaveTextContent(/cleanup may be incomplete/i);
+      expect(screen.getByRole("button", { name: "Retry finishing" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Discard this attempt" })).toBeEnabled();
+    });
+
+    it("confirms before discarding an approved local attempt", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true });
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockRejectedValue({ code: "secure-store-unavailable" });
+      vi.spyOn(bridge, "enrollment_cancel_computer").mockResolvedValue();
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Finish connection" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Discard this attempt" }));
+      expect(bridge.enrollment_cancel_computer).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Discard attempt" }));
+      await waitFor(() => expect(bridge.enrollment_cancel_computer).toHaveBeenCalledOnce());
     });
 
     it("offers reopening, not an activation retry, after a poisoned claimant checkpoint", async () => {

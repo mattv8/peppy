@@ -321,7 +321,7 @@ fn remember_composer_target(
 impl AppState {
     pub fn new(root: PathBuf, store: Arc<dyn SecretStore>, notifier: Notifier) -> Self {
         let notifications = Arc::new(NotificationSettings::load(&root));
-        Self {
+        let state = Self {
             config_path: root.join("server.json"),
             root,
             store,
@@ -347,7 +347,14 @@ impl AppState {
             media_read_budget: Arc::new(MediaReadBudget::new(MAX_CONCURRENT_MEDIA_READS)),
             update_safety: update_safety::SafetyGate::default(),
             updates: updates::UpdateManager::new(env!("CARGO_PKG_VERSION").into()),
+        };
+        if let Err(error) = enrollment::computer::recover_computer_install_rollback(&state) {
+            eprintln!(
+                "peppy: pending computer enrollment rollback was not completed: {}",
+                error.code
+            );
         }
+        state
     }
 
     fn config(&self) -> BridgeResult<HostConfig> {
@@ -365,8 +372,7 @@ impl AppState {
         Ok(config)
     }
 
-    async fn close_session_preserving_heads(&self, preserve_heads: bool) {
-        let _opening = self.session_open_lock.lock().await;
+    async fn retire_session_preserving_heads(&self, preserve_heads: bool) -> bool {
         if let Ok(mut scopes) = self.composer_scopes.lock() {
             scopes.clear();
         }
@@ -386,9 +392,16 @@ impl AppState {
                 if current.is_none() {
                     *current = Some(session);
                 }
+                return false;
             }
         }
         self.notification_activation.retire();
+        true
+    }
+
+    async fn close_session_preserving_heads(&self, preserve_heads: bool) {
+        let _opening = self.session_open_lock.lock().await;
+        let _ = self.retire_session_preserving_heads(preserve_heads).await;
     }
 
     async fn close_session(&self) {
@@ -408,7 +421,15 @@ impl AppState {
     /// Opens the active session while an existing operation admission remains held.
     pub(crate) async fn session_admitted(
         &self,
+        operation: &update_safety::OperationGuard,
+    ) -> BridgeResult<Option<Arc<Session>>> {
+        self.session_admitted_for_computer(operation, None).await
+    }
+
+    async fn session_admitted_for_computer(
+        &self,
         _operation: &update_safety::OperationGuard,
+        computer_attempt: Option<uuid::Uuid>,
     ) -> BridgeResult<Option<Arc<Session>>> {
         let _opening = self.session_open_lock.lock().await;
         let config = self.config()?;
@@ -433,6 +454,7 @@ impl AppState {
             self.revoke_media_capabilities();
             return Ok(None);
         };
+        enrollment::computer::check_computer_install_access(self, &binding, computer_attempt)?;
         let retiring = {
             let mut current = self.session.lock().await;
             if let Some(existing) = current.as_ref() {
@@ -1224,8 +1246,8 @@ async fn activate_native_credential(
     };
     let result = async {
         state.update_config(|config| config.select_origin(&credential.origin))?;
-        verify_import(state, &credential).await?;
-        activate_import_locked(state, credential.clone(), Some(operation)).await
+        verify_import(state, &credential, None).await?;
+        activate_import_locked(state, credential.clone(), Some(operation), None).await
     }
     .await;
     if let Err(error) = result {
@@ -1247,16 +1269,22 @@ async fn verify_and_activate_test_credential(
     state: &AppState,
     credential: Arc<credentials::ImportedCredential>,
 ) -> BridgeResult<()> {
-    verify_import(state, &credential).await?;
+    verify_import(state, &credential, None).await?;
     activate_import(state, credential).await
 }
 
 async fn verify_import(
     state: &AppState,
     credential: &Arc<credentials::ImportedCredential>,
+    computer_attempt: Option<uuid::Uuid>,
 ) -> BridgeResult<()> {
     // Refuse before any network use: the token must never be sent to a non-configured origin.
     check_configured_origin(state, credential)?;
+    enrollment::computer::check_computer_install_access(
+        state,
+        &credential.binding(),
+        computer_attempt,
+    )?;
     let (store, check) = (state.store.clone(), credential.clone());
     blocking(move || check_origin_binding(&*store, &check)).await?;
     let api = net::Api::new(&credential.origin, &credential.device_token)?;
@@ -1286,17 +1314,19 @@ async fn activate_import(
     credential: Arc<credentials::ImportedCredential>,
 ) -> BridgeResult<()> {
     let _import = state.import_lock.lock().await;
-    activate_import_locked(state, credential, None).await
+    activate_import_locked(state, credential, None, None).await
 }
 
 async fn activate_import_locked(
     state: &AppState,
     credential: Arc<credentials::ImportedCredential>,
     operation: Option<&update_safety::OperationGuard>,
+    computer_attempt: Option<uuid::Uuid>,
 ) -> BridgeResult<()> {
     // Re-checked under the lock: the origin may have changed while the credential was verified.
     check_configured_origin(state, &credential)?;
     let binding = credential.binding();
+    enrollment::computer::check_computer_install_access(state, &binding, computer_attempt)?;
     let previous = state.config()?;
     let preserve_heads = previous.active_binding() == Some(&binding);
     let (store, root, keyed, stored) = (
@@ -1318,7 +1348,11 @@ async fn activate_import_locked(
     })?;
     state.close_session_preserving_heads(preserve_heads).await;
     let open_session = match operation {
-        Some(operation) => state.session_admitted(operation).await,
+        Some(operation) => {
+            state
+                .session_admitted_for_computer(operation, computer_attempt)
+                .await
+        }
         None => state.session().await,
     };
     if let Err(error) = open_session {
@@ -5011,6 +5045,7 @@ pub fn run() {
             enrollment::computer::enrollment_computer_claimant_status,
             enrollment::computer::enrollment_confirm_computer_claimant,
             enrollment::computer::enrollment_cancel_computer_claimant,
+            enrollment::computer::enrollment_discard_computer_claimant,
             enrollment::enrollment_add_phone,
             enrollment::enrollment_rotate_phone,
             enrollment::enrollment_cancel_phone,

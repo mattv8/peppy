@@ -1086,6 +1086,18 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .primary-button:hover:not(:disabled) {
   background: var(--peppy-accent-hover);
 }
+.destructive-button {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--peppy-danger-hover);
+  border-radius: 4px;
+  background: var(--peppy-danger-hover);
+  color: var(--peppy-danger-text);
+  font-size: 13px;
+  line-height: 26px;
+}
+.destructive-button:hover:not(:disabled) { background: var(--peppy-danger-hover); }
 .btn,
 .secondary-button {
   height: 28px;
@@ -1108,11 +1120,19 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   cursor: default;
   opacity: 0.5;
 }
+.destructive-button:disabled { cursor: default; opacity: 1; border-style: dashed; }
 .primary-button:focus-visible,
 .btn:focus-visible,
 .secondary-button:focus-visible {
   outline: 2px solid var(--peppy-focus);
   outline-offset: 2px;
+}
+.destructive-button:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+@media (forced-colors: active) {
+  .destructive-button,
+  .destructive-button:hover:not(:disabled) { background: ButtonFace; color: ButtonText; border-color: ButtonText; }
+  .destructive-button:disabled { background: ButtonFace; color: GrayText; border-color: GrayText; }
+  .destructive-button:focus-visible { outline-color: Highlight; }
 }
 #settings-view section > .settings-control-row {
   justify-self: stretch;

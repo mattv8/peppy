@@ -317,7 +317,10 @@ pub fn ensure_database_key(
     static KEY_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _serialized = KEY_INIT.lock().unwrap_or_else(|poison| poison.into_inner());
     let database_exists = database.exists();
-    if let Some(existing) = store.get(&binding.db_key_account())? {
+    if let Some(existing) = store
+        .get(&binding.db_key_account())?
+        .filter(|existing| !existing.is_empty())
+    {
         if existing.len() != 32 {
             return Err(invalid_stored());
         }
@@ -345,7 +348,10 @@ pub fn stored_credential(
     store: &dyn SecretStore,
     binding: &Binding,
 ) -> BridgeResult<Option<ImportedCredential>> {
-    let Some(bytes) = store.get(&binding.credential_account())? else {
+    let Some(bytes) = store
+        .get(&binding.credential_account())?
+        .filter(|bytes| !bytes.is_empty())
+    else {
         return Ok(None);
     };
     let credential = parse_credential(&bytes).map_err(|_| invalid_stored())?;
@@ -367,7 +373,10 @@ pub fn check_origin_binding(
     credential: &ImportedCredential,
 ) -> BridgeResult<()> {
     let binding = credential.binding();
-    if let Some(bytes) = store.get(&binding.credential_account())? {
+    if let Some(bytes) = store
+        .get(&binding.credential_account())?
+        .filter(|bytes| !bytes.is_empty())
+    {
         let existing = parse_credential(&bytes).map_err(|_| invalid_stored())?;
         if existing.origin != credential.origin {
             return Err(BridgeError::new(

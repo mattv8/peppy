@@ -214,6 +214,32 @@ fn declared_commands() -> Vec<String> {
         .collect()
 }
 
+fn registered_commands() -> Vec<String> {
+    let registered = include_str!("lib.rs");
+    let macro_start = registered.find("macro_rules! command_handler").unwrap();
+    let macro_end = registered[macro_start..]
+        .find("] };")
+        .map(|end| macro_start + end)
+        .unwrap();
+    let invocation_start = registered.rfind("command_handler!(").unwrap();
+    let invocation_end = registered[invocation_start..]
+        .find(");")
+        .map(|end| invocation_start + end)
+        .unwrap();
+
+    [
+        &registered[macro_start..macro_end],
+        &registered[invocation_start..invocation_end],
+    ]
+    .into_iter()
+    .flat_map(|source| source.lines())
+    .filter_map(|line| {
+        let command = line.trim().strip_suffix(',')?;
+        (!command.starts_with('$')).then(|| command.rsplit("::").next().unwrap().to_owned())
+    })
+    .collect()
+}
+
 fn allow(command: &str) -> String {
     format!("allow-{}", command.replace('_', "-"))
 }
@@ -224,33 +250,54 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let registered = include_str!("lib.rs");
     let hosted = include_str!("hosted/mod.rs");
     let enrollment = include_str!("enrollment.rs");
+    let computer_enrollment = include_str!("enrollment/computer.rs");
     let history_search = include_str!("search_history.rs");
     let notification_activation = include_str!("notification_activation.rs");
     for command in &commands {
         assert!(
             registered.contains(&format!("enrollment::{command},"))
+                || registered.contains(&format!("enrollment::computer::{command},"))
                 || !command.starts_with("enrollment_"),
             "{command} is declared but not registered in generate_handler"
         );
         assert!(
             registered.contains(&format!("fn {command}("))
-                || [hosted, enrollment, history_search, notification_activation]
-                    .iter()
-                    .any(|source| {
-                        source.contains(&format!("pub async fn {command}("))
-                            || source.contains(&format!("pub fn {command}("))
-                    }),
+                || [
+                    hosted,
+                    enrollment,
+                    computer_enrollment,
+                    history_search,
+                    notification_activation,
+                ]
+                .iter()
+                .any(|source| {
+                    source.contains(&format!("pub async fn {command}("))
+                        || source.contains(&format!("pub fn {command}("))
+                }),
             "{command} declared in the app manifest but not defined"
         );
     }
 
     let composer = permissions(include_str!("../capabilities/composer.json"));
     let main = permissions(include_str!("../capabilities/default.json"));
+    for command in registered_commands() {
+        assert!(
+            commands.contains(&command),
+            "{command} is registered but absent from the app manifest"
+        );
+        assert!(
+            main.contains(&allow(&command)) || composer.contains(&allow(&command)),
+            "{command} is registered but absent from every capability"
+        );
+    }
     assert!(commands.contains(&"load_history".to_owned()));
     assert!(registered.contains("fn load_history("));
     let handler = &registered[registered.find("tauri::generate_handler![").unwrap()..];
     assert!(handler.contains("\n        load_history,"));
-    for command in ["peek_notification_activation", "ack_notification_activation"] {
+    for command in [
+        "peek_notification_activation",
+        "ack_notification_activation",
+    ] {
         assert!(commands.contains(&command.to_owned()));
         assert!(handler.contains(&format!("notification_activation::{command},")));
         assert!(main.contains(&allow(command)));
