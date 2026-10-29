@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -52,14 +53,8 @@ internal fun OwnerComputerApprovalScreen(host: OwnerComputerApprovalHost, onDone
         scanning = granted
         if (!granted) error = "camera-denied"
     }
-    fun cancel() = scope.launch {
-        busy = true
-        when (val result = host.cancel()) {
-            OwnerComputerApprovalHost.Result.Cancelled, is OwnerComputerApprovalHost.Result.Approved -> onDone()
-            is OwnerComputerApprovalHost.Result.Failed -> error = result.code
-            else -> Unit
-        }
-        busy = false
+    fun exit() {
+        onDone()
     }
     fun scan(code: String) = scope.launch {
         if (busy) return@launch
@@ -84,6 +79,9 @@ internal fun OwnerComputerApprovalScreen(host: OwnerComputerApprovalHost, onDone
         busy = false
     }
     prompt.request.value?.let { ApprovalPassphraseDialog(it) }
+    BackHandler {
+        if (scanning) scanning = false else exit()
+    }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("owner-computer-screen"),
@@ -101,7 +99,7 @@ internal fun OwnerComputerApprovalScreen(host: OwnerComputerApprovalHost, onDone
             scanning -> {
                 Text(stringResource(R.string.peppy_owner_computer_scanner_title))
                 QRScanner(Modifier.fillMaxWidth().weight(1f).testTag("owner-computer-scanner"), ::scan)
-                OutlinedButton(onClick = { scanning = false }, enabled = !busy, modifier = Modifier.testTag("owner-computer-scan-cancel")) { Text(stringResource(R.string.peppy_cancel)) }
+                OutlinedButton(onClick = { scanning = false }, modifier = Modifier.testTag("owner-computer-scan-cancel")) { Text(stringResource(R.string.peppy_back)) }
             }
             view != null && approved -> {
                 Text(stringResource(R.string.peppy_owner_computer_approved_title), Modifier.testTag("owner-computer-approved").semantics { liveRegion = LiveRegionMode.Polite })
@@ -127,7 +125,7 @@ internal fun OwnerComputerApprovalScreen(host: OwnerComputerApprovalHost, onDone
                 ) { Text(stringResource(R.string.peppy_owner_computer_open_settings_cta)) }
             }
         }
-        if (!scanning && !approved) OutlinedButton(onClick = ::cancel, enabled = !busy, modifier = Modifier.testTag("owner-computer-cancel")) { Text(stringResource(R.string.peppy_cancel)) }
+        if (!scanning && !approved) OutlinedButton(onClick = ::exit, modifier = Modifier.testTag("owner-computer-cancel")) { Text(stringResource(R.string.peppy_cancel)) }
     }
 }
 

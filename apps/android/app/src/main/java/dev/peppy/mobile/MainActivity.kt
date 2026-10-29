@@ -236,6 +236,14 @@ private fun CompanionScreen(activity: ComponentActivity) {
             }
         }
     }
+    val leavingOwnerComputerHost = ownerComputerHost
+    DisposableEffect(leavingOwnerComputerHost) {
+        onDispose {
+            leavingOwnerComputerHost?.let { host ->
+                CoroutineScope(Dispatchers.IO).launch { host.cancelAndClose() }
+            }
+        }
+    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -280,15 +288,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
     }
 
     if (connectComputerOpen && ownerComputerHost != null) {
-        BackHandler { scope.launch {
-            when (ownerComputerHost?.cancel()) {
-                OwnerComputerApprovalHost.Result.Cancelled, is OwnerComputerApprovalHost.Result.Approved -> {
-                    ownerComputerHost?.close(); ownerComputerHost = null; connectComputerOpen = false
-                }
-                else -> Unit
-            }
-        } }
-        OwnerComputerApprovalScreen(ownerComputerHost!!, onDone = { ownerComputerHost?.close(); ownerComputerHost = null; connectComputerOpen = false })
+        OwnerComputerApprovalScreen(ownerComputerHost!!, onDone = { ownerComputerHost = null; connectComputerOpen = false })
         return
     }
 

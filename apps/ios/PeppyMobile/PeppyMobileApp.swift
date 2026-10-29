@@ -102,7 +102,9 @@ struct DeviceView: View {
                 )
             }
         }
-        .sheet(isPresented: $showingOwnerComputerApproval) {
+        .sheet(isPresented: $showingOwnerComputerApproval, onDismiss: {
+            ownerComputerApprovalHost = nil
+        }) {
             if let ownerComputerApprovalHost {
                 OwnerComputerApprovalView(host: ownerComputerApprovalHost, isPresented: $showingOwnerComputerApproval)
             }
