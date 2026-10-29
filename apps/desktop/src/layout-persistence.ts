@@ -12,6 +12,7 @@ type LayoutPatch = {
   contactsDetailWidth?: number;
   compactTimestamps?: boolean;
   theme?: "light" | "dark" | "system";
+  groupSenderAvatars?: boolean;
 };
 
 type StoredLayout = Record<string, unknown>;
@@ -28,10 +29,18 @@ export function readContactsDetailWidth(): number | undefined {
 }
 
 export function readCompactTimestamps(): boolean {
+  return readLayoutBoolean("compactTimestamps");
+}
+
+export function readGroupSenderAvatars(): boolean {
+  return readLayoutBoolean("groupSenderAvatars");
+}
+
+function readLayoutBoolean(key: string): boolean {
   try {
     const stored: unknown = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
     if (typeof stored !== "object" || stored === null || Array.isArray(stored)) return true;
-    const value = (stored as StoredLayout).compactTimestamps;
+    const value = (stored as StoredLayout)[key];
     return typeof value === "boolean" ? value : true;
   } catch {
     return true;

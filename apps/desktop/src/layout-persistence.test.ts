@@ -5,6 +5,7 @@ import {
   persistRecipientPosition,
   readCompactTimestamps,
   readContactsDetailWidth,
+  readGroupSenderAvatars,
 } from "./layout-persistence";
 
 const LAYOUT_KEY = "peppy.layout.v1";
@@ -103,6 +104,27 @@ describe("layout persistence", () => {
       sibling: "kept",
       compactTimestamps: false,
     });
+  });
+
+  it.each([
+    { label: "missing layout", savedLayout: null },
+    { label: "malformed layout", savedLayout: "{" },
+    { label: "a stored JSON null", savedLayout: "null" },
+    { label: "a string value", savedLayout: JSON.stringify({ groupSenderAvatars: "false" }) },
+  ])("defaults group sender avatars on for $label", ({ savedLayout }) => {
+    if (savedLayout !== null) {
+      localStorage.setItem(LAYOUT_KEY, savedLayout);
+    }
+
+    expect(readGroupSenderAvatars()).toBe(true);
+  });
+
+  it("reloads group sender avatar preferences", () => {
+    persistLayoutPatch({ groupSenderAvatars: false });
+    expect(readGroupSenderAvatars()).toBe(false);
+
+    persistLayoutPatch({ groupSenderAvatars: true });
+    expect(readGroupSenderAvatars()).toBe(true);
   });
 
   it("re-reads sibling keys before each patch", () => {

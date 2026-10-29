@@ -214,8 +214,8 @@ jobs:
         os: [ubuntu-24.04, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
     # Linux also runs ignored integration tests using the desktop build below.
-    # Windows needs cold-cache headroom for its native Tauri dependencies.
-    timeout-minutes: ${{ matrix.os == 'macos-15' && 30 || 60 }}
+    # All native platforms need cold-cache headroom for their Tauri dependencies.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020

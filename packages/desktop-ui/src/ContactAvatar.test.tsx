@@ -18,6 +18,9 @@ describe("ContactAvatar", () => {
     rerender(<ContactAvatar seed="small" name="Ada Lovelace" size={18} />);
     expect(document.querySelector(".contact-avatar")).toHaveTextContent("A");
 
+    rerender(<ContactAvatar seed="sender" name="Ada Lovelace" size={24} />);
+    expect(document.querySelector(".contact-avatar")).toHaveTextContent("A");
+
     rerender(<ContactAvatar seed="person" />);
     expect(document.querySelector(".contact-avatar")).toHaveAttribute("data-avatar-kind", "person");
 

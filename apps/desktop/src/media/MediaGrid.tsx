@@ -14,6 +14,7 @@ export type MediaGridProps = {
   messageRef?(message: GalleryMessage): RefCallback<HTMLElement> | undefined;
   renderCaption?(message: GalleryMessage): ReactNode;
   messageTitle?(message: GalleryMessage): string | undefined;
+  senderRun?(group: MessageGroup): { label?: ReactNode; avatar?: ReactNode; gutter: boolean; ariaName?: string; start: boolean; end: boolean } | undefined;
 };
 
 function Carousel({ group, onOpen, messageTitle }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; messageTitle?: MediaGridProps["messageTitle"] }) {
@@ -125,16 +126,19 @@ function Carousel({ group, onOpen, messageTitle }: { group: MessageGroup; onOpen
   </div>{allHeld && <p id={holdNoteId} data-group-hold-note aria-live="off"><WifiOff size={12} aria-hidden="true" />{groupStatus}</p>}</>;
 }
 
-function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, messageTitle }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"]; messageTitle?: MediaGridProps["messageTitle"] }) {
+function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, messageTitle, senderRun }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"]; messageTitle?: MediaGridProps["messageTitle"]; senderRun?: MediaGridProps["senderRun"] }) {
   const finalMessage = group.messages.at(-1);
   const isGrouped = group.messages.length > 1 || group.attachments.length > 1;
   const onlyAttachment = group.attachments[0];
-  return <div className={`message-row ${group.messages[0].sender}`} data-message-group={group.id} data-sender={group.messages[0].sender}>
-    <article data-grouped={isGrouped || undefined} data-sender={group.messages[0].sender} data-sender-address={group.messages[0].senderAddress} aria-label={`${group.attachments.length} images`} title={group.attachments.length === 1 && onlyAttachment ? messageTitle?.(onlyAttachment.message) : undefined}>
+  const sender = senderRun?.(group);
+  const article = <article data-grouped={isGrouped || undefined} data-sender={group.messages[0].sender} data-sender-address={group.messages[0].senderAddress} aria-label={sender?.ariaName ? `${group.attachments.length} images from ${sender.ariaName}` : `${group.attachments.length} images`} title={group.attachments.length === 1 && onlyAttachment ? messageTitle?.(onlyAttachment.message) : undefined}>
       {group.attachments.length === 1 && onlyAttachment ? <MediaTile attachment={onlyAttachment.attachment} message={onlyAttachment.message} variant="single" onOpen={() => onOpen(onlyAttachment)} /> : <Carousel group={group} onOpen={onOpen} messageTitle={messageTitle} />}
       {finalMessage?.body && <p data-group-caption>{renderCaption?.(finalMessage) ?? finalMessage.body}</p>}
       {finalMessage?.subject && <p data-group-subject>Subject: {finalMessage.subject}</p>}
-    </article>
+    </article>;
+  return <div className={`message-row ${group.messages[0].sender}`} data-message-group={group.id} data-sender={group.messages[0].sender} data-sender-gutter={sender?.gutter ? "" : undefined} data-sender-run-start={sender?.start ? "" : undefined} data-sender-run-end={sender?.end ? "" : undefined}>
+    {sender?.label}
+    {sender ? <div className="message-sender-line" data-sender-line>{sender.avatar ?? (sender.gutter && <span className="message-sender-gutter" aria-hidden="true" />)}{article}</div> : article}
     {group.messages.map((message) => <div key={message.id} ref={messageRef?.(message)} data-message-row={message.id}><div data-message-id={message.id} data-message-meta={message.id}>{renderMessageMeta?.(message)}</div></div>)}
   </div>;
 }

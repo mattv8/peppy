@@ -75,6 +75,7 @@ export function ContactForm({
   toneControl,
   savedToneSeed,
   saveDisabled = false,
+  createPrefill,
 }: {
   initial?: ContactView;
   onCancel(): void;
@@ -87,6 +88,7 @@ export function ContactForm({
   toneControl?: { value?: number; pending?: boolean; error?: string; disabled?: boolean; onSelect(index: number | null): void };
   savedToneSeed?: string;
   saveDisabled?: boolean;
+  createPrefill?: { phone: string };
 }) {
   const rowSequence = useRef(0);
   // Existing domain IDs win; new unsaved rows get a stable form-local allocation ID.
@@ -108,7 +110,7 @@ export function ContactForm({
           photoDataUrl: initial.photoDataUrl,
         }
       : {
-          phones: [],
+          phones: createPrefill ? [{ label: "mobile", number: createPrefill.phone, editorKey: rowKey("phone") }] : [],
           emails: [],
           addresses: [],
           photoKind: "keep",

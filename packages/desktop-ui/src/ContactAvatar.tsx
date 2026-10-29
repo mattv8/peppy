@@ -8,7 +8,7 @@ type ContactAvatarProps = {
   kind?: AvatarKind;
   photoDataUrl?: string;
   name?: string;
-  size?: 18 | 36 | 64;
+  size?: 18 | 24 | 36 | 64;
   id?: string;
   className?: string;
   "data-contact-id"?: string;
@@ -17,6 +17,7 @@ type ContactAvatarProps = {
 
 const GLYPH_SIZES = {
   18: { initials: 8, icon: 10, strokeWidth: 1.75 },
+  24: { initials: 10, icon: 13, strokeWidth: 1.75 },
   36: { initials: 14, icon: 18, strokeWidth: 1.75 },
   64: { initials: 26, icon: 32, strokeWidth: 1.5 },
 } as const;
