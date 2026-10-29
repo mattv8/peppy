@@ -1529,18 +1529,66 @@ describe("ContactsView", () => {
       expect(bridge.submit_contact_edit).not.toHaveBeenCalled();
     });
 
-    it("keeps a rejected save visible after a background refresh hint", async () => {
-      vi.mocked(bridge.submit_contact_edit).mockResolvedValueOnce({ state: "rejected", reason: "The phone refused this save." });
-      render(<ContactsView />);
-      fireEvent.click(await screen.findByLabelText("New contact"));
-      fireEvent.change(await screen.findByLabelText("Given name"), { target: { value: "Draft for Pixel" } });
-      fireEvent.click(screen.getByRole("button", { name: "Save" }));
-      expect(await screen.findByRole("alert")).toHaveTextContent("The phone refused this save.");
+    it.each(["before refresh starts", "while refresh is pending", "after refresh completes"])(
+      "keeps a rejected save visible after a background refresh hint: rejection %s",
+      async rejectionOrder => {
+        const initialBooks = deferred<ContactBookView[]>();
+        const refreshedBooks = deferred<ContactBookView[]>();
+        const refreshedPage = deferred<ContactView[]>();
+        const submit = deferred<Awaited<ReturnType<typeof bridge.submit_contact_edit>>>();
+        vi.mocked(bridge.list_contact_books)
+          .mockReturnValueOnce(initialBooks.promise)
+          .mockReturnValueOnce(refreshedBooks.promise);
+        vi.mocked(bridge.submit_contact_edit).mockReturnValue(submit.promise);
+        render(<ContactsView />);
 
-      act(() => hint?.());
-      await waitFor(() => expect(bridge.list_contact_books).toHaveBeenCalledTimes(2));
-      expect(screen.getByRole("alert")).toHaveTextContent("The phone refused this save.");
-    });
+        const create = screen.getByLabelText("New contact");
+        expect(create).toBeDisabled();
+        await act(async () => initialBooks.resolve(books));
+        await waitFor(() => expect(create).toBeEnabled());
+        await screen.findByRole("button", { name: /Aurora Chen/ });
+        fireEvent.click(create);
+        const givenName = screen.getByLabelText("Given name");
+        fireEvent.change(givenName, { target: { value: "Draft for Pixel" } });
+        fireEvent.click(screen.getByRole("button", { name: "Save" }));
+        expect(bridge.submit_contact_edit).toHaveBeenCalledWith(expect.objectContaining({
+          kind: "create", targetBookId: "book-pixel8",
+        }));
+        expect(saveButton()).toBeDisabled();
+
+        const rejectSave = async () => {
+          await act(async () => submit.resolve({ state: "rejected", reason: "The phone refused this save." }));
+          expect(screen.getByRole("alert")).toHaveTextContent("The phone refused this save.");
+        };
+        if (rejectionOrder === "before refresh starts") await rejectSave();
+
+        vi.mocked(bridge.list_contacts).mockReturnValueOnce(refreshedPage.promise);
+        act(() => hint?.());
+        await waitFor(() => expect(bridge.list_contact_books).toHaveBeenCalledTimes(2));
+        await waitFor(() => expect(bridge.list_contacts).toHaveBeenCalledTimes(2));
+        if (rejectionOrder === "while refresh is pending") await rejectSave();
+
+        await act(async () => {
+          refreshedBooks.resolve([otherBook, { ...restorableBook, contactCount: 3 }]);
+          refreshedPage.resolve([{ ...mockContactAurora, displayName: "Refreshed Aurora" }, mockContactRiver]);
+        });
+        expect(screen.getByRole("button", { name: /Pixel 8/ })).toHaveTextContent("3");
+        expect(screen.getByRole("button", { name: /Refreshed Aurora/ })).toBeInTheDocument();
+        if (rejectionOrder === "after refresh completes") await rejectSave();
+
+        expect(screen.getByLabelText("Given name")).toBe(givenName);
+        expect(givenName).toHaveValue("Draft for Pixel");
+        expect(screen.getByRole("alert")).toHaveTextContent("The phone refused this save.");
+        expect(saveButton()).toBeEnabled();
+        fireEvent.click(saveButton());
+        await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(2));
+        expect(vi.mocked(bridge.submit_contact_edit).mock.calls[1][0]).toMatchObject({
+          kind: "create", targetBookId: "book-pixel8",
+          patches: expect.arrayContaining([{ field: "givenName", value: "Draft for Pixel" }]),
+        });
+        expect(screen.getByLabelText("Given name")).toHaveValue("Draft for Pixel");
+      },
+    );
 
     it("clears a stale clean detail and list when every book disappears", async () => {
       const { container } = render(<ContactsView />);
