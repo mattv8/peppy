@@ -1508,14 +1508,19 @@ fn classify_callback_request(line: &str, expected_state: &str) -> CallbackReques
 }
 
 async fn read_callback_request_line(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
     deadline: Duration,
     max_bytes: usize,
 ) -> Result<String, ()> {
+    // A close with unread HTTP headers can reset the connection and discard the callback page.
+    // Drain through the blank line, not EOF: browsers keep their write side open for the response.
+    const MAX_REQUEST_BYTES: usize = 16 * 1024;
     let mut request = Vec::with_capacity(256);
+    let mut line_end = None;
     let expires_at = tokio::time::Instant::now() + deadline;
     loop {
-        if request.len() >= max_bytes {
+        if request.len() >= MAX_REQUEST_BYTES || (line_end.is_none() && request.len() >= max_bytes)
+        {
             return Err(());
         }
         let mut byte = [0u8; 1];
@@ -1531,9 +1536,14 @@ async fn read_callback_request_line(
             return Err(());
         }
         request.push(byte[0]);
-        if request.ends_with(b"\r\n") {
-            let line = std::str::from_utf8(&request[..request.len() - 2]).map_err(|_| ())?;
-            return Ok(line.to_owned());
+        if line_end.is_none() && request.ends_with(b"\r\n") {
+            line_end = Some(request.len() - 2);
+        }
+        if let Some(end) = line_end {
+            if request.ends_with(b"\r\n\r\n") {
+                let line = std::str::from_utf8(&request[..end]).map_err(|_| ())?;
+                return Ok(line.to_owned());
+            }
         }
     }
 }
@@ -1654,6 +1664,126 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn callback_reader_consumes_headers_before_the_connection_can_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        client
+            .write_all(
+                b"GET /?code=auth-code&state=expected-state HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+
+        let line = read_callback_request_line(&mut server, Duration::from_secs(1), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            classify_callback_request(&line, CALLBACK_STATE),
+            CallbackRequest::Code(Zeroizing::new("auth-code".into()))
+        );
+        let mut unread = Vec::new();
+        server.read_to_end(&mut unread).await.unwrap();
+        assert!(
+            unread.is_empty(),
+            "closing with unread request bytes: {unread:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_delivers_the_complete_page_without_resetting_the_browser() {
+        let loopback = Loopback::bind().await.unwrap();
+        let address = loopback.uri.trim_start_matches("http://").to_owned();
+        let receiver = tokio::spawn(async move { loopback.receive(CALLBACK_STATE).await });
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(
+                b"GET /?code=auth-code&state=expected-state HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        // A browser waits for the response without first half-closing its request socket.
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8(response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        let length: usize = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(body.len(), length);
+        assert_eq!(receiver.await.unwrap().unwrap().as_str(), "auth-code");
+    }
+
+    #[tokio::test]
+    async fn callback_reader_rejects_incomplete_oversized_and_expired_requests() {
+        for request in [
+            b"GET / HTTP/1.1\r\nHost: localhost\r\n".to_vec(),
+            [b"A".repeat(4096), b"\r\n\r\n".to_vec()].concat(),
+            [
+                b"GET / HTTP/1.1\r\nHost: ".to_vec(),
+                b"A".repeat(16 * 1024),
+                b"\r\n\r\n".to_vec(),
+            ]
+            .concat(),
+        ] {
+            assert!(read_callback_request_line(
+                &mut request.as_slice(),
+                Duration::from_secs(1),
+                4096
+            )
+            .await
+            .is_err());
+        }
+        let mut complete = b"GET / HTTP/1.1\r\n\r\n".as_slice();
+        assert!(
+            read_callback_request_line(&mut complete, Duration::ZERO, 4096)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_reader_waits_for_fragmented_headers_but_not_for_eof() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: local")
+            .await
+            .unwrap();
+        let read = read_callback_request_line(&mut server, Duration::from_secs(1), 4096);
+        tokio::pin!(read);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(read.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        client.write_all(b"host\r\n\r\n").await.unwrap();
+        assert_eq!(read.await.unwrap(), "GET / HTTP/1.1");
+    }
+
+    #[tokio::test]
+    async fn callback_reader_deadline_also_bounds_stalled_headers() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: local")
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            read_callback_request_line(&mut server, Duration::from_millis(20), 4096),
+        )
+        .await
+        .expect("the request deadline must close a stalled header read");
+        assert!(result.is_err());
+    }
+
     /// Sends `chunks` on one loopback connection, then waits until the listener closes it.
     async fn send_callback_connection(address: &str, chunks: &[&[u8]]) -> Vec<u8> {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
@@ -1678,14 +1808,14 @@ mod tests {
 
         let oversized = vec![b'A'; 5000];
         for unrelated in [
-            &[b"GET /favicon.ico HTTP/1.1\r\n".as_slice()][..],
-            &[b"GET / HTTP/1.1\r\n".as_slice()],
-            &[b"GARBAGE\r\n".as_slice()],
-            &[b"GET :99999/ HTTP/1.1\r\n".as_slice()],
-            &[b"GET /?error=access_denied HTTP/1.1\r\n".as_slice()],
-            &[b"GET /?code=forged&state=other HTTP/1.1\r\n".as_slice()],
+            &[b"GET /favicon.ico HTTP/1.1\r\n\r\n".as_slice()][..],
+            &[b"GET / HTTP/1.1\r\n\r\n".as_slice()],
+            &[b"GARBAGE\r\n\r\n".as_slice()],
+            &[b"GET :99999/ HTTP/1.1\r\n\r\n".as_slice()],
+            &[b"GET /?error=access_denied HTTP/1.1\r\n\r\n".as_slice()],
+            &[b"GET /?code=forged&state=other HTTP/1.1\r\n\r\n".as_slice()],
             &[b"GET /?code=cut-off&state=expected-state".as_slice()],
-            &[b"\xff\xfe\r\n".as_slice()],
+            &[b"\xff\xfe\r\n\r\n".as_slice()],
             &[oversized.as_slice()],
         ] {
             assert!(send_callback_connection(&address, unrelated)
@@ -1714,11 +1844,11 @@ mod tests {
         let address = loopback.uri.trim_start_matches("http://").to_owned();
         let receiver = tokio::spawn(async move { loopback.receive(CALLBACK_STATE).await });
 
-        send_callback_connection(&address, &[b"GET /?error=access_denied HTTP/1.1\r\n"]).await;
+        send_callback_connection(&address, &[b"GET /?error=access_denied HTTP/1.1\r\n\r\n"]).await;
         assert!(!receiver.is_finished());
         send_callback_connection(
             &address,
-            &[b"GET /?error=access_denied&state=expected-state HTTP/1.1\r\n"],
+            &[b"GET /?error=access_denied&state=expected-state HTTP/1.1\r\n\r\n"],
         )
         .await;
 
