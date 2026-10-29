@@ -129,10 +129,10 @@ select:focus-visible {
 #titlebar-search > input {
   width: 100%;
   min-width: 0;
-  height: 26px;
+  height: 28px;
   padding: 0 28px 0 8px;
   border: 1px solid var(--peppy-border);
-  border-radius: var(--peppy-control-radius);
+  border-radius: var(--peppy-radius-md);
   background: var(--peppy-surface-widget);
   color: var(--peppy-text-primary);
   font-size: 12px;
@@ -205,7 +205,7 @@ select:focus-visible {
     inset-inline: 0;
     margin-block: auto;
     margin-inline: auto;
-    height: 26px;
+    height: 28px;
     width: clamp(160px, calc(100% - 480px), 520px);
   }
 }
