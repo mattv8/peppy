@@ -81,8 +81,12 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
 - These disclosure strings stay exact and untruncated: `Device sync encrypted`,
   `Device sync key mismatch`, `Device sync not unlocked`, and `Carrier SMS/MMS not
   end-to-end encrypted`.
-- App-drawn platform-appropriate chrome; do not switch to native decorations. Close paths use
-  `closeAfterSave`, and a draft flush failure keeps the window open. The detached
+- App-drawn platform-appropriate chrome. The one exception is the macOS main window, which
+  uses native overlay traffic lights (`titleBarStyle: "Overlay"`) so the OS tile menu and
+  window managers work; `AppTitlebar` reserves their 76px slot with a non-interactive spacer
+  (`nativeWindowControls`). Composer windows, head panels, Windows and Linux stay app-drawn.
+  Close paths use `closeAfterSave` or the native `CloseRequested` lifecycle, and a draft
+  flush failure keeps the window open. The detached
   composer is not a second main window.
 
 ## Icons and compose
