@@ -279,6 +279,8 @@ Branch from `production`, use Conventional Commit messages on each commit, and o
 
 Required CI has no bypass, and the production history ruleset forbids force pushes without a bypass. A separate ruleset leaves deletion protection unchanged.
 
+After the `gate` and both production image publishers succeed, a production CI run dispatches the private `build-publish.yml` workflow with that run's source revision, run ID, attempt, and immutable image digests. An HTTP 204 only queues private verification and deployment; it is not deployment evidence. GitHub may coalesce pending private workflow runs, and duplicate delivery is safe because the private release pipeline is idempotent. To recover a failed dispatch, rerun the complete public CI workflow so the notifier and publisher evidence share one attempt, or manually dispatch the private workflow with the original successful evidence. Never use **Re-run failed jobs**: choose **Re-run all jobs**. Do not rerun only the notifier job. The production environment's `PEPPY_PLATFORM_DISPATCH_TOKEN` is a fine-grained, target-repository Actions-write credential; rotate it before expiry and revoke/replace it if exposed. No periodic polling backs up a missed event.
+
 ## Commit messages and versioning
 
 Use Conventional Commits (`type(scope): message`) to drive automatic version bumps. While major version is 0, the rules are: `feat` and breaking changes bump minor; `fix` and `perf` bump patch; `docs`, `ci`, `build`, `refactor`, `test`, `chore`, and `style` do not bump. Mark breaking changes with `type!:` (for example `feat!:`) or a `BREAKING CHANGE:` footer; while the version is `0.x` they bump minor. Merge commits are ignored; unconventional non-merge subjects bump patch.
