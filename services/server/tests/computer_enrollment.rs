@@ -15,21 +15,122 @@ use peppy_hosted_api::{
     enrollment::{ClientKind, EnrollmentRole, ProposedDevice},
 };
 use peppy_hosted_client::newenrollment::EnrollmentClient;
-use peppy_server::enrollment::computers::{ComputerEnrollmentRouterState, router};
+use peppy_server::{
+    api::{
+        EnrollmentAuthContext, EnrollmentAuthorization, EnrollmentAuthorizationFuture,
+        EnrollmentAuthorizationRequest,
+    },
+    enrollment::computers::{ComputerEnrollmentRouterState, router},
+};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::sync::Arc;
+use std::{sync::Arc, thread};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 const ORIGIN: &str = "https://peppy.test";
 const PASSPHRASE: &str = "correct horse battery staple";
 
+struct HostedAuthorization {
+    vault_id: Uuid,
+}
+
+impl EnrollmentAuthorization for HostedAuthorization {
+    fn authorize_enrollment(
+        &self,
+        _request: EnrollmentAuthorizationRequest,
+    ) -> EnrollmentAuthorizationFuture<'_, Result<EnrollmentAuthContext, StatusCode>> {
+        Box::pin(async move {
+            Ok(EnrollmentAuthContext {
+                vault_id: self.vault_id,
+                device_id: None,
+                role: "account".into(),
+            })
+        })
+    }
+}
+
+struct IsolatedHostedDatabase {
+    database_url: String,
+    admin_url: String,
+    database: String,
+    role: String,
+}
+
+impl IsolatedHostedDatabase {
+    async fn create() -> Self {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
+        let database = format!("peppy_computer_hosted_{}", Uuid::new_v4().simple());
+        let role = format!("peppy_computer_runtime_{}", Uuid::new_v4().simple());
+        let mut admin_url: url::Url = database_url.parse().unwrap();
+        admin_url.set_path("/postgres");
+        let admin_url = admin_url.to_string();
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+            .unwrap();
+        sqlx::query(&format!("CREATE DATABASE {database}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+
+        let mut isolated_url: url::Url = database_url.parse().unwrap();
+        isolated_url.set_path(&format!("/{database}"));
+        Self {
+            database_url: isolated_url.to_string(),
+            admin_url,
+            database,
+            role,
+        }
+    }
+}
+
+impl Drop for IsolatedHostedDatabase {
+    fn drop(&mut self) {
+        let admin_url = self.admin_url.clone();
+        let database = self.database.clone();
+        let role = self.role.clone();
+        let cleanup = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test cleanup runtime");
+            runtime.block_on(async move {
+                if let Ok(admin) = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&admin_url)
+                    .await
+                {
+                    let _ =
+                        sqlx::query(&format!("DROP DATABASE IF EXISTS {database} WITH (FORCE)"))
+                            .execute(&admin)
+                            .await;
+                    let _ = sqlx::query(&format!("REVOKE {role} FROM CURRENT_USER"))
+                        .execute(&admin)
+                        .await;
+                    let _ = sqlx::query(&format!("DROP ROLE IF EXISTS {role}"))
+                        .execute(&admin)
+                        .await;
+                    admin.close().await;
+                }
+            });
+        });
+        let _ = cleanup.join();
+    }
+}
+
 async fn fixture() -> (Router, PgPool, String, String, String, Uuid, Uuid) {
     let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
+    fixture_at(&database_url).await
+}
+
+async fn fixture_at(database_url: &str) -> (Router, PgPool, String, String, String, Uuid, Uuid) {
     let admin = PgPoolOptions::new()
         .max_connections(1)
-        .connect(&database_url)
+        .connect(database_url)
         .await
         .unwrap();
     let schema = format!("peppy_computer_test_{}", Uuid::new_v4().simple());
@@ -127,6 +228,205 @@ fn owner_request(path: String, token: &str, value: serde_json::Value) -> Request
         .header("content-type", "application/json")
         .body(Body::from(value.to_string()))
         .unwrap()
+}
+
+#[tokio::test]
+async fn hosted_computer_owner_routes_use_the_rls_credential_resolver() {
+    let isolated_database = IsolatedHostedDatabase::create().await;
+    let (_, pool, schema, owner_token, gateway_token, vault, owner) =
+        fixture_at(&isolated_database.database_url).await;
+    let role = &isolated_database.role;
+    sqlx::query(&format!("CREATE ROLE {role} NOLOGIN NOSUPERUSER"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!("GRANT {role} TO CURRENT_USER"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA {schema} TO {role}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {role}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE SCHEMA peppy")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "CREATE OR REPLACE FUNCTION peppy.resolve_device_credential(token BYTEA) RETURNS TABLE(vault_id UUID, device_id UUID, role TEXT, token_digest BYTEA) LANGUAGE sql SECURITY DEFINER SET search_path = {schema}, pg_catalog AS $$ SELECT c.vault_id, c.device_id, d.role, c.token_digest FROM device_credentials c JOIN devices d ON d.vault_id = c.vault_id AND d.device_id = c.device_id WHERE c.token_digest = token AND c.revoked_at IS NULL AND d.revoked_at IS NULL $$"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA peppy TO {role}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "GRANT EXECUTE ON FUNCTION peppy.resolve_device_credential(BYTEA) TO {role}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    for table in ["devices", "device_credentials"] {
+        sqlx::query(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&format!("CREATE POLICY {table}_vault_scope ON {table} USING (vault_id::text = nullif(current_setting('peppy.vault_id', true), '')) WITH CHECK (vault_id::text = nullif(current_setting('peppy.vault_id', true), ''))"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let mut url: url::Url = isolated_database.database_url.parse().unwrap();
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema} -crole={role}"));
+    let runtime_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(url.as_str())
+        .await
+        .unwrap();
+    let app = router(
+        ComputerEnrollmentRouterState::new(
+            runtime_pool.clone(),
+            Arc::new(HostedAuthorization { vault_id: vault }),
+            true,
+            ORIGIN.into(),
+        )
+        .unwrap(),
+    );
+
+    let (app, status, body) = call(
+        app,
+        owner_request(
+            "/v1/enrollment/computers".into(),
+            &gateway_token,
+            serde_json::to_value(request_data(Uuid::new_v4(), Uuid::new_v4(), [6; 32])).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "owner_required");
+
+    let id = Uuid::new_v4();
+    let create = request_data(id, Uuid::new_v4(), [7; 32]);
+    let (app, status, created) = call(
+        app,
+        owner_request(
+            "/v1/enrollment/computers".into(),
+            &owner_token,
+            serde_json::to_value(&create).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let approve = serde_json::json!({
+        "transcript": ComputerEnrollmentTranscript {
+            origin: ORIGIN.into(), vault_id: vault, fingerprint: "11".repeat(32), key_epoch: 1,
+            invitation_id: id, server_nonce: created["server_nonce"].as_str().unwrap().into(),
+            owner_transfer_public_key: URL_SAFE_NO_PAD.encode([5; 32]), owner_device_id: owner,
+            recipient: create.recipient.clone(), recipient_transfer_public_key: create.recipient_transfer_public_key.clone(), granted_role: EnrollmentRole::Device,
+        },
+        "encrypted_key_package": URL_SAFE_NO_PAD.encode([6; 32]), "transfer_nonce": URL_SAFE_NO_PAD.encode([7; 24]), "owner_proof": URL_SAFE_NO_PAD.encode([8; 32]),
+    });
+    let (app, status, _) = call(
+        app,
+        owner_request(
+            format!("/v1/enrollment/computers/{id}/approve"),
+            &owner_token,
+            approve,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let cancel_id = Uuid::new_v4();
+    let (app, status, _) = call(
+        app,
+        owner_request(
+            "/v1/enrollment/computers".into(),
+            &owner_token,
+            serde_json::to_value(request_data(cancel_id, Uuid::new_v4(), [8; 32])).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (app, status, _) = call(
+        app,
+        Request::delete(format!("/v1/enrollment/computers/{cancel_id}"))
+            .header("authorization", format!("Bearer {owner_token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let foreign = router(
+        ComputerEnrollmentRouterState::new(
+            runtime_pool.clone(),
+            Arc::new(HostedAuthorization {
+                vault_id: Uuid::new_v4(),
+            }),
+            true,
+            ORIGIN.into(),
+        )
+        .unwrap(),
+    );
+    let (_, status, body) = call(
+        foreign,
+        owner_request(
+            "/v1/enrollment/computers".into(),
+            &owner_token,
+            serde_json::to_value(request_data(Uuid::new_v4(), Uuid::new_v4(), [9; 32])).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "foreign_vault");
+
+    sqlx::query(
+        "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(vault)
+    .bind(owner)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let revoked = router(
+        ComputerEnrollmentRouterState::new(
+            runtime_pool.clone(),
+            Arc::new(HostedAuthorization { vault_id: vault }),
+            true,
+            ORIGIN.into(),
+        )
+        .unwrap(),
+    );
+    let (_, status, body) = call(
+        revoked,
+        owner_request(
+            "/v1/enrollment/computers".into(),
+            &owner_token,
+            serde_json::to_value(request_data(Uuid::new_v4(), Uuid::new_v4(), [9; 32])).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "owner_required");
+
+    drop(app);
+    runtime_pool.close().await;
+    pool.close().await;
+    drop(isolated_database);
 }
 
 #[tokio::test]
