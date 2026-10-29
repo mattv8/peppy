@@ -38,9 +38,18 @@ mod tests {
 
     #[test]
     fn notification_activation_typescript_matches_frozen_shape() {
-        assert_eq!(NotificationActivationTarget::decl(), "type NotificationActivationTarget = { sourceDeviceId: string, notificationKey: string, lifetime: string, };");
-        assert_eq!(NotificationActivationDestination::decl(), "type NotificationActivationDestination = { \"kind\": \"conversation\", conversationId: string, } | { \"kind\": \"mirrored\", target: NotificationActivationTarget, } | { \"kind\": \"main\" };");
-        assert_eq!(NotificationActivation::decl(), "type NotificationActivation = { requestId: string, sessionGeneration: string, destination: NotificationActivationDestination, };");
+        assert_eq!(
+            NotificationActivationTarget::decl(),
+            "type NotificationActivationTarget = { sourceDeviceId: string, notificationKey: string, lifetime: string, };"
+        );
+        assert_eq!(
+            NotificationActivationDestination::decl(),
+            "type NotificationActivationDestination = { \"kind\": \"conversation\", conversationId: string, } | { \"kind\": \"mirrored\", target: NotificationActivationTarget, } | { \"kind\": \"main\" };"
+        );
+        assert_eq!(
+            NotificationActivation::decl(),
+            "type NotificationActivation = { requestId: string, sessionGeneration: string, destination: NotificationActivationDestination, };"
+        );
     }
 
     #[test]
