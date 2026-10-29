@@ -321,7 +321,7 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 8px 0;
+  padding: 0 0 8px;
   background: var(--peppy-surface-chrome);
   border-right: 1px solid var(--peppy-border);
   overflow: visible;
@@ -329,7 +329,6 @@ select:focus-visible {
 #desktop-rail nav {
   display: grid;
   gap: 4px;
-  margin-top: 4px;
 }
 #desktop-rail nav button {
   position: relative;
@@ -503,6 +502,12 @@ select:focus-visible {
   list-style: none;
   padding: 0;
   margin: 0;
+}
+#conversation-list {
+  scrollbar-width: none;
+}
+#conversation-list::-webkit-scrollbar {
+  display: none;
 }
 .conversation-row {
   position: relative;
