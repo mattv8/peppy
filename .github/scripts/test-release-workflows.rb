@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require 'shellwords'
 require 'yaml'
 
 root = File.expand_path('..', __dir__)
@@ -14,6 +15,15 @@ assert.call(ci_jobs.key?('notify-hosted-production'), 'public CI must dispatch v
 assert.call(!ci_text.include?('create-github-app-token'), 'public CI must not mint an App token')
 assert.call(!ci_text.match?(/HOSTED_DISPATCH_APP_|HOSTED_DISPATCH_TOKEN/), 'public CI must not depend on hosted dispatch credentials')
 assert.call(ci_text.include?('PEPPY_PLATFORM_DISPATCH_TOKEN'), 'public CI must use the production-scoped dispatch token')
+android_ci_steps = ci_jobs.fetch('android').fetch('steps')
+android_packaging = android_ci_steps.find { |step| step['name'] == 'Lint and assemble Android artifacts' }
+assert.call(!android_packaging.nil?, 'public CI must retain the Android lint and packaging step')
+android_packaging_command = Shellwords.shellsplit(android_packaging.fetch('run'))
+android_packaging_flags = android_packaging_command.reject { |token| token.start_with?(':') }
+expected_android_packaging_flags = ['./gradlew', '--console=plain', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2']
+assert.call(android_packaging_flags == expected_android_packaging_flags, 'public CI Android packaging must use the 4 GiB JVM override, two-worker bound, and diagnostic flags')
+android_packaging_tasks = android_packaging_command.select { |token| token.start_with?(':') }
+assert.call(android_packaging_tasks == %w[:app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest], 'public CI Android packaging must retain lint, debug APK, and debug test APK tasks')
 handoff = ci_jobs.fetch('notify-hosted-production')
 assert.call(handoff.fetch('if') == "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'", 'hosted dispatch must require a successful production push gate and both publishers')
 assert.call(handoff.fetch('needs').sort == %w[gate publish-production-relay publish-production-server], 'hosted dispatch must wait for the gate and both publishers')
