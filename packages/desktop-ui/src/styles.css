@@ -243,6 +243,7 @@ select:focus-visible {
   align-self: stretch;
 }
 .window-controls-windows button:hover,
+.window-controls-windows button[data-native-hover],
 .icon-button:hover {
   background: var(--peppy-surface-hover);
 }

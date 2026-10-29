@@ -88,6 +88,7 @@ import {
   type AppLockStatus,
   type Draft,
 } from "./bridge";
+import { useMaximizeButtonRegion } from "./useMaximizeButtonRegion";
 import { dismissibleNotifications, notificationMuteKey, NotificationsView } from "./Notifications";
 import { createNotificationActivationDrain, nativeNotificationActivation, type ActivationContext } from "./notificationActivation";
 import type { NotificationActivation, NotificationActivationTarget } from "@peppy/generated/notification-activation";
@@ -1416,6 +1417,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [headPanelBootstrap] = useState(() =>
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
+  useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
   const [conversationTab, setConversationTab] = useState<"messages" | "media">("messages");
   const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);

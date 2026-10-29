@@ -132,6 +132,7 @@ export type HostedPreviewView = {
 };
 /** App-open password state; no password or verifier crosses this boundary. */
 export type AppLockStatus = { enabled: boolean; locked: boolean; storageAvailable: boolean };
+export type MaximizeButtonRegion = { x: number; y: number; width: number; height: number };
 
 export interface DesktopBridge {
   load_state(conversationId?: string, historyFromMessageId?: string, options?: { metadataOnly?: boolean }): Promise<DesktopSnapshot>;
@@ -194,7 +195,9 @@ export interface DesktopBridge {
   hide_head(conversationId: string): Promise<void>;
   close_composer(): Promise<void>;
   close_head_panel(): Promise<void>;
+  set_maximize_button_region(region: MaximizeButtonRegion | null): Promise<void>;
   subscribe(listener: () => void): () => void;
+  subscribe_maximize_button_hover(listener: (hovered: boolean) => void): () => void;
   subscribe_drafts?(listener: (draft: Draft) => void): () => void;
   subscribe_lifecycle(listener: (request: { id: string; action: "quit" | "close" | "collapse" }) => void): () => void;
   subscribe_lifecycle_finished(listener: (result: { id: string; ok: boolean }) => void): () => void;

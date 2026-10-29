@@ -576,6 +576,7 @@ describe("desktop UI controls", () => {
     expect(screen.getByRole("button", { name: "Close window" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Minimize window" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Maximize window" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Maximize window" })).toHaveAttribute("id", "window-maximize");
   });
 
   it("renders main-window conversation controls and invokes their callbacks", () => {

@@ -64,6 +64,7 @@ const COMMANDS: &[&str] = &[
     "revoke_device",
     "hide_head",
     "close_composer",
+    "set_maximize_button_region",
     "close_head_panel",
     "set_start_at_login",
     "get_notification_sound",
