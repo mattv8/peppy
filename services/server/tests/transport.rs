@@ -856,6 +856,31 @@ async fn insert_phone_invitation(
     id
 }
 
+async fn insert_computer_enrollment(
+    pool: &PgPool,
+    vault: Uuid,
+    owner_device: Uuid,
+    fingerprint: &str,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO computer_enrollments(id,vault_id,owner_device_id,origin,claim_token_digest,server_nonce,recipient_device_id,recipient_kind,recipient_name,recipient_signing_public_key,recipient_transfer_public_key,recipient_credential_digest,recipient_commitment,profile_fingerprint,key_epoch,state,expires_at) VALUES($1,$2,$3,'https://peppy.test',$4,$5,$6,'browser','Computer',$7,$8,$9,$10,$11,1,'consumed',now()+interval '1 hour')")
+        .bind(id)
+        .bind(vault)
+        .bind(owner_device)
+        .bind(Sha256::digest(id.as_bytes()).as_slice())
+        .bind(vec![1_u8; 32])
+        .bind(Uuid::new_v4())
+        .bind(vec![2_u8; 32])
+        .bind(vec![3_u8; 32])
+        .bind(vec![4_u8; 32])
+        .bind(vec![5_u8; 32])
+        .bind(fingerprint)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
 #[tokio::test]
 async fn vault_delete_removes_device_owned_phone_invitations_and_keeps_other_vaults() {
     let _guard = TEST_LOCK.lock().await;
@@ -896,6 +921,20 @@ async fn vault_delete_removes_device_owned_phone_invitations_and_keeps_other_vau
         false,
     )
     .await;
+    let computer_enrollment = insert_computer_enrollment(
+        &server.pool,
+        server.vault,
+        server.owner_device,
+        &server.fingerprint,
+    )
+    .await;
+    let other_computer_enrollment = insert_computer_enrollment(
+        &server.pool,
+        other_vault,
+        other_owner.device_id,
+        &other_fingerprint,
+    )
+    .await;
 
     let (status, deleted) = server
         .call(
@@ -906,23 +945,31 @@ async fn vault_delete_removes_device_owned_phone_invitations_and_keeps_other_vau
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{deleted}");
-    let (vaults, invitations, devices, credentials): (i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM vaults WHERE vault_id=$1), (SELECT count(*) FROM phone_invitations WHERE vault_id=$1), (SELECT count(*) FROM devices WHERE vault_id=$1), (SELECT count(*) FROM device_credentials WHERE vault_id=$1)",
+    let (vaults, invitations, enrollments, devices, credentials): (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM vaults WHERE vault_id=$1), (SELECT count(*) FROM phone_invitations WHERE vault_id=$1), (SELECT count(*) FROM computer_enrollments WHERE vault_id=$1 AND id=$2), (SELECT count(*) FROM devices WHERE vault_id=$1), (SELECT count(*) FROM device_credentials WHERE vault_id=$1)",
     )
     .bind(server.vault)
+    .bind(computer_enrollment)
     .fetch_one(&server.pool)
     .await
     .unwrap();
-    assert_eq!((vaults, invitations, devices, credentials), (0, 0, 0, 0));
-    let (other_invitations, other_devices): (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM phone_invitations WHERE vault_id=$1 AND id=$2), (SELECT count(*) FROM devices WHERE vault_id=$1)",
+    assert_eq!(
+        (vaults, invitations, enrollments, devices, credentials),
+        (0, 0, 0, 0, 0)
+    );
+    let (other_invitations, other_enrollments, other_devices): (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM phone_invitations WHERE vault_id=$1 AND id=$2), (SELECT count(*) FROM computer_enrollments WHERE vault_id=$1 AND id=$3), (SELECT count(*) FROM devices WHERE vault_id=$1)",
     )
     .bind(other_vault)
     .bind(other_invitation)
+    .bind(other_computer_enrollment)
     .fetch_one(&server.pool)
     .await
     .unwrap();
-    assert_eq!((other_invitations, other_devices), (1, 1));
+    assert_eq!(
+        (other_invitations, other_enrollments, other_devices),
+        (1, 1, 1)
+    );
     server.shutdown().await;
 }
 

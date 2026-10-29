@@ -185,6 +185,52 @@ describe("BrowserEnrollment", () => {
     expect(session.finishComputerEnrollment).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps computer enrollment retryable when a status request reaches its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const statusPath = `/v1/enrollment/computers/${invitationId}/status`;
+      const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+        if (command === "_worker_enrollment_new") return {};
+        if (command === "_worker_enrollment_pending_vault_request") return null;
+        if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+        if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: statusPath, body: { claim_token: "private" } }) };
+        if (command === "_worker_enrollment_computer_claimant_view") return { awaitingOwner: false, state: "approved", expiresInSeconds: 60, sas: "123 456" };
+        return {};
+      }) };
+      let statusRequests = 0;
+      const fetcher = vi.fn<typeof fetch>(async input => {
+        const path = pathOf(input);
+        if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+        if (path === "/v1/instance") return json(instanceInfo(true));
+        if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+        if (path === statusPath) {
+          statusRequests += 1;
+          if (statusRequests === 1) return new Promise<Response>(() => undefined);
+          if (statusRequests === 2) return json({ state: "approved", expires_in_seconds: 60 });
+          return new Promise<Response>(() => undefined);
+        }
+        throw new Error(`unexpected ${path}`);
+      });
+
+      const waiting = new BrowserEnrollment(core, new TestSession(), origin, fetcher);
+      await waiting.discover();
+      await waiting.connectComputer();
+      const stalledPoll = waiting.computerStatus();
+      await vi.advanceTimersByTimeAsync(25_000);
+      await expect(stalledPoll).resolves.toMatchObject({ stage: "computer_waiting", errorCode: "computer_transient" });
+
+      const approved = new BrowserEnrollment(core, new TestSession(), origin, fetcher);
+      await approved.discover();
+      await approved.connectComputer();
+      await expect(approved.computerStatus()).resolves.toMatchObject({ stage: "computer_approved" });
+      const stalledConfirmation = approved.confirmComputer();
+      await vi.advanceTimersByTimeAsync(25_000);
+      await expect(stalledConfirmation).resolves.toMatchObject({ stage: "computer_approved", errorCode: "computer_transient" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("starts a fresh claimant after expiry and restores the prior locked view on cancellation", async () => {
     const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
       if (command === "_worker_enrollment_new") return {};

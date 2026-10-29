@@ -1978,6 +1978,7 @@ pub async fn delete_vault_in_transaction(
         "outbox_jobs",
         "vault_key_profiles",
         "phone_invitations",
+        "computer_enrollments",
         "device_credentials",
         "devices",
     ] {

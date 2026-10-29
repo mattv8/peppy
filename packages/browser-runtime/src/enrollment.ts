@@ -789,6 +789,7 @@ function isTransientVaultRequestFailure(error: unknown): boolean {
 
 function isTransientComputerFailure(error: unknown): boolean {
   return error instanceof TypeError
+    || error instanceof Error && error.message === "enrollment-timeout"
     || error instanceof HttpStatusError && (error.status === 408 || error.status === 429 || error.status >= 500);
 }
 

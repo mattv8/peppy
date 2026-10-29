@@ -5,7 +5,7 @@
 mod common;
 use common::*;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use tempfile::TempDir;
 
 const BOOK: &str = "book1";
@@ -730,6 +730,34 @@ fn applied_legacy_notification_and_mute_survive_authoritative_snapshot() {
 }
 
 #[test]
+fn applied_legacy_tone_survives_authoritative_snapshot() {
+    let mut p = pair();
+    let seed = "+15555550109";
+    p.owner.set_server_compaction_supported(false).unwrap();
+    p.owner.set_conversation_tone(seed, Some(47)).unwrap();
+    p.server.upload(&p.owner);
+    assert!(p.server.log.iter().all(|e| e.compaction.is_none()));
+    p.server.sync(&p.peer);
+    assert_eq!(
+        p.peer.conversation_tones().unwrap(),
+        BTreeMap::from([(seed.to_owned(), 47)])
+    );
+
+    let high_water = p.server.log.len();
+    import(&p.peer, &compact(&p.server.log, true), high_water, Some(34));
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(
+        p.peer.conversation_tones().unwrap(),
+        BTreeMap::from([(seed.to_owned(), 47)]),
+        "the applied legacy tone is not absent"
+    );
+}
+
+#[test]
 fn newer_compactable_removal_and_filter_win_over_preserved_legacy_state() {
     let mut p = pair();
     let phone_id = legacy_posts_and_mute(&mut p);
@@ -758,6 +786,33 @@ fn newer_compactable_removal_and_filter_win_over_preserved_legacy_state() {
     );
     assert!(shown(&p.peer).is_empty(), "the staged removal wins");
     assert_eq!(muted(&p.peer, "com.example.news"), Some(false));
+}
+
+#[test]
+fn newer_compactable_tone_wins_over_preserved_legacy_tone() {
+    let mut p = pair();
+    let seed = "+15555550110";
+    p.owner.set_server_compaction_supported(false).unwrap();
+    p.owner.set_conversation_tone(seed, Some(48)).unwrap();
+    p.server.upload(&p.owner);
+    p.server.sync(&p.peer);
+
+    connect(&p.owner);
+    p.owner.set_conversation_tone(seed, Some(49)).unwrap();
+    p.server.upload(&p.owner);
+    assert!(
+        p.server.log[1..]
+            .iter()
+            .all(|envelope| envelope.compaction.is_some())
+    );
+
+    let high_water = p.server.log.len();
+    import(&p.peer, &full(&p.server.log), high_water, Some(35));
+    settle(&p.peer);
+    assert_eq!(
+        p.peer.conversation_tones().unwrap(),
+        BTreeMap::from([(seed.to_owned(), 49)])
+    );
 }
 
 #[test]

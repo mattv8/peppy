@@ -30,8 +30,8 @@
 //! `drain_snapshot` records their plaintext header provenance (`projection_legacy_retained`:
 //! cursor, producer device and sequence) when the journal holds the identical wire at that
 //! cursor, whatever its status. Promotion keeps the live notification, app-filter or conversation
-//! pin row that this provenance still produces, provided the journal row was applied by promotion (live
-//! apply may run between drain and promotion), instead of deleting it as absent; staged
+//! pin or conversation-tone row that this provenance still produces, provided the journal row was
+//! applied by promotion (live apply may run between drain and promotion), instead of deleting it as absent; staged
 //! authenticated writes and tombstones still override it through the usual gates. A
 //! header-free record still pending at promotion produced no state and applies live after it.
 //!
@@ -858,7 +858,15 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
             )?;
         }
     }
-    conn.execute("DELETE FROM conversation_tones WHERE logical_revision>0 AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones s WHERE s.generation=?2 AND s.seed=conversation_tones.seed) AND NOT (conversation_tones.producer_device_id=?1 AND EXISTS(SELECT 1 FROM outbox o WHERE o.seq=conversation_tones.source_sequence AND NOT EXISTS(SELECT 1 FROM journal j WHERE j.envelope_id=o.envelope_id AND j.cursor<=?3)))", params![me, generation, high_water])?;
+    conn.execute(
+        "DELETE FROM conversation_tones WHERE logical_revision>0
+           AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones s WHERE s.generation=?2 AND s.seed=conversation_tones.seed)
+           AND NOT EXISTS(SELECT 1 FROM projection_legacy_retained l WHERE l.generation=?2 AND l.producer_device_id=conversation_tones.producer_device_id AND l.producer_sequence=conversation_tones.source_sequence
+                AND EXISTS(SELECT 1 FROM journal j WHERE j.cursor=l.cursor AND j.status='applied'))
+           AND NOT (conversation_tones.producer_device_id=?1 AND EXISTS(SELECT 1 FROM outbox o WHERE o.seq=conversation_tones.source_sequence
+                AND NOT EXISTS(SELECT 1 FROM journal j WHERE j.envelope_id=o.envelope_id AND j.cursor<=?3)))",
+        params![me, generation, high_water],
+    )?;
     let mut after_tone = String::new();
     loop {
         let page: Vec<(String, Option<u8>, i64, String, i64, String)> = conn.prepare("SELECT seed,palette_index,source_sequence,producer_device_id,logical_revision,writer_device_id FROM projection_conversation_tones WHERE generation=? AND seed>? ORDER BY seed LIMIT ?")?.query_map(params![generation, after_tone, PROMOTE_PAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<Result<_, _>>()?;

@@ -409,9 +409,10 @@ mod tests {
 
     #[test]
     fn ingest_batch_quarantines_malformed_records_and_reports_the_contiguous_frontier() {
-        let mut core = open_core();
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
         let result = response(
-            &mut core,
+            core,
             "ingest_batch",
             json!({"events": [
                 {"cursor": "2", "envelope": {}},
@@ -429,7 +430,7 @@ mod tests {
         );
 
         let result = response(
-            &mut core,
+            core,
             "ingest_batch",
             json!({"events": [{"cursor": "1", "envelope": {}}]}),
         );
@@ -438,10 +439,11 @@ mod tests {
 
     #[test]
     fn ingest_batch_conflict_rolls_back_the_entire_page() {
-        let mut core = open_core();
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
         assert_eq!(
             response(
-                &mut core,
+                core,
                 "ingest_batch",
                 json!({"events": [{"cursor": "2", "envelope": {}}]}),
             )["ok"],
@@ -449,7 +451,7 @@ mod tests {
         );
 
         let result = response(
-            &mut core,
+            core,
             "ingest_batch",
             json!({"events": [
                 {"cursor": "1", "envelope": {}},
@@ -458,12 +460,12 @@ mod tests {
         );
         assert_eq!(result["error"]["code"], "core");
         assert_eq!(
-            response(&mut core, "receive_cursor", json!({}))["value"]["cursor"],
+            response(core, "receive_cursor", json!({}))["value"]["cursor"],
             "0"
         );
 
         let result = response(
-            &mut core,
+            core,
             "ingest_batch",
             json!({"events": [{"cursor": "1", "envelope": {}}]}),
         );
@@ -472,7 +474,8 @@ mod tests {
 
     #[test]
     fn ingest_batch_rejects_noncanonical_cursors_and_out_of_bounds_event_counts() {
-        let mut core = open_core();
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
         for cursor in [
             json!(1),
             json!("01"),
@@ -480,7 +483,7 @@ mod tests {
             json!("18446744073709551616"),
         ] {
             let result = response(
-                &mut core,
+                core,
                 "ingest_batch",
                 json!({"events": [{"cursor": cursor, "envelope": {}}]}),
             );
@@ -490,15 +493,16 @@ mod tests {
         let events = (1..=201)
             .map(|cursor| json!({"cursor": cursor.to_string(), "envelope": {}}))
             .collect::<Vec<_>>();
-        let result = response(&mut core, "ingest_batch", json!({"events": events}));
+        let result = response(core, "ingest_batch", json!({"events": events}));
         assert_eq!(result["error"]["code"], "invalid-request");
     }
 
     #[test]
     fn sync_progress_returns_decimal_string_dto() {
-        let mut core = open_core();
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
         assert_eq!(
-            response(&mut core, "sync_progress", json!({}))["value"],
+            response(core, "sync_progress", json!({}))["value"],
             json!({
                 "receivedThrough": "0",
                 "processedThrough": "0",
