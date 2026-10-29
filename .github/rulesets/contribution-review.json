@@ -1,0 +1,37 @@
+{
+  "name": "Contribution review",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/heads/production",
+        "refs/heads/staging"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "pull_request",
+      "parameters": {
+        "allowed_merge_methods": [
+          "merge",
+          "rebase"
+        ],
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": true,
+        "require_extra_approval_for_unattributed_changes": true,
+        "require_last_push_approval": true,
+        "required_approving_review_count": 1
+      }
+    }
+  ],
+  "bypass_actors": [
+    {
+      "actor_id": 5,
+      "actor_type": "RepositoryRole",
+      "bypass_mode": "pull_request"
+    }
+  ]
+}

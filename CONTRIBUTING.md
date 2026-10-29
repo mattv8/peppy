@@ -275,9 +275,9 @@ Native clients enroll through first-run setup, the single Connect your phone QR,
 
 ## Branches and pull requests
 
-Branch from `production`, use Conventional Commit messages on each commit, and open a pull request to `production` (or use `staging` for prerelease integration). For contributors without bypass permission, the `gate` check must pass and the branch must be up to date; use **Update branch** when needed. Rebase is the default merge method (`gh pr merge --auto --rebase`); merge commits are also allowed (`--merge`), while squash merges are disabled. Branches auto-delete after merging. PR CI runs only jobs affected by changed paths; pushes to `staging` publish prereleases and trusted Harbor staging images after `gate`; production pushes advance only the community edge image.
+Branch from `production`, use Conventional Commit messages on each commit, and open a pull request to `production` (or use `staging` for prerelease integration). Pull requests are required for both `production` and `staging`. The `gate` check must pass and the branch must be up to date for everyone; use **Update branch** when needed. A code-owner approval is required, with a pull-request-only review bypass for repository administrators (`@mattv8` is the sole current administrator). Production requires rebase merging because of linear history; staging also allows merge commits. Squash merges are disabled. Branches auto-delete after merging. PR CI runs only jobs affected by changed paths; pushes to `staging` publish prereleases and trusted Harbor staging images after `gate`; production pushes advance only the community edge image. See the [contribution policy](.github/rulesets/README.md).
 
-Repository Admin and Maintain roles can bypass pull-request requirements, required CI checks, and force-push restrictions on `production`. A separate ruleset blocks deletion of the default branch and grants no bypass permissions.
+Required CI has no bypass, and the production history ruleset forbids force pushes without a bypass. A separate ruleset leaves deletion protection unchanged.
 
 ## Commit messages and versioning
 
