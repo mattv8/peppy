@@ -9,6 +9,14 @@ assert = ->(condition, message) { abort(message) unless condition }
 
 ci = load_workflow.call('ci.yml')
 ci_jobs = ci.fetch('jobs')
+ci_text = File.read(File.join(root, 'workflows', 'ci.yml'))
+assert.call(ci_jobs.key?('notify-hosted-production'), 'public CI must dispatch verified hosted production evidence')
+assert.call(!ci_text.include?('create-github-app-token'), 'public CI must not mint an App token')
+assert.call(!ci_text.match?(/HOSTED_DISPATCH_APP_|HOSTED_DISPATCH_TOKEN/), 'public CI must not depend on hosted dispatch credentials')
+assert.call(ci_text.include?('PEPPY_PLATFORM_DISPATCH_TOKEN'), 'public CI must use the production-scoped dispatch token')
+handoff = ci_jobs.fetch('notify-hosted-production')
+assert.call(handoff.fetch('if') == "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'", 'hosted dispatch must require a successful production push gate and both publishers')
+assert.call(handoff.fetch('needs').sort == %w[gate publish-production-relay publish-production-server], 'hosted dispatch must wait for the gate and both publishers')
 publish_job_names = %w[
   publish-prerelease
   publish-staging-server

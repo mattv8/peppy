@@ -576,18 +576,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Mint private dispatch token
-        id: dispatch-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
-        with:
-          app-id: ${{ vars.HOSTED_DISPATCH_APP_ID }}
-          private-key: ${{ secrets.HOSTED_DISPATCH_APP_PRIVATE_KEY }}
-          owner: mattv8
-          repositories: peppy-platform
-          permission-actions: write
-      - name: Notify hosted production promotion
+      - name: Dispatch hosted production workflow
         env:
-          HOSTED_DISPATCH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
+          PEPPY_PLATFORM_DISPATCH_TOKEN: ${{ secrets.PEPPY_PLATFORM_DISPATCH_TOKEN }}
           SOURCE_REVISION: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
