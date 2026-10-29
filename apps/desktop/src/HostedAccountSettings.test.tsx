@@ -57,6 +57,43 @@ describe("HostedAccountSettings", () => {
     await waitFor(() => expect(signIn).toHaveFocus());
   });
 
+  it("preserves sign-out focus through an earlier account render's queued effect", async () => {
+    const initial = deferred<HostedAccountView>();
+    const signOut = deferred<void>();
+    const refresh = deferred<HostedAccountView>();
+    vi.mocked(bridge.hosted_account)
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(refresh.promise);
+    vi.mocked(bridge.hosted_sign_out).mockReturnValueOnce(signOut.promise);
+
+    // Click between the initial DOM commit and its passive effect, before React
+    // can commit pending=true. That earlier effect must not consume action focus.
+    const observer = new MutationObserver(() => {
+      const button = document.getElementById("hosted-account-sign-out");
+      if (!button) return;
+      observer.disconnect();
+      button.focus();
+      fireEvent.click(button);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    try {
+      render(<HostedAccountSettings />);
+      initial.resolve(account({ signedIn: true }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Sign out of Peppy" })).toBeDisabled());
+
+      await act(async () => signOut.resolve());
+      expect(screen.getByRole("status")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Sign in with Google" })).not.toBeInTheDocument();
+
+      await act(async () => refresh.resolve(account()));
+      const signIn = screen.getByRole("button", { name: "Sign in with Google" });
+      expect(signIn).toBeEnabled();
+      expect(signIn).toHaveFocus();
+    } finally {
+      observer.disconnect();
+    }
+  });
+
   it("keeps the signed-in state when sign-out fails", async () => {
     vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
     vi.mocked(bridge.hosted_sign_out).mockRejectedValue(new Error("write failed"));
