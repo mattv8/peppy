@@ -2,12 +2,13 @@ import type { MessageView } from "@peppy/desktop-ui/bridge-contracts";
 import { normalizeReactionText, parseReaction, quoteMatches, type ParsedReaction } from "./parse";
 
 export type ReactionActor = { key: string; sender: MessageView["sender"]; senderAddress?: string };
-export type ReactionBadgeInfo = { emoji: string; actors: ReactionActor[] };
+export type ReactionBadgeInfo = { emoji: string; actors: ReactionActor[]; reactionIds: string[] };
 export type ReactionNoticeInfo = ParsedReaction & { reactionId: string; targetId?: string };
 export type LinkedReactions = { badges: ReadonlyMap<string, ReactionBadgeInfo[]>; notices: ReadonlyMap<string, ReactionNoticeInfo> };
 export const NO_REACTIONS: LinkedReactions = { badges: new Map(), notices: new Map() };
 
-type EmojiActors = Map<string, Map<string, ReactionActor>>;
+type ActorReaction = { actor: ReactionActor; reactionId: string };
+type EmojiActors = Map<string, Map<string, ActorReaction>>;
 
 export function isReactionCandidate(message: MessageView): boolean {
   return message.attachments.length === 0 && !message.subject;
@@ -26,10 +27,11 @@ function findTarget(messages: readonly MessageView[], normalizedBodies: readonly
   return undefined;
 }
 
-function applyReaction(state: EmojiActors, reaction: ParsedReaction, actor: ReactionActor): void {
+function applyReaction(state: EmojiActors, reaction: ParsedReaction, entry: ActorReaction): void {
+  const { actor } = entry;
   if (reaction.action === "add") for (const actors of state.values()) actors.delete(actor.key);
-  const actors = state.get(reaction.emoji) ?? new Map<string, ReactionActor>();
-  if (reaction.action === "add") actors.set(actor.key, actor);
+  const actors = state.get(reaction.emoji) ?? new Map<string, ActorReaction>();
+  if (reaction.action === "add") actors.set(actor.key, entry);
   else actors.delete(actor.key);
   state.set(reaction.emoji, actors);
 }
@@ -39,7 +41,7 @@ function toBadges(targets: ReadonlyMap<string, EmojiActors>): Map<string, Reacti
   for (const [targetId, emojiActors] of targets) {
     const targetBadges = [...emojiActors]
       .filter(([, actors]) => actors.size > 0)
-      .map(([emoji, actors]) => ({ emoji, actors: [...actors.values()] }));
+      .map(([emoji, actors]) => ({ emoji, actors: [...actors.values()].map(({ actor }) => actor), reactionIds: [...actors.values()].map(({ reactionId }) => reactionId) }));
     if (targetBadges.length > 0) badges.set(targetId, targetBadges);
   }
   return badges;
@@ -59,8 +61,8 @@ export function linkReactions(messages: readonly MessageView[]): LinkedReactions
     const targetId = findTarget(messages, normalizedBodies, index, reaction, notices);
     notices.set(message.id, { ...reaction, reactionId: message.id, targetId });
     if (!targetId) return;
-    const state = targets.get(targetId) ?? new Map<string, Map<string, ReactionActor>>();
-    applyReaction(state, reaction, actorOf(message));
+    const state = targets.get(targetId) ?? new Map<string, Map<string, ActorReaction>>();
+    applyReaction(state, reaction, { actor: actorOf(message), reactionId: message.id });
     targets.set(targetId, state);
   });
   return { badges: toBadges(targets), notices };

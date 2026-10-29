@@ -1,11 +1,31 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, REACTION_HIGHLIGHT_MS } from "./App";
 import { bridge, fixtureBridge, type DesktopSnapshot, type MessageView } from "./bridge";
 
 let snapshot: DesktopSnapshot;
 let reactionStorage: Storage;
+
+class ReactionObserver {
+  static instances: ReactionObserver[] = [];
+  nodes = new Set<Element>();
+  constructor(private callback: IntersectionObserverCallback, readonly options?: IntersectionObserverInit) { ReactionObserver.instances.push(this); }
+  observe = (node: Element) => { this.nodes.add(node); };
+  unobserve = (node: Element) => { this.nodes.delete(node); };
+  disconnect = () => { this.nodes.clear(); };
+  takeRecords = () => [];
+  deliver(node: Element, ratio = 0.75, area = 20) {
+    const bounds = { width: area, height: area, top: 0, bottom: area, left: 0, right: area, x: 0, y: 0, toJSON() {} };
+    this.callback([{ target: node, isIntersecting: true, intersectionRatio: ratio, boundingClientRect: bounds, intersectionRect: bounds } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+  }
+  static intersect(node: Element, ratio = 0.75, area = 20) {
+    for (const observer of [...this.instances]) {
+      if (observer.nodes.has(node)) observer.deliver(node, ratio, area);
+    }
+  }
+}
 
 const message = (id: string, body: string, overrides: Partial<MessageView> = {}): MessageView => ({
   id,
@@ -27,6 +47,8 @@ const searchPage = (items: Array<{ messageId: string; snippet: string; timestamp
 
 beforeEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  ReactionObserver.instances = [];
   const values = new Map<string, string>();
   reactionStorage = {
     get length() { return values.size; },
@@ -62,6 +84,415 @@ function renderMessages(messages: MessageView[]) {
 }
 
 describe("App reactions", () => {
+  const conversationId = "10000000-0000-4000-8000-000000000001";
+  const reactionId = "20000000-0000-4000-8000-000000000001";
+  const nextReactionId = "20000000-0000-4000-8000-000000000002";
+  const seenKey = (id = reactionId) => `peppy.reactions.seen.v1:["fixture","https://push.example.com"]:["${conversationId}","${id}"]`;
+  const enableObservation = () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    vi.stubGlobal("IntersectionObserver", ReactionObserver);
+  };
+  const durableConversation = () => {
+    snapshot.conversations[0].id = conversationId;
+    snapshot.activeConversationId = conversationId;
+  };
+  const refreshMessages = async (messages: MessageView[]) => {
+    snapshot.conversations[0].messages = messages;
+    await act(async () => { vi.mocked(bridge.subscribe).mock.calls.at(-1)![0](); });
+  };
+  const reactionChip = () => document.querySelector('[data-reaction-emoji="😆"]')!;
+
+  it("preserves an exact visible bubble offset when a visible notice above it collapses", async () => {
+    enableObservation();
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”"), message("anchor", "anchor")]);
+    await screen.findByText("anchor");
+    const list = document.getElementById("message-list")!;
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 400 }, scrollHeight: { configurable: true, get: () => document.querySelector('[data-reaction-marker]') ? 1160 : 1200 } });
+    list.scrollTop = 500;
+    fireEvent.scroll(list);
+    const bounds = (top: number, height = 20) => ({ width: 200, height, top, bottom: top + height, left: 0, right: 200, x: 0, y: top, toJSON() {} });
+    vi.spyOn(list, "getBoundingClientRect").mockImplementation(() => bounds(0, 400));
+    const originalBounds = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.messageId === "reaction") return bounds(10);
+      if (this.dataset.messageId === "anchor") return bounds(80 - (document.querySelector('[data-reaction-marker]') ? 40 : 0) - (list.scrollTop - 500));
+      if (this.dataset.messageId === "plan") return bounds(-100);
+      return originalBounds.call(this);
+    });
+    const textarea = document.getElementById("composer-textarea")!;
+    act(() => textarea.focus());
+    act(() => ReactionObserver.intersect(reactionChip()));
+    await waitFor(() => expect(list.scrollTop).toBe(460));
+    expect(document.querySelector('[data-message-id="anchor"]')!.getBoundingClientRect().top).toBe(80);
+    expect(textarea).toHaveFocus();
+    expect(bridge.load_message_window).not.toHaveBeenCalled();
+  });
+
+  it("keeps latest bottom pinned through a notice collapse", async () => {
+    enableObservation();
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    const list = document.getElementById("message-list")!;
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 400 }, scrollHeight: { configurable: true, get: () => document.querySelector('[data-reaction-marker]') ? 1160 : 1200 } });
+    list.scrollTop = 800;
+    fireEvent.scroll(list);
+    act(() => ReactionObserver.intersect(reactionChip()));
+    await waitFor(() => expect(list.scrollTop).toBe(1160));
+    expect(bridge.load_message_window).not.toHaveBeenCalled();
+  });
+
+  it("rebinds the visible scroll anchor when suppressing a hint merges adjacent media groups", async () => {
+    durableConversation();
+    const imageMessage = (id: string) => message(id, "", { transport: "mms", attachments: [{ id: `${id}-file`, name: `${id}.jpg`, mediaType: "image/jpeg", byteSize: 100, state: "ready", previewUrl: "data:image/jpeg;base64,AA==" }] });
+    renderMessages([imageMessage("first-image"), message(reactionId, "Reacted 😆 to “unloaded”"), imageMessage("second-image")]);
+    await screen.findByRole("button", { name: /reacted 😆/ });
+    const list = document.getElementById("message-list")!;
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 400 }, scrollHeight: { configurable: true, value: 1200 } });
+    list.scrollTop = 500;
+    fireEvent.scroll(list);
+    const bounds = (top: number, height = 20) => ({ width: 200, height, top, bottom: top + height, left: 0, right: 200, x: 0, y: top, toJSON() {} });
+    vi.spyOn(list, "getBoundingClientRect").mockImplementation(() => bounds(0, 400));
+    const originalBounds = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (!this.isConnected) return bounds(0, 0);
+      if (this.dataset.messageRow === "first-image") return bounds(-100);
+      if (this.dataset.messageRow === "second-image") return bounds(80 - (document.querySelector('[data-reaction-marker]') ? 40 : 0) - (list.scrollTop - 500));
+      return originalBounds.call(this);
+    });
+    reactionStorage.setItem(seenKey(), "1");
+    act(() => window.dispatchEvent(Object.assign(new Event("storage"), { key: seenKey(), newValue: "1" })));
+    await waitFor(() => expect(list.scrollTop).toBe(460));
+    expect(document.querySelector('[data-message-row="second-image"]')!.getBoundingClientRect().top).toBe(80);
+  });
+
+  it("reveals an already-seen explicit search-target notice before focusing its registered row", async () => {
+    enableObservation();
+    durableConversation();
+    reactionStorage.setItem(seenKey(), "1");
+    const target = message("plan", "plan?");
+    const reaction = message(reactionId, "Reacted 😆 to “plan?”");
+    vi.mocked(bridge.search_local).mockResolvedValue({ ...searchPage([{ messageId: reactionId, snippet: reaction.body }]), query: "Reacted", items: [{ kind: "message", conversationId, messageId: reactionId, title: "Aurora", snippet: reaction.body, timestamp: reaction.timestamp }] });
+    vi.mocked(bridge.load_message_window).mockResolvedValue({ conversationId, messages: [target, reaction], hasOlder: false, hasNewer: false });
+    renderMessages([target, reaction]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    expect(document.querySelector('[data-reaction-notice]')).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "Reacted" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Reacted 😆/ }));
+    const notice = await screen.findByRole("button", { name: /Aurora Chen reacted 😆/ });
+    await waitFor(() => expect(notice).toHaveFocus());
+    expect(notice).toHaveAttribute("data-search-target", "true");
+    expect(notice.closest('[data-reaction-notice]')).toBeVisible();
+    act(() => screen.getByRole("button", { name: "Go to latest" }).focus());
+    fireEvent.click(screen.getByRole("button", { name: "Go to latest" }));
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toBeInTheDocument());
+  });
+
+  it("batches the current actors sharing an emoji while leaving superseded and removed events visible", async () => {
+    enableObservation();
+    renderMessages([message("plan", "plan?"), message("superseded", "Reacted 😆 to “plan?”"), message("current", "Reacted 😆 to “plan?”"), message("second", "Reacted 😆 to “plan?”", { senderAddress: "+15555550142" }), message("removed-add", "Reacted 👍 to “plan?”", { senderAddress: "+15555550143" }), message("removed", "Removed 👍 from “plan?”", { senderAddress: "+15555550143" })]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    act(() => ReactionObserver.intersect(reactionChip()));
+    await waitFor(() => expect(document.querySelectorAll('[data-reaction-marker]')).toHaveLength(2));
+    expect(bridge.mark_seen).toHaveBeenCalledWith(["current", "second"]);
+    expect(document.querySelector('[data-reaction-notice="superseded"]')).toBeVisible();
+    expect(document.querySelector('[data-reaction-notice="removed"]')).toBeVisible();
+    expect(document.querySelector('[data-reaction-notice="removed-add"]')).toBeVisible();
+  });
+
+  it("waits for a fresh chip observation after the search navigation gate releases", async () => {
+    enableObservation();
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+    const target = message("plan", "plan?");
+    const reaction = message("reaction", "Reacted 😆 to “plan?”");
+    vi.mocked(bridge.search_local).mockResolvedValue({ ...searchPage([{ messageId: "plan", snippet: "plan?" }]), query: "plan" });
+    vi.mocked(bridge.load_message_window).mockResolvedValue({ conversationId: "conv-aurora", messages: [target, reaction], hasOlder: false, hasNewer: false });
+    renderMessages([target, reaction]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    act(() => frames.splice(0).forEach(callback => callback(0)));
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "plan" } });
+    fireEvent.click(await screen.findByRole("option", { name: /plan\?/ }));
+    await waitFor(() => expect(document.querySelector('[data-search-target="true"]')).toHaveAttribute("data-message-id", "plan"));
+    const gatedObserver = [...ReactionObserver.instances].reverse().find(observer => observer.nodes.has(reactionChip()))!;
+    act(() => gatedObserver.deliver(reactionChip()));
+    expect(document.querySelector('[data-reaction-notice]')).toBeVisible();
+    act(() => frames.splice(0).forEach(callback => callback(0)));
+    expect(gatedObserver.nodes.size).toBe(0);
+    expect(document.querySelector('[data-reaction-notice]')).toBeVisible();
+    act(() => ReactionObserver.intersect(reactionChip()));
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toBeInTheDocument());
+    expect(bridge.mark_seen).toHaveBeenCalledWith(["reaction"]);
+  });
+
+  it("uses composer occlusion and the half-chip threshold instead of whole-message visibility", async () => {
+    enableObservation();
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) { return this.id === "composer-area" ? 201 : 0; });
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”")]);
+    await waitFor(() => expect(reactionChip()).not.toBeNull());
+    const options = [...ReactionObserver.instances].reverse().find(observer => observer.nodes.has(reactionChip()))?.options;
+    expect(options?.root).toBe(document.getElementById("message-list"));
+    expect(options?.rootMargin).toBe("0px 0px -208px 0px");
+    act(() => ReactionObserver.intersect(reactionChip(), 0.49));
+    expect(document.querySelector('[data-reaction-notice]')).toBeInTheDocument();
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+    act(() => ReactionObserver.intersect(reactionChip(), 0.5));
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toBeInTheDocument());
+    expect(document.querySelector('[data-message-id="plan"]')).not.toHaveAttribute("data-visible", "true");
+  });
+
+  it("fences late chip callbacks after settings, disabling reactions, lock and conversation changes", async () => {
+    enableObservation();
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    const chip = reactionChip();
+    const oldObserver = [...ReactionObserver.instances].reverse().find(observer => observer.nodes.has(chip))!;
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    act(() => oldObserver.deliver(chip));
+    fireEvent.click(await screen.findByRole("switch", { name: "Show reactions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+    await screen.findByText("Reacted 😆 to “plan?”");
+    act(() => oldObserver.deliver(chip));
+    fireEvent.click(screen.getByRole("button", { name: /River Park/ }));
+    await screen.findByText("Attachment received");
+    act(() => oldObserver.deliver(chip));
+    snapshot.encryption.state = "locked";
+    await refreshMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”")]);
+    act(() => oldObserver.deliver(chip));
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+  });
+
+  it("hides persisted hint-only history on its first committed render and survives restart", async () => {
+    durableConversation();
+    reactionStorage.setItem(seenKey(), "1");
+    const commits: boolean[] = [];
+    const observer = new MutationObserver(() => commits.push(Boolean(document.querySelector('[data-reaction-notice]'))));
+    observer.observe(document.body, { subtree: true, childList: true });
+    const first = renderMessages([message(reactionId, "Reacted 😆 to “unloaded text”")]);
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toHaveAttribute("data-message-id", reactionId));
+    expect(commits).not.toContain(true);
+    observer.disconnect();
+    first.unmount();
+    render(<App hostKind="browser" />);
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toHaveAttribute("data-message-id", reactionId));
+    expect(document.querySelector('[data-reaction-notice]')).toBeNull();
+  });
+
+  it("persists seen UUIDs across remount and conversation navigation without suppressing a new same-emoji event", async () => {
+    enableObservation();
+    durableConversation();
+    const first = renderMessages([message("plan", "plan?"), message(reactionId, "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("button", { name: /reacted 😆/ });
+    act(() => ReactionObserver.intersect(reactionChip()));
+    await waitFor(() => expect(reactionStorage.getItem(seenKey())).toBe("1"));
+    first.unmount();
+    render(<App hostKind="browser" />);
+    await screen.findByRole("img", { name: /😆 from/ });
+    expect(document.querySelector('[data-reaction-notice]')).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /River Park/ }));
+    await screen.findByText("Attachment received");
+    fireEvent.click(screen.getByRole("button", { name: /Aurora Chen/ }));
+    await screen.findByRole("img", { name: /😆 from/ });
+    expect(document.querySelector('[data-reaction-notice]')).toBeNull();
+    await refreshMessages([message("plan", "plan?"), message(reactionId, "Reacted 😆 to “plan?”"), message(nextReactionId, "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("button", { name: /reacted 😆/ });
+    expect(reactionStorage.getItem(seenKey(nextReactionId))).toBeNull();
+    act(() => ReactionObserver.intersect(reactionChip()));
+    await waitFor(() => expect(document.querySelector('[data-reaction-notice]')).toBeNull());
+    expect(reactionStorage.getItem(seenKey(nextReactionId))).toBe("1");
+  });
+
+  it("retains focused notices until blur and failed or unknown metadata after seeing the chip", async () => {
+    enableObservation();
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”"), message("failed", "Reacted 👍 to “plan?”", { sender: "self", status: "failed-confirmed" }), message("unknown", "Reacted ❤️ to “plan?”", { sender: "self", status: "unknown", timestamp: "1788435190000" })]);
+    const notice = await screen.findByRole("button", { name: /Aurora Chen reacted 😆/ });
+    act(() => notice.focus());
+    act(() => ReactionObserver.intersect(reactionChip()));
+    expect(notice).toHaveFocus();
+    expect(notice).toBeVisible();
+    act(() => (document.getElementById("composer-textarea") as HTMLElement).focus());
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker="reaction"]')).toBeInTheDocument());
+    for (const chip of document.querySelectorAll('[data-reaction-emoji]')) act(() => ReactionObserver.intersect(chip));
+    expect(document.querySelector('[data-reaction-notice="failed"]')).toBeVisible();
+    expect(document.querySelector('[data-reaction-notice="unknown"]')).toBeVisible();
+    expect(document.getElementById("composer-textarea")).toHaveFocus();
+  });
+
+  it.each(["failed-before-submit", "failed-confirmed", "unknown"] as const)("retains persisted %s status until the status exception ends", async status => {
+    durableConversation();
+    reactionStorage.setItem(seenKey(), "1");
+    snapshot.conversations[0].hasOlderMessages = true;
+    let resolveHistory!: (page: Awaited<ReturnType<typeof bridge.load_history>>) => void;
+    vi.spyOn(bridge, "load_history").mockReturnValue(new Promise(resolve => { resolveHistory = resolve; }));
+    const reaction = message(reactionId, "Reacted 😆 to “plan?”", { sender: "self", senderAddress: undefined, status });
+    renderMessages([message("plan", "plan?"), reaction, message("anchor", "anchor")]);
+    await screen.findByRole("button", { name: /You reacted 😆/ });
+    expect(document.querySelector(`[data-message-meta="${reactionId}"]`)).toBeVisible();
+    const list = document.getElementById("message-list")!;
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 400 }, scrollHeight: { configurable: true, value: 1200 } });
+    list.scrollTop = 500;
+    fireEvent.scroll(list);
+    const bounds = (top: number, height = 20) => ({ width: 200, height, top, bottom: top + height, left: 0, right: 200, x: 0, y: top, toJSON() {} });
+    vi.spyOn(list, "getBoundingClientRect").mockImplementation(() => bounds(0, 400));
+    const originalBounds = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.messageId === "anchor") return bounds(80 - (document.querySelector('[data-reaction-marker]') ? 40 : 0) - (list.scrollTop - 500));
+      if (this.dataset.messageId === "plan") return bounds(-100);
+      return originalBounds.call(this);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    expect(bridge.load_history).toHaveBeenCalledTimes(1);
+    act(() => document.getElementById("composer-textarea")!.focus());
+    await refreshMessages([message("plan", "plan?"), { ...reaction, status: undefined }, message("anchor", "anchor")]);
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toBeInTheDocument());
+    expect(list.scrollTop).toBe(460);
+    expect(document.querySelector('[data-message-id="anchor"]')!.getBoundingClientRect().top).toBe(80);
+    expect(document.getElementById("composer-textarea")).toHaveFocus();
+    await refreshMessages([message("plan", "plan?"), reaction, message("anchor", "anchor")]);
+    expect(document.querySelector('[data-reaction-notice]')).toBeInTheDocument();
+    expect(list.scrollTop).toBe(500);
+    expect(document.querySelector('[data-message-id="anchor"]')!.getBoundingClientRect().top).toBe(80);
+    await refreshMessages([message("plan", "plan?"), { ...reaction, status: undefined }, message("anchor", "anchor")]);
+    expect(list.scrollTop).toBe(460);
+    expect(document.querySelector('[data-message-id="anchor"]')!.getBoundingClientRect().top).toBe(80);
+    await act(async () => resolveHistory({ conversationId, messages: [], hasMore: false }));
+    expect(list.scrollTop).toBe(460);
+    expect(bridge.load_history).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries rejected badge receipts on focus without marking unrelated or collapsed rows", async () => {
+    enableObservation();
+    vi.mocked(bridge.mark_seen).mockRejectedValueOnce(new Error("offline"));
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”"), message("offscreen", "other")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    await act(async () => ReactionObserver.intersect(reactionChip()));
+    expect(bridge.mark_seen).toHaveBeenCalledWith(["reaction"]);
+    const marker = document.querySelector('[data-reaction-marker]')!;
+    act(() => ReactionObserver.intersect(marker, 0, 0));
+    expect(marker).not.toHaveAttribute("data-visible", "true");
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(bridge.mark_seen).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(bridge.mark_seen).mock.calls[1][0]).toEqual(["reaction"]);
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(bridge.mark_seen).toHaveBeenCalledTimes(2);
+  });
+
+  it("handles cross-window positives during StrictMode subscription replay", async () => {
+    enableObservation();
+    durableConversation();
+    snapshot.conversations[0].messages = [message("plan", "plan?"), message(reactionId, "Reacted 😆 to “plan?”"), message(nextReactionId, "Reacted 👍 to “plan?”", { senderAddress: "+15555550142" })];
+    render(<StrictMode><App hostKind="browser" /></StrictMode>);
+    await screen.findByRole("button", { name: /reacted 😆/ });
+    reactionStorage.setItem(seenKey(), "1");
+    act(() => window.dispatchEvent(Object.assign(new Event("storage"), { key: seenKey(), newValue: "1" })));
+    await waitFor(() => expect(document.querySelector(`[data-reaction-marker="${reactionId}"]`)).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /reacted 👍/ })).toBeVisible();
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+  });
+
+  it("requires fresh focused geometry and disables chip recording in the media tab", async () => {
+    enableObservation();
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    act(() => ReactionObserver.intersect(reactionChip()));
+    expect(document.querySelector('[data-reaction-notice]')).toBeVisible();
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(document.querySelector('[data-reaction-notice]')).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Media" }));
+    act(() => ReactionObserver.intersect(reactionChip()));
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Messages" }));
+    act(() => ReactionObserver.intersect(reactionChip()));
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toBeInTheDocument());
+  });
+
+  it("does not record background or locked chip intersections", async () => {
+    enableObservation();
+    const reaction = message("reaction", "Reacted 😆 to “plan?”");
+    renderMessages([message("plan", "plan?"), reaction]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    act(() => ReactionObserver.intersect(reactionChip()));
+    expect(document.querySelector('[data-reaction-notice]')).toBeInTheDocument();
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    const chip = reactionChip();
+    const oldObserver = [...ReactionObserver.instances].reverse().find(observer => observer.nodes.has(chip))!;
+    snapshot.encryption.state = "locked";
+    await refreshMessages([message("plan", "plan?"), reaction]);
+    act(() => oldObserver.deliver(chip));
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+    snapshot.encryption.state = "unlocked";
+    await refreshMessages([message("plan", "plan?"), reaction]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    expect(document.querySelector('[data-reaction-notice]')).toBeInTheDocument();
+    act(() => ReactionObserver.intersect(reactionChip()));
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toBeInTheDocument());
+  });
+
+  it("preserves active lookup feedback until opening the loaded original ends the exception", async () => {
+    enableObservation();
+    let resolveSearch!: (page: ReturnType<typeof searchPage>) => void;
+    vi.mocked(bridge.search_local).mockReturnValue(new Promise(resolve => { resolveSearch = resolve; }));
+    const reaction = message("reaction", "Reacted 😆 to “plan?”");
+    renderMessages([reaction]);
+    fireEvent.click(await screen.findByRole("button", { name: /reacted 😆/ }));
+    await refreshMessages([message("plan", "plan?"), reaction, message("anchor", "anchor")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    act(() => ReactionObserver.intersect(reactionChip()));
+    expect(screen.getByRole("button", { name: /reacted 😆/ })).toHaveAttribute("aria-busy", "true");
+    expect(document.querySelector('[data-reaction-marker]')).not.toBeInTheDocument();
+    await act(async () => resolveSearch(searchPage([])));
+    expect(document.querySelector('[data-reaction-feedback]')).toBeVisible();
+    expect(screen.getByRole("button", { name: /reacted 😆/ })).toBeVisible();
+    const list = document.getElementById("message-list")!;
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 400 }, scrollHeight: { configurable: true, value: 1200 } });
+    list.scrollTop = 500;
+    fireEvent.scroll(list);
+    const bounds = (top: number, height = 20) => ({ width: 200, height, top, bottom: top + height, left: 0, right: 200, x: 0, y: top, toJSON() {} });
+    vi.spyOn(list, "getBoundingClientRect").mockImplementation(() => bounds(0, 400));
+    const originalBounds = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.messageId === "anchor") return bounds(80 - (document.querySelector('[data-reaction-marker]') ? 40 : 0) - (list.scrollTop - 500));
+      if (this.dataset.messageId === "plan") return bounds(-100);
+      return originalBounds.call(this);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /reacted 😆/ }));
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker]')).toBeInTheDocument());
+    expect(document.querySelector('[data-message-id="plan"]')).toHaveFocus();
+    expect(list.scrollTop).toBe(460);
+    expect(document.querySelector('[data-message-id="anchor"]')!.getBoundingClientRect().top).toBe(80);
+  });
+
+  it("permanently suppresses only represented hints and accounts for badge reads once", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    vi.stubGlobal("IntersectionObserver", ReactionObserver);
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”"), message("other", "Reacted 👍 to “plan?”", { senderAddress: "+15555550142" })]);
+    const chip = (await screen.findByRole("img", { name: /😆 from/ })).querySelector('[data-reaction-emoji="😆"]')!;
+    act(() => ReactionObserver.intersect(chip));
+    await waitFor(() => expect(document.querySelector('[data-reaction-marker="reaction"]')).toHaveAttribute("hidden"));
+    expect(screen.getByRole("button", { name: /reacted 👍/ })).toBeVisible();
+    expect(screen.getByText("plan?")).toBeVisible();
+    await waitFor(() => expect(bridge.mark_seen).toHaveBeenCalledWith(["reaction"]));
+    act(() => ReactionObserver.intersect(chip, 0));
+    expect(document.querySelector('[data-reaction-marker="reaction"]')).toHaveAttribute("hidden");
+    expect(bridge.mark_seen).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not read zero-area boundary rows", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    vi.stubGlobal("IntersectionObserver", ReactionObserver);
+    renderMessages([message("plan", "plan?")]);
+    await screen.findByText("plan?");
+    const row = document.querySelector('[data-message-id="plan"]')!;
+    act(() => ReactionObserver.intersect(row, 0, 0));
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+    act(() => ReactionObserver.intersect(row));
+    await waitFor(() => expect(bridge.mark_seen).toHaveBeenCalledWith(["plan"]));
+  });
+
   it("renders default-on badges and notices with resolved actor names", async () => {
     renderMessages([message("plan", "plan?", { sender: "self", senderAddress: undefined }), message("reaction", "Reacted 😆 to “plan?”")]);
 

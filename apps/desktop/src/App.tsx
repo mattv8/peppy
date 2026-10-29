@@ -1,4 +1,5 @@
 import {
+  Component,
   useEffect,
   useLayoutEffect,
   useReducer,
@@ -122,7 +123,7 @@ import { GatewayPicker } from "./GatewayPicker";
 import { installHostedSessionRenewal } from "./hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps } from "./layout-persistence";
 import { hiddenTimeIds } from "./timestamp-bursts";
-import { linkReactions, locateReactionTarget, NO_REACTIONS, ReactionBadges, ReactionNotice, ReactionSettings, useShowReactions, type ActorName, type ReactionNoticeInfo, type ReactionTargetResult } from "./reactions";
+import { createSeenReactionLedger, linkReactions, locateReactionTarget, NO_REACTIONS, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
 import { normalizeReactionText, quoteMatches } from "./reactions/parse";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
 import {
@@ -627,6 +628,30 @@ function showsReactionNoticeMeta(message: MessageView): boolean {
   return message.sender === "self" && Boolean(message.status && ["failed-before-submit", "failed-confirmed", "unknown"].includes(message.status));
 }
 
+type ReactionLayoutSnapshot = { bottom: boolean; anchor: { row: HTMLElement; top: number } | null };
+type ReactionHintLayoutProps = {
+  suppressed: ReadonlySet<string>;
+  capture(): ReactionLayoutSnapshot | null;
+  restore(snapshot: ReactionLayoutSnapshot): void;
+  children: ReactNode;
+};
+
+class ReactionHintLayout extends Component<ReactionHintLayoutProps, Record<string, never>, ReactionLayoutSnapshot | null> {
+  getSnapshotBeforeUpdate(previous: ReactionHintLayoutProps): ReactionLayoutSnapshot | null {
+    const changed = previous.suppressed.size !== this.props.suppressed.size
+      || [...this.props.suppressed].some(id => !previous.suppressed.has(id));
+    return changed ? this.props.capture() : null;
+  }
+
+  componentDidUpdate(_previous: ReactionHintLayoutProps, _state: Record<string, never>, snapshot: ReactionLayoutSnapshot | null) {
+    if (snapshot) this.props.restore(snapshot);
+  }
+
+  render() {
+    return this.props.children;
+  }
+}
+
 function MessageList({
   conversation,
   loading,
@@ -662,6 +687,10 @@ function MessageList({
   onOpenReactionTarget,
   pendingReactionId,
   reactionFeedback,
+  seenReactions,
+  badgeObservation,
+  captureReactionLayout,
+  restoreReactionLayout,
   toneOverrides = {},
 }: {
   conversation?: ConversationView;
@@ -698,9 +727,22 @@ function MessageList({
   onOpenReactionTarget(reaction: MessageView, notice: ReactionNoticeInfo): void;
   pendingReactionId?: string;
   reactionFeedback?: { reactionId: string; message: string };
+  seenReactions: SeenReactionLedger;
+  badgeObservation: { root: HTMLElement | null; obscuredBottom: number | null; enabled: boolean; canRecord(): boolean; onSeen(ids: readonly string[]): void };
+  captureReactionLayout(): ReactionLayoutSnapshot | null;
+  restoreReactionLayout(snapshot: ReactionLayoutSnapshot): void;
   toneOverrides?: Record<string, number>;
 }) {
   const reactions = useMemo(() => showReactions && conversation ? linkReactions(conversation.messages) : NO_REACTIONS, [showReactions, conversation?.messages]);
+  const [focusedNoticeId, setFocusedNoticeId] = useState<string>();
+  const chipRef = useSeenBadges({
+    ...badgeObservation,
+    badges: [...reactions.badges].flatMap(([id, badges]) => badges.map(badge => ({ key: JSON.stringify([id, badge.emoji]), reactionIds: badge.reactionIds }))),
+  });
+  const suppressed = new Set(conversation?.messages.filter(message => reactions.notices.has(message.id)
+    && seenReactions.has(conversation.id, message.id) && !showsReactionNoticeMeta(message)
+    && pendingReactionId !== message.id && reactionFeedback?.reactionId !== message.id
+    && searchTargetId !== message.id && focusedNoticeId !== message.id).map(message => message.id));
   if (loading)
     return (
       <div
@@ -753,17 +795,19 @@ function MessageList({
       </div>
     );
   const conversationToneSeed = conversationAvatar({ id: conversation.id, name: conversation.name, participants: conversation.participants, recipientless: conversation.recipientlessDraft }).seed;
+  const visualMessages = conversation.messages.filter(message => !suppressed.has(message.id));
   const timeIsShown = (message: MessageView) => {
     const displayedTime = messageTime(message).displayedTime;
     return Boolean(formatDateTime(displayedTime) && isoDateTime(displayedTime));
   };
   const hiddenTimes = compactTimestamps
-    ? hiddenTimeIds(conversation.messages, (message) => timeIsShown(message) && !(reactions.notices.has(message.id) && !showsReactionNoticeMeta(message)))
+    ? hiddenTimeIds(visualMessages, (message) => timeIsShown(message) && !(reactions.notices.has(message.id) && !showsReactionNoticeMeta(message)))
     : new Set<string>();
   const hiddenTimeTitle = (message: MessageView) => hiddenTimes.has(message.id)
     ? formatDateTime(messageTime(message).displayedTime) ?? undefined
     : undefined;
   return (
+    <ReactionHintLayout suppressed={suppressed} capture={captureReactionLayout} restore={restoreReactionLayout}>
     <div
       ref={listRef}
       id="message-list"
@@ -772,6 +816,10 @@ function MessageList({
       tabIndex={-1}
       onScroll={onScroll}
       onWheel={onWheel}
+      onFocusCapture={(event) => setFocusedNoticeId((event.target as HTMLElement).closest<HTMLElement>("[data-reaction-notice]")?.dataset.reactionNotice)}
+      onBlurCapture={(event) => {
+        setFocusedNoticeId((event.relatedTarget as HTMLElement | null)?.closest<HTMLElement>("[data-reaction-notice]")?.dataset.reactionNotice);
+      }}
     >
       {searchTargetId && <span id="search-result-message-hint" className="sr-only">Search result message</span>}
       {detachedHistory && <section id="detached-history-status" aria-label="Search history position">
@@ -785,9 +833,10 @@ function MessageList({
         {!historyLoading && !historyError && hasOlderMessages && <button id="history-load-button" className="history-divider-action" type="button" onClick={(event) => onLoadOlder(event.currentTarget)}>Load older messages</button>}
       </div>}
       <div id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined}>
+        {conversation.messages.filter(message => suppressed.has(message.id)).map(message => <ReactionNotice key={message.id} reaction={message} notice={reactions.notices.get(message.id)!} actorName={actorName} rowRef={row => registerRow(message.id, row)} onOpen={onOpenReactionTarget} suppressedHint />)}
         {historyExhausted && <p id="history-beginning-marker" className="history-load-band" data-history-state="beginning">Beginning of conversation</p>}
         {!conversation.messages.length && <p>Start the conversation.</p>}
-        {groupMessages(conversation.messages).map((group) => {
+        {groupMessages(visualMessages).map((group) => {
           const message = group.messages[0];
           const reactionNotice = reactions.notices.get(message.id);
           const imageRun = group.messages.every((candidate) => candidate.transport === "mms" && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
@@ -885,13 +934,14 @@ function MessageList({
                   );
                 })}
               </article>
-              {badges && <ReactionBadges messageId={message.id} badges={badges} actorName={actorName} />}
+              {badges && <ReactionBadges messageId={message.id} badges={badges} actorName={actorName} chipRef={chipRef} />}
               <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} />
             </div>
           );
         })}
       </div>
     </div>
+    </ReactionHintLayout>
   );
 }
 
@@ -1447,6 +1497,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const paneRef = useRef<HTMLElement>(null);
   const desktopBodyRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const [messageListNode, setMessageListRoot] = useState<HTMLDivElement | null>(null);
+  const [reactionSeenRevision, setReactionSeenRevision] = useState(0);
+  const badgeReadIds = useRef(new Set<string>());
   const nearBottom = useRef(true);
   const seenMessageIds = useRef(new Set<string>());
   const pendingSeenMessageIds = useRef(new Set<string>());
@@ -1561,7 +1614,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const visibleRow = listBounds
       ? [...messageRows.current.values()]
           .map((row) => ({ row, bounds: row.getBoundingClientRect() }))
-          .filter(({ bounds }) => bounds.bottom > listBounds.top && bounds.top < unobscuredBottom)
+          .filter(({ row, bounds }) => !row.hasAttribute("data-reaction-marker") && !row.closest("[data-reaction-notice]") && bounds.bottom > listBounds.top && bounds.top < unobscuredBottom)
           .sort((left, right) => left.bounds.top - right.bounds.top)[0]?.row
       : undefined;
     const row = visibleRow ?? (fallbackMessageId ? messageRows.current.get(fallbackMessageId) : undefined);
@@ -1570,8 +1623,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const correctHistoryAnchorScroll = (anchor: { row: HTMLElement; top: number } | null) => {
     const list = messageListRef.current;
     if (!list || !anchor) return;
+    const messageId = anchor.row.dataset.messageId ?? anchor.row.dataset.messageRow;
+    const row = (messageId && messageRows.current.get(messageId)) || anchor.row;
     list.setAttribute("data-scroll-programmatic", "");
-    list.scrollTop += anchor.row.getBoundingClientRect().top - anchor.top;
+    list.scrollTop += row.getBoundingClientRect().top - anchor.top;
     messageListScrollTopRef.current = list.scrollTop;
     if (typeof requestAnimationFrame === "undefined") list.removeAttribute("data-scroll-programmatic");
     else requestAnimationFrame(() => list.removeAttribute("data-scroll-programmatic"));
@@ -2320,6 +2375,33 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, [active?.id, appLock?.locked, snapshot?.encryption.state]);
   const conversationLoaded =
     Boolean(active) && snapshot?.activeConversationId === slotKey;
+  const seenReactions = useMemo(() => createSeenReactionLedger({ mode: snapshot?.mode ?? "", origin: snapshot?.connection.origin }), [snapshot?.mode, snapshot?.connection.origin]);
+  const reactionScopeKey = JSON.stringify([renderedSearchSessionKey, slotKey]);
+  const reactionReadEnabled = conversationLoaded && activeView === "conversations" && conversationTab === "messages" && snapshot?.encryption.state === "unlocked" && !appLock?.locked;
+  const reactionReadContext = useRef({ key: reactionScopeKey, enabled: reactionReadEnabled });
+  reactionReadContext.current = { key: reactionScopeKey, enabled: reactionReadEnabled };
+  const canReadMessages = () => mountedRef.current && selectedRef.current === slotKey && currentSearchSessionKey() === renderedSearchSessionKey
+    && reactionReadContext.current.key === reactionScopeKey && reactionReadContext.current.enabled
+    && !searchReadGate.current && document.hasFocus() && document.visibilityState === "visible";
+  const markReadMessages = (candidateIds: readonly string[]) => {
+    if (!canReadMessages()) return;
+    const seen = seenMessageIds.current;
+    const pending = pendingSeenMessageIds.current;
+    const ids = [...new Set(candidateIds)].filter(id => !seen.has(id) && !pending.has(id));
+    if (!ids.length) return;
+    ids.forEach(id => pending.add(id));
+    void bridge.mark_seen(ids).then(() => {
+      if (reactionReadContext.current.key === reactionScopeKey) ids.forEach(id => seen.add(id));
+    }).catch(() => {}).finally(() => ids.forEach(id => pending.delete(id)));
+  };
+  useEffect(() => seenReactions.subscribe(() => setReactionSeenRevision(value => value + 1)), [seenReactions]);
+  const captureReactionLayout = (): ReactionLayoutSnapshot | null => searchReadGate.current ? null
+    : { bottom: nearBottom.current && !detachedHistoryRef.current, anchor: captureHistoryAnchor() };
+  const restoreReactionLayout = (layout: ReactionLayoutSnapshot) => {
+    if (searchReadGate.current) return;
+    if (layout.bottom) stickToBottom();
+    else correctHistoryAnchorScroll(layout.anchor);
+  };
   const messageIds = conversationLoaded
     ? active!.messages.map((message) => message.id).join(",")
     : "";
@@ -2552,6 +2634,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       messageListScrollTopRef.current = list.scrollTop;
       list.removeAttribute("data-scroll-programmatic");
       searchReadGate.current = false;
+      setReactionSeenRevision(value => value + 1);
     };
     if (typeof requestAnimationFrame === "undefined") release();
     else requestAnimationFrame(release);
@@ -2577,10 +2660,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   useEffect(() => {
     seenMessageIds.current = new Set<string>();
     pendingSeenMessageIds.current = new Set<string>();
-  }, [slotKey]);
+    badgeReadIds.current = new Set<string>();
+  }, [reactionScopeKey]);
   const setMessageListNode = useCallback((node: HTMLDivElement | null) => {
     if (node !== messageListRef.current) lastUnobscuredHeight.current = null;
     messageListRef.current = node;
+    setMessageListRoot(node);
     messageListScrollTopRef.current = node?.scrollTop ?? 0;
   }, []);
   const overlayMargin =
@@ -2588,42 +2673,39 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   useEffect(() => {
     const listNode = messageListRef.current;
     if (!listNode || overlayMargin === null) return;
+    let observing = true;
     const markVisible = () => {
-      if (searchReadGate.current || !document.hasFocus() || document.visibilityState !== "visible")
-        return;
+      if (!observing) return;
       const ids = [...messageRows.current]
-        .filter(([id, row]) => row.dataset.visible === "true" && !seenMessageIds.current.has(id) && !pendingSeenMessageIds.current.has(id))
+        .filter(([, row]) => !row.hasAttribute("data-reaction-marker") && row.dataset.visible === "true")
         .map(([id]) => id);
-      if (!ids.length) return;
-      const visibleSlot = slotKey;
-      ids.forEach(id => pendingSeenMessageIds.current.add(id));
-      void bridge.mark_seen(ids).then(() => {
-        if (selectedRef.current === visibleSlot) ids.forEach(id => seenMessageIds.current.add(id));
-      }).catch(() => {}).finally(() => ids.forEach(id => pendingSeenMessageIds.current.delete(id)));
+      markReadMessages([...ids, ...badgeReadIds.current]);
     };
     // Preserve the last measured visibility across native state refreshes so a rejected hidden-window mark can retry.
     markVisible();
     const observer =
-      typeof IntersectionObserver === "undefined"
+      typeof IntersectionObserver === "undefined" || !reactionReadEnabled
         ? undefined
-        : new IntersectionObserver((entries) => {
+         : new IntersectionObserver((entries) => {
+            if (!observing) return;
             entries.forEach((entry) =>
               entry.target.setAttribute(
                 "data-visible",
-                String(entry.isIntersecting),
+                String(!entry.target.hasAttribute("data-reaction-marker") && entry.isIntersecting && entry.intersectionRect?.width > 0 && entry.intersectionRect?.height > 0),
               ),
             );
             markVisible();
           }, { root: listNode, rootMargin: `0px 0px -${overlayMargin}px 0px` });
-    messageRows.current.forEach((row) => observer?.observe(row));
+    messageRows.current.forEach((row) => { if (!row.hasAttribute("data-reaction-marker")) observer?.observe(row); });
     window.addEventListener("focus", markVisible);
     document.addEventListener("visibilitychange", markVisible);
     return () => {
+      observing = false;
       observer?.disconnect();
       window.removeEventListener("focus", markVisible);
       document.removeEventListener("visibilitychange", markVisible);
     };
-  }, [slotKey, messageIds, activeView, overlayMargin, snapshot]);
+  }, [reactionScopeKey, messageIds, reactionReadEnabled, overlayMargin, snapshot, reactionSeenRevision, messageListNode]);
   const registerRow: RowRegistry = (id, row) => {
     if (row) messageRows.current.set(id, row);
     else messageRows.current.delete(id);
@@ -3688,6 +3770,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       </div>
       <div id="tabpanel-messages" role="tabpanel" aria-labelledby="tab-messages" hidden={conversationTab !== "messages"}>
       <MessageList
+      key={reactionScopeKey}
       conversation={active}
       loading={Boolean(active) && !conversationLoaded}
       registerRow={registerRow}
@@ -3722,6 +3805,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onOpenReactionTarget={(reaction, notice) => { void openReactionTarget(reaction, notice); }}
       pendingReactionId={pendingReactionId}
       reactionFeedback={reactionFeedback}
+      seenReactions={seenReactions}
+      captureReactionLayout={captureReactionLayout}
+      restoreReactionLayout={restoreReactionLayout}
+      badgeObservation={{ root: messageListNode, obscuredBottom: overlayMargin, enabled: reactionReadEnabled && showReactions, canRecord: canReadMessages, onSeen: ids => {
+        if (!canReadMessages()) return;
+        ids.forEach(id => badgeReadIds.current.add(id));
+        seenReactions.mark(slotKey, ids);
+        markReadMessages(ids);
+      } }}
       toneOverrides={toneOverrides}
     />
       </div>

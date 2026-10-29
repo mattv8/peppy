@@ -4377,13 +4377,13 @@ describe("host state display", () => {
     mark.mockRejectedValueOnce({ message: "Window is hidden." });
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     const observed: ((
-      entries: { target: Element; isIntersecting: boolean }[],
+      entries: { target: Element; isIntersecting: boolean; intersectionRect?: Pick<DOMRectReadOnly, "width" | "height"> }[],
     ) => void)[] = [];
     const targets: Element[] = [];
     class Observer {
       constructor(
         private callback: (
-          entries: { target: Element; isIntersecting: boolean }[],
+          entries: { target: Element; isIntersecting: boolean; intersectionRect?: Pick<DOMRectReadOnly, "width" | "height"> }[],
         ) => void,
       ) {
         observed.push(callback);
@@ -4408,7 +4408,7 @@ describe("host state display", () => {
     const row = targets.find(
       (target) => target.getAttribute("data-message-id") === "m-aurora",
     )!;
-    act(() => observed.at(-1)!([{ target: row, isIntersecting: true }]));
+    act(() => observed.at(-1)!([{ target: row, isIntersecting: true, intersectionRect: { width: 240, height: 48 } }]));
     await waitFor(() => expect(mark).toHaveBeenCalledTimes(1));
     expect(document.querySelector('[data-app-notice-source="refresh"]')).not.toBeInTheDocument();
     await act(async () => hint?.());
