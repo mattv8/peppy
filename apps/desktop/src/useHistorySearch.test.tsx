@@ -225,6 +225,19 @@ describe("useHistorySearch", () => {
     expect(fixture.bridge.get_history_search).toHaveBeenCalledTimes(2);
   });
 
+  it("does not rearm a queued read after unmount", async () => {
+    const fixture = bridgeFixture(active());
+    const pendingRead = deferred<HistorySearchSnapshot>();
+    vi.mocked(fixture.bridge.get_history_search).mockReturnValue(pendingRead.promise);
+    const { unmount } = renderHook(() => useHistorySearch({ sessionKey: "a", enabled: true, visible: true, bridge: fixture.bridge }));
+
+    act(() => fixture.notify());
+    unmount();
+    await act(async () => { pendingRead.resolve(active({ progressVersion: "late" })); await pendingRead.promise; });
+
+    expect(fixture.bridge.get_history_search).toHaveBeenCalledTimes(1);
+  });
+
   it("does not let stale reads overwrite a newer start or cancel", async () => {
     const fixture = bridgeFixture(inactive());
     const beforeStart = deferred<HistorySearchSnapshot>();

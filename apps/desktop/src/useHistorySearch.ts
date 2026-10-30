@@ -51,6 +51,7 @@ function isSameContext(current: Pick<Owner, "sessionKey" | "bridge">, expected: 
 export function useHistorySearch({ sessionKey, enabled, visible, bridge }: UseHistorySearchInput): UseHistorySearchResult {
   const [historySearch, setHistorySearch] = useState<HistorySearchSnapshot>();
   const [documentVisible, setDocumentVisible] = useState(() => document.visibilityState === "visible");
+  const mountedRef = useRef(true);
   const activityRef = useRef<Activity>({ sessionKey, enabled, visible, bridge, generation: 0 });
   const snapshotRef = useRef<HistorySearchSnapshot | undefined>(undefined);
   const ownerRef = useRef<Owner>({ sessionKey, bridge, mutationSequence: 0 });
@@ -58,7 +59,7 @@ export function useHistorySearch({ sessionKey, enabled, visible, bridge }: UseHi
 
   const canUpdateView = useCallback((generation: number): boolean => {
     const activity = activityRef.current;
-    return activity.generation === generation && activity.enabled && activity.visible && document.visibilityState === "visible";
+    return mountedRef.current && activity.generation === generation && activity.enabled && activity.visible && document.visibilityState === "visible";
   }, []);
 
   const settleOwnedTerminal = useCallback((snapshot: HistorySearchSnapshot, owner: Owner) => {
@@ -106,6 +107,13 @@ export function useHistorySearch({ sessionKey, enabled, visible, bridge }: UseHi
       if (readRef.current.generation === generation && readRef.current.queued) readSnapshot(generation);
     });
   }, [canUpdateView, readSnapshot]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const updateDocumentVisibility = () => {
