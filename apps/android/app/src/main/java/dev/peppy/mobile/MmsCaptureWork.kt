@@ -151,11 +151,13 @@ class MmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
     override suspend fun doWork(): Result = PASS.withLock {
         withContext(Dispatchers.IO) {
             val job = currentCoroutineContext()[kotlinx.coroutines.Job]
-            MmsCaptureWork.runWorkerPass(applicationContext, inputData) { manualRecheck, providerChanged ->
+            val result = MmsCaptureWork.runWorkerPass(applicationContext, inputData) { manualRecheck, providerChanged ->
                 MmsCaptureWork.runner.run(applicationContext, manualRecheck, providerChanged).also {
                     job?.ensureActive()
                 }
             }
+            if (result == ListenableWorker.Result.success()) PhoneReadCaptureWork.run(applicationContext)
+            result
         }
     }
 

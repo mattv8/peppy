@@ -11,7 +11,9 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -221,6 +223,37 @@ internal fun smsCaptureInitialDelayMs(source: SmsCaptureRequestSource): Long = w
     SmsCaptureRequestSource.UNKNOWN -> CAPTURE_DELAY_MS
 }
 
+internal fun interface PhoneReadCaptureRunner {
+    fun run(context: Context): Boolean
+}
+
+internal object PhoneReadCaptureWork {
+    @Volatile internal var runner = PhoneReadCaptureRunner { context ->
+        NativeGateway.open(context)?.let { PhoneReadIngest.run(context, it) } ?: false
+    }
+    @Volatile internal var onApplied: (Context) -> Unit = { GatewayWork.enqueueAfterCapture(it) }
+
+    suspend fun run(context: Context): Boolean {
+        val app = context.applicationContext
+        val applied = try {
+            runInterruptible { runner.run(app) }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            false
+        }
+        if (!applied) return false
+        try {
+            onApplied(app)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // Sync scheduling is best effort; a later gateway or periodic wake uploads the read.
+        }
+        return true
+    }
+}
+
 private const val CAPTURE_DELAY_MS = 15_000L
 
 private data class CaptureDiagnosticRequest(val traceId: Long, val session: Long, val enqueuedMs: Long, val source: Long) {
@@ -264,6 +297,7 @@ class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
                 } else {
                     runner.run(applicationContext)
                 }
+                PhoneReadCaptureWork.run(applicationContext)
                 if (diagnostic != null) {
                     SyncDiagnostics.withTrace(traceId) {
                         SyncDiagnostics.record(
