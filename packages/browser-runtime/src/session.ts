@@ -21,12 +21,20 @@ export interface BrowserCoreFacade {
   invoke(request: { command: string; args: Record<string, unknown> }): Promise<CoreResult>;
 }
 
+export interface RememberedUnlockLifecycle {
+  remember(wrappedIdentity: string, passphrase: string): Promise<void>;
+  recover(wrappedIdentity: string): Promise<string | undefined>;
+  clear(): Promise<void>;
+  validate(): Promise<void>;
+}
+
 export interface BrowserSessionOptions {
   origin: string;
   core: BrowserCoreFacade;
   filesystem: EmscriptenFilesystem;
   checkpoint: IndexedDbCheckpointStore;
   onFatal: (error: Error) => void;
+  rememberedUnlock?: RememberedUnlockLifecycle;
 }
 
 function isReadyAttachment(value: CoreResult): value is Record<string, unknown> {
@@ -57,6 +65,7 @@ export class BrowserSession {
   private transportToken?: string;
   private publicIdentityValue?: BrowserPublicIdentity;
   private lifecycleBusy = false;
+  private rememberedUnlockGeneration = 0;
   private fatalReported = false;
   private readonly previews = new Map<string, string>();
   private readonly previewedIds = new Set<string>();
@@ -82,6 +91,7 @@ export class BrowserSession {
       session.wrappedIdentity = decodeWrappedIdentity(loaded.checkpoint.manifest.wrappedCredentials);
       session.createRuntime();
       session.phaseValue = "locked";
+      await session.recoverRememberedUnlock();
       return session;
     } catch (error: unknown) {
       const failure = error instanceof Error ? error : new CheckpointError("storage-unavailable");
@@ -96,6 +106,7 @@ export class BrowserSession {
   public publicIdentity(): BrowserPublicIdentity | undefined { return this.publicIdentityValue ? { ...this.publicIdentityValue } : undefined; }
 
   public async enroll(metadata: unknown, deviceToken: string, passphrase: string, signal?: AbortSignal): Promise<void> {
+    const rememberedUnlockGeneration = this.rememberedUnlockGeneration;
     return this.lifecycle("unenrolled", signal, async () => {
       const identity = await this.options.core.invoke({ command: "_worker_enroll_identity", args: { metadata, deviceToken, passphrase } });
       this.publicIdentityValue = publicIdentity(identity);
@@ -104,11 +115,13 @@ export class BrowserSession {
       await this.loadTransportToken();
       this.throwIfAborted(signal);
       this.phaseValue = "ready";
+      this.rememberUnlock(passphrase, rememberedUnlockGeneration);
     });
   }
 
   /** Completes a Rust-verified enrollment handoff without routing it through generic identity enrollment. */
   public async finishEnrollment(command: "_worker_enrollment_finish_owner" | "_worker_enrollment_finish_manual" | "_worker_enrollment_finish_hosted_owner", responseJson: string, passphrase: string, signal?: AbortSignal): Promise<void> {
+    const rememberedUnlockGeneration = this.rememberedUnlockGeneration;
     return this.lifecycle("unenrolled", signal, async () => {
       const identity = await this.options.core.invoke({ command, args: { responseJson, passphrase } });
       this.publicIdentityValue = publicIdentity(identity);
@@ -117,6 +130,7 @@ export class BrowserSession {
       await this.loadTransportToken();
       this.throwIfAborted(signal);
       this.phaseValue = "ready";
+      this.rememberUnlock(passphrase, rememberedUnlockGeneration);
     });
   }
 
@@ -133,6 +147,19 @@ export class BrowserSession {
   }
 
   public async unlock(passphrase: string, signal?: AbortSignal): Promise<void> {
+    return this.unlockWithPassphrase(passphrase, signal, true, this.rememberedUnlockGeneration);
+  }
+
+  public async clearRememberedUnlock(): Promise<void> {
+    this.rememberedUnlockGeneration += 1;
+    await this.options.rememberedUnlock?.clear();
+  }
+
+  public async validateRememberedUnlock(): Promise<void> {
+    await this.options.rememberedUnlock?.validate().catch(() => undefined);
+  }
+
+  private async unlockWithPassphrase(passphrase: string, signal: AbortSignal | undefined, remember: boolean, rememberedUnlockGeneration: number): Promise<void> {
     return this.lifecycle("locked", signal, async () => {
       const wrappedIdentity = this.wrappedIdentity;
       if (!wrappedIdentity) throw new CheckpointError("invalid-checkpoint");
@@ -143,11 +170,13 @@ export class BrowserSession {
       await this.loadTransportToken();
       this.throwIfAborted(signal);
       this.phaseValue = "ready";
+      if (remember) this.rememberUnlock(passphrase, rememberedUnlockGeneration);
     });
   }
 
   public async rotate(profile: unknown, header: unknown, passphrase: string): Promise<void> {
     this.requireReady();
+    const rememberedUnlockGeneration = this.rememberedUnlockGeneration;
     let checkpoint: CheckpointInput | undefined;
     try {
       const result = await this.runtime.mutate({
@@ -155,6 +184,7 @@ export class BrowserSession {
         capture: async generation => checkpoint = await this.capture(generation),
       });
       this.applyCheckpoint(checkpoint, result.generation);
+      this.rememberUnlock(passphrase, rememberedUnlockGeneration);
     } catch (error: unknown) {
       this.applyHandledCheckpoint(checkpoint, error);
       throw error;
@@ -393,6 +423,39 @@ export class BrowserSession {
     if (typeof attachment.id !== "string") return value;
     const previewUrl = await this.previewAttachment(attachment.id);
     return previewUrl ? { ...attachment, previewUrl } : attachment;
+  }
+
+  private async recoverRememberedUnlock(): Promise<void> {
+    const wrappedIdentity = this.wrappedIdentity;
+    if (!wrappedIdentity || !this.options.rememberedUnlock) return;
+    const rememberedUnlockGeneration = this.rememberedUnlockGeneration;
+    let passphrase: string | undefined;
+    try {
+      passphrase = await this.options.rememberedUnlock.recover(wrappedIdentity);
+    } catch {
+      return;
+    }
+    if (!passphrase || rememberedUnlockGeneration !== this.rememberedUnlockGeneration || this.phaseValue !== "locked") return;
+    try {
+      await this.unlockWithPassphrase(passphrase, undefined, false, rememberedUnlockGeneration);
+    } catch (error: unknown) {
+      if (error instanceof CoreRejectedError) {
+        await this.discardRememberedUnlock();
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private rememberUnlock(passphrase: string, generation: number): void {
+    const wrappedIdentity = this.wrappedIdentity;
+    if (!wrappedIdentity || generation !== this.rememberedUnlockGeneration) return;
+    void this.options.rememberedUnlock?.remember(wrappedIdentity, passphrase).catch(() => undefined);
+  }
+
+  private async discardRememberedUnlock(): Promise<void> {
+    this.rememberedUnlockGeneration += 1;
+    await this.options.rememberedUnlock?.clear().catch(() => undefined);
   }
 
   /** Ensures work accepted before shutdown finishes before the owner lock is released. */

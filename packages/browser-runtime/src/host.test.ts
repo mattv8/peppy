@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
-import { BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort, type HostSession } from "./host.js";
+import { browserRememberedUnlock, BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort, type HostSession } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
 import { TransportError } from "./transport.js";
+import { RememberedUnlock } from "./remembered-unlock.js";
 
 function locks(): OwnerLockManager {
   let held = false;
@@ -23,6 +24,11 @@ async function eventually(predicate: () => boolean): Promise<void> {
   throw new Error("condition was not met");
 }
 
+function deferred(): { promise: Promise<void>; release(): void } {
+  let release!: () => void;
+  return { promise: new Promise<void>(resolve => { release = resolve; }), release };
+}
+
 class FakeSession implements HostSession {
   public phase: "unenrolled" | "locked" | "ready" | "closed" = "ready";
   public generation = 0;
@@ -31,6 +37,8 @@ class FakeSession implements HostSession {
   public previewAttachment?: (id: string) => Promise<string | undefined>;
   public exportAttachment?: (id: string) => Promise<Record<string, unknown> & { bytes: Uint8Array }>;
   public openMediaAttachment?: (id: string, maxBytes: number) => Promise<Record<string, unknown> & { bytes: Uint8Array }>;
+  public clearRememberedUnlock?: () => Promise<void>;
+  public validateRememberedUnlock?: () => Promise<void>;
   public async query(command: string, args: Record<string, unknown>): Promise<import("./core.js").CoreResult> {
     this.calls.push({ command, args, mutation: false });
     if (command === "contact_snapshot" && !Array.isArray(args.addresses)) throw { code: "invalid-request" };
@@ -55,6 +63,37 @@ function port(): BrowserPort & { messages: unknown[]; emit(message: unknown): vo
 
 describe("browser host RPC", () => {
   afterEach(() => { vi.useRealTimers(); });
+
+  it("constructs worker recovery against the app origin when the logical API origin differs", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 503 })) as unknown as typeof globalThis.fetch;
+    const origins = { logicalOrigin: "https://api.peppy.pro", fetchBase: "https://app.peppy.pro" };
+    const recovery = browserRememberedUnlock(origins.fetchBase, fetch);
+
+    expect(recovery).toBeInstanceOf(RememberedUnlock);
+    await recovery.remember(JSON.stringify({ metadata: { vaultId: "11111111-1111-7111-8111-111111111111" } }), "passphrase");
+    expect(fetch).toHaveBeenCalledWith("https://app.peppy.pro/hosted/v1/web/app-session", expect.objectContaining({ credentials: "include" }));
+  });
+
+  it.each(["locked", "unenrolled"] as const)("does not start networking for a %s boot", async phase => {
+    const session = new FakeSession();
+    session.phase = phase;
+    const start = vi.fn(async () => undefined);
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
+
+    await host.attach(port());
+
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("starts networking once for an already-ready recovered boot", async () => {
+    const session = new FakeSession();
+    const start = vi.fn(async () => undefined);
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
+
+    await Promise.all([host.attach(port()), host.attach(port())]);
+
+    expect(start).toHaveBeenCalledTimes(1);
+  });
 
   it("does not forward private worker commands", async () => {
     const session = new FakeSession();
@@ -887,12 +926,13 @@ describe("browser host RPC", () => {
     const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: network as unknown as import("./host.js").BrowserNetwork });
     const attached = port();
     await host.attach(attached);
+    const startsAtAttach = start.mock.calls.length;
 
     attached.emit({ id: 1, command, args: {} });
 
     await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
     expect(attached.messages).not.toContainEqual({ event: "changed" });
-    expect(start).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledTimes(startsAtAttach);
   });
 
   it("lets a subscribed UI reload enrollment and app state once after an enrollment mutation", async () => {
@@ -945,6 +985,119 @@ describe("browser host RPC", () => {
 
     await eventually(() => enrollmentApprove.mock.calls.length === 1);
     expect(enrollmentApprove).toHaveBeenCalledWith();
+  });
+
+  it("clears remembered recovery before sending hosted sign-out", async () => {
+    const session = new FakeSession();
+    const events: string[] = [];
+    session.clearRememberedUnlock = async () => { events.push("clear"); };
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        enrollmentSignOut: async () => { events.push("signout"); },
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_sign_out", args: {} });
+
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(events).toEqual(["clear", "signout"]);
+    expect(session.phase).toBe("ready");
+  });
+
+  it("stops after Lock even when remembered recovery cannot clear", async () => {
+    const session = new FakeSession();
+    session.clearRememberedUnlock = async () => { throw new Error("storage unavailable"); };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "lock_sync", args: {} });
+
+    await eventually(() => attached.closed);
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: { code: "recovery-clear-failed", message: "Browser recovery could not be forgotten." } });
+    expect(session.phase).toBe("closed");
+  });
+
+  it("does not report hosted sign-out success when remembered recovery cannot clear", async () => {
+    const session = new FakeSession();
+    session.clearRememberedUnlock = async () => { throw new Error("storage unavailable"); };
+    const enrollmentSignOut = vi.fn(async () => undefined);
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, enrollmentSignOut } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_sign_out", args: {} });
+
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: { code: "recovery-clear-failed", message: "Browser recovery could not be forgotten." } });
+    expect(enrollmentSignOut).toHaveBeenCalledTimes(1);
+  });
+
+  it("validates remembered recovery after enrollment status without stopping active sync", async () => {
+    const session = new FakeSession();
+    const validate = vi.fn(async () => undefined);
+    session.validateRememberedUnlock = validate;
+    const stop = vi.fn(async () => undefined);
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: {
+        start: async () => undefined,
+        stop,
+        enrollmentStatus: async () => ({ mode: "hosted" as const, stage: "ready" as const }),
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_status", args: {} });
+
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(validate).toHaveBeenCalledTimes(1);
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("returns enrollment status before coalesced remembered recovery validation settles", async () => {
+    vi.useFakeTimers();
+    const session = new FakeSession();
+    const gate = deferred();
+    const validate = vi.fn(async () => gate.promise);
+    session.validateRememberedUnlock = validate;
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, enrollmentStatus: async () => ({ mode: "hosted" as const, stage: "ready" as const }) } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_status", args: {} });
+    attached.emit({ id: 2, command: "enrollment_status", args: {} });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true }));
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 2, ok: true }));
+    expect(validate).toHaveBeenCalledTimes(1);
+    gate.release();
+    await Promise.resolve();
+    attached.emit({ id: 3, command: "enrollment_status", args: {} });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(validate).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    attached.emit({ id: 4, command: "enrollment_status", args: {} });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(validate).toHaveBeenCalledTimes(2);
   });
 
   it("validates and forwards waiting-only enrollment cancellation", async () => {

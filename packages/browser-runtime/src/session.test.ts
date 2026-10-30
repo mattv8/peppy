@@ -40,6 +40,7 @@ class TrustedCore {
   public unlockFailure?: Error;
   public mutationFailure?: Error;
   public finishFailure?: Error;
+  public tokenGate?: Promise<void>;
   public publicIdentity = { vaultId: id, deviceId: id, role: "owner", unlocked: true, epoch: "1" };
   public readonly commands: string[] = [];
   public async invoke({ command }: { command: string; args: Record<string, unknown> }): Promise<CoreResult> {
@@ -52,7 +53,7 @@ class TrustedCore {
     if (command === "_worker_local_attachment_ids") return { attachmentIds: this.attachmentIds };
     if (command === "attachment_info") return { state: "ready", plaintextBytes: 3 };
     if (command === "retain_attachment_ciphertext" || command === "touch_attachment_ciphertext" || command === "release_attachment_ciphertext") return {};
-    if (command === "_worker_transport_token") { this.tokenCalls++; return { deviceToken: "private-token" }; }
+    if (command === "_worker_transport_token") { await this.tokenGate; this.tokenCalls++; return { deviceToken: "private-token" }; }
     if (command === "preview_attachment") return { previewUrl: "data:image/png;base64,cHJldmlldw==" };
     if (command === "_worker_rotate_identity") this.envelope = "rotated-envelope";
     return {};
@@ -162,6 +163,15 @@ function sessionOptions(core: TrustedCore, fs: MemoryFs, store: IndexedDbCheckpo
   return { origin: "https://peppy.test", core, filesystem: fs, checkpoint: store, onFatal };
 }
 
+function rememberedUnlock() {
+  return {
+    remember: vi.fn(async () => undefined),
+    recover: vi.fn(async () => undefined as string | undefined),
+    clear: vi.fn(async () => undefined),
+    validate: vi.fn(async () => undefined),
+  };
+}
+
 describe("BrowserSession", () => {
   it("boots fresh or restores a locked checkpoint without exposing its identity", async () => {
     const fresh = await BrowserSession.boot(sessionOptions(new TrustedCore(), new MemoryFs(), new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`)));
@@ -173,6 +183,52 @@ describe("BrowserSession", () => {
     const locked = await BrowserSession.boot(sessionOptions(new TrustedCore(), new MemoryFs(), store));
     expect(locked.phase).toBe("locked");
     expect(locked.generation).toBe(1);
+  });
+
+  it("restores a committed checkpoint with a remembered phrase without saving it again", async () => {
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    await store.commit(checkpoint(0));
+    const recovery = rememberedUnlock();
+    recovery.recover.mockResolvedValue("remembered-passphrase");
+
+    const session = await BrowserSession.boot({ ...sessionOptions(new TrustedCore(), new MemoryFs(), store), rememberedUnlock: recovery });
+
+    expect(session.phase).toBe("ready");
+    expect(recovery.recover).toHaveBeenCalledWith("envelope-1");
+    expect(recovery.remember).not.toHaveBeenCalled();
+  });
+
+  it("keeps a restored checkpoint locked when its remembered phrase is rejected", async () => {
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    await store.commit(checkpoint(0));
+    const recovery = rememberedUnlock();
+    recovery.recover.mockResolvedValue("wrong-passphrase");
+    const core = new TrustedCore();
+    core.unlockFailure = new CoreRejectedError("unlock-failed");
+
+    const session = await BrowserSession.boot({ ...sessionOptions(core, new MemoryFs(), store), rememberedUnlock: recovery });
+
+    expect(session.phase).toBe("locked");
+    expect(recovery.clear).toHaveBeenCalledTimes(1);
+    await expect(store.load(1)).resolves.toMatchObject({ kind: "present" });
+  });
+
+  it("does not unlock when recovery resolves after shutdown", async () => {
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    await store.commit(checkpoint(0));
+    const recovery = rememberedUnlock();
+    const core = new TrustedCore();
+    const session = await BrowserSession.boot({ ...sessionOptions(core, new MemoryFs(), store), rememberedUnlock: recovery });
+    const gate = deferred();
+    recovery.recover.mockImplementation(async () => { await gate.promise; return "remembered-passphrase"; });
+
+    const recovering = (session as unknown as { recoverRememberedUnlock(): Promise<void> }).recoverRememberedUnlock();
+    session.shutdown();
+    gate.release();
+
+    await expect(recovering).resolves.toBeUndefined();
+    expect(core.commands.filter(command => command === "_worker_unlock_identity")).toHaveLength(0);
+    expect(session.phase).toBe("closed");
   });
 
   it("does not become ready or expose the transport token before durable enrollment", async () => {
@@ -230,6 +286,100 @@ describe("BrowserSession", () => {
     core.unlockFailure = undefined;
     await expect(session.unlock("correct")).resolves.toBeUndefined();
     expect(session.phase).toBe("ready");
+  });
+
+  it("remembers a manually unlocked phrase only after its checkpoint commits", async () => {
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    await store.commit(checkpoint(0));
+    const commit = store.commit.bind(store);
+    const gate = deferred();
+    store.commit = vi.fn(async input => { await gate.promise; return commit(input); });
+    const recovery = rememberedUnlock();
+    const core = new TrustedCore();
+    const session = await BrowserSession.boot({ ...sessionOptions(core, new MemoryFs(), store), rememberedUnlock: recovery });
+
+    const unlock = session.unlock("correct-passphrase");
+    await vi.waitFor(() => expect(core.commands).toContain("_worker_checkpoint_identity"));
+    expect(recovery.remember).not.toHaveBeenCalled();
+    gate.release();
+    await unlock;
+
+    expect(recovery.remember).toHaveBeenCalledWith("envelope-1", "correct-passphrase");
+  });
+
+  it("completes explicit unlock after checkpointing without waiting for remembered recovery", async () => {
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    await store.commit(checkpoint(0));
+    const recovery = rememberedUnlock();
+    const gate = deferred();
+    recovery.remember.mockImplementation(async () => { await gate.promise; return undefined; });
+    const session = await BrowserSession.boot({ ...sessionOptions(new TrustedCore(), new MemoryFs(), store), rememberedUnlock: recovery });
+
+    await expect(session.unlock("correct-passphrase")).resolves.toBeUndefined();
+
+    expect(session.phase).toBe("ready");
+    expect(recovery.remember).toHaveBeenCalledWith("envelope-1", "correct-passphrase");
+    await expect(store.load(session.generation)).resolves.toMatchObject({ kind: "present" });
+    gate.release();
+  });
+
+  it("never remembers a rejected manual unlock", async () => {
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    await store.commit(checkpoint(0));
+    const recovery = rememberedUnlock();
+    const core = new TrustedCore();
+    core.unlockFailure = new CoreRejectedError("unlock-failed");
+    const session = await BrowserSession.boot({ ...sessionOptions(core, new MemoryFs(), store), rememberedUnlock: recovery });
+
+    await expect(session.unlock("wrong-passphrase")).rejects.toMatchObject({ code: "unlock-failed" });
+
+    expect(recovery.remember).not.toHaveBeenCalled();
+  });
+
+  it("fences a pending unlock from remembering after sign-out clears recovery", async () => {
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    await store.commit(checkpoint(0));
+    const recovery = rememberedUnlock();
+    const core = new TrustedCore();
+    const gate = deferred();
+    core.tokenGate = gate.promise;
+    const session = await BrowserSession.boot({ ...sessionOptions(core, new MemoryFs(), store), rememberedUnlock: recovery });
+
+    const unlock = session.unlock("correct-passphrase");
+    await vi.waitFor(() => expect(core.commands).toContain("_worker_transport_token"));
+    await session.clearRememberedUnlock();
+    gate.release();
+    await unlock;
+
+    expect(recovery.clear).toHaveBeenCalledTimes(1);
+    expect(recovery.remember).not.toHaveBeenCalled();
+  });
+
+  it("reports a remembered recovery clear failure without changing the checkpoint", async () => {
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    await store.commit(checkpoint(0));
+    const recovery = rememberedUnlock();
+    recovery.clear.mockRejectedValue(new Error("storage unavailable"));
+    const session = await BrowserSession.boot({ ...sessionOptions(new TrustedCore(), new MemoryFs(), store), rememberedUnlock: recovery });
+
+    await expect(session.clearRememberedUnlock()).rejects.toThrow("storage unavailable");
+    expect(session.phase).toBe("locked");
+    await expect(store.load(1)).resolves.toMatchObject({ kind: "present" });
+  });
+
+  it("remembers the rotated wrapped identity after its committed rotation", async () => {
+    const fs = new MemoryFs();
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    const recovery = rememberedUnlock();
+    const core = new TrustedCore();
+    const session = await BrowserSession.boot({ ...sessionOptions(core, fs, store), rememberedUnlock: recovery });
+    fs.seedDatabase();
+    await session.enroll({}, "device-token", "first-passphrase");
+    recovery.remember.mockClear();
+
+    await session.rotate({}, {}, "rotated-passphrase");
+
+    expect(recovery.remember).toHaveBeenCalledWith("rotated-envelope", "rotated-passphrase");
   });
 
   it("retains a completed checkpoint when cancellation arrives during its commit", async () => {

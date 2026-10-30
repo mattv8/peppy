@@ -79,6 +79,29 @@ rejecting raw core operations like unlock/open when invoked through renderer por
 serialization. Mutations serialize core operations, file capture, and checkpoint
 commits atomically; checkpoint failures terminate the session without automatic retry.
 
+## Remembered browser unlock
+
+After a manual phrase unlock, the worker can remember an encrypted recovery record
+for the current checkpoint and a valid hosted app session. Its session check uses
+the actual worker/app origin (where hosted cookies belong), while the wrapped
+identity retains the canonical API context. The record is bound to the origin,
+account, and wrapped identity. It stores no plaintext passphrase, root
+or database key, and no OAuth token; OAuth does not cryptographically encrypt the
+vault. Recovery is best effort, so unavailable or evicted browser storage falls
+back to the ordinary locked state.
+
+This is a browser-profile trust choice, not cryptographic enforcement of app
+session policy. Anyone who can run same-origin code in, or access, that browser
+profile can bypass the app-session gate and decrypt the remembered record. Explicit
+Lock attempts to forget recovery before stopping the worker; if storage cleanup
+fails, the worker still locks and reports that forgetting was not durable. Sign-out
+still reaches the server when cleanup fails, then reports that cleanup failure.
+Worker-side validation runs nonblocking after enrollment status, coalesced and no
+more than once per minute; a rejected record clears only remembered recovery. These
+actions do not erase the independent checkpoint or device token, and active device
+sync continues. Computer handoff has no phrase to cache, so a later manual unlock
+is required once before that browser can use remembered recovery.
+
 `BrowserScheduler` coordinates network activity, enrollment, and polling with
 backoff. Device tokens and network state remain worker-private.
 
