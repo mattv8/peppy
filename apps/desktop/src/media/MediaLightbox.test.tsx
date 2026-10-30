@@ -182,6 +182,27 @@ describe("MediaLightbox", () => {
     expect(releaseMedia).not.toHaveBeenCalledWith(selectedAttachmentId, `blob:${selectedAttachmentId}`);
   });
 
+  it.each([
+    { initialAttachmentId: "one", navigationButton: "Older image", selectedAttachmentId: "two" },
+    { initialAttachmentId: "two", navigationButton: "Newer image", selectedAttachmentId: "one" },
+  ])("shows the next original after leaving a loaded image", async ({ initialAttachmentId, navigationButton, selectedAttachmentId }) => {
+    let resolveSelected!: (result: { state: "ready"; url: string }) => void;
+    const requestOriginal = vi.fn((id: string) => id === initialAttachmentId
+      ? Promise.resolve({ state: "ready" as const, url: `blob:${id}` })
+      : new Promise<{ state: "ready"; url: string }>((resolve) => { resolveSelected = resolve; }));
+    const releaseMedia = vi.fn();
+    render(<MediaLightbox items={items} initialAttachmentId={initialAttachmentId} onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={vi.fn().mockResolvedValue({ state: "pending" })} saveMedia={vi.fn()} releaseMedia={releaseMedia} />);
+    await act(async () => {});
+    expect(screen.getByRole("img", { name: initialAttachmentId })).toHaveAttribute("src", `blob:${initialAttachmentId}`);
+
+    fireEvent.click(screen.getByRole("button", { name: navigationButton }));
+    await act(async () => resolveSelected({ state: "ready", url: `blob:${selectedAttachmentId}` }));
+
+    expect(screen.getByRole("img", { name: selectedAttachmentId })).toHaveAttribute("src", `blob:${selectedAttachmentId}`);
+    expect(releaseMedia).toHaveBeenCalledTimes(1);
+    expect(releaseMedia).toHaveBeenCalledWith(initialAttachmentId, `blob:${initialAttachmentId}`);
+  });
+
   it("offers Retry for a failed original even when the producer marked the preview unavailable", async () => {
     const failed = [{ ...items[0], attachment: { ...items[0].attachment, state: "failed" as const, mediaMeta: { previewUnavailable: "thumbnail_unavailable" as const } } }];
     render(<MediaLightbox items={failed} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={vi.fn().mockRejectedValue(new Error("offline"))} checkOriginal={vi.fn().mockResolvedValue({ state: "pending" as const })} saveMedia={vi.fn()} />);
