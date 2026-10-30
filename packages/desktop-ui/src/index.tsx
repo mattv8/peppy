@@ -1205,6 +1205,7 @@ export function Composer({
   draft,
   attachments,
   sendSupported,
+  readOnly = false,
   onDraftChange,
   onSend,
   status,
@@ -1216,6 +1217,7 @@ export function Composer({
   statusSlot,
   statusActive = false,
   composerName,
+  placeholder,
   composerUserSized = false,
   maxAutoGrowHeight = 176,
   platform,
@@ -1223,6 +1225,8 @@ export function Composer({
   draft: string;
   attachments: Attachment[];
   sendSupported: boolean;
+  /** Blocks editing and sending while the textarea stays focusable. */
+  readOnly?: boolean;
   onDraftChange(value: string): void;
   onSend(): void;
   status?: string;
@@ -1234,6 +1238,7 @@ export function Composer({
   statusSlot?: ReactNode;
   statusActive?: boolean;
   composerName?: string;
+  placeholder?: string;
   composerUserSized?: boolean;
   /** CSS max-height: 176px remains the hard ceiling (8 lines); this can only lower auto-grow. */
   maxAutoGrowHeight?: number;
@@ -1241,7 +1246,7 @@ export function Composer({
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const hasContent = Boolean(draft.trim()) || attachments.length > 0;
-  const canSend = sendSupported && hasContent;
+  const canSend = sendSupported && !readOnly && hasContent;
   const counter = !attachments.length ? smsCounter(draft) : null;
   const fallbackShown = !sendSupported && !gatewaySlot && !statusSlot;
   useEffect(() => {
@@ -1326,10 +1331,14 @@ export function Composer({
           id="composer-textarea"
           aria-label="Message"
           value={draft}
-          onChange={(e) => onDraftChange(e.target.value)}
+          readOnly={readOnly}
+          onChange={(e) => {
+            if (!readOnly) onDraftChange(e.target.value);
+          }}
           onKeyDown={keydown}
           placeholder={
-            composerName ? `Message ${composerName}` : "Type a message"
+            placeholder ??
+            (composerName ? `Message ${composerName}` : "Type a message")
           }
           rows={1}
         />

@@ -138,6 +138,66 @@ describe("bridge subscriptions", () => {
     await vi.waitFor(() => expect(eventMock.windowStop).toHaveBeenCalledOnce());
   });
 
+  it("resolves draft readiness only after the native window listener is installed", async () => {
+    let finishRegistration: ((stop: () => void) => void) | undefined;
+    eventMock.windowListen.mockImplementationOnce((event: string, handler: (event: { payload: unknown }) => void) => new Promise((resolve) => {
+      eventMock.windowHandlers.set(event, handler);
+      finishRegistration = resolve;
+    }));
+    const subscription = tauriBridge.subscribe_drafts?.(() => undefined);
+    let ready = false;
+    void subscription?.ready?.then(() => { ready = true; });
+
+    await vi.waitFor(() => expect(eventMock.windowListen).toHaveBeenCalledWith("peppy://draft", expect.any(Function)));
+    await Promise.resolve();
+    expect(ready).toBe(false);
+
+    finishRegistration?.(eventMock.windowStop);
+    await expect(subscription?.ready).resolves.toBeUndefined();
+    expect(ready).toBe(true);
+    subscription?.();
+    expect(eventMock.windowStop).toHaveBeenCalledOnce();
+  });
+
+  it("rejects draft readiness when native registration fails without an unhandled rejection", async () => {
+    const failure = new Error("listen denied");
+    eventMock.windowListen.mockImplementationOnce(async () => { throw failure; });
+    const subscription = tauriBridge.subscribe_drafts?.(() => undefined);
+
+    await expect(subscription?.ready).rejects.toBe(failure);
+    subscription?.();
+    expect(eventMock.windowStop).not.toHaveBeenCalled();
+  });
+
+  it("keeps legacy draft callers working when they never await readiness", async () => {
+    eventMock.windowListen.mockImplementationOnce(async () => { throw new Error("listen denied"); });
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      const dispose = tauriBridge.subscribe_drafts?.(() => undefined);
+      expect(dispose).toEqual(expect.any(Function));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("unlistens immediately when a draft subscription is disposed before readiness resolves", async () => {
+    let finishRegistration: ((stop: () => void) => void) | undefined;
+    eventMock.windowListen.mockImplementationOnce(() => new Promise((resolve) => {
+      finishRegistration = resolve;
+    }));
+    const subscription = tauriBridge.subscribe_drafts?.(() => undefined);
+    await vi.waitFor(() => expect(eventMock.windowListen).toHaveBeenCalledOnce());
+    subscription?.();
+    expect(eventMock.windowStop).not.toHaveBeenCalled();
+
+    finishRegistration?.(eventMock.windowStop);
+    await expect(subscription?.ready).resolves.toBeUndefined();
+    expect(eventMock.windowStop).toHaveBeenCalledOnce();
+  });
+
   it("passes declared arguments to native commands", async () => {
     await tauriBridge.list_devices();
     await tauriBridge.revoke_device("device-id");

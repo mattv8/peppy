@@ -1,5 +1,6 @@
 use crate::{
-    draft_event_target_labels_after_save, load_state_for_window, save_draft_for_window,
+    cleared_draft_after_accepted_send, draft_event_target_labels_after_save, load_state_for_window,
+    save_draft_for_window,
     secure_store::MemoryStore,
     send_draft_for_window, session_for_update_flush, session_is_current,
     tests::{fixture_at, gateway, input, open, routed, Fixture, PHRASE},
@@ -559,6 +560,139 @@ async fn saved_draft_event_gate_blocks_failures_locked_and_replaced_sessions() {
         ],
     )
     .is_empty());
+}
+
+/// Saves a recipient-bearing draft that moves into an existing conversation.
+fn saved_draft_for_target(
+    session: &crate::session::Session,
+    text: &str,
+) -> (String, crate::DraftView) {
+    let target = incoming(session, "+15555550100", "history");
+    let source = session.client.recipientless_compose_draft().unwrap();
+    let saved = session
+        .save_draft(&input(
+            &source.draft_id.to_string(),
+            &source.conversation_id.to_string(),
+            text,
+            &["+15555550100"],
+            "0",
+        ))
+        .unwrap();
+    assert_eq!(saved.conversation_id, target);
+    (target, saved)
+}
+
+#[tokio::test]
+async fn accepted_send_loads_the_retained_cleared_draft_for_matching_composers_only() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let gateway_id = uuid::Uuid::new_v4().to_string();
+    session.set_status(|status| {
+        status.gateways = vec![gateway(&gateway_id, true, true)];
+        status.gateways_known = true;
+    });
+    let (target, saved) = saved_draft_for_target(&session, "hello");
+    let state = state(&fixture);
+    let window = label(&target);
+
+    let sent = send_draft_for_window(
+        &state,
+        &window,
+        session.clone(),
+        routed(
+            input(&saved.id, &target, "", &[], &saved.revision),
+            &gateway_id,
+            "sim-1",
+        ),
+    )
+    .await;
+    let accepted = sent.as_ref().is_ok_and(|sent| sent.accepted);
+    assert!(accepted);
+    let sent_revision = sent.as_ref().unwrap().revision.clone();
+
+    let cleared = cleared_draft_after_accepted_send(&session, &saved.id, accepted).unwrap();
+    assert_eq!(cleared.id, saved.id);
+    assert_eq!(cleared.conversation_id, target);
+    assert_eq!(cleared.text, "");
+    assert!(cleared.attachment_ids.is_empty());
+    assert_eq!(cleared.recipient_ids, vec!["+15555550100".to_string()]);
+    assert_eq!(cleared.gateway_id.as_deref(), Some(gateway_id.as_str()));
+    assert_eq!(cleared.sim_id.as_deref(), Some("sim-1"));
+    assert_eq!(Some(cleared.revision.clone()), sent_revision);
+
+    let unrelated = label(&uuid::Uuid::new_v4().to_string());
+    let locked = cleared_draft_after_accepted_send(&session, &saved.id, accepted).unwrap();
+    assert!(draft_event_target_labels_after_save(
+        &state,
+        &session,
+        &Ok(locked),
+        true,
+        true,
+        [crate::tray::MAIN, window.as_str()],
+    )
+    .is_empty());
+    assert_eq!(
+        draft_event_target_labels_after_save(
+            &state,
+            &session,
+            &Ok(cleared),
+            false,
+            true,
+            [crate::tray::MAIN, window.as_str(), unrelated.as_str()],
+        ),
+        vec![crate::tray::MAIN.to_owned(), window]
+    );
+}
+
+#[tokio::test]
+async fn rejected_send_retains_the_draft_and_loads_no_cleared_broadcast() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let gateway_id = uuid::Uuid::new_v4().to_string();
+    let (target, saved) = saved_draft_for_target(&session, "hello");
+    let queued_before = session.client.pending_outbox_batch(10).unwrap().len();
+    let state = state(&fixture);
+
+    // Gateway capabilities are unknown, so the send is refused before anything is queued.
+    let sent = send_draft_for_window(
+        &state,
+        &label(&target),
+        session.clone(),
+        routed(
+            input(&saved.id, &target, "", &[], &saved.revision),
+            &gateway_id,
+            "sim-1",
+        ),
+    )
+    .await;
+    assert_eq!(sent.as_ref().unwrap_err().code, "gateways-unknown");
+    let accepted = sent.as_ref().is_ok_and(|sent| sent.accepted);
+    assert!(cleared_draft_after_accepted_send(&session, &saved.id, accepted).is_none());
+    let draft = session
+        .client
+        .compose_draft(saved.id.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(draft.text, "hello");
+    assert_eq!(
+        session.client.pending_outbox_batch(10).unwrap().len(),
+        queued_before
+    );
+}
+
+#[tokio::test]
+async fn accepted_send_without_a_readable_cleared_draft_broadcasts_nothing() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+
+    assert!(cleared_draft_after_accepted_send(&session, "not-a-draft-id", true).is_none());
+    assert!(
+        cleared_draft_after_accepted_send(&session, &uuid::Uuid::new_v4().to_string(), true)
+            .is_none()
+    );
 }
 
 #[tokio::test]

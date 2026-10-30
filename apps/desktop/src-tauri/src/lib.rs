@@ -83,7 +83,7 @@ use dto::{DraftView, Head, HistoryPage, PublicCopyView, SendResultView, Snapshot
 use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{
-    AttachmentId, AttachmentInfo, ConversationId, LocalSearchRequest, MessageId,
+    AttachmentId, AttachmentInfo, ConversationId, DraftId, LocalSearchRequest, MessageId,
     NativePlaintextFile, NotificationTarget, SearchIndexState,
 };
 use peppy_desktop_api::compose::DiscardDraftInput;
@@ -2081,6 +2081,21 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
+/// Loads the cleared row that an accepted send retained so every matching composer converges on
+/// the host draft. Returns nothing for rejected sends and unreadable rows: the send already stands.
+fn cleared_draft_after_accepted_send(
+    session: &Session,
+    draft_id: &str,
+    accepted: bool,
+) -> Option<DraftView> {
+    if !accepted {
+        return None;
+    }
+    let id = DraftId::from_str(draft_id).ok()?;
+    let draft = session.client.compose_draft(id).ok().flatten()?;
+    Some(peppy_desktop_api::draft_view(&draft))
+}
+
 #[tauri::command]
 async fn send_draft(
     window: tauri::WebviewWindow,
@@ -2089,7 +2104,31 @@ async fn send_draft(
 ) -> BridgeResult<SendResultView> {
     let operation = admit_update_operation(&state)?;
     let session = state.require_session_admitted(&operation).await?;
-    send_draft_for_window(&state, window.label(), session, input).await
+    let draft_id = input.id.clone();
+    let result = send_draft_for_window(&state, window.label(), session.clone(), input).await;
+    let accepted = result.as_ref().is_ok_and(|sent| sent.accepted);
+    let cleared = blocking({
+        let session = session.clone();
+        move || {
+            Ok(cleared_draft_after_accepted_send(
+                &session, &draft_id, accepted,
+            ))
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(cleared) = cleared {
+        let session_current = session_is_current(&state, &session).await;
+        emit_saved_draft(
+            window.app_handle(),
+            &state,
+            &session,
+            &Ok(cleared),
+            session_current,
+        );
+    }
+    result
 }
 
 #[tauri::command]

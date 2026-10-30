@@ -26,9 +26,22 @@ export type DraftSlot = {
   /** While a send is in flight, saves are deferred so they cannot race the atomic send/clear. */
   held: boolean;
   queue: Promise<unknown>;
+  /** Last host version successfully acknowledged for safe stale-save reconciliation. */
+  acknowledgedContent: DraftContent;
 };
 
-export type SaveOutcome = { ok: true } | { ok: false; error: string };
+/** A failed outcome from `flushAll` carries the resolved key of the draft that failed, which may be offscreen. */
+export type SaveOutcome = { ok: true } | { ok: false; error: string; reviewRequired?: true; key?: string };
+export type DraftSaveState = "idle" | "saving" | "failed";
+export type DraftNoticeEvent = "remote-update" | "replaced" | "moved" | "save-failed" | "saved";
+
+type UndoVersion = {
+  content: DraftContent;
+  generation: number;
+  reviewedId: string;
+  reviewedRevision: string;
+  reviewedContent: DraftContent;
+};
 
 export const blankContent = (): DraftContent => ({
   text: "",
@@ -44,11 +57,19 @@ const contentOf = (draft: Draft): DraftContent => ({
 });
 export const isDirty = (slot: DraftSlot) => slot.generation > slot.savedGeneration;
 const sameDraftContent = (left: DraftContent, right: DraftContent) =>
-  left.text === right.text &&
+  left.text === right.text && sameStructure(left, right);
+/** Authored text and attachments only; host recipient formatting is not a local edit. */
+const sameAuthoredContent = (left: DraftContent, right: DraftContent) =>
+  left.text === right.text && sameAttachments(left, right);
+const sameAttachments = (left: DraftContent, right: DraftContent) =>
+  left.attachmentIds.join("\u0000") === right.attachmentIds.join("\u0000");
+const sameStructure = (left: DraftContent, right: DraftContent) =>
   left.gatewayId === right.gatewayId &&
   left.simId === right.simId &&
-  left.recipientIds.join("\u0000") === right.recipientIds.join("\u0000") &&
-  left.attachmentIds.join("\u0000") === right.attachmentIds.join("\u0000");
+  sameRecipients(left, right) &&
+  sameAttachments(left, right);
+const sameRecipients = (left: DraftContent, right: DraftContent) =>
+  left.recipientIds.join("\u0000") === right.recipientIds.join("\u0000");
 export const shouldConfirmPostFlushDelete = (
   requestedKey: string,
   currentKey: string,
@@ -60,18 +81,10 @@ export const shouldConfirmPostFlushDelete = (
   (!hadContent || currentKey !== requestedKey) &&
   confirmedKey !== currentKey;
 
-type DraftStoreEvents = {
+export type DraftStoreEvents = {
   changed(): void;
   rekeyed(from: string, to: string): void;
-  unavailable?(from: string, to?: string, message?: string): void;
-};
-
-export type DraftRecovery = {
-  id: string;
-  source: string;
-  content: DraftContent;
-  destination?: string;
-  message: string;
+  notice?(key: string, event: DraftNoticeEvent): void;
 };
 
 /**
@@ -84,14 +97,21 @@ export class DraftStore {
   private aliases = new Map<string, string>();
   private tombstones = new Set<string>();
   private retiredDraftIds = new Map<string, { conversationId: string; revision: string }>();
-  private recoveries = new Map<string, DraftRecovery>();
   private hydrated = new Set<string>();
+  private bufferedAuthoritative = new Map<string, Draft>();
+  private undoVersions = new Map<string, UndoVersion>();
+  /** Copy-only local content displaced by a remote structural change or move. */
+  private retainedVersions = new Map<string, DraftContent[]>();
+  private reviewRequired = new Set<string>();
+  private pendingSentVerification = new Map<string, number>();
+  private saveStates = new Map<string, DraftSaveState>();
   private newCount = 0;
-  private recoveryCount = 0;
+  private sessionGeneration = 0;
 
   constructor(
     private readonly persist: (input: DraftInput) => Promise<Draft>,
     private readonly events: DraftStoreEvents,
+    private readonly loadDraft: (conversationId: string) => Promise<Draft | undefined> = async () => undefined,
   ) {}
 
   /** Follows `new:` keys to the conversation ID the host assigned. */
@@ -110,38 +130,143 @@ export class DraftStore {
     return this.slots.get(this.resolve(key));
   }
 
-  localDrafts(): DraftSlot[] {
-    return [...this.slots.values()].filter((slot) => isLocalDraftKey(slot.key));
+  isHydrated(key: string): boolean {
+    const slot = this.get(key);
+    return Boolean(slot && (isLocalDraftKey(slot.key) || this.hydrated.has(slot.conversationId)));
   }
 
-  recoveriesFor(conversationId?: string): DraftRecovery[] {
-    return [...this.recoveries.values()].filter(
-        recovery => conversationId
-        ? !recovery.destination || recovery.destination === conversationId || recovery.source === conversationId
-        : !recovery.destination,
-    );
+  saveState(key: string): DraftSaveState {
+    return this.saveStates.get(this.resolve(key)) ?? "idle";
   }
 
-  discardRecovery(id: string) {
-    this.recoveries.delete(id);
+  clearUndo(key: string): void {
+    const resolved = this.resolve(key);
+    this.undoVersions.delete(resolved);
+    this.retainedVersions.delete(resolved);
+  }
+
+  acknowledgeReview(key: string): void {
+    this.reviewRequired.delete(this.resolve(key));
+  }
+
+  /**
+   * Settles a stale send for review. The caller has already loaded `host`; this method never loads,
+   * sends, or writes. The supplied copies are kept copy-only and undo is dropped. A present host is
+   * adopted for review; an absent host keeps the local slot, fails as not-found, and is not recreated.
+   * Failures carry the resolved key so the caller can point at the affected draft.
+   */
+  reconcileForReview(key: string, host: Draft | undefined, retained: DraftContent[]): SaveOutcome {
+    const resolved = this.resolve(key);
+    for (const content of retained) this.retainCopy(resolved, content);
+    this.undoVersions.delete(resolved);
+    this.pendingSentVerification.delete(resolved);
+    const slot = this.slots.get(resolved) ?? (host && !this.tombstones.has(resolved) ? this.ensure(resolved) : undefined);
+    if (!slot || this.tombstones.has(resolved)) {
+      this.events.changed();
+      return { ok: false, error: "Draft no longer exists.", key: resolved };
+    }
+    slot.held = false;
+    if (!host) {
+      slot.error = { message: "Draft no longer exists.", code: "not-found" };
+      this.reviewRequired.add(slot.key);
+      this.saveStates.set(slot.key, "failed");
+      this.events.notice?.(slot.key, "save-failed");
+      this.events.changed();
+      return { ok: false, error: "Draft no longer exists.", key: slot.key };
+    }
+    const event = host.conversationId === slot.conversationId ? "remote-update" : "moved";
+    if (this.adoptHost(slot, host, event)) {
+      this.events.changed();
+      const outcome = this.reviewOutcome(slot);
+      return outcome.ok ? outcome : { ...outcome, key: slot.key };
+    }
+    const message = "Draft was moved to a conversation with unsaved edits. Your text is kept for copying.";
+    slot.error = { message, code: "moved" };
+    this.reviewRequired.add(slot.key);
+    this.saveStates.set(slot.key, "failed");
+    this.events.changed();
+    return { ok: false, error: message, key: slot.key };
+  }
+
+  hasUndo(key: string): boolean {
+    const slot = this.get(key);
+    const undo = this.undoVersions.get(this.resolve(key));
+    return Boolean(slot && undo && undo.generation === slot.generation && sameRecipients(slot.content, undo.content));
+  }
+
+  retainedText(key: string): string | undefined {
+    return this.retainedTexts(key).join("\n\n--- retained draft ---\n\n") || this.undoVersions.get(this.resolve(key))?.content.text;
+  }
+
+  retainedTexts(key: string): string[] {
+    return (this.retainedVersions.get(this.resolve(key)) ?? []).map(version => version.text);
+  }
+
+  reset(): void {
+    this.sessionGeneration += 1;
+    this.slots.clear();
+    this.aliases.clear();
+    this.tombstones.clear();
+    this.retiredDraftIds.clear();
+    this.hydrated.clear();
+    this.bufferedAuthoritative.clear();
+    this.undoVersions.clear();
+    this.retainedVersions.clear();
+    this.pendingSentVerification.clear();
+    this.reviewRequired.clear();
+    this.saveStates.clear();
     this.events.changed();
   }
 
-  /** Retires content whose host identity moved outside this window's save queue. */
-  retireUnavailable(key: string, error: unknown): string | undefined {
+  retry(key: string): Promise<SaveOutcome> {
     const slot = this.get(key);
-    const destination = errorDetail(error, "conversationId");
-    if (!slot) return destination;
-    const moved = errorCode(error) === "draft-moved";
-    this.retire(
-      slot,
-      slot.content,
-      destination,
-      moved
-        ? "Draft moved elsewhere. Review the retained text before sending again."
-        : "Draft was deleted elsewhere. Retained text can be copied or restored to a new draft.",
-    );
-    return destination;
+    if (!slot) return Promise.resolve({ ok: false, error: "This draft was deleted or moved elsewhere." });
+    if (slot.error?.code === "not-found") return Promise.resolve({ ok: false, error: slot.error.message });
+    slot.error = undefined;
+    if (this.pendingSentVerification.has(slot.key)) return this.verifySentRevision(slot, this.pendingSentVerification.get(slot.key)!);
+    if (!isDirty(slot)) {
+      this.saveStates.set(slot.key, "idle");
+      this.events.changed();
+      return Promise.resolve({ ok: true });
+    }
+    return this.enqueue(slot);
+  }
+
+  async undo(key: string): Promise<SaveOutcome> {
+    const slot = this.get(key);
+    const resolved = this.resolve(key);
+    const undo = this.undoVersions.get(resolved);
+    if (!slot || !undo) return { ok: false, error: "No retained draft text is available." };
+    if (!sameRecipients(slot.content, undo.content))
+      return { ok: false, error: "Draft recipients changed; local text is kept for copying." };
+    const generation = slot.generation;
+    const session = this.sessionGeneration;
+    const slotKey = slot.key;
+    let current: Draft | undefined;
+    try {
+      current = await this.loadDraft(slot.conversationId);
+    } catch (error) {
+      if (!this.isCurrent(slot, slotKey, session)) return { ok: true };
+      return { ok: false, error: errorText(error) };
+    }
+    if (!this.isCurrent(slot, slotKey, session)) return { ok: true };
+    if (
+      !current ||
+      current.id !== undo.reviewedId ||
+      current.revision !== undo.reviewedRevision ||
+      !sameDraftContent(contentOf(current), undo.reviewedContent) ||
+      slot.generation !== generation
+    )
+      return { ok: false, error: "Draft structure changed; local text is kept for review." };
+    slot.content = { ...slot.content, text: undo.content.text };
+    slot.generation += 1;
+    this.undoVersions.delete(slot.key);
+    this.events.changed();
+    return this.enqueue(slot);
+  }
+
+  localDrafts(): DraftSlot[] {
+    return [...this.slots.values()].filter((slot) => isLocalDraftKey(slot.key));
   }
 
   /** Starts a draft; the host assigns both IDs on save. */
@@ -156,9 +281,12 @@ export class DraftStore {
     if (this.tombstones.has(key) || this.tombstones.has(resolved))
       return Promise.resolve({ ok: false, error: "This draft was deleted or moved elsewhere." });
     const slot = this.ensure(key);
+    this.undoVersions.delete(slot.key);
     slot.content = { ...slot.content, ...patch };
     slot.generation += 1;
     this.events.changed();
+    if (slot.error?.code === "not-found") return Promise.resolve({ ok: false, error: slot.error.message });
+    this.reviewRequired.delete(slot.key);
     return this.enqueue(slot);
   }
 
@@ -168,16 +296,24 @@ export class DraftStore {
     const firstHydration = !this.hydrated.has(conversationId);
     this.hydrated.add(conversationId);
     const slot = this.get(conversationId) ?? this.ensure(conversationId);
+    const buffered = this.bufferedAuthoritative.get(conversationId);
+    if (buffered && draft && buffered.id === draft.id && this.shouldAdopt(draft, buffered)) draft = buffered;
+    if (buffered && (!draft || buffered.id !== draft.id)) void this.verifyBufferedIdentity(conversationId, draft);
+    this.bufferedAuthoritative.delete(conversationId);
     if (draft && this.isRetiredInConversation(draft)) return;
     if (slot && (isDirty(slot) || slot.held)) {
       if (!firstHydration) return;
       if (draft && this.hasRecoverableContent(draft) && !sameDraftContent(slot.content, contentOf(draft))) {
-        this.retainOtherVersion(slot, contentOf(draft), "Stored draft text conflicts with local edits. Review both versions before replacing either.");
+        this.retainCopy(slot.key, contentOf(draft));
+        this.reviewRequired.add(slot.key);
         slot.error = { message: "A stored draft conflicts with local edits. Review both versions before saving.", code: "stale-draft" };
         this.events.changed();
         return;
       }
-      if (draft && !slot.id) this.installIdentity(slot, draft);
+      if (draft && !slot.id) {
+        this.installIdentity(slot, draft);
+        slot.acknowledgedContent = contentOf(draft);
+      }
       if (!slot.held && !slot.error) void this.enqueue(slot);
       return;
     }
@@ -190,6 +326,7 @@ export class DraftStore {
         revision: draft.revision,
         content: contentOf(draft),
         error: undefined,
+        acknowledgedContent: contentOf(draft),
       });
     } else {
       Object.assign(slot, {
@@ -197,6 +334,7 @@ export class DraftStore {
         revision: "0",
         content: blankContent(),
         error: undefined,
+        acknowledgedContent: blankContent(),
       });
     }
     this.events.changed();
@@ -205,64 +343,61 @@ export class DraftStore {
   /** Applies a saved-draft notification without allowing an older revision to regress local state. */
   applyAuthoritative(draft: Draft): void {
     if (this.tombstones.has(draft.conversationId) || this.isRetiredInConversation(draft)) return;
+    if (!this.hydrated.has(draft.conversationId)) {
+      const buffered = this.bufferedAuthoritative.get(draft.conversationId);
+      if (!buffered || this.shouldAdopt(buffered, draft))
+        this.bufferedAuthoritative.set(draft.conversationId, draft);
+      return;
+    }
     const slot = this.get(draft.conversationId);
     if (!slot || isDirty(slot) || slot.held || !this.shouldAdopt(slot, draft)) return;
+    const incomingContent = contentOf(draft);
+    const changed = !sameDraftContent(slot.content, incomingContent);
+    const textOnlyChange = changed && slot.id === draft.id && sameStructure(slot.content, incomingContent);
+    if (textOnlyChange) this.preserveUndo(slot, slot.content, draft);
+    else if (changed || slot.id !== draft.id) {
+      this.retainCopy(slot.key, slot.content);
+      this.undoVersions.delete(slot.key);
+    }
     Object.assign(slot, {
       id: draft.id,
       conversationId: draft.conversationId,
       revision: draft.revision,
-      content: contentOf(draft),
+      content: incomingContent,
       error: undefined,
+      acknowledgedContent: incomingContent,
     });
+    if (changed) this.events.notice?.(slot.key, "remote-update");
     this.events.changed();
   }
 
-  /** Waits for queued saves and retries once if edits are still unacknowledged. */
+  /**
+   * Waits for queued saves. Unsaved or failed content blocks as a non-review failure; only a clean,
+   * durably adopted host state reports review-required.
+   */
   async flush(key: string): Promise<SaveOutcome> {
     const slot = this.get(key);
     if (!slot) return { ok: true };
     await slot.queue;
+    if (this.reviewRequired.has(slot.key)) {
+      if (isDirty(slot) || this.saveStates.get(slot.key) === "failed") return this.unsavedOutcome(slot);
+      return this.reviewOutcome(slot);
+    }
     return isDirty(slot) ? this.enqueue(slot) : { ok: true };
   }
 
-  /** Flush all live draft slots and report the first failure after every attempt. */
+  /** Flush all live draft slots and report the first failure after every attempt, keyed to its draft. */
   async flushAll(): Promise<SaveOutcome> {
-    let firstFailure: SaveOutcome | undefined;
-    for (const key of [...this.slots.keys()]) {
-      const outcome = await this.flush(key);
-      if (!outcome.ok && !firstFailure) firstFailure = outcome;
+    let review: SaveOutcome | undefined;
+    let failure: SaveOutcome | undefined;
+    for (const slot of [...this.slots.values()]) {
+      const outcome = await this.flush(slot.key);
+      if (outcome.ok) continue;
+      const attributed: SaveOutcome = { ...outcome, key: slot.key };
+      if (outcome.reviewRequired) review ??= attributed;
+      else failure ??= attributed;
     }
-    return firstFailure ?? { ok: true };
-  }
-
-  /** Replaces conflicted local content with the reviewed stored version, retaining local text for recovery. */
-  resolveUseStored(key: string, stored: Draft | undefined): Promise<void> {
-    const slot = this.get(key);
-    if (!slot) return Promise.resolve();
-    return this.enqueueResolution(slot, () => {
-      if (!stored || !sameDraftContent(slot.content, contentOf(stored)))
-        this.retainOtherVersion(slot, slot.content, "Local draft text was replaced with the reviewed stored version.");
-      if (stored) Object.assign(slot, { id: stored.id, conversationId: stored.conversationId, revision: stored.revision, content: contentOf(stored) });
-      else Object.assign(slot, { id: "", revision: "0", content: blankContent() });
-      slot.savedGeneration = slot.generation;
-      slot.error = undefined;
-      this.events.changed();
-    });
-  }
-
-  /** Deliberately saves reviewed local content over the stored conflict version. */
-  async resolveKeepLocal(key: string, stored: Draft | undefined): Promise<SaveOutcome> {
-    const slot = this.get(key);
-    if (!slot) return { ok: false, error: "This draft was deleted or moved elsewhere." };
-    await this.enqueueResolution(slot, () => {
-      if (stored && !sameDraftContent(slot.content, contentOf(stored)))
-        this.retainOtherVersion(slot, contentOf(stored), "Stored draft text was retained before replacing it with local text.");
-      if (stored) this.installIdentity(slot, stored);
-      else Object.assign(slot, { id: "", revision: "0" });
-      slot.error = undefined;
-      this.events.changed();
-    });
-    return this.enqueue(slot);
+    return failure ?? review ?? { ok: true };
   }
 
   hold(key: string) {
@@ -287,24 +422,86 @@ export class DraftStore {
     this.events.changed();
   }
 
-  /** The host cleared the sent draft; edits typed during the send start a fresh draft. */
-  markSent(key: string, sentGeneration: number) {
+  /** The host cleared the sent draft; edits typed during the send stay as fresh content on the same draft id. */
+  markSent(key: string, sentGeneration: number, revision?: string, postSendContent?: Partial<DraftContent>) {
     const slot = this.get(key);
     if (!slot) return;
-    if (slot.id) this.retireIdentity(slot);
+    if (!revision) {
+      slot.held = true;
+      const cleared = { ...slot.content, text: "", attachmentIds: [] };
+      slot.content = postSendContent ? { ...cleared, ...postSendContent } : cleared;
+      if (postSendContent && slot.generation <= sentGeneration) slot.generation = sentGeneration + 1;
+      slot.acknowledgedContent = cleared;
+      slot.savedGeneration = sentGeneration;
+      this.pendingSentVerification.set(slot.key, sentGeneration);
+      void this.verifySentRevision(slot, sentGeneration);
+      this.events.changed();
+      return;
+    }
     Object.assign(slot, {
-      id: "",
-      revision: "0",
+      revision,
       held: false,
       error: undefined,
     });
+    slot.acknowledgedContent = { ...slot.content, text: "", attachmentIds: [] };
     if (slot.generation > sentGeneration) {
+      if (postSendContent) slot.content = { ...slot.acknowledgedContent, ...postSendContent };
       void this.enqueue(slot);
     } else {
-      slot.content = blankContent();
+      slot.content = { ...slot.content, text: "", attachmentIds: [] };
       slot.savedGeneration = slot.generation;
+      slot.acknowledgedContent = slot.content;
     }
     this.events.changed();
+  }
+
+  private async verifySentRevision(slot: DraftSlot, sentGeneration: number): Promise<SaveOutcome> {
+    const session = this.sessionGeneration;
+    const key = slot.key;
+    let current: Draft | undefined;
+    try {
+      current = await this.loadDraft(slot.conversationId);
+    } catch (error) {
+      if (!this.isCurrent(slot, key, session)) return { ok: true };
+      slot.held = false;
+      this.failSave(slot, errorText(error), errorCode(error));
+      return { ok: false, error: errorText(error) };
+    }
+    if (!this.isCurrent(slot, key, session)) return { ok: true };
+    if (!current) {
+      this.pendingSentVerification.delete(slot.key);
+      slot.held = false;
+      this.retainCopy(slot.key, slot.content);
+      this.reviewRequired.add(slot.key);
+      return this.failSave(slot, "Sent draft could not be verified before saving new edits.", "not-found");
+    }
+    if (current.id !== slot.id) {
+      this.pendingSentVerification.delete(slot.key);
+      slot.held = false;
+      this.retainCopy(slot.key, slot.content);
+      this.undoVersions.delete(slot.key);
+      this.adoptHost(slot, current, "remote-update");
+      this.events.changed();
+      return this.reviewOutcome(slot);
+    }
+    const hostContent = contentOf(current);
+    const acknowledgedBeforeSendVerification = slot.acknowledgedContent;
+    const hasPostSendEdits = slot.generation > sentGeneration;
+    this.pendingSentVerification.delete(slot.key);
+    slot.revision = current.revision;
+    slot.held = false;
+    slot.error = undefined;
+    this.saveStates.set(slot.key, "idle");
+    slot.acknowledgedContent = hostContent;
+    if (!hasPostSendEdits) {
+      slot.content = hostContent;
+      slot.savedGeneration = slot.generation;
+    } else if (!sameDraftContent(hostContent, acknowledgedBeforeSendVerification)) {
+      this.retainCopy(slot.key, hostContent);
+    }
+    if (isDirty(slot)) return this.enqueue(slot);
+    this.events.changed();
+    return { ok: true };
   }
 
   private ensure(key: string): DraftSlot {
@@ -321,6 +518,7 @@ export class DraftStore {
         savedGeneration: 0,
         held: false,
         queue: Promise.resolve(),
+        acknowledgedContent: blankContent(),
       };
       this.slots.set(resolved, slot);
     }
@@ -328,18 +526,15 @@ export class DraftStore {
   }
 
   private enqueue(slot: DraftSlot): Promise<SaveOutcome> {
-    const run = slot.queue.then(() => this.save(slot));
-    slot.queue = run;
+    const session = this.sessionGeneration;
+    const run = slot.queue.catch(() => undefined).then(() => this.save(slot, session));
+    slot.queue = run.catch(() => undefined);
     return run;
   }
 
-  private enqueueResolution(slot: DraftSlot, resolve: () => void): Promise<void> {
-    const run = slot.queue.then(() => resolve());
-    slot.queue = run;
-    return run;
-  }
-
-  private async save(slot: DraftSlot): Promise<SaveOutcome> {
+  private async save(slot: DraftSlot, session = this.sessionGeneration): Promise<SaveOutcome> {
+    const key = slot.key;
+    if (!this.isCurrent(slot, key, session)) return { ok: true };
     if (this.isUnavailable(slot))
       return { ok: false, error: "This draft was deleted or moved elsewhere." };
     if (slot.held)
@@ -348,99 +543,286 @@ export class DraftStore {
         error:
           "A send is in progress; your edits are kept and saved afterwards.",
       };
+    if (this.pendingSentVerification.has(slot.key))
+      return {
+        ok: false,
+        error: "Sent draft must be verified before saving new edits.",
+      };
     if (!isLocalDraftKey(slot.key) && !this.hydrated.has(slot.conversationId))
       return { ok: false, error: "Draft is still loading. Retry once it is available." };
     if (!isDirty(slot))
       return slot.error
         ? { ok: false, error: slot.error.message }
         : { ok: true };
+    this.saveStates.set(slot.key, "saving");
     const generation = slot.generation;
-    const input: DraftInput = {
-      id: slot.id,
-      conversationId: slot.conversationId,
-      ...slot.content,
-      expectedRevision: slot.revision,
-    };
-    let saved: Draft;
-    try {
-      saved = await this.persist(input);
-    } catch (error) {
-      if (this.isUnavailable(slot) || slot.held)
-        return { ok: false, error: "This draft changed while saving. Retry after it is available." };
-      const code = errorCode(error);
-      if (code === "draft-moved" || code === "not-found") {
-        this.retireUnavailable(slot.key, error);
-        return { ok: true };
+    let saved: Draft | undefined;
+    let submittedContent: DraftContent | undefined;
+    for (let attempts = 0; attempts < 3; attempts += 1) {
+      const input: DraftInput = {
+        id: slot.id,
+        conversationId: slot.conversationId,
+        ...slot.content,
+        expectedRevision: slot.revision,
+      };
+      submittedContent = { ...slot.content };
+      try {
+        saved = await this.persist(input);
+        if (!this.isCurrent(slot, key, session)) return { ok: true };
+        break;
+      } catch (error) {
+        if (!this.isCurrent(slot, key, session)) return { ok: true };
+        if (this.isUnavailable(slot) || slot.held)
+          return this.failSave(slot, "This draft changed while saving. Retry after it is available.");
+        const code = errorCode(error);
+        if (code === "stale-draft") {
+          const caughtUp = await this.catchUpStaleSave(slot, session);
+          if (session !== this.sessionGeneration) return { ok: true };
+          if (caughtUp) continue;
+          return slot.error ? { ok: false, error: slot.error.message } : this.reviewOutcome(slot);
+        }
+        if (code === "draft-moved" || code === "not-found") {
+          const adopted = await this.adoptMovedOrMissing(slot, error, session);
+          if (session !== this.sessionGeneration) return { ok: true };
+          return adopted ? this.reviewOutcome(slot) : this.failSave(slot, errorText(error), code);
+        }
+        return this.failSave(slot, errorText(error), code);
       }
-      slot.error = { message: errorText(error), code };
-      this.events.changed();
-      return { ok: false, error: slot.error.message };
     }
+    if (!saved) return this.failSave(slot, "Draft save could not be reconciled after 3 attempts.", "stale-draft");
     if (this.isUnavailable(slot)) return { ok: false, error: "This draft was deleted or moved elsewhere." };
+    if (saved.conversationId && saved.conversationId !== slot.conversationId) {
+      if (!slot.id && !slot.conversationId) {
+        if (submittedContent && sameAuthoredContent(contentOf(saved), submittedContent) && this.rekey(slot, saved.conversationId)) {
+          this.hydrated.add(saved.conversationId);
+        } else {
+          this.retainCopy(slot.key, slot.content);
+          this.adoptHost(slot, saved, "moved");
+          return this.reviewOutcome(slot);
+        }
+      } else {
+        this.retainCopy(slot.key, slot.content);
+        this.undoVersions.delete(slot.key);
+        this.adoptHost(slot, saved, "moved");
+        return this.reviewOutcome(slot);
+      }
+    }
     this.hydrated.add(saved.conversationId || slot.conversationId);
     Object.assign(slot, {
       id: saved.id,
       revision: saved.revision,
       savedGeneration: Math.max(slot.savedGeneration, generation),
       error: undefined,
+      acknowledgedContent: contentOf(saved),
     });
-    if (slot.held) return { ok: false, error: "A send is in progress; your edits are kept and saved afterwards." };
-    if (slot.generation === generation) slot.content = contentOf(saved);
-    if (saved.conversationId && saved.conversationId !== slot.conversationId) {
-      if (slot.generation > generation && !sameDraftContent(contentOf(saved), input)) {
-        this.retire(
-          slot,
-          slot.content,
-          saved.conversationId,
-          "Draft moved while you were editing. Your newer text is retained separately; review it before sending again.",
-        );
-        return { ok: false, error: "Draft moved while you were editing. Your newer text is retained separately." };
-      }
-      if (!this.rekey(slot, saved.conversationId)) return { ok: false, error: "Draft moved while another window has edits. Your text is retained separately." };
+    this.fenceUndoAfterSave(slot, generation, saved);
+    if (slot.held) {
+      this.saveStates.set(slot.key, "idle");
+      return { ok: false, error: "A send is in progress; your edits are kept and saved afterwards." };
     }
+    if (slot.generation === generation) slot.content = contentOf(saved);
     this.events.changed();
+    this.saveStates.set(slot.key, "idle");
+    this.events.notice?.(slot.key, "saved");
     return { ok: true };
+  }
+
+  /** Reconciles a rejected CAS write without replacing recipient, attachment, or route changes. */
+  private async catchUpStaleSave(slot: DraftSlot, session = this.sessionGeneration): Promise<boolean> {
+    const key = slot.key;
+    let current: Draft | undefined;
+    try {
+      current = await this.loadDraft(slot.conversationId);
+    } catch (error) {
+      if (!this.isCurrent(slot, key, session)) return false;
+      this.failSave(slot, errorText(error), errorCode(error));
+      return false;
+    }
+    if (!this.isCurrent(slot, key, session)) return false;
+    if (!current) {
+      this.failSave(slot, "Draft no longer exists.", "not-found");
+      return false;
+    }
+    if (current.id !== slot.id && slot.id) {
+      this.retainCopy(slot.key, slot.content);
+      this.undoVersions.delete(slot.key);
+      this.adoptHost(slot, current, current.conversationId === slot.conversationId ? "remote-update" : "moved");
+      return false;
+    }
+    const hostContent = contentOf(current);
+    if (!sameStructure(slot.acknowledgedContent, hostContent)) {
+      this.retainCopy(slot.key, slot.content);
+      this.undoVersions.delete(slot.key);
+      this.adoptHost(slot, current, "remote-update");
+      return false;
+    }
+    if (!sameDraftContent(slot.acknowledgedContent, hostContent)) {
+      this.preserveUndo(slot, hostContent, current);
+      this.events.notice?.(slot.key, "replaced");
+    }
+    this.installIdentity(slot, current);
+    slot.acknowledgedContent = hostContent;
+    return true;
+  }
+
+  private async adoptMovedOrMissing(slot: DraftSlot, error: unknown, session = this.sessionGeneration): Promise<boolean> {
+    const destination = errorDetail(error, "conversationId");
+    if (!destination) return false;
+    let host: Draft | undefined;
+    try {
+      host = await this.loadDraft(destination);
+    } catch {
+      return false;
+    }
+    if (!this.isCurrent(slot, slot.key, session)) return false;
+    if (!host) return false;
+    this.retainCopy(slot.key, slot.content);
+    this.undoVersions.delete(slot.key);
+    this.adoptHost(slot, host, "moved");
+    return true;
+  }
+
+  private adoptHost(slot: DraftSlot, host: Draft, event: "moved" | "remote-update"): boolean {
+    const previousKey = slot.key;
+    if (host.conversationId !== slot.conversationId && !this.rekey(slot, host.conversationId)) {
+      const destination = this.slots.get(host.conversationId);
+      if (destination) {
+        this.retainCopy(destination.key, slot.content);
+        this.reviewRequired.add(destination.key);
+        this.events.notice?.(destination.key, "moved");
+      }
+      this.reviewRequired.add(host.conversationId);
+      return false;
+    }
+    Object.assign(slot, {
+      id: host.id,
+      conversationId: host.conversationId,
+      revision: host.revision,
+      content: contentOf(host),
+      acknowledgedContent: contentOf(host),
+      savedGeneration: slot.generation,
+      error: undefined,
+    });
+    this.saveStates.set(slot.key, "idle");
+    this.reviewRequired.add(slot.key);
+    this.events.notice?.(slot.key, event);
+    if (previousKey !== slot.key) this.events.changed();
+    return true;
+  }
+
+  private preserveUndo(slot: DraftSlot, content: DraftContent, reviewed: Draft) {
+    if (!content.text && !content.attachmentIds.length) return;
+    this.undoVersions.set(slot.key, {
+      content: { ...content },
+      generation: slot.generation,
+      reviewedId: reviewed.id,
+      reviewedRevision: reviewed.revision,
+      reviewedContent: contentOf(reviewed),
+    });
+  }
+
+  private fenceUndoAfterSave(slot: DraftSlot, generation: number, saved: Draft) {
+    const undo = this.undoVersions.get(slot.key);
+    if (!undo || undo.generation !== generation || slot.generation !== generation) return;
+    undo.reviewedId = saved.id;
+    undo.reviewedRevision = saved.revision;
+    undo.reviewedContent = contentOf(saved);
+  }
+
+  private retainCopy(key: string, content: DraftContent) {
+    if (!content.text && !content.attachmentIds.length) return;
+    const retained = this.retainedVersions.get(key) ?? [];
+    if (retained.some(version => sameDraftContent(version, content))) return;
+    retained.push({ ...content });
+    this.retainedVersions.set(key, retained);
+  }
+
+  /** Unsaved content under a pending review blocks close as a plain failure; it is never auto-saved over review. */
+  private unsavedOutcome(slot: DraftSlot): SaveOutcome {
+    slot.error ??= { message: "Draft has unsaved changes. Retry saving before closing." };
+    if (this.saveStates.get(slot.key) !== "failed") {
+      this.saveStates.set(slot.key, "failed");
+      this.events.changed();
+    }
+    return { ok: false, error: slot.error.message };
+  }
+
+  private reviewOutcome(slot: DraftSlot): SaveOutcome {
+    this.reviewRequired.add(slot.key);
+    this.saveStates.set(slot.key, "idle");
+    return { ok: false, error: "Draft changed in another window. Review the retained text before sending.", reviewRequired: true };
+  }
+
+  private failSave(slot: DraftSlot, message: string, code?: string): SaveOutcome {
+    slot.error = { message, code };
+    this.saveStates.set(slot.key, "failed");
+    this.events.notice?.(slot.key, "save-failed");
+    this.events.changed();
+    return { ok: false, error: message };
+  }
+
+  private async verifyBufferedIdentity(conversationId: string, snapshot: Draft | undefined) {
+    const session = this.sessionGeneration;
+    const slot = this.get(conversationId);
+    try {
+      const current = await this.loadDraft(conversationId);
+      if (!slot || !this.isCurrent(slot, slot.key, session) || (snapshot && slot.id !== snapshot.id) || isDirty(slot)) return;
+      if (!current) {
+        if (snapshot) this.retireDraftIdentity(snapshot.id, conversationId, snapshot.revision);
+        Object.assign(slot, {
+          id: "",
+          revision: "0",
+          content: blankContent(),
+          acknowledgedContent: blankContent(),
+          error: undefined,
+        });
+        this.events.changed();
+        return;
+      }
+      if (this.shouldAdopt(slot, current)) this.applyAuthoritative(current);
+    } catch {
+      // The hydrated snapshot remains authoritative until a later host event arrives.
+    }
   }
 
   private rekey(slot: DraftSlot, conversationId: string): boolean {
     const from = slot.key;
-    slot.conversationId = conversationId;
     if (from === conversationId) return true;
     const destination = this.slots.get(conversationId);
     if (destination && destination !== slot && isDirty(destination)) {
-      this.retire(
-        slot,
-        slot.content,
-        conversationId,
-        "This draft moved while the destination has newer edits. Your text is retained separately.",
-      );
       return false;
     }
     this.slots.delete(from);
+    this.migrateRetained(from, conversationId);
     if (isLocalDraftKey(from)) this.aliases.set(from, conversationId);
     slot.key = conversationId;
+    slot.conversationId = conversationId;
     this.slots.set(conversationId, slot);
+    this.hydrated.add(conversationId);
     this.events.rekeyed(from, conversationId);
     return true;
   }
 
-  private retire(
-    slot: DraftSlot,
-    content: DraftContent,
-    destination: string | undefined,
-    message: string,
-  ) {
-    const from = slot.key;
-    if (slot.id) this.retireDraftIdentity(slot.id, from, slot.revision);
-    if (content.text || content.attachmentIds.length || content.recipientIds.length)
-      this.addRecovery(from, content, destination, message);
-    this.slots.delete(from);
-    if (destination && isLocalDraftKey(from)) this.aliases.set(from, destination);
-    this.events.unavailable?.(from, destination, message);
-    this.events.changed();
+  private migrateRetained(from: string, to: string) {
+    const retained = this.undoVersions.get(from);
+    if (retained) {
+      this.undoVersions.delete(from);
+      this.undoVersions.set(to, retained);
+    }
+    const retainedCopy = this.retainedVersions.get(from);
+    if (retainedCopy) {
+      this.retainedVersions.delete(from);
+      for (const content of retainedCopy) this.retainCopy(to, content);
+    }
+    if (this.reviewRequired.delete(from)) this.reviewRequired.add(to);
+    const pending = this.pendingSentVerification.get(from);
+    if (pending !== undefined) {
+      this.pendingSentVerification.delete(from);
+      this.pendingSentVerification.set(to, pending);
+    }
   }
 
-  private shouldAdopt(slot: DraftSlot, incoming: Draft): boolean {
+  private shouldAdopt(slot: Pick<DraftSlot, "id" | "revision">, incoming: Draft): boolean {
     if (slot.id !== incoming.id) return true;
     try {
       return BigInt(incoming.revision) > BigInt(slot.revision);
@@ -457,16 +839,6 @@ export class DraftStore {
     });
   }
 
-  private retainOtherVersion(slot: DraftSlot, content: DraftContent, message: string) {
-    if (!content.text && !content.attachmentIds.length && !content.recipientIds.length) return;
-    this.addRecovery(slot.key, content, slot.conversationId || undefined, message);
-  }
-
-  private addRecovery(source: string, content: DraftContent, destination: string | undefined, message: string) {
-    const id = `${source}:recovery:${++this.recoveryCount}`;
-    this.recoveries.set(id, { id, source, content: { ...content }, destination, message });
-  }
-
   private hasRecoverableContent(draft: Draft) {
     const content = contentOf(draft);
     return Boolean(content.text || content.attachmentIds.length || content.recipientIds.length);
@@ -474,6 +846,10 @@ export class DraftStore {
 
   private isUnavailable(slot: DraftSlot) {
     return this.tombstones.has(slot.key) || this.slots.get(slot.key) !== slot;
+  }
+
+  private isCurrent(slot: DraftSlot, key: string, session: number): boolean {
+    return session === this.sessionGeneration && this.slots.get(key) === slot && slot.key === key;
   }
 
   private retireIdentity(slot: DraftSlot) {
@@ -494,5 +870,3 @@ export class DraftStore {
     this.retiredDraftIds.set(id, { conversationId, revision });
   }
 }
-
-/* ------------------------------------------------------------------ presentational pieces */

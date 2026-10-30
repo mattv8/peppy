@@ -470,6 +470,56 @@ describe("desktop UI controls", () => {
     expect(sent).not.toHaveBeenCalled();
   });
 
+  it("passes a supplied placeholder through to the message textarea", () => {
+    render(
+      <Composer
+        draft=""
+        attachments={[]}
+        sendSupported={false}
+        placeholder="Loading draft…"
+        onDraftChange={() => {}}
+        onSend={() => {}}
+      />,
+    );
+    expect(screen.getByLabelText("Message")).toHaveAttribute("placeholder", "Loading draft…");
+  });
+
+  it("keeps a read-only composer focusable without editing or sending", () => {
+    const changed = vi.fn();
+    const sent = vi.fn();
+    render(
+      <Composer
+        draft="saved text"
+        attachments={[]}
+        sendSupported
+        readOnly
+        onDraftChange={changed}
+        onSend={sent}
+      />,
+    );
+    const textarea = screen.getByLabelText("Message");
+    expect(textarea).toHaveAttribute("readonly");
+    textarea.focus();
+    expect(textarea).toHaveFocus();
+    fireEvent.change(textarea, { target: { value: "edited" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(changed).not.toHaveBeenCalled();
+    expect(sent).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(sent).not.toHaveBeenCalled();
+  });
+
+  it("keeps the default placeholder and editing unchanged when readOnly is absent", () => {
+    const changed = vi.fn();
+    render(<Composer draft="" attachments={[]} sendSupported onDraftChange={changed} onSend={() => {}} />);
+    const textarea = screen.getByLabelText("Message");
+    expect(textarea).toHaveAttribute("placeholder", "Type a message");
+    expect(textarea).not.toHaveAttribute("readonly");
+    fireEvent.change(textarea, { target: { value: "hi" } });
+    expect(changed).toHaveBeenCalledWith("hi");
+  });
+
   it("allows attachment-only sends and explains why sending is unavailable", () => {
     const sent = vi.fn();
     const { rerender } = render(
