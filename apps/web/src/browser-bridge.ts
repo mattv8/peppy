@@ -84,7 +84,7 @@ function canonicalChangedCount(value: unknown): string {
   return value;
 }
 
-function secretDialog(options: { id: string; title: string; description: string; confirm: string; fields: EnrollmentSecretField[]; setupMode?: "open" | "protected"; errorMessage?: string }): Promise<Record<string, string> | null> {
+function secretDialog(options: { id: string; title: string; description: string; confirm: string; fields: EnrollmentSecretField[]; checkbox?: { name: string; label: string; description?: string }; setupMode?: "open" | "protected"; errorMessage?: string }): Promise<Record<string, string> | null> {
   activeSecretDialog?.();
   return new Promise((resolve) => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
@@ -121,6 +121,28 @@ function secretDialog(options: { id: string; title: string; description: string;
       form.append(label);
       return input;
     });
+    let checkbox: HTMLInputElement | undefined;
+    if (options.checkbox) {
+      const group = document.createElement("div");
+      group.id = `${options.id}-${options.checkbox.name}-group`;
+      const label = document.createElement("label");
+      label.className = "browser-dialog-checkbox";
+      checkbox = document.createElement("input");
+      checkbox.id = `${options.id}-${options.checkbox.name}`;
+      checkbox.name = options.checkbox.name;
+      checkbox.type = "checkbox";
+      label.htmlFor = checkbox.id;
+      label.append(checkbox, options.checkbox.label);
+      group.append(label);
+      if (options.checkbox.description) {
+        const description = document.createElement("p");
+        description.id = `${checkbox.id}-description`;
+        description.textContent = options.checkbox.description;
+        checkbox.setAttribute("aria-describedby", description.id);
+        group.append(description);
+      }
+      form.append(group);
+    }
     if (options.errorMessage) {
       const error = document.createElement("p");
       error.id = `${options.id}-error`;
@@ -143,6 +165,7 @@ function secretDialog(options: { id: string; title: string; description: string;
     form.append(cancel, submit);
     const finish = (result: Record<string, string> | null) => {
       inputs.forEach((input) => { input.value = ""; });
+      if (checkbox) checkbox.checked = false;
       if (activeSecretDialog === close) activeSecretDialog = undefined;
       dialog.remove();
       previousFocus?.focus();
@@ -153,7 +176,10 @@ function secretDialog(options: { id: string; title: string; description: string;
     cancel.onclick = close;
     form.onsubmit = (event) => {
       event.preventDefault();
-      finish(Object.fromEntries(inputs.map((input) => [input.name, input.value])));
+      finish(Object.fromEntries([
+        ...inputs.map((input) => [input.name, input.value]),
+        ...(checkbox ? [[checkbox.name, checkbox.checked ? "true" : "false"]] : []),
+      ]));
     };
     dialog.oncancel = (event) => { event.preventDefault(); close(); };
     dialog.append(form);
@@ -484,7 +510,7 @@ export class BrowserBridge implements DesktopBridge {
   public subscribe_lifecycle_finished(): () => void { return () => undefined; }
   public lock_sync(): Promise<void> { return this.call("lock_sync"); }
 
-  public async unlock_sync(): Promise<void> { const secret = await secretDialog({ id: "browser-unlock", title: "Unlock Peppy", description: "Enter your Vault key phrase to access your messages. This is not your account or admin password.", confirm: "Unlock", fields: [{ name: "passphrase", label: "Vault key phrase", autocomplete: "current-password" }] }); if (secret) await this.call("unlock", secret); }
+  public async unlock_sync(): Promise<void> { const secret = await secretDialog({ id: "browser-unlock", title: "Unlock Peppy", description: "Enter your Vault key phrase to access your messages. This is not your account or admin password.", confirm: "Unlock", fields: [{ name: "passphrase", label: "Vault key phrase", autocomplete: "current-password" }], checkbox: { name: "remember", label: "Remember on this browser", description: "Anyone with access to this browser profile can unlock your vault without your Vault key phrase." } }); if (secret) await this.call("unlock", { passphrase: secret.passphrase, remember: secret.remember === "true" }); }
   public configure_server(origin: string): Promise<void> { return origin === location.origin ? Promise.resolve() : Promise.reject(new BrowserBridgeError("invalid-origin", "The browser uses its own secure origin.")); }
   public hosted_origin_url(): Promise<string> { return Promise.resolve(location.origin); }
   public get_app_lock_status(): Promise<AppLockStatus> { return unsupported("App lock"); }

@@ -3663,7 +3663,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       await lock();
       await refresh();
     } catch (error) {
-      setNotice(`Could not lock sync: ${errorText(error)}`);
+      if (errorCode(error) === "recovery-clear-failed") {
+        setNotice("Sync is locked, but this browser may still remember your Vault key phrase.");
+        await refresh();
+      } else setNotice(`Could not lock sync: ${errorText(error)}`);
     }
   } : undefined;
 

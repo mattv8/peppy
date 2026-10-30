@@ -35,9 +35,14 @@ This reference records non-obvious Peppy domain constraints. Related references:
   cutover from an already-active epoch. On browser, a verified handoff import
   also grants a one-shot core `LocalWrap` capability (`seal_local_identity`) that
   seals the same encrypted identity checkpoint format. It creates no independent
-  persistent plaintext key, and browser restart still requires the vault
-  passphrase (`open_identity`); do not describe the handoff path as restart
-  recovery. See [key lifecycle](../crates/client-core/src/lib.rs) and
+  persistent plaintext key. Browser restart requires the vault passphrase
+  (`open_identity`) unless the user explicitly chose **Remember on this browser**
+  during a later manual unlock. That separate opt-in stores a recoverable encrypted
+  phrase and its wrapping CryptoKey in the browser profile; same-origin code or
+  profile access can bypass its hosted-session policy gate. Lock, sign-out, and
+  observed device revocation attempt local cleanup, not deletion from offline or
+  copied profiles. Enrollment and handoff do not opt in; do not describe the
+  handoff path as restart recovery. See [key lifecycle](../crates/client-core/src/lib.rs) and
   [browser identity](../crates/browser-bindings/src/local_identity.rs).
 - Phone transfer approval on desktop and browser uses the active Rust client's
   verified root handoff capability, without collecting an approval passphrase.

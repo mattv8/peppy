@@ -955,7 +955,7 @@ describe("BrowserBridge", () => {
     }
   });
 
-  it("submits the browser unlock dialog once with its passphrase", async () => {
+  it("submits the browser unlock dialog without remembering by default", async () => {
     const port = new TestPort();
     const showModal = vi.fn();
     const restoreShowModal = stubShowModal(showModal);
@@ -963,16 +963,43 @@ describe("BrowserBridge", () => {
     try {
       const unlock = bridge.unlock_sync();
       const input = document.getElementById("browser-unlock-passphrase") as HTMLInputElement;
+      const remember = document.getElementById("browser-unlock-remember") as HTMLInputElement;
       input.value = "synthetic-passphrase";
-      document.getElementById("browser-unlock-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
 
       expect(showModal).toHaveBeenCalledOnce();
+      expect(remember.checked).toBe(false);
+      expect(document.getElementById("browser-unlock-remember-group")).not.toBeNull();
+      expect(remember.getAttribute("aria-describedby")).toBe("browser-unlock-remember-description");
+      expect(document.getElementById("browser-unlock-remember-description")?.textContent).toBe("Anyone with access to this browser profile can unlock your vault without your Vault key phrase.");
+      document.getElementById("browser-unlock-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
       await vi.waitFor(() => expect(port.sent).toHaveLength(1));
-      expect(port.sent).toEqual([{ id: 1, command: "unlock", args: { passphrase: "synthetic-passphrase" } }]);
+      expect(port.sent).toEqual([{ id: 1, command: "unlock", args: { passphrase: "synthetic-passphrase", remember: false } }]);
       port.reply({ id: 1, ok: true, value: undefined });
       await expect(unlock).resolves.toBeUndefined();
       expect(input.value).toBe("");
       expect(input.isConnected).toBe(false);
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("submits the browser unlock dialog with remembering when selected", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const unlock = bridge.unlock_sync();
+      const input = document.getElementById("browser-unlock-passphrase") as HTMLInputElement;
+      const remember = document.getElementById("browser-unlock-remember") as HTMLInputElement;
+      input.value = "synthetic-passphrase";
+      remember.checked = true;
+      document.getElementById("browser-unlock-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      expect(port.sent).toEqual([{ id: 1, command: "unlock", args: { passphrase: "synthetic-passphrase", remember: true } }]);
+      port.reply({ id: 1, ok: true, value: undefined });
+      await expect(unlock).resolves.toBeUndefined();
     } finally {
       bridge.dispose();
       restoreShowModal();
