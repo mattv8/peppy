@@ -1838,12 +1838,42 @@ async fn save_draft_for_window(
     input: DraftInput,
 ) -> BridgeResult<DraftView> {
     if label != tray::MAIN {
-        effective_composer_conversation(
-            state,
-            label,
-            &session,
-            Some(input.conversation_id.as_str()),
-        )?;
+        let blank_recovery = input.id.is_empty()
+            && input.conversation_id.is_empty()
+            && input.expected_revision == "0";
+        if blank_recovery {
+            let bound_conversation = tray::composer_conversation(label)
+                .is_some()
+                .then(|| scoped_window_conversation(state, label, &session))
+                .transpose()?
+                .ok_or_else(window_error)?;
+            let recovery_session = session.clone();
+            let bound_draft_or_history_exists = blocking(move || {
+                let bound_draft_exists = recovery_session
+                    .client
+                    .compose_drafts()
+                    .map_err(core_error)?
+                    .iter()
+                    .any(|draft| draft.conversation_id == bound_conversation);
+                let bound_history_exists = recovery_session
+                    .client
+                    .latest_message(bound_conversation)
+                    .map_err(core_error)?
+                    .is_some();
+                Ok(bound_draft_exists || bound_history_exists)
+            })
+            .await?;
+            if bound_draft_or_history_exists {
+                return Err(window_error());
+            }
+        } else {
+            effective_composer_conversation(
+                state,
+                label,
+                &session,
+                Some(input.conversation_id.as_str()),
+            )?;
+        }
     }
     let requested_conversation = input.conversation_id.clone();
     let result = blocking({

@@ -3933,7 +3933,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   if (draftSubscriptionError) noticeCandidates.push({ kind: "save-failed", detail: `Draft updates unavailable: ${draftSubscriptionError}`, sequence: Number.MAX_SAFE_INTEGER });
   if (slotKey && !store.isHydrated(slotKey) && !isLocalDraftKey(slotKey)) noticeCandidates.push({ kind: "loading", sequence: 0 });
   if (slotKey && store.saveState(slotKey) === "saving") noticeCandidates.push({ kind: "saving", sequence: 1 });
-  if (slot?.error) noticeCandidates.push({ kind: "save-failed", sequence: 2 });
+  if (slot?.error) noticeCandidates.push({ kind: "save-failed", errorCode: slot.error.code, sequence: 2 });
   const retainedTextAvailable = Boolean(slotKey && store.retainedText(slotKey));
   if (draftNotice?.key === slotKey) {
     const undoAvailable = store.hasUndo(slotKey);
@@ -3946,13 +3946,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   if (composerFeedback?.key === slotKey) noticeCandidates.push({ kind: "send-failed", detail: composerFeedback.message, sequence: draftNoticeSequence.current + 1 });
   const visibleDraftNotice = selectDraftNotice(noticeCandidates);
   const statusActive = Boolean(unavailableReason || mmsLimitShown || visibleDraftNotice);
-  const onDraftNoticeAction = (action: "retry" | "undo" | "copy") => {
+  const onDraftNoticeAction = (action: "retry" | "save-new" | "discard-local" | "undo" | "copy") => {
     if (!slotKey || noticeActionBusyRef.current) return;
     noticeActionOwnedFocusRef.current = document.activeElement?.id === "draft-notice-action";
     noticeActionBusyRef.current = true;
     setNoticeActionBusy(true);
     const run = async () => {
       if (action === "retry") await retrySave();
+      else if (action === "save-new") await store.saveAsNew(slotKey);
+      else if (action === "discard-local" && store.discardLocalChanges(slotKey)) {
+        draftNoticesRef.current.delete(slotKey);
+        setDraftNotice(undefined);
+        if (selectedRef.current === slotKey && !isLocalDraftKey(slotKey)) void refresh(slotKey).catch(reportRefresh(""));
+      }
       else if (action === "undo") {
         const outcome = await store.undo(slotKey);
         if (outcome.ok) {
@@ -4015,7 +4021,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
               </span>
             )}
-            <DraftNotice notice={visibleDraftNotice} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
+            <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
           </>
         }
         composerName={title}

@@ -10,14 +10,16 @@ export type DraftNoticeKind =
   | "loading";
 
 export type DraftNoticeTone = "neutral" | "warning" | "error";
-export type DraftNoticeAction = "retry" | "undo" | "copy";
+export type DraftNoticeAction = "retry" | "save-new" | "discard-local" | "undo" | "copy";
 
 export type DraftNoticeView = {
   kind: DraftNoticeKind;
   message: string;
   tone: DraftNoticeTone;
   role: "alert" | "status";
+  errorCode?: string;
   action?: DraftNoticeAction;
+  secondaryAction?: "discard-local";
   durationMs?: number;
 };
 
@@ -27,6 +29,7 @@ export type DraftNoticeView = {
 type DraftNoticeBase = {
   sequence: number;
   detail?: string;
+  errorCode?: string;
   undoAvailable?: boolean;
   retainedTextAvailable?: boolean;
 };
@@ -66,6 +69,16 @@ export function selectDraftNotice(candidates: readonly DraftNoticeCandidate[]): 
 export function draftNoticeView(candidate: DraftNoticeCandidate): DraftNoticeView {
   switch (candidate.kind) {
     case "save-failed":
+      if (candidate.errorCode === "not-found")
+        return {
+          kind: candidate.kind,
+          errorCode: candidate.errorCode,
+          message: "This draft no longer exists. Your text is kept. Save as new draft to unblock sending and closing.",
+          tone: "error",
+          role: "alert",
+          action: "save-new",
+          secondaryAction: "discard-local",
+        };
       return {
         kind: candidate.kind,
         message: candidate.detail ?? "Draft not saved. Your text is kept. Sending and closing wait until it saves.",

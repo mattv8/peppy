@@ -108,6 +108,183 @@ async fn main_load_for_window_preserves_requested_second_conversation() {
 }
 
 #[tokio::test]
+async fn blank_recovery_create_works_without_old_history_and_never_overwrites_an_occupied_draft() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+
+    let created = session
+        .save_draft(&input("", "", "recovered", &["+15555550100"], "0"))
+        .unwrap();
+    assert_eq!(created.text, "recovered");
+    assert!(!created.conversation_id.is_empty());
+
+    let occupied = session
+        .save_draft(&input("", "", "must not overwrite", &["+15555550100"], "0"))
+        .unwrap_err();
+    assert_eq!(occupied.code, "draft-moved");
+    let preserved = session
+        .client
+        .compose_draft(created.id.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(preserved.text, "recovered");
+}
+
+#[tokio::test]
+async fn composer_blank_recovery_rebinds_after_a_deleted_draft_without_history() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let old = session.client.recipientless_compose_draft().unwrap();
+    let old_conversation = old.conversation_id.to_string();
+    session
+        .client
+        .discard_compose_draft(old.draft_id, old.revision)
+        .unwrap();
+    let state = state(&fixture);
+    let window = label(&old_conversation);
+
+    let recovered = save_draft_for_window(
+        &state,
+        &window,
+        session.clone(),
+        input("", "", "recovered", &["+15555550100"], "0"),
+    )
+    .await
+    .unwrap();
+    assert_ne!(recovered.conversation_id, old_conversation);
+    assert_eq!(recovered.text, "recovered");
+    assert_eq!(recovered.recipient_ids, ["+15555550100"]);
+
+    let saved = save_draft_for_window(
+        &state,
+        &window,
+        session.clone(),
+        input(
+            &recovered.id,
+            &recovered.conversation_id,
+            "saved again",
+            &["+15555550100"],
+            &recovered.revision,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.text, "saved again");
+    let (snapshot, _) = load_state_for_window(
+        &state,
+        &window,
+        session,
+        Some(recovered.conversation_id.clone()),
+        None,
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot.active_conversation_id.as_deref(),
+        Some(recovered.conversation_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn composer_blank_recovery_rejects_an_occupied_bound_conversation() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let draft = session.client.recipientless_compose_draft().unwrap();
+    let conversation = draft.conversation_id.to_string();
+    let window = label(&conversation);
+    let state = state(&fixture);
+    session
+        .save_draft(&input(
+            &draft.draft_id.to_string(),
+            &conversation,
+            "keep this",
+            &[],
+            &draft.revision.to_string(),
+        ))
+        .unwrap();
+
+    let error = save_draft_for_window(
+        &state,
+        &window,
+        session.clone(),
+        input("", "", "must not overwrite", &["+15555550100"], "0"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "window-context");
+    let preserved = session
+        .client
+        .compose_draft(draft.draft_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(preserved.text, "keep this");
+}
+
+#[tokio::test]
+async fn composer_blank_recovery_cannot_target_another_conversation() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let source = session.client.recipientless_compose_draft().unwrap();
+    let other = incoming(&session, "+15555550100", "history");
+
+    let error = save_draft_for_window(
+        &state(&fixture),
+        &label(&source.conversation_id.to_string()),
+        session,
+        input("", &other, "forged", &["+15555550100"], "0"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "window-context");
+}
+
+#[tokio::test]
+async fn composer_blank_recovery_rejects_a_bound_history_conversation_without_a_draft() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let bound = incoming(&session, "+15555550100", "bound history");
+    let other = incoming(&session, "+15555550101", "other history");
+
+    let error = save_draft_for_window(
+        &state(&fixture),
+        &label(&bound),
+        session.clone(),
+        input("", "", "forged", &["+15555550101"], "0"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "window-context");
+    assert!(session.client.compose_drafts().unwrap().is_empty());
+    assert_eq!(
+        session
+            .client
+            .latest_message(bound.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .payload
+            .body,
+        "bound history"
+    );
+    assert_eq!(
+        session
+            .client
+            .latest_message(other.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .payload
+            .body,
+        "other history"
+    );
+}
+
+#[tokio::test]
 async fn composer_save_move_updates_scope_for_next_load_and_save() {
     let fixture = fixture_at("http://127.0.0.1:9");
     let session = Arc::new(open(&fixture, &fixture.binding, &[]));

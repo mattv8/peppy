@@ -78,6 +78,11 @@ describe("selectDraftNotice", () => {
     expect(notice).toMatchObject({ action: "retry", message: "Draft updates unavailable: listener failed" });
   });
 
+  it("offers explicit recovery for a deleted draft", () => {
+    const notice = draftNoticeView({ kind: "save-failed", errorCode: "not-found", sequence: 1 });
+    expect(notice).toMatchObject({ action: "save-new", message: expect.stringContaining("no longer exists") });
+  });
+
   it("offers Undo for recovery notices only when undo is available", () => {
     for (const kind of RECOVERY_KINDS) {
       expect(draftNoticeView(candidateOf(kind, 1, { undoAvailable: true })).action).toBe("undo");
@@ -159,6 +164,15 @@ describe("DraftNotice", () => {
     expect(document.activeElement).toBe(document.body);
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(onAction).toHaveBeenCalledWith("retry");
+  });
+
+  it("renders the explicit deleted-draft recovery action with a stable hook", () => {
+    const onAction = vi.fn();
+    render(<DraftNotice notice={draftNoticeView({ kind: "save-failed", errorCode: "not-found", sequence: 1 })} onAction={onAction} />);
+    const action = screen.getByRole("button", { name: "Save as new draft" });
+    expect(action).toHaveAttribute("data-draft-action", "save-new");
+    fireEvent.click(action);
+    expect(onAction).toHaveBeenCalledWith("save-new");
   });
 
   it("names the retained-text action for copy and reports it", () => {
