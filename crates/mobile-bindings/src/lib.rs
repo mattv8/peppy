@@ -5,14 +5,14 @@ use peppy_client_core::{
     AttachmentInfo, AttachmentState, Captured, CipherObject, Client, ClientConfig,
     ComposeDraftUpdate, DatabaseKey, DeviceId, Error as CoreError, GatewayHostFacts,
     GatewayMmsCleanup, GatewayPlatform, GatewaySettings, HistoryImportConditions, IncomingSms,
-    KeyProfile, MAX_SEAL_BATCH, Message, MmsAcquisitionInput, MmsAcquisitionState,
+    KeyProfile, MAX_SEAL_BATCH, Message, MessageId, MmsAcquisitionInput, MmsAcquisitionState,
     MmsBackfillPause, MmsBackfillPhase, MmsBackfillRecheck, MmsBackfillRecheckConditions,
     MmsBackfillRecheckOutcome, MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome,
     MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource,
     NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
-    PermitBlock, PermitDecision, QuarantineReason, ReceivedCommand, SendResult, SendState,
-    SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan,
-    SmsSource, Transport, VaultCheckHeader, VaultId,
+    PermitBlock, PermitDecision, ProviderRowRef, QuarantineReason, ReceivedCommand, SendResult,
+    SendState, SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan,
+    SmsScanPlan, SmsSource, Transport, VaultCheckHeader, VaultId,
 };
 use std::{
     fmt,
@@ -56,6 +56,7 @@ pub struct NativeGatewaySettings {
     pub sms_sync_enabled: bool,
     pub mms_sync_enabled: bool,
     pub media_wifi_only: bool,
+    pub phone_read_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -70,6 +71,7 @@ pub struct NativeGatewayHostFacts {
     pub notification_listener_available: bool,
     pub sms_available: bool,
     pub notification_is_silent: bool,
+    pub phone_read_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -78,6 +80,7 @@ pub struct NativeGatewayCapabilities {
     pub sms_sync_supported: bool,
     pub mms_sync_supported: bool,
     pub rcs_supported: bool,
+    pub phone_read_supported: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -87,6 +90,23 @@ pub struct NativeGatewayPolicyDecision {
     pub capture_mms: bool,
     pub transfer_media: bool,
     pub rcs_supported: bool,
+    pub apply_phone_read: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeProviderRowRef {
+    pub source_generation: String,
+    pub subscription_id: String,
+    pub provider_message_id: String,
+    pub provider_thread_id: String,
+    pub provider_date_ms: i64,
+    pub source_row_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativePhoneReadEffect {
+    pub message_id: String,
+    pub row: NativeProviderRowRef,
 }
 
 /// Android's local message-history source facts. The provider UUID stays on this device; the host
@@ -804,6 +824,7 @@ fn gateway_settings_view(settings: GatewaySettings) -> NativeGatewaySettings {
         sms_sync_enabled: settings.sms_sync_enabled,
         mms_sync_enabled: settings.mms_sync_enabled,
         media_wifi_only: settings.media_wifi_only,
+        phone_read_enabled: settings.phone_read_enabled,
     }
 }
 fn gateway_settings(settings: NativeGatewaySettings) -> GatewaySettings {
@@ -814,6 +835,7 @@ fn gateway_settings(settings: NativeGatewaySettings) -> GatewaySettings {
         sms_sync_enabled: settings.sms_sync_enabled,
         mms_sync_enabled: settings.mms_sync_enabled,
         media_wifi_only: settings.media_wifi_only,
+        phone_read_enabled: settings.phone_read_enabled,
     }
 }
 fn gateway_platform(platform: NativeGatewayPlatform) -> GatewayPlatform {
@@ -828,6 +850,27 @@ fn gateway_facts(facts: NativeGatewayHostFacts) -> GatewayHostFacts {
         notification_listener_available: facts.notification_listener_available,
         sms_available: facts.sms_available,
         notification_is_silent: facts.notification_is_silent,
+        phone_read_available: facts.phone_read_available,
+    }
+}
+fn provider_row_ref(row: NativeProviderRowRef) -> ProviderRowRef {
+    ProviderRowRef {
+        source_generation: row.source_generation,
+        subscription_id: row.subscription_id,
+        provider_message_id: row.provider_message_id,
+        provider_thread_id: row.provider_thread_id,
+        provider_date_ms: row.provider_date_ms,
+        source_row_fingerprint: row.source_row_fingerprint,
+    }
+}
+fn provider_row_ref_view(row: ProviderRowRef) -> NativeProviderRowRef {
+    NativeProviderRowRef {
+        source_generation: row.source_generation,
+        subscription_id: row.subscription_id,
+        provider_message_id: row.provider_message_id,
+        provider_thread_id: row.provider_thread_id,
+        provider_date_ms: row.provider_date_ms,
+        source_row_fingerprint: row.source_row_fingerprint,
     }
 }
 fn notification_target_view(value: NotificationTarget) -> NativeNotificationTarget {
@@ -1532,6 +1575,7 @@ impl NativeClient {
             sms_sync_supported: capabilities.sms_sync_supported,
             mms_sync_supported: capabilities.mms_sync_supported,
             rcs_supported: capabilities.rcs_supported,
+            phone_read_supported: capabilities.phone_read_supported,
         })
     }
 
@@ -1550,6 +1594,7 @@ impl NativeClient {
             capture_mms: decision.capture_mms,
             transfer_media: decision.transfer_media,
             rcs_supported: decision.rcs_supported,
+            apply_phone_read: decision.apply_phone_read,
         })
     }
 
@@ -2540,6 +2585,62 @@ impl NativeClient {
     }
     pub fn complete_notification_dismissal(&self, id: String) -> Result<(), MobileBindingsError> {
         with_client(&self.client, |c| c.complete_notification_dismissal(&id))
+    }
+
+    pub fn pending_phone_read_effects(
+        &self,
+        now_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<NativePhoneReadEffect>, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.pending_phone_read_effects(now_ms, limit)
+        })
+        .map(|effects| {
+            effects
+                .into_iter()
+                .map(|effect| NativePhoneReadEffect {
+                    message_id: effect.message_id.to_string(),
+                    row: provider_row_ref_view(effect.row),
+                })
+                .collect()
+        })
+    }
+
+    pub fn complete_phone_read_effects(
+        &self,
+        message_ids: Vec<String>,
+    ) -> Result<(), MobileBindingsError> {
+        let message_ids = message_ids
+            .iter()
+            .map(|id| MessageId::from_str(id).map_err(|_| MobileBindingsError::InvalidRequest))
+            .collect::<Result<Vec<_>, _>>()?;
+        with_client(&self.client, |client| {
+            client.complete_phone_read_effects(&message_ids)
+        })
+    }
+
+    pub fn sms_provider_rows_seen(
+        &self,
+        rows: Vec<NativeProviderRowRef>,
+    ) -> Result<bool, MobileBindingsError> {
+        let rows = rows.into_iter().map(provider_row_ref).collect::<Vec<_>>();
+        with_client(&self.client, |client| client.sms_provider_rows_seen(&rows))
+    }
+
+    pub fn consume_phone_read_effects(
+        &self,
+        message_ids: Vec<String>,
+        rows: Vec<NativeProviderRowRef>,
+        now_ms: i64,
+    ) -> Result<u32, MobileBindingsError> {
+        let message_ids = message_ids
+            .iter()
+            .map(|id| MessageId::from_str(id).map_err(|_| MobileBindingsError::InvalidRequest))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows = rows.into_iter().map(provider_row_ref).collect::<Vec<_>>();
+        with_client(&self.client, |client| {
+            client.consume_phone_read_effects(&message_ids, &rows, now_ms)
+        })
     }
 
     pub fn list_conversations(&self) -> Result<Vec<NativeConversation>, MobileBindingsError> {

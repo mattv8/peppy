@@ -769,11 +769,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_notification_dismissal(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_phone_read_effects(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_acquisition(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_reconciliation(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compose_drafts(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_consume_phone_read_effects(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_apply_evidence_json(
     ): Int
@@ -909,6 +913,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_outbox_json_batch(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_phone_read_effects(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_mms_backfill_scans(
@@ -1000,6 +1006,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_acquisitions_after(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_history_status(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_provider_rows_seen(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_scan_status(
     ): Int
@@ -1195,12 +1203,16 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_notification_dismissal(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_phone_read_effects(`ptr`: Long,`messageIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sms_acquisition(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sms_reconciliation(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`upperBound`: RustBuffer.ByValue,`cursor`: RustBuffer.ByValue,`exhausted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_compose_drafts(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_consume_phone_read_effects(`ptr`: Long,`messageIds`: RustBuffer.ByValue,`rows`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_apply_evidence_json(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_approval_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1335,6 +1347,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_outbox_json_batch(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_phone_read_effects(`ptr`: Long,`nowMs`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_uploads(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_mms_backfill_scans(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`observedMaxId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1427,6 +1441,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_history_status(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_provider_rows_seen(`ptr`: Long,`rows`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_scan_status(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`subscriptionId`: RustBuffer.ByValue,`imported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_snapshot_progress(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1871,6 +1887,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_notification_dismissal() and 0xFFFF) != 45632) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_phone_read_effects() and 0xFFFF) != 18468) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_acquisition() and 0xFFFF) != 6650) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1878,6 +1897,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compose_drafts() and 0xFFFF) != 45000) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_consume_phone_read_effects() and 0xFFFF) != 12647) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_apply_evidence_json() and 0xFFFF) != 47978) {
@@ -2081,6 +2103,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_outbox_json_batch() and 0xFFFF) != 2130) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_phone_read_effects() and 0xFFFF) != 55700) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads() and 0xFFFF) != 38265) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2217,6 +2242,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_history_status() and 0xFFFF) != 46876) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_provider_rows_seen() and 0xFFFF) != 10168) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_scan_status() and 0xFFFF) != 26765) {
@@ -2896,11 +2924,15 @@ public interface NativeClientInterface {
     
     fun `completeNotificationDismissal`(`id`: kotlin.String)
     
+    fun `completePhoneReadEffects`(`messageIds`: List<kotlin.String>)
+    
     fun `completeSmsAcquisition`(`id`: kotlin.String): NativeCaptured
     
     fun `completeSmsReconciliation`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `upperBound`: kotlin.String, `cursor`: kotlin.String?, `exhausted`: kotlin.Boolean)
     
     fun `composeDrafts`(): List<NativeComposeDraft>
+    
+    fun `consumePhoneReadEffects`(`messageIds`: List<kotlin.String>, `rows`: List<NativeProviderRowRef>, `nowMs`: kotlin.Long): kotlin.UInt
     
     fun `contactApplyEvidenceJson`(`inputJson`: kotlin.String): kotlin.String
     
@@ -3102,6 +3134,8 @@ public interface NativeClientInterface {
      */
     fun `pendingOutboxJsonBatch`(`limit`: kotlin.ULong): List<kotlin.String>
     
+    fun `pendingPhoneReadEffects`(`nowMs`: kotlin.Long, `limit`: kotlin.UInt): List<NativePhoneReadEffect>
+    
     fun `pendingUploads`(): List<NativeCipherObject>
     
     fun `planMmsBackfillScans`(`generation`: kotlin.String, `scope`: kotlin.String, `observedMaxId`: kotlin.String): List<NativeMmsBackfillScanPlan>
@@ -3209,6 +3243,8 @@ public interface NativeClientInterface {
     fun `smsAcquisitionsAfter`(`afterId`: kotlin.String?, `limit`: kotlin.ULong): List<NativeSmsAcquisition>
     
     fun `smsHistoryStatus`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String): NativeSmsHistoryStatus
+    
+    fun `smsProviderRowsSeen`(`rows`: List<NativeProviderRowRef>): kotlin.Boolean
     
     fun `smsScanStatus`(`sourceGeneration`: kotlin.String, `subscriptionId`: kotlin.String, `imported`: kotlin.Boolean): NativeSmsScanStatus
     
@@ -3748,6 +3784,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `completePhoneReadEffects`(`messageIds`: List<kotlin.String>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_phone_read_effects(
+        it,
+        
+        FfiConverterSequenceString.lower(`messageIds`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `completeSmsAcquisition`(`id`: kotlin.String): NativeCaptured {
             return FfiConverterTypeNativeCaptured.lift(
     callWithHandle {
@@ -3788,6 +3838,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_compose_drafts(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `consumePhoneReadEffects`(`messageIds`: List<kotlin.String>, `rows`: List<NativeProviderRowRef>, `nowMs`: kotlin.Long): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_consume_phone_read_effects(
+        it,
+        
+        FfiConverterSequenceString.lower(`messageIds`),
+        FfiConverterSequenceTypeNativeProviderRowRef.lower(`rows`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     }
     )
@@ -4859,6 +4926,22 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `pendingPhoneReadEffects`(`nowMs`: kotlin.Long, `limit`: kotlin.UInt): List<NativePhoneReadEffect> {
+            return FfiConverterSequenceTypeNativePhoneReadEffect.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_phone_read_effects(
+        it,
+        
+        FfiConverterLong.lower(`nowMs`),
+        FfiConverterUInt.lower(`limit`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `pendingUploads`(): List<NativeCipherObject> {
             return FfiConverterSequenceTypeNativeCipherObject.lift(
     callWithHandle {
@@ -5594,6 +5677,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         
         FfiConverterString.lower(`sourceGeneration`),
         FfiConverterString.lower(`providerScope`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `smsProviderRowsSeen`(`rows`: List<NativeProviderRowRef>): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_provider_rows_seen(
+        it,
+        
+        FfiConverterSequenceTypeNativeProviderRowRef.lower(`rows`),_status)
 }
     }
     )
@@ -8737,6 +8835,8 @@ data class NativeGatewayCapabilities (
     var `mmsSyncSupported`: kotlin.Boolean
     , 
     var `rcsSupported`: kotlin.Boolean
+    , 
+    var `phoneReadSupported`: kotlin.Boolean
     
 ){
     
@@ -8757,6 +8857,7 @@ public object FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer<
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8764,7 +8865,8 @@ public object FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer<
             FfiConverterBoolean.allocationSize(value.`notificationMirroringSupported`) +
             FfiConverterBoolean.allocationSize(value.`smsSyncSupported`) +
             FfiConverterBoolean.allocationSize(value.`mmsSyncSupported`) +
-            FfiConverterBoolean.allocationSize(value.`rcsSupported`)
+            FfiConverterBoolean.allocationSize(value.`rcsSupported`) +
+            FfiConverterBoolean.allocationSize(value.`phoneReadSupported`)
     )
 
     override fun write(value: NativeGatewayCapabilities, buf: ByteBuffer) {
@@ -8772,6 +8874,7 @@ public object FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer<
             FfiConverterBoolean.write(value.`smsSyncSupported`, buf)
             FfiConverterBoolean.write(value.`mmsSyncSupported`, buf)
             FfiConverterBoolean.write(value.`rcsSupported`, buf)
+            FfiConverterBoolean.write(value.`phoneReadSupported`, buf)
     }
 }
 
@@ -8785,6 +8888,8 @@ data class NativeGatewayHostFacts (
     var `smsAvailable`: kotlin.Boolean
     , 
     var `notificationIsSilent`: kotlin.Boolean
+    , 
+    var `phoneReadAvailable`: kotlin.Boolean
     
 ){
     
@@ -8805,6 +8910,7 @@ public object FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer<Nat
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8812,7 +8918,8 @@ public object FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer<Nat
             FfiConverterBoolean.allocationSize(value.`wifiConnected`) +
             FfiConverterBoolean.allocationSize(value.`notificationListenerAvailable`) +
             FfiConverterBoolean.allocationSize(value.`smsAvailable`) +
-            FfiConverterBoolean.allocationSize(value.`notificationIsSilent`)
+            FfiConverterBoolean.allocationSize(value.`notificationIsSilent`) +
+            FfiConverterBoolean.allocationSize(value.`phoneReadAvailable`)
     )
 
     override fun write(value: NativeGatewayHostFacts, buf: ByteBuffer) {
@@ -8820,6 +8927,7 @@ public object FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer<Nat
             FfiConverterBoolean.write(value.`notificationListenerAvailable`, buf)
             FfiConverterBoolean.write(value.`smsAvailable`, buf)
             FfiConverterBoolean.write(value.`notificationIsSilent`, buf)
+            FfiConverterBoolean.write(value.`phoneReadAvailable`, buf)
     }
 }
 
@@ -8881,6 +8989,8 @@ data class NativeGatewayPolicyDecision (
     var `transferMedia`: kotlin.Boolean
     , 
     var `rcsSupported`: kotlin.Boolean
+    , 
+    var `applyPhoneRead`: kotlin.Boolean
     
 ){
     
@@ -8902,6 +9012,7 @@ public object FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8910,7 +9021,8 @@ public object FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
             FfiConverterBoolean.allocationSize(value.`captureSms`) +
             FfiConverterBoolean.allocationSize(value.`captureMms`) +
             FfiConverterBoolean.allocationSize(value.`transferMedia`) +
-            FfiConverterBoolean.allocationSize(value.`rcsSupported`)
+            FfiConverterBoolean.allocationSize(value.`rcsSupported`) +
+            FfiConverterBoolean.allocationSize(value.`applyPhoneRead`)
     )
 
     override fun write(value: NativeGatewayPolicyDecision, buf: ByteBuffer) {
@@ -8919,6 +9031,7 @@ public object FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
             FfiConverterBoolean.write(value.`captureMms`, buf)
             FfiConverterBoolean.write(value.`transferMedia`, buf)
             FfiConverterBoolean.write(value.`rcsSupported`, buf)
+            FfiConverterBoolean.write(value.`applyPhoneRead`, buf)
     }
 }
 
@@ -8940,6 +9053,8 @@ data class NativeGatewaySettings (
     var `mmsSyncEnabled`: kotlin.Boolean
     , 
     var `mediaWifiOnly`: kotlin.Boolean
+    , 
+    var `phoneReadEnabled`: kotlin.Boolean
     
 ){
     
@@ -8962,6 +9077,7 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8971,7 +9087,8 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
             FfiConverterBoolean.allocationSize(value.`skipSilent`) +
             FfiConverterBoolean.allocationSize(value.`smsSyncEnabled`) +
             FfiConverterBoolean.allocationSize(value.`mmsSyncEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`mediaWifiOnly`)
+            FfiConverterBoolean.allocationSize(value.`mediaWifiOnly`) +
+            FfiConverterBoolean.allocationSize(value.`phoneReadEnabled`)
     )
 
     override fun write(value: NativeGatewaySettings, buf: ByteBuffer) {
@@ -8981,6 +9098,7 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
             FfiConverterBoolean.write(value.`smsSyncEnabled`, buf)
             FfiConverterBoolean.write(value.`mmsSyncEnabled`, buf)
             FfiConverterBoolean.write(value.`mediaWifiOnly`, buf)
+            FfiConverterBoolean.write(value.`phoneReadEnabled`, buf)
     }
 }
 
@@ -10639,6 +10757,102 @@ public object FfiConverterTypeNativePermit: FfiConverterRustBuffer<NativePermit>
             FfiConverterTypeNativePermitState.write(value.`state`, buf)
             FfiConverterOptionalTypeNativeCarrierCommand.write(value.`command`, buf)
             FfiConverterOptionalString.write(value.`existingSendState`, buf)
+    }
+}
+
+
+
+data class NativePhoneReadEffect (
+    var `messageId`: kotlin.String
+    , 
+    var `row`: NativeProviderRowRef
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePhoneReadEffect: FfiConverterRustBuffer<NativePhoneReadEffect> {
+    override fun read(buf: ByteBuffer): NativePhoneReadEffect {
+        return NativePhoneReadEffect(
+            FfiConverterString.read(buf),
+            FfiConverterTypeNativeProviderRowRef.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativePhoneReadEffect) = (
+            FfiConverterString.allocationSize(value.`messageId`) +
+            FfiConverterTypeNativeProviderRowRef.allocationSize(value.`row`)
+    )
+
+    override fun write(value: NativePhoneReadEffect, buf: ByteBuffer) {
+            FfiConverterString.write(value.`messageId`, buf)
+            FfiConverterTypeNativeProviderRowRef.write(value.`row`, buf)
+    }
+}
+
+
+
+data class NativeProviderRowRef (
+    var `sourceGeneration`: kotlin.String
+    , 
+    var `subscriptionId`: kotlin.String
+    , 
+    var `providerMessageId`: kotlin.String
+    , 
+    var `providerThreadId`: kotlin.String
+    , 
+    var `providerDateMs`: kotlin.Long
+    , 
+    var `sourceRowFingerprint`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeProviderRowRef: FfiConverterRustBuffer<NativeProviderRowRef> {
+    override fun read(buf: ByteBuffer): NativeProviderRowRef {
+        return NativeProviderRowRef(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeProviderRowRef) = (
+            FfiConverterString.allocationSize(value.`sourceGeneration`) +
+            FfiConverterString.allocationSize(value.`subscriptionId`) +
+            FfiConverterString.allocationSize(value.`providerMessageId`) +
+            FfiConverterString.allocationSize(value.`providerThreadId`) +
+            FfiConverterLong.allocationSize(value.`providerDateMs`) +
+            FfiConverterString.allocationSize(value.`sourceRowFingerprint`)
+    )
+
+    override fun write(value: NativeProviderRowRef, buf: ByteBuffer) {
+            FfiConverterString.write(value.`sourceGeneration`, buf)
+            FfiConverterString.write(value.`subscriptionId`, buf)
+            FfiConverterString.write(value.`providerMessageId`, buf)
+            FfiConverterString.write(value.`providerThreadId`, buf)
+            FfiConverterLong.write(value.`providerDateMs`, buf)
+            FfiConverterString.write(value.`sourceRowFingerprint`, buf)
     }
 }
 
@@ -13457,6 +13671,62 @@ public object FfiConverterSequenceTypeNativeNotificationTarget: FfiConverterRust
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNativeNotificationTarget.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativePhoneReadEffect: FfiConverterRustBuffer<List<NativePhoneReadEffect>> {
+    override fun read(buf: ByteBuffer): List<NativePhoneReadEffect> {
+        val len = buf.getInt()
+        return List<NativePhoneReadEffect>(len) {
+            FfiConverterTypeNativePhoneReadEffect.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativePhoneReadEffect>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativePhoneReadEffect.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativePhoneReadEffect>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativePhoneReadEffect.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeProviderRowRef: FfiConverterRustBuffer<List<NativeProviderRowRef>> {
+    override fun read(buf: ByteBuffer): List<NativeProviderRowRef> {
+        val len = buf.getInt()
+        return List<NativeProviderRowRef>(len) {
+            FfiConverterTypeNativeProviderRowRef.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeProviderRowRef>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeProviderRowRef.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeProviderRowRef>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeProviderRowRef.write(it, buf)
         }
     }
 }

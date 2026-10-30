@@ -1101,6 +1101,166 @@
         }
       }
     },
+    "peppy.toggle_android_phone_read_section": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone messaging app"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark read in phone messaging app"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_off_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Asks your messaging app to mark a conversation read after you read it in Peppy. Best effort."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_on_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Best effort. Works when your messaging app supports it."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_access_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused: notification access is needed."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_sms_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn on SMS sync to use this."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_sms_read_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow SMS read access to use this."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_sms_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused: SMS sync is off."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_sms_read_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused: SMS read access is needed."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not available on this phone."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_saving": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saving…"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not update this setting. Try again."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_access_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notification access was not allowed. Try again when you are ready."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_open_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open notification access"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_consent_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark conversations read on this phone?"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_phone_read_next": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next, Android will open notification access settings."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_mirroring_consent_title": {
       "localizations": {
         "en": {
@@ -1521,6 +1681,16 @@
         }
       }
     },
+    "peppy.help_android_phone_read": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Best effort. Needs notification access, SMS sync, and SMS read access. Peppy skips ambiguous or unseen conversations, and pending attempts expire after one day."
+          }
+        }
+      }
+    },
     "peppy.help_android_notification_wifi": {
       "localizations": {
         "en": {
@@ -1737,6 +1907,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Notification access lets Peppy read the content Android makes available, which may include verification codes or bank alerts. Mirroring is off by default. When you enable it, Peppy encrypts copies for your vault and stores them on your configured server for your authorized vault devices. Dismissing a mirrored notification on another device may also clear it on this phone while mirroring is permitted. Turning mirroring off stops new captures and remote phone clearing. Already-synced history stays in your vault."
+          }
+        }
+      }
+    },
+    "peppy.phone_read_disclosure": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When you read a conversation in Peppy, Peppy can ask your phone's messaging app to use its own mark-read action. That updates the messaging app's read status for the whole conversation, and a message arriving at that moment or RCS messages Peppy cannot inspect may also be marked read. It acts only when exact message-time evidence is unambiguous; time is not a guaranteed conversation identity. Notification access can see all notifications, but this path inspects only the current default messaging app. No per-app support is promised. Older reads are not backfilled."
           }
         }
       }

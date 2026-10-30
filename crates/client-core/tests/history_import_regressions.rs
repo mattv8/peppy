@@ -120,6 +120,117 @@ fn eligible_history_events_backpressure_sms_import_at_the_threshold() {
 }
 
 #[test]
+fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressure_indexes() {
+    let directory = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "history-backpressure-index-reinstall", &vault);
+    let client = unlocked(&config, &vault);
+    let mut settings = client.gateway_settings().unwrap();
+    settings.mirroring_enabled = true;
+    settings.skip_silent = false;
+    settings.media_wifi_only = false;
+    client.set_gateway_settings(settings).unwrap();
+    drop(client);
+
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    let version: i64 = connection
+        .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 40);
+    let outbox_index: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        outbox_index.contains("(envelope_id,compaction,purpose,state)"),
+        "{outbox_index}"
+    );
+    connection
+        .execute_batch(
+            "DROP INDEX outbox_pending_events_history;
+             DROP INDEX contact_photo_registrations_unacknowledged;
+             DROP TABLE phone_read_effects;
+             DROP TABLE phone_read_effect_terminals;
+             ALTER TABLE gateway_settings DROP COLUMN phone_read_enabled;
+             UPDATE schema_meta SET version=39;",
+        )
+        .unwrap();
+    drop(connection);
+
+    drop(open(&config));
+    drop(open(&config));
+
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    let index_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('outbox_pending_events_history','contact_photo_registrations_unacknowledged')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index_count, 2);
+    let outbox_index: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        outbox_index.contains("(envelope_id,compaction,purpose,state)"),
+        "{outbox_index}"
+    );
+    let phone_read_enabled: bool = connection
+        .query_row(
+            "SELECT phone_read_enabled FROM gateway_settings WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!phone_read_enabled);
+    let (mirroring_enabled, skip_silent, media_wifi_only): (bool, bool, bool) = connection
+        .query_row(
+            "SELECT mirroring_enabled,skip_silent,media_wifi_only FROM gateway_settings WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert!(
+        mirroring_enabled,
+        "nondefault mirroring_enabled must survive the upgrade"
+    );
+    assert!(
+        !skip_silent,
+        "nondefault skip_silent must survive the upgrade"
+    );
+    assert!(
+        !media_wifi_only,
+        "nondefault media_wifi_only must survive the upgrade"
+    );
+    let phone_read_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('phone_read_effects','phone_read_effect_terminals')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(phone_read_tables, 2);
+}
+
+#[test]
 fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
     let directory = TempDir::new().unwrap();
     let vault = Vault::new();
@@ -136,7 +247,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 39);
+    assert_eq!(version, 40);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
