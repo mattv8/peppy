@@ -246,9 +246,14 @@ jobs:
           "$RUNNER_TEMP/installer-tests/bin/python" -m pip install --require-hashes --only-binary=:all: -r packaging/macos/dmg/requirements.txt
           PYTHONPATH=packaging/macos/dmg "$RUNNER_TEMP/installer-tests/bin/python" -m unittest discover -s packaging/macos/dmg/tests
           python3 packaging/windows/installer/tests/test_installer_assets.py
-      - if: runner.os == 'Windows'
+      - name: Test Windows desktop development script
+        if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh -NoProfile -File tests/dev/windows-desktop.Tests.ps1
+      - name: Test Windows loader diagnostics parser
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/windows-loader-diagnostics.Tests.ps1
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.98.1
@@ -279,6 +284,22 @@ jobs:
           cache-on-failure: true
       - run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
       - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Diagnose Windows loader failure
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $executable = Get-ChildItem -LiteralPath apps/desktop/src-tauri/target/debug/deps -Filter 'peppy_desktop_lib-*.exe' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $executable) {
+            Write-Warning 'No peppy_desktop_lib test executable was available for loader diagnostics.'
+            exit 0
+          }
+          try {
+            & .github/scripts/windows-loader-diagnostics.ps1 -ExecutablePath $executable.FullName
+          } catch {
+            Write-Warning "Windows loader diagnostics could not complete: $($_.Exception.Message)"
+          }
       - name: Run desktop integration tests with the existing build
         if: runner.os == 'Linux' && needs.changes.outputs.integration == 'true'
         shell: bash
