@@ -25,6 +25,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowLooper
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -36,6 +37,8 @@ class SmsCaptureSchedulingTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
     private lateinit var workerExecutor: ExecutorService
     private var readSmsPermissionBeforeTest: Boolean? = null
+    private lateinit var productionPhoneReadRunner: PhoneReadCaptureRunner
+    private lateinit var productionPhoneReadApplied: (Context) -> Unit
 
     @Before fun setUpWorkManager() {
         workerExecutor = Executors.newSingleThreadExecutor()
@@ -48,6 +51,8 @@ class SmsCaptureSchedulingTest {
             ExecutorsMode.PRESERVE_EXECUTORS,
         )
         SmsCaptureWork.runner = null
+        productionPhoneReadRunner = PhoneReadCaptureWork.runner
+        productionPhoneReadApplied = PhoneReadCaptureWork.onApplied
     }
 
     @After fun tearDownWorkManager() {
@@ -57,6 +62,8 @@ class SmsCaptureSchedulingTest {
         assertTrue(workerExecutor.awaitTermination(1, TimeUnit.SECONDS))
         SmsCaptureWork.takeHintCount()
         SmsCaptureWork.runner = null
+        PhoneReadCaptureWork.runner = productionPhoneReadRunner
+        PhoneReadCaptureWork.onApplied = productionPhoneReadApplied
     }
 
     @Test fun debounceCapsContinuousNotificationsAtThreeSeconds() {
@@ -201,6 +208,61 @@ class SmsCaptureSchedulingTest {
         assertTrue(WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().isEmpty())
         assertEquals(BackoffPolicy.EXPONENTIAL, SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT).workSpec.backoffPolicy)
         assertEquals(30_000L, SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT).workSpec.backoffDelayDuration)
+    }
+
+    @Test fun workerReconcilesPhoneReadsAfterANoNewIdPeriodicCaptureAndRequestsGatewaySync() {
+        var phoneReadRuns = 0
+        var syncRequests = 0
+        SmsCaptureWork.runner = SmsCaptureRunner { SmsCaptureSummary() }
+        PhoneReadCaptureWork.runner = PhoneReadCaptureRunner { phoneReadRuns++; true }
+        PhoneReadCaptureWork.onApplied = { syncRequests++ }
+
+        val result = TestListenableWorkerBuilder<SmsCaptureWorker>(context).build().startWork().get()
+
+        assertEquals(androidx.work.ListenableWorker.Result.success(), result)
+        assertEquals(1, phoneReadRuns)
+        assertEquals(1, syncRequests)
+    }
+
+    @Test fun phoneReadFailureDoesNotSuppressCaptureContinuation() {
+        val passes = AtomicInteger()
+        SmsCaptureWork.runner = SmsCaptureRunner {
+            if (passes.incrementAndGet() == 1) SmsCaptureWork.enqueueObserver(context)
+            SmsCaptureSummary()
+        }
+        PhoneReadCaptureWork.runner = PhoneReadCaptureRunner { throw IllegalStateException("read ingest unavailable") }
+
+        SmsCaptureWork.enqueue(context)
+        val manager = WorkManager.getInstance(context)
+        val request = manager.getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().single()
+        requireNotNull(WorkManagerTestInitHelper.getTestDriver(context)).setInitialDelayMet(request.id)
+        val completed = awaitUniqueWorkTerminal(manager, expectedCount = 2)
+
+        assertEquals(2, passes.get())
+        assertTrue(completed.all { it.state == WorkInfo.State.SUCCEEDED })
+    }
+
+    @Test fun cancellingWorkerInterruptsPhoneReadReconciliation() {
+        val entered = CountDownLatch(1)
+        val observedInterrupted = CountDownLatch(1)
+        SmsCaptureWork.runner = SmsCaptureRunner { SmsCaptureSummary() }
+        PhoneReadCaptureWork.runner = PhoneReadCaptureRunner {
+            entered.countDown()
+            try {
+                Thread.sleep(TimeUnit.SECONDS.toMillis(30))
+            } catch (error: InterruptedException) {
+                observedInterrupted.countDown()
+                throw error
+            }
+            false
+        }
+
+        val work = TestListenableWorkerBuilder<SmsCaptureWorker>(context).build().startWork()
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        work.cancel(true)
+
+        assertTrue(work.isCancelled)
+        assertTrue(observedInterrupted.await(5, TimeUnit.SECONDS))
     }
 
     @Test fun diagnosticContinuationRecordsHintReasonWithoutChangingTheTwoQueuedRequests() {

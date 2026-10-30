@@ -59,6 +59,7 @@ pub struct GatewayPolicyDecision {
     pub transfer_media: bool,
     pub rcs_supported: bool,
     pub apply_phone_read: bool,
+    pub ingest_phone_read: bool,
 }
 
 impl Client {
@@ -120,6 +121,10 @@ impl Client {
             apply_phone_read: settings.phone_read_enabled
                 && capabilities.phone_read_supported
                 && settings.sms_sync_enabled,
+            ingest_phone_read: settings.phone_read_enabled
+                && settings.sms_sync_enabled
+                && platform == GatewayPlatform::Android
+                && capabilities.sms_sync_supported,
         })
     }
 }

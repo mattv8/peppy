@@ -347,3 +347,23 @@ test("android strings properly escape apostrophes and special characters", () =>
     }
   }
 });
+
+test("android strings encode newlines as resource escapes", () => {
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const elements = [...android.matchAll(/<string name="peppy_(\w+)">([^]*?)<\/string>/g)];
+
+  for (const [, , content] of elements) {
+    assert.ok(!content.includes("\n"), `Raw newline in Android string: ${content.slice(0, 60)}`);
+  }
+
+  const multiline = Object.entries(nativeCatalog).filter(([, value]) => value.includes("\n"));
+  assert.ok(multiline.length > 0);
+  for (const [key, value] of multiline) {
+    const escaped = value
+      .replace(/\\/g, "\\\\")
+      .replace(/'/g, "\\'")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n");
+    assert.ok(android.includes(`<string name="peppy_${key}">${escaped}</string>`), `Missing escaped newlines for ${key}`);
+  }
+});

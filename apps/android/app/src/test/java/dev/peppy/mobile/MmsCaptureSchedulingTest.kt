@@ -34,9 +34,13 @@ class MmsCaptureSchedulingTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
     private lateinit var workerExecutor: ExecutorService
     private lateinit var productionRunner: MmsCaptureRunner
+    private lateinit var productionPhoneReadRunner: PhoneReadCaptureRunner
+    private lateinit var productionPhoneReadApplied: (Context) -> Unit
 
     @Before fun setUpWorkManager() {
         productionRunner = MmsCaptureWork.runner
+        productionPhoneReadRunner = PhoneReadCaptureWork.runner
+        productionPhoneReadApplied = PhoneReadCaptureWork.onApplied
         MmsCaptureWork.hintScheduler.resetForTest()
         workerExecutor = Executors.newSingleThreadExecutor()
         WorkManagerTestInitHelper.initializeTestWorkManager(
@@ -51,6 +55,8 @@ class MmsCaptureSchedulingTest {
 
     @After fun tearDownWorkManager() {
         MmsCaptureWork.runner = productionRunner
+        PhoneReadCaptureWork.runner = productionPhoneReadRunner
+        PhoneReadCaptureWork.onApplied = productionPhoneReadApplied
         MmsCaptureWork.hintScheduler.resetForTest()
         WorkManagerTestInitHelper.closeWorkDatabase()
         workerExecutor.shutdownNow()
@@ -76,6 +82,58 @@ class MmsCaptureSchedulingTest {
 
         assertEquals(1, passes.get())
         assertEquals(WorkInfo.State.SUCCEEDED, completed.single().state)
+    }
+
+    @Test fun workerReconcilesPhoneReadsAfterANoNewIdPeriodicCaptureAndRequestsGatewaySync() {
+        var phoneReadRuns = 0
+        var syncRequests = 0
+        MmsCaptureWork.runner = MmsCaptureRunner { _, _, _ -> summary(more = false) }
+        PhoneReadCaptureWork.runner = PhoneReadCaptureRunner { phoneReadRuns++; true }
+        PhoneReadCaptureWork.onApplied = { syncRequests++ }
+
+        val result = TestListenableWorkerBuilder<MmsCaptureWorker>(context)
+            .setInputData(androidx.work.workDataOf(MmsCaptureWork.MANAGED_WORK to true))
+            .build()
+            .startWork()
+            .get(5, TimeUnit.SECONDS)
+
+        assertEquals(ListenableWorker.Result.success(), result)
+        assertEquals(1, phoneReadRuns)
+        assertEquals(1, syncRequests)
+    }
+
+    @Test fun phoneReadFailureDoesNotSuppressCaptureContinuation() {
+        val passes = AtomicInteger()
+        MmsCaptureWork.runner = MmsCaptureRunner { _, _, _ -> summary(more = passes.incrementAndGet() == 1) }
+        PhoneReadCaptureWork.runner = PhoneReadCaptureRunner { throw IllegalStateException("read ingest unavailable") }
+
+        val completed = runDelayedPassToTerminal(expectedCount = 2)
+
+        assertEquals(2, passes.get())
+        assertTrue(completed.all { it.state == WorkInfo.State.SUCCEEDED })
+    }
+
+    @Test fun cancellingWorkerInterruptsPhoneReadReconciliation() {
+        val entered = CountDownLatch(1)
+        val observedInterrupted = CountDownLatch(1)
+        MmsCaptureWork.runner = MmsCaptureRunner { _, _, _ -> summary(more = false) }
+        PhoneReadCaptureWork.runner = PhoneReadCaptureRunner {
+            entered.countDown()
+            try {
+                Thread.sleep(TimeUnit.SECONDS.toMillis(30))
+            } catch (error: InterruptedException) {
+                observedInterrupted.countDown()
+                throw error
+            }
+            false
+        }
+
+        val work = TestListenableWorkerBuilder<MmsCaptureWorker>(context).build().startWork()
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        work.cancel(true)
+
+        assertTrue(work.isCancelled)
+        assertTrue(observedInterrupted.await(5, TimeUnit.SECONDS))
     }
 
     @Test fun transientPassFailureRetriesWithoutAppendingAContinuation() {

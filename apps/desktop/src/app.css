@@ -487,7 +487,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .message-bubble {
   max-width: min(76%, 620px);
   margin: 0;
-  padding: 8px 12px;
+  padding: 10px 14px;
   border: 1px solid var(--peppy-border-strong);
   border-radius: var(--peppy-radius-md, 8px);
   background: color-mix(in srgb, var(--peppy-surface-active) 92%, var(--peppy-surface-panel));

@@ -1,15 +1,25 @@
 package dev.peppy.mobile
 
+import android.Manifest
+import android.content.ContextWrapper
+import android.content.pm.PackageManager
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.waitUntilExactlyOneExists
 import androidx.compose.ui.res.stringResource
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.peppy.mobile.ui.ConsentSheet
@@ -19,6 +29,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
+@OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
 class PhoneReadSettingsTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
@@ -60,6 +71,34 @@ class PhoneReadSettingsTest {
     }
 
     @Test
+    fun agreeingWritesTheExistingSettingWithoutNotificationAccess() {
+        val store = FakePhoneReadSettingsStore(enabled = false, smsSyncEnabled = true)
+        val smsReadGrantedContext = object : ContextWrapper(compose.activity) {
+            override fun checkPermission(permission: String, pid: Int, uid: Int): Int =
+                if (permission == Manifest.permission.READ_SMS) PackageManager.PERMISSION_GRANTED
+                else super.checkPermission(permission, pid, uid)
+        }
+        compose.setContent {
+            PhoneReadSettings(
+                context = smsReadGrantedContext,
+                refresh = 0,
+                onChanged = {},
+                store = store,
+                notificationAccessGranted = { false },
+            )
+        }
+
+        compose.waitUntilExactlyOneExists(hasTestTag("phone-read-row") and isEnabled(), TIMEOUT_MS)
+        compose.onNodeWithTag("phone-read-row").performClick()
+        compose.waitUntilExactlyOneExists(hasTestTag("phone-read-consent-sheet-policy"), TIMEOUT_MS)
+        compose.onNodeWithTag("phone-read-consent-sheet-policy").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("phone-read-consent-sheet-confirm").performClick()
+        compose.waitUntil { store.writes == listOf(true) }
+
+        assertEquals(true, store.enabled)
+    }
+
+    @Test
     fun smsReadPrerequisiteDisablesTheRow() {
         compose.setContent {
             PhoneReadSettingsContent(
@@ -72,6 +111,40 @@ class PhoneReadSettingsTest {
             )
         }
         compose.onNodeWithTag("phone-read-row").assertIsNotEnabled()
+    }
+
+    @Test
+    fun accessLimitedKeepsInboundToggleEnabledAndOffersOptionalNotificationAccess() {
+        compose.setContent {
+            PhoneReadSettingsContent(
+                presentation = PhoneReadPresentation(PhoneReadPresentation.State.ACCESS_LIMITED, true, showOpenAccess = true),
+                checked = true,
+                subtitle = "Phone reads sync to Peppy.",
+                onCheckedChange = {},
+                onOpenAccess = {},
+                onRetry = {},
+            )
+        }
+
+        compose.onNodeWithTag("phone-read-row").assertIsEnabled()
+        compose.onNodeWithTag("phone-read-open-access").assertIsDisplayed()
+    }
+
+    @Test
+    fun outboundUnsupportedKeepsInboundToggleEnabledWithoutNotificationAccessAction() {
+        compose.setContent {
+            PhoneReadSettingsContent(
+                presentation = PhoneReadPresentation(PhoneReadPresentation.State.OUTBOUND_UNSUPPORTED, true),
+                checked = true,
+                subtitle = "Phone reads sync to Peppy.",
+                onCheckedChange = {},
+                onOpenAccess = {},
+                onRetry = {},
+            )
+        }
+
+        compose.onNodeWithTag("phone-read-row").assertIsEnabled()
+        compose.onAllNodesWithTag("phone-read-open-access").assertCountEquals(0)
     }
 
     @Test
@@ -89,5 +162,24 @@ class PhoneReadSettingsTest {
         }
         compose.onNodeWithTag("phone-read-retry").performClick()
         assertEquals(1, retries)
+    }
+
+    private companion object {
+        const val TIMEOUT_MS = 10_000L
+    }
+
+    private class FakePhoneReadSettingsStore(
+        var enabled: Boolean?,
+        private val smsSyncEnabled: Boolean,
+    ) : PhoneReadSettingsStore {
+        var reads = 0
+        val writes = mutableListOf<Boolean>()
+
+        override fun read() = (enabled to smsSyncEnabled).also { reads++ }
+        override fun write(value: Boolean): Boolean? {
+            writes += value
+            enabled = value
+            return enabled
+        }
     }
 }

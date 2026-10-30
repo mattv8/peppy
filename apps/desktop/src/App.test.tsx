@@ -21,6 +21,7 @@ import {
   type DraftInput,
   type EnrollmentView,
   type GatewayView,
+  type ContactBookView,
   type SendDraftInput,
 } from "./bridge";
 
@@ -224,6 +225,57 @@ describe("group sender attribution", () => {
     expect(imageGroup.querySelector("[data-sender-avatar]")).toBeNull();
     expect(document.querySelector('[data-message-row="after-images"]')).toHaveAttribute("data-sender-run-end");
     expect(document.querySelector('[data-message-row="after-images"] [data-sender-avatar="+18015551234"]')).toBeInTheDocument();
+  });
+});
+
+describe("conversation add-contact action", () => {
+  const writableBook: ContactBookView = {
+    id: "book-1",
+    deviceName: "Phone",
+    state: "active",
+    capabilities: { canWrite: true, canDelete: true, supportsNotes: true, supportsPhoto: true },
+    contactCount: 0,
+    pendingEditCount: 0,
+  };
+
+  it("opens a prefilled contact create form for the raw participant address", async () => {
+    host.conversations[0] = { ...host.conversations[0], participants: ["+18015551234"] };
+    host.contactBooks = [writableBook];
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add (801) 555-1234 to contacts" }));
+
+    expect(await screen.findByRole("form", { name: "Create contact" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Phone 1 number")).toHaveValue("+18015551234");
+  });
+
+  it("hides for saved contacts, groups, drafts, and unusable books", async () => {
+    host.conversations[0] = { ...host.conversations[0], participants: ["+18015551234"] };
+    host.contactBooks = [writableBook];
+    host.contactResolution = { "+18015551234": { bookId: "book-1", contactId: "contact-1", displayName: "Ada" } };
+    const view = render(<App />);
+    await screen.findByText("Hello from Aurora");
+    expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
+    view.unmount();
+
+    host.contactResolution = undefined;
+    host.conversations[0] = { ...host.conversations[0], participants: ["+18015551234", "+18015551235"] };
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
+    cleanup();
+
+    host.conversations[0] = { ...host.conversations[0], participants: ["+18015551234"], draftOnly: true };
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
+    cleanup();
+
+    host.conversations[0] = { ...host.conversations[0], draftOnly: undefined };
+    host.contactBooks = [{ ...writableBook, capabilities: { ...writableBook.capabilities, canWrite: false } }];
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
   });
 });
 const SMS_ONLY: GatewayView = {
@@ -685,6 +737,7 @@ function createHost() {
     drafts: new Map<string, Draft>(),
     failSaves: undefined as HostError | undefined,
     contactResolution: undefined as DesktopSnapshot["contactResolution"],
+    contactBooks: [] as ContactBookView[],
     notifications: [] as DesktopSnapshot["notifications"],
     appFilters: [] as DesktopSnapshot["appFilters"],
     sent: [] as Draft[],
@@ -729,6 +782,7 @@ function createHost() {
         quarantineCount: 0,
         notifications: host.notifications,
         contactResolution: host.contactResolution,
+        contactBooks: host.contactBooks,
         appFilters: host.appFilters,
         notificationPreferences: {
           messageBanners: true,

@@ -191,15 +191,34 @@ fn phone_read_capability_and_policy_follow_the_platform_and_sms_truth_table() {
     let client = open(&config(&dir, "phone-read-policy", &vault));
     let facts = GatewayHostFacts {
         sms_available: true,
-        phone_read_available: true,
+        notification_listener_available: false,
         ..GatewayHostFacts::default()
     };
     let mut settings = client.gateway_settings().unwrap();
     settings.phone_read_enabled = true;
     client.set_gateway_settings(settings.clone()).unwrap();
     assert!(
+        !client
+            .gateway_policy_decision(GatewayPlatform::Android, facts)
+            .unwrap()
+            .apply_phone_read,
+        "outbound notification actions remain separately unavailable"
+    );
+    assert!(
         client
             .gateway_policy_decision(GatewayPlatform::Android, facts)
+            .unwrap()
+            .ingest_phone_read,
+        "provider read ingestion relies on SMS permission, not notification access"
+    );
+
+    let outbound_facts = GatewayHostFacts {
+        phone_read_available: true,
+        ..facts
+    };
+    assert!(
+        client
+            .gateway_policy_decision(GatewayPlatform::Android, outbound_facts)
             .unwrap()
             .apply_phone_read
     );
@@ -214,9 +233,43 @@ fn phone_read_capability_and_policy_follow_the_platform_and_sms_truth_table() {
     );
     assert!(
         !client
+            .gateway_policy_decision(GatewayPlatform::Android, facts)
+            .unwrap()
+            .ingest_phone_read
+    );
+    assert!(
+        !client
             .gateway_policy_decision(GatewayPlatform::Ios, facts)
             .unwrap()
             .apply_phone_read
+    );
+    assert!(
+        !client
+            .gateway_policy_decision(GatewayPlatform::Ios, facts)
+            .unwrap()
+            .ingest_phone_read
+    );
+
+    settings.sms_sync_enabled = true;
+    settings.phone_read_enabled = false;
+    client.set_gateway_settings(settings).unwrap();
+    assert!(
+        !client
+            .gateway_policy_decision(GatewayPlatform::Android, facts)
+            .unwrap()
+            .ingest_phone_read
+    );
+    assert!(
+        !client
+            .gateway_policy_decision(
+                GatewayPlatform::Android,
+                GatewayHostFacts {
+                    sms_available: false,
+                    ..facts
+                },
+            )
+            .unwrap()
+            .ingest_phone_read
     );
 }
 
