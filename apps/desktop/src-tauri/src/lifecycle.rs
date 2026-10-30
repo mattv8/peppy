@@ -406,6 +406,7 @@ impl Drop for UpdatePermit {
 
 impl SwitchPermit {
     pub async fn finish(mut self) -> crate::error::BridgeResult<()> {
+        crate::close_media_viewers(&self.app, None, None);
         crate::heads_runtime::reset(&self.app).await?;
         for label in &self.labels {
             if crate::tray::composer_conversation(label).is_some() {
@@ -525,7 +526,12 @@ pub fn request_quit(app: &tauri::AppHandle) -> crate::error::BridgeResult<()> {
             .store(false, std::sync::atomic::Ordering::Release);
         return Err(error);
     }
-    let labels = app.webview_windows().keys().cloned().collect::<Vec<_>>();
+    let labels = app
+        .webview_windows()
+        .keys()
+        .filter(|label| crate::media_viewer_conversation(label).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
     let started = match begin_with_id(app, Operation::Quit, labels, id.clone()) {
         Ok(started) => started,
         Err(error) => {
@@ -558,7 +564,12 @@ fn replay_pending_quit(app: &tauri::AppHandle) {
 pub async fn prepare_switch(app: &tauri::AppHandle) -> crate::error::BridgeResult<SwitchPermit> {
     let id = uuid::Uuid::new_v4().to_string();
     reserve_topology(app, id.clone(), Operation::Switch)?;
-    let labels = app.webview_windows().keys().cloned().collect::<Vec<_>>();
+    let labels = app
+        .webview_windows()
+        .keys()
+        .filter(|label| crate::media_viewer_conversation(label).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
     let started = match begin_with_id(app, Operation::Switch, labels, id.clone()) {
         Ok(started) => started,
         Err(error) => {
@@ -612,7 +623,12 @@ pub async fn prepare_update(
         drop(safety);
         return Err(error);
     }
-    let labels = app.webview_windows().keys().cloned().collect::<Vec<_>>();
+    let labels = app
+        .webview_windows()
+        .keys()
+        .filter(|label| crate::media_viewer_conversation(label).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
     let started = match begin_with_id(app, Operation::Update, labels, id.clone()) {
         Ok(started) => started,
         Err(error) => {
@@ -798,7 +814,10 @@ fn apply_completion(
     completion: Completion,
 ) -> crate::error::BridgeResult<()> {
     match completion.operation {
-        Operation::Quit => finish_quit(app),
+        Operation::Quit => {
+            crate::close_media_viewers(app, None, None);
+            finish_quit(app);
+        }
         Operation::Switch => {
             // The waiter owns account-switch teardown so callers cannot mutate
             // binding state until it has observed successful completion.
@@ -809,6 +828,7 @@ fn apply_completion(
         Operation::Window(action) => {
             for label in completion.labels {
                 let Some(window) = app.get_webview_window(&label) else {
+                    crate::close_media_viewers_for_parent(app, &label);
                     continue;
                 };
                 if label == crate::tray::MAIN {
@@ -829,6 +849,9 @@ fn apply_completion(
                         })?,
                         Action::Quit => unreachable!("quit uses its own operation"),
                     }
+                }
+                if label != crate::tray::MAIN {
+                    crate::close_media_viewers_for_parent(app, &label);
                 }
             }
         }

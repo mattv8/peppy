@@ -7,11 +7,15 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Instant,
 };
+#[cfg(not(target_os = "windows"))]
+use tauri::LogicalPosition;
+#[cfg(target_os = "windows")]
+use tauri::PhysicalPosition;
 use tauri::{Emitter, Listener, Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_opener::OpenerExt;
@@ -151,6 +155,13 @@ struct MediaCapability {
     opened_at: Instant,
 }
 
+struct MediaViewer {
+    window: Option<tauri::WebviewWindow>,
+    parent_label: String,
+    conversation: ConversationId,
+    session: Arc<Session>,
+}
+
 type ReleasedMediaCapabilities = Vec<(Arc<Session>, AttachmentId)>;
 type StoredMediaCapability = (OpenMediaView, ReleasedMediaCapabilities);
 
@@ -179,6 +190,8 @@ pub struct AppState {
     app_lock_storage_available: AtomicBool,
     app_lock_attempts: Arc<app_lock::Attempts>,
     media_capabilities: Mutex<HashMap<String, MediaCapability>>,
+    media_viewers: Mutex<HashMap<String, MediaViewer>>,
+    next_media_viewer: AtomicU64,
     /// How long a retiring session's workers may take to release the shared store.
     session_drain_timeout: std::time::Duration,
     media_read_budget: Arc<MediaReadBudget>,
@@ -207,6 +220,7 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "copy_attachment_image",
     "hydrate_media_preview",
     "close_media",
+    "open_media_viewer",
     "search_contact_recipients",
     "close_composer",
     "close_head_panel",
@@ -273,6 +287,219 @@ fn effective_composer_conversation(
         .ok_or_else(window_error)
 }
 
+/// Parses only labels minted by `open_media_viewer`: `media-<uuid>-<counter>`.
+fn media_viewer_conversation(label: &str) -> Option<ConversationId> {
+    let value = label.strip_prefix("media-")?;
+    let (conversation, counter) = value.rsplit_once('-')?;
+    if counter.is_empty() || !counter.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    counter.parse::<u64>().ok()?;
+    ConversationId::from_str(conversation).ok()
+}
+
+fn require_media_viewer_parent(label: &str) -> BridgeResult<ConversationId> {
+    tray::composer_conversation(label).ok_or_else(window_error)
+}
+
+#[cfg(test)]
+mod media_viewer_tests;
+
+#[cfg(test)]
+mod media_viewer_label_tests {
+    use super::media_viewer_conversation;
+
+    #[test]
+    fn accepts_only_the_final_numeric_media_suffix() {
+        let conversation = "00000000-0000-0000-0000-000000000001";
+        assert!(media_viewer_conversation(&format!("media-{conversation}-42")).is_some());
+        for label in [
+            format!("media-{conversation}"),
+            format!("media-{conversation}-"),
+            format!("media-{conversation}-not-a-number"),
+            format!("media-{conversation}-4x"),
+            format!("media-{conversation}-4-extra"),
+            "media-not-a-uuid-1".into(),
+            format!("composer-{conversation}"),
+        ] {
+            assert!(media_viewer_conversation(&label).is_none(), "{label}");
+        }
+    }
+}
+
+fn media_viewer_scope(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+    conversation: ConversationId,
+) -> BridgeResult<()> {
+    if media_viewer_conversation(label) != Some(conversation) {
+        return Err(window_error());
+    }
+    let viewers = state
+        .media_viewers
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    let viewer = viewers.get(label).ok_or_else(window_error)?;
+    if viewer.conversation != conversation || !Arc::ptr_eq(&viewer.session, session) {
+        return Err(window_error());
+    }
+    let parent = viewer.parent_label.clone();
+    drop(viewers);
+    (tray::composer_conversation(&parent).is_some()
+        && effective_composer_conversation(
+            state,
+            &parent,
+            session,
+            Some(&conversation.to_string()),
+        )? == Some(conversation))
+    .then_some(())
+    .ok_or_else(window_error)
+}
+
+fn window_conversation_scope(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+    conversation: ConversationId,
+) -> BridgeResult<()> {
+    if tray::composer_conversation(label).is_some() {
+        return (effective_composer_conversation(
+            state,
+            label,
+            session,
+            Some(&conversation.to_string()),
+        )? == Some(conversation))
+        .then_some(())
+        .ok_or_else(window_error);
+    }
+    media_viewer_scope(state, label, session, conversation)
+}
+
+fn scoped_window_conversation(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+) -> BridgeResult<ConversationId> {
+    if let Some(source) = tray::composer_conversation(label) {
+        let requested = state
+            .composer_scopes
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .get(label)
+            .filter(|scope| scope.binding == session.binding)
+            .map(|scope| scope.conversation)
+            .unwrap_or(source);
+        return effective_composer_conversation(
+            state,
+            label,
+            session,
+            Some(&requested.to_string()),
+        )?
+        .ok_or_else(window_error);
+    }
+    media_viewer_conversation(label).ok_or_else(window_error)
+}
+
+pub(crate) fn close_media_viewers(
+    app: &tauri::AppHandle,
+    parent_label: Option<&str>,
+    conversation: Option<ConversationId>,
+) {
+    let state = app.state::<AppState>();
+    let viewers = state
+        .media_viewers
+        .lock()
+        .map(|mut viewers| {
+            let labels = viewers
+                .iter()
+                .filter_map(|(label, viewer)| {
+                    (parent_label.is_none_or(|parent| viewer.parent_label == parent)
+                        && conversation.is_none_or(|id| viewer.conversation == id))
+                    .then_some(label.clone())
+                })
+                .collect::<Vec<_>>();
+            for label in &labels {
+                viewers.remove(label);
+            }
+            labels
+        })
+        .unwrap_or_default();
+    for label in viewers {
+        close_media_viewer(app, &label);
+    }
+}
+
+fn close_media_viewer(app: &tauri::AppHandle, label: &str) {
+    let state = app.state::<AppState>();
+    if let Ok(mut viewers) = state.media_viewers.lock() {
+        viewers.remove(label);
+    }
+    let released = take_window_media_capabilities(&state, label);
+    if !released.is_empty() {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            release_media_capabilities(&handle.state::<AppState>(), released).await;
+        });
+    }
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.destroy();
+    }
+}
+
+pub(crate) fn close_media_viewers_for_parent(app: &tauri::AppHandle, parent_label: &str) {
+    close_media_viewers(app, Some(parent_label), None);
+}
+
+pub(crate) fn sync_media_viewer_topmost(app: &tauri::AppHandle, parent_label: &str, atop: bool) {
+    let state = app.state::<AppState>();
+    let labels = state
+        .media_viewers
+        .lock()
+        .map(|viewers| {
+            viewers
+                .iter()
+                .filter(|(_, viewer)| viewer.parent_label == parent_label)
+                .map(|(label, _)| label.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for label in labels {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.set_always_on_top(atop);
+        }
+    }
+}
+
+fn media_viewer_position(
+    window: &tauri::WebviewWindow,
+    cascade: i32,
+) -> Option<window_geometry::Placement> {
+    let parent = window.outer_position().ok()?;
+    let parent_size = window.outer_size().ok()?;
+    let monitor = window
+        .current_monitor()
+        .ok()?
+        .or_else(|| window.primary_monitor().ok().flatten())?;
+    let work = monitor.work_area();
+    window_placement::media_viewer_placement(
+        window_geometry::Rect {
+            x: parent.x,
+            y: parent.y,
+            width: parent_size.width,
+            height: parent_size.height,
+        },
+        window_geometry::Rect {
+            x: work.position.x,
+            y: work.position.y,
+            width: work.size.width,
+            height: work.size.height,
+        },
+        monitor.scale_factor(),
+        cascade,
+    )
+}
+
 fn remember_composer_move(
     state: &AppState,
     label: &str,
@@ -297,6 +524,23 @@ fn remember_composer_move(
                 conversation,
             },
         );
+    }
+    let app = state.media_viewers.lock().ok().and_then(|viewers| {
+        viewers.values().find_map(|viewer| {
+            (viewer.parent_label == label)
+                .then(|| {
+                    viewer
+                        .window
+                        .as_ref()
+                        .map(|window| window.app_handle().clone())
+                })
+                .flatten()
+        })
+    });
+    if let Some(app) = app {
+        close_media_viewers_for_parent(&app, label);
+    } else if let Ok(mut viewers) = state.media_viewers.lock() {
+        viewers.retain(|_, viewer| viewer.parent_label != label);
     }
 }
 
@@ -350,6 +594,8 @@ impl AppState {
             app_lock_storage_available: AtomicBool::new(true),
             app_lock_attempts: Arc::new(app_lock::Attempts::default()),
             media_capabilities: Mutex::new(HashMap::new()),
+            media_viewers: Mutex::new(HashMap::new()),
+            next_media_viewer: AtomicU64::new(0),
             session_drain_timeout: std::time::Duration::from_secs(30),
             media_read_budget: Arc::new(MediaReadBudget::new(MAX_CONCURRENT_MEDIA_READS)),
             update_safety: update_safety::SafetyGate::default(),
@@ -539,6 +785,19 @@ impl AppState {
     fn revoke_media_capabilities(&self) {
         if let Ok(mut capabilities) = self.media_capabilities.lock() {
             capabilities.clear();
+        }
+        let windows = self
+            .media_viewers
+            .lock()
+            .map(|mut viewers| {
+                viewers
+                    .drain()
+                    .filter_map(|(_, viewer)| viewer.window)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for window in windows {
+            let _ = window.destroy();
         }
     }
 
@@ -2129,10 +2388,8 @@ async fn check_attachment_window_scope(
     if window.label() == tray::MAIN {
         return Ok(());
     }
-    let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
-    let conversation =
-        effective_composer_conversation(state, window.label(), session, Some(&source.to_string()))?
-            .ok_or_else(window_error)?;
+    let conversation = scoped_window_conversation(state, window.label(), session)?;
+    window_conversation_scope(state, window.label(), session, conversation)?;
     let (session, id) = (session.clone(), id.to_owned());
     let belongs = blocking(move || session.attachment_in_conversation(&id, conversation)).await?;
     belongs.then_some(()).ok_or_else(window_error)
@@ -2147,10 +2404,8 @@ async fn check_media_preview_window_scope(
     if window.label() == tray::MAIN {
         return Ok(());
     }
-    let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
-    let conversation =
-        effective_composer_conversation(state, window.label(), session, Some(&source.to_string()))?
-            .ok_or_else(window_error)?;
+    let conversation = scoped_window_conversation(state, window.label(), session)?;
+    window_conversation_scope(state, window.label(), session, conversation)?;
     let (session, message_id) = (session.clone(), message_id.to_owned());
     let message_conversation =
         blocking(move || session.media_preview_message_conversation(&message_id)).await?;
@@ -2640,20 +2895,160 @@ async fn media_page(
     let conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
     if window.label() != tray::MAIN {
-        let scoped = effective_composer_conversation(
-            &state,
-            window.label(),
-            &session,
-            Some(&conversation_id),
-        )?;
-        if scoped != Some(conversation) {
-            return Err(window_error());
-        }
+        window_conversation_scope(&state, window.label(), &session, conversation)?;
     }
     let cursor = cursor
         .map(peppy_client_core::MediaCursor::try_from)
         .transpose()?;
     blocking(move || session.media_page(conversation, cursor.as_ref(), limit.unwrap_or(50))).await
+}
+
+#[tauri::command]
+async fn open_media_viewer(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    attachment_id: String,
+    message_id: String,
+) -> BridgeResult<()> {
+    require_media_viewer_parent(window.label())?;
+    let conversation = ConversationId::from_str(&conversation_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+    let attachment = AttachmentId::from_str(&attachment_id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    let message = MessageId::from_str(&message_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The message ID is invalid."))?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    if effective_composer_conversation(&state, window.label(), &session, Some(&conversation_id))?
+        != Some(conversation)
+    {
+        return Err(window_error());
+    }
+    check_attachment_window_scope(&state, &session, &window, &attachment_id).await?;
+    check_media_preview_window_scope(&state, &session, &window, &message_id).await?;
+    let _window_permit = lifecycle::permit_window_creation(&app)?;
+    let counter = state.next_media_viewer.fetch_add(1, Ordering::Relaxed);
+    let label = format!("media-{conversation}-{counter}");
+    let cascade = state
+        .media_viewers
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .values()
+        .filter(|viewer| viewer.conversation == conversation)
+        .count() as i32
+        * 24;
+    let url = format!(
+        "index.html?window=media&conversationId={conversation}&attachmentId={attachment}&messageId={message}"
+    );
+    let placement = media_viewer_position(&window, cascade);
+    state
+        .media_viewers
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .insert(
+            label.clone(),
+            MediaViewer {
+                window: None,
+                parent_label: window.label().to_owned(),
+                conversation,
+                session: session.clone(),
+            },
+        );
+    let builder =
+        tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
+            .title("Peppy media")
+            .inner_size(420.0, 600.0)
+            .min_inner_size(280.0, 240.0)
+            .decorations(false)
+            .resizable(true)
+            .visible(false)
+            .focused(true)
+            .always_on_top(heads_runtime::is_panel(&app, window.label()));
+    #[cfg(target_os = "macos")]
+    let builder = builder.transparent(true);
+    let viewer = match builder.build() {
+        Ok(viewer) => viewer,
+        Err(_) => {
+            if let Ok(mut viewers) = state.media_viewers.lock() {
+                viewers.remove(&label);
+            }
+            return Err(BridgeError::new(
+                "window",
+                "Could not open the media viewer.",
+            ));
+        }
+    };
+    let registered = state
+        .media_viewers
+        .lock()
+        .map(|mut viewers| {
+            if let Some(entry) = viewers.get_mut(&label) {
+                entry.window = Some(viewer.clone());
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+    if !registered {
+        let _ = viewer.destroy();
+        return Err(window_error());
+    }
+    if let Some(placement) = placement {
+        #[cfg(not(target_os = "windows"))]
+        let position =
+            LogicalPosition::new(f64::from(placement.bounds.x), f64::from(placement.bounds.y));
+        #[cfg(target_os = "windows")]
+        let position = PhysicalPosition::new(placement.bounds.x, placement.bounds.y);
+        #[cfg(not(target_os = "windows"))]
+        let size = tauri::LogicalSize::new(
+            f64::from(placement.bounds.width),
+            f64::from(placement.bounds.height),
+        );
+        #[cfg(target_os = "windows")]
+        let size = tauri::PhysicalSize::new(placement.bounds.width, placement.bounds.height);
+        #[cfg(not(target_os = "windows"))]
+        let minimum = tauri::LogicalSize::new(size.width.min(280.0), size.height.min(240.0));
+        #[cfg(target_os = "windows")]
+        let minimum = tauri::PhysicalSize::new(
+            size.width
+                .min((280.0 * placement.scale_factor).round() as u32),
+            size.height
+                .min((240.0 * placement.scale_factor).round() as u32),
+        );
+        if viewer.set_min_size(Some(minimum)).is_err()
+            || viewer.set_size(size).is_err()
+            || viewer.set_position(position).is_err()
+        {
+            close_media_viewer(&app, &label);
+            return Err(BridgeError::new(
+                "window",
+                "Could not position the media viewer.",
+            ));
+        }
+    }
+    let parent_visible = app
+        .get_webview_window(window.label())
+        .and_then(|parent| parent.is_visible().ok())
+        .unwrap_or(false);
+    if !parent_visible || !session_is_current(&state, &session).await {
+        close_media_viewer(&app, &label);
+        return Err(BridgeError::new(
+            "window",
+            "The media viewer parent is no longer available.",
+        ));
+    }
+    window_chrome::sync_webview_window(&viewer, false);
+    if window_chrome::show_when_ready(&viewer).is_err() {
+        close_media_viewer(&app, &label);
+        return Err(BridgeError::new(
+            "window",
+            "Could not show the media viewer.",
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2678,15 +3073,7 @@ async fn media_page_around(
         })
         .transpose()?;
     if window.label() != tray::MAIN {
-        let scoped = effective_composer_conversation(
-            &state,
-            window.label(),
-            &session,
-            Some(&conversation_id),
-        )?;
-        if scoped != Some(conversation) {
-            return Err(window_error());
-        }
+        window_conversation_scope(&state, window.label(), &session, conversation)?;
     }
     blocking(move || {
         session.media_page_around(conversation, attachment, message, limit.unwrap_or(50))
@@ -2707,15 +3094,7 @@ async fn media_page_newer(
     let conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
     if window.label() != tray::MAIN {
-        let scoped = effective_composer_conversation(
-            &state,
-            window.label(),
-            &session,
-            Some(&conversation_id),
-        )?;
-        if scoped != Some(conversation) {
-            return Err(window_error());
-        }
+        window_conversation_scope(&state, window.label(), &session, conversation)?;
     }
     let cursor = peppy_client_core::MediaCursor::try_from(cursor)?;
     blocking(move || session.media_page_newer(conversation, &cursor, limit.unwrap_or(50))).await
@@ -4592,6 +4971,7 @@ pub fn run() {
             }
             if webview.label() != tray::MAIN
                 && tray::composer_conversation(webview.label()).is_none()
+                && media_viewer_conversation(webview.label()).is_none()
             {
                 return;
             }
@@ -4913,6 +5293,14 @@ pub fn run() {
                     if let Ok(mut scopes) = state.composer_scopes.lock() {
                         scopes.remove(window.label());
                     }
+                    if tray::composer_conversation(window.label()).is_some() {
+                        close_media_viewers_for_parent(window.app_handle(), window.label());
+                    }
+                    if media_viewer_conversation(window.label()).is_some() {
+                        if let Ok(mut viewers) = state.media_viewers.lock() {
+                            viewers.remove(window.label());
+                        }
+                    }
                     let released = take_window_media_capabilities(&state, window.label());
                     if !released.is_empty() {
                         let app = window.app_handle().clone();
@@ -4927,7 +5315,8 @@ pub fn run() {
                 event,
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
             ) && (window.label() == tray::MAIN
-                || tray::composer_conversation(window.label()).is_some())
+                || tray::composer_conversation(window.label()).is_some()
+                || media_viewer_conversation(window.label()).is_some())
             {
                 if let Some(webview_window) = window.app_handle().get_webview_window(window.label())
                 {
@@ -5019,6 +5408,7 @@ pub fn run() {
         open_media,
         load_media,
         close_media,
+        open_media_viewer,
         publish_attachment,
         open_composer,
         dismiss_notification,

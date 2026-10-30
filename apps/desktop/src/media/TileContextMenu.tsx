@@ -38,7 +38,7 @@ export function TileContextMenu({ attachment, actions, anchor, onRetryPreview, r
     onRetryPreview ? { label: "Retry preview", icon: RotateCw, disabled: false, title: undefined, action: onRetryPreview } : undefined,
     attachment.state === "failed" ? { label: "Retry download", icon: RotateCw, disabled: false, title: undefined, action: () => actions.retry(attachment) } : undefined,
     { label: "Save image", icon: Download, disabled: false, title: undefined, action: () => actions.save(attachment) },
-    { label: actions.publicCopy(attachment.id) ? "Copy public link" : "Create public link", icon: Link, disabled: false, title: undefined, action: () => actions.shareLink(attachment) },
+    actions.canShareLink ? { label: actions.publicCopy(attachment.id) ? "Copy public link" : "Create public link", icon: Link, disabled: false, title: undefined, action: () => actions.shareLink(attachment) } : undefined,
   ];
   const items = [copyItem, ...otherItems].filter((item): item is NonNullable<typeof item> => Boolean(item));
 

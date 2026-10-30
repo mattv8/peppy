@@ -14,7 +14,7 @@ export type StatusTone = "info" | "warning" | "error";
 export type MediaActionsProviderProps = {
   publicCopies: Record<string, PublicCopy>;
   onSave(attachment: GalleryAttachment): Promise<SaveOutcome>;
-  onPublish(attachment: GalleryAttachment): Promise<PublicCopy | null>;
+  onPublish?(attachment: GalleryAttachment): Promise<PublicCopy | null>;
   onRetry(attachmentId: string): Promise<void>;
   requestDownload(attachmentId: string): Promise<void>;
   requestMediaSync?(attachmentIds: string[]): Promise<void>;
@@ -32,6 +32,7 @@ export type MediaActions = {
   isSaving(attachmentId: string): boolean;
   publicCopy(attachmentId: string): PublicCopy | undefined;
   shareLink(attachment: GalleryAttachment): void;
+  canShareLink: boolean;
   canCopyImage: boolean;
   copyImage(attachment: GalleryAttachment): void;
   retry(attachment: GalleryAttachment): void;
@@ -142,6 +143,7 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
   }, [announce, props.onSave]);
 
   const shareLink = useCallback((attachment: GalleryAttachment) => {
+    if (!props.onPublish) return;
     const existingCopy = props.publicCopies[attachment.id];
     const copyText = async (copy: PublicCopy): Promise<boolean> => {
       if (!navigator.clipboard?.writeText) return false;
@@ -224,6 +226,7 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
     isSaving: (attachmentId) => savingIds.has(attachmentId),
     publicCopy: (attachmentId) => props.publicCopies[attachmentId],
     shareLink,
+    canShareLink: Boolean(props.onPublish),
     canCopyImage,
     copyImage,
     retry,
@@ -232,7 +235,7 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
     requestMediaSync: props.requestMediaSync ? requestMediaSync : undefined,
     hydratePreview,
     nativeCopy: Boolean(props.copyNativeImage),
-  }), [canCopyImage, copyImage, hydratePreview, props.copyNativeImage, props.publicCopies, props.requestMediaSync, requestDownload, requestMediaSync, retry, save, savingIds, shareLink]);
+  }), [canCopyImage, copyImage, hydratePreview, props.copyNativeImage, props.onPublish, props.publicCopies, props.requestMediaSync, requestDownload, requestMediaSync, retry, save, savingIds, shareLink]);
 
   const statusNode = <div id="media-action-status" role="status" aria-live="polite" aria-atomic="true" data-tone={status.tone}>{status.text}</div>;
   return <MediaActionsContext.Provider value={actions}>{props.children}{createPortal(statusNode, status.host ?? document.body)}</MediaActionsContext.Provider>;

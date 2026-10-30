@@ -65,6 +65,13 @@ describe("MediaTile", () => {
     expect(body.querySelector("button")).toBeNull();
   });
 
+  it("does not render share actions without a publish provider", () => {
+    renderTile(attachment(), providerProps({ onPublish: undefined }));
+    expect(screen.queryByRole("button", { name: /public link/i })).not.toBeInTheDocument();
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Photo" }));
+    expect(screen.queryByRole("menuitem", { name: /public link/i })).not.toBeInTheDocument();
+  });
+
   it("keeps the saving button focusable while a save is in flight", () => {
     const props = providerProps({ onSave: vi.fn(() => new Promise<"saved">(() => undefined)) });
     renderTile(attachment(), props);

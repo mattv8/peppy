@@ -279,6 +279,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     }
 
     let composer = permissions(include_str!("../capabilities/composer.json"));
+    let media = permissions(include_str!("../capabilities/media.json"));
     let main = permissions(include_str!("../capabilities/default.json"));
     for command in registered_commands() {
         assert!(
@@ -286,7 +287,9 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
             "{command} is registered but absent from the app manifest"
         );
         assert!(
-            main.contains(&allow(&command)) || composer.contains(&allow(&command)),
+            main.contains(&allow(&command))
+                || composer.contains(&allow(&command))
+                || media.contains(&allow(&command)),
             "{command} is registered but absent from every capability"
         );
     }
@@ -317,11 +320,17 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
     let composer_manifest: Value =
         serde_json::from_str(include_str!("../capabilities/composer.json")).unwrap();
+    let media_manifest: Value =
+        serde_json::from_str(include_str!("../capabilities/media.json")).unwrap();
     assert_eq!(main_manifest["windows"], json!(["main"]));
     assert_eq!(composer_manifest["windows"], json!(["composer-*"]));
+    assert_eq!(media_manifest["windows"], json!(["media-*"]));
     assert!(crate::COMPOSER_COMMANDS.contains(&"load_history"));
     assert!(main.contains("allow-load-history"));
     assert!(composer.contains("allow-load-history"));
+    assert!(composer.contains("allow-open-media-viewer"));
+    assert!(!main.contains("allow-open-media-viewer"));
+    assert!(!media.contains("allow-open-media-viewer"));
     assert!(!composer.contains("allow-load-message-window"));
     assert!(main.contains("allow-load-message-window"));
     assert!(!crate::COMPOSER_COMMANDS.contains(&"load_message_window"));
@@ -386,6 +395,50 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         .collect();
     assert!(expected.contains("allow-close-head-panel"));
     assert_eq!(app_permissions(&composer), expected);
+    let expected_media: HashSet<String> = [
+        "media_page",
+        "media_page_around",
+        "media_page_newer",
+        "open_media",
+        "load_media",
+        "close_media",
+        "save_attachment",
+        "copy_attachment_image",
+    ]
+    .into_iter()
+    .map(allow)
+    .collect();
+    assert_eq!(app_permissions(&media), expected_media);
+    assert_eq!(
+        media
+            .iter()
+            .filter(|permission| permission.contains(':'))
+            .cloned()
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            "core:event:default".into(),
+            "core:window:allow-close".into(),
+            "core:window:allow-start-dragging".into(),
+        ])
+    );
+    for forbidden in [
+        "publish_attachment",
+        "load_state",
+        "load_history",
+        "save_draft",
+        "send_draft",
+        "mark_seen",
+        "pick_attachments",
+        "open_composer",
+        "close_composer",
+        "close_head_panel",
+        "open_media_viewer",
+    ] {
+        assert!(
+            !media.contains(&allow(forbidden)),
+            "media can call {forbidden}"
+        );
+    }
     for main_only in [
         "configure_server",
         "unlock_sync",
@@ -419,10 +472,9 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         );
         assert!(main.contains(&allow(main_only)), "main lacks {main_only}");
     }
-    for command in commands
-        .iter()
-        .filter(|c| **c != "close_composer" && **c != "close_head_panel")
-    {
+    for command in commands.iter().filter(|c| {
+        **c != "close_composer" && **c != "close_head_panel" && **c != "open_media_viewer"
+    }) {
         assert!(
             main.contains(&allow(command)),
             "main window cannot call {command}"

@@ -39,6 +39,8 @@ const pageItem = (attachment: AttachmentView, messageId = `message-${attachment.
   timestamp: "1788434460000",
   cursor: { sortAtMs: "1788434460000", localOrder: messageId, messageId, attachmentPosition: 0 },
 });
+const setMediaPage = (attachment: AttachmentView, messageId: string) =>
+  vi.mocked(bridge.media_page).mockResolvedValue({ items: [pageItem(attachment, messageId)] });
 
 const ready = (url: string, attachment: AttachmentView): MediaOpen => ({
   state: "ready",
@@ -70,9 +72,11 @@ function snapshot(messages: MessageView[], activeConversationId = "aurora"): Des
 
 let currentSnapshot: DesktopSnapshot;
 let stateHint: (() => void) | undefined;
+const setWindowSearch = (search: string) => window.history.replaceState({}, "", search || "/");
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  delete bridge.open_media_viewer;
   const storage = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {
     configurable: true,
@@ -84,6 +88,7 @@ beforeEach(() => {
     },
   });
   currentSnapshot = snapshot([]);
+  setWindowSearch("");
   stateHint = undefined;
   vi.spyOn(bridge, "load_state").mockImplementation(async () => currentSnapshot);
   vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: false, locked: false, storageAvailable: true });
@@ -107,11 +112,54 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  delete bridge.open_media_viewer;
+  setWindowSearch("");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("App media wiring", () => {
+  it("opens composer media in a native viewer when the bridge supports it", async () => {
+    const attachment = image("composer-image");
+    currentSnapshot = snapshot([message("composer-message", attachment)]);
+    setMediaPage(attachment, "composer-message");
+    setWindowSearch("?window=composer&conversationId=aurora");
+    const openMediaViewer = vi.fn().mockResolvedValue(undefined);
+    Object.assign(bridge, { open_media_viewer: openMediaViewer });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "composer-image.png" }));
+
+    await waitFor(() => expect(openMediaViewer).toHaveBeenCalledWith("aurora", "composer-image", "composer-message"));
+    expect(screen.queryByRole("dialog", { name: "Media viewer" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the main-window media modal when native viewer support exists", async () => {
+    const attachment = image("main-image");
+    currentSnapshot = snapshot([message("main-message", attachment)]);
+    setMediaPage(attachment, "main-message");
+    const openMediaViewer = vi.fn().mockResolvedValue(undefined);
+    Object.assign(bridge, { open_media_viewer: openMediaViewer });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "main-image.png" }));
+
+    await screen.findByRole("dialog", { name: "Media viewer" });
+    expect(openMediaViewer).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the composer media modal when the native viewer is unavailable", async () => {
+    const attachment = image("fallback-image");
+    currentSnapshot = snapshot([message("fallback-message", attachment)]);
+    setMediaPage(attachment, "fallback-message");
+    setWindowSearch("?window=composer&conversationId=aurora");
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "fallback-image.png" }));
+
+    await screen.findByRole("dialog", { name: "Media viewer" });
+  });
+
   it("renders consecutive MMS image runs with per-message metadata and opens the clicked image once", async () => {
     const first = message("first", image("first-image"));
     const second = message("second", image("second-image"));

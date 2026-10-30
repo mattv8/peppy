@@ -171,6 +171,16 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(14, "start_history_search", { input: { operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
     expect(invokeMock).toHaveBeenNthCalledWith(15, "cancel_history_search", { input: { attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
   });
+
+  it("opens a media viewer with its conversation, attachment, and message", async () => {
+    await tauriBridge.open_media_viewer?.("conversation-id", "attachment-id", "message-id");
+
+    expect(invokeMock).toHaveBeenCalledWith("open_media_viewer", {
+      conversationId: "conversation-id",
+      attachmentId: "attachment-id",
+      messageId: "message-id",
+    });
+  });
 });
 
 describe("fixture draft saves", () => {

@@ -507,6 +507,10 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         let stale_for_ui = stale.clone();
         let _ = on_main_if_current(app, token.clone(), move |app| {
             for id in stale_for_ui {
+                crate::close_media_viewers_for_parent(
+                    app,
+                    &format!("{}{}", tray::COMPOSER_PREFIX, id),
+                );
                 let _ = windows::hide_head(app, &id);
             }
         })
@@ -644,6 +648,10 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
     for id in to_hide {
         let hide_id = id.clone();
         let _ = on_main_if_current(app, token.clone(), move |app| {
+            crate::close_media_viewers_for_parent(
+                app,
+                &format!("{}{}", tray::COMPOSER_PREFIX, hide_id),
+            );
             windows::hide_head(app, &hide_id)
         })
         .await;
@@ -1518,6 +1526,10 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
     if !stale.is_empty() {
         let _ = on_main_if_current(app, token.clone(), move |app| {
             for id in stale {
+                crate::close_media_viewers_for_parent(
+                    app,
+                    &format!("{}{}", tray::COMPOSER_PREFIX, id),
+                );
                 let _ = windows::hide_head(app, &id);
             }
         })
@@ -1648,9 +1660,14 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
         ) {
             if prior.is_none() {
                 let id = spec.conversation_id.clone();
-                let _ =
-                    on_main_if_current(app, token.clone(), move |app| windows::hide_head(app, &id))
-                        .await;
+                let _ = on_main_if_current(app, token.clone(), move |app| {
+                    crate::close_media_viewers_for_parent(
+                        app,
+                        &format!("{}{}", tray::COMPOSER_PREFIX, id),
+                    );
+                    windows::hide_head(app, &id)
+                })
+                .await;
             }
             restore_prior(app, &spec.conversation_id, prior);
             return Err(BridgeError::new("heads", message));
@@ -1781,8 +1798,11 @@ pub(crate) async fn dismiss_generation(
         .remove(&binding, conversation_id)
         .map_err(|message| BridgeError::new("heads", message))?;
     let id = conversation_id.to_owned();
-    let hidden =
-        on_main_if_current(app, token.clone(), move |app| windows::hide_head(app, &id)).await?;
+    let hidden = on_main_if_current(app, token.clone(), move |app| {
+        crate::close_media_viewers_for_parent(app, &format!("{}{}", tray::COMPOSER_PREFIX, id));
+        windows::hide_head(app, &id)
+    })
+    .await?;
     if !matches!(hidden, Some(Ok(()))) {
         if let Some(pin) = removed {
             let _ = runtime(app).pins.upsert(&binding, pin);
@@ -2139,6 +2159,7 @@ async fn clear_visible(app: &AppHandle) {
     let _ = on_main(app, move |app| {
         windows::clear_heads(app);
         for label in labels {
+            crate::close_media_viewers_for_parent(app, &label);
             if let Some(window) = app.get_webview_window(&label) {
                 let _ = window.hide();
             }

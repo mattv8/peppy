@@ -36,6 +36,7 @@ const COMMANDS: &[&str] = &[
     "hydrate_media_preview",
     "copy_attachment_image",
     "close_media",
+    "open_media_viewer",
     "publish_attachment",
     "open_composer",
     "dismiss_notification",

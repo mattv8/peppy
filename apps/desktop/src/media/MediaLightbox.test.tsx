@@ -97,6 +97,18 @@ describe("MediaLightbox", () => {
     expect(screen.getByRole("button", { name: "Copy image" })).toBeInTheDocument();
   });
 
+  it("renders the native window chrome without a modal or sharing action", async () => {
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:one" });
+    render(<MediaLightbox chrome="window" items={[items[0]]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn()} />);
+
+    await act(async () => {});
+
+    expect(screen.getByRole("main", { name: "Media viewer" })).toHaveAttribute("id", "media-viewer-window");
+    expect(document.querySelector("#media-lightbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close media viewer" }).parentElement).toHaveAttribute("data-tauri-drag-region", "true");
+    expect(screen.queryByRole("button", { name: "Create public link" })).not.toBeInTheDocument();
+  });
+
   it("advances through multiple adjacent pages and disables next at exhaustion", async () => {
     const third = { ...items[0], attachment: { ...items[0].attachment, id: "three", name: "three" }, message: { ...items[0].message, id: "message-three" } };
     const loadAdjacentPage = vi.fn()

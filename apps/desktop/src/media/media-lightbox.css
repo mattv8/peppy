@@ -24,5 +24,32 @@
 [data-lightbox-failure] > svg { color: var(--peppy-error-text); }
 #lightbox-retry-btn { display: inline-flex; height: 32px; align-items: center; gap: 5px; padding: 0 10px; border: 0; border-radius: var(--peppy-radius-sm); background: var(--peppy-accent); color: var(--peppy-accent-text); }
 @keyframes lightbox-spin { to { transform: rotate(360deg); } }
-@media (max-width: 600px) { .media-lightbox { width: 100dvw; height: 100dvh; } [data-lightbox-actions] button { width: 40px; height: 40px; } }
+@media (max-width: 600px) { #media-lightbox { padding: 8px; } .peppy-modal-panel.media-lightbox { width: 100%; height: auto; max-height: 100%; padding: 0; gap: 0; overflow-y: auto; } .media-lightbox > .peppy-modal-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; } [data-lightbox-toolbar] { padding: 4px 6px; border-bottom: none; } [data-lightbox-actions] button { width: 32px; height: 32px; } [data-lightbox-media] > img:not(.lightbox-backdrop), [data-lightbox-media] video { max-height: calc(100dvh - 96px); } [data-lightbox-stage] { min-height: 160px; } [data-lightbox-media] { min-height: 160px; } #lightbox-prev-btn { left: 8px; } #lightbox-next-btn { right: 8px; } [data-lightbox-stage] > [data-lightbox-nav] { width: 36px; height: 36px; } #lightbox-meta { padding: 6px 10px; font-size: 12px; color: var(--peppy-text-secondary); } [data-lightbox] > [role="alert"] { margin: 0; padding: 6px 10px; } }
 @media (forced-colors: active) { .lightbox-backdrop { display: none; } [data-lightbox-stage] > [data-lightbox-nav] { background: Canvas; color: CanvasText; border-color: ButtonText; } [data-lightbox-actions] button:focus-visible, [data-lightbox-stage] button:focus-visible { outline-color: Highlight; } }
+html:has(#media-viewer-window), body:has(#media-viewer-window), #root:has(#media-viewer-window) { width: 100%; height: 100%; margin: 0; background: transparent; }
+#media-viewer-window { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--peppy-border); background: var(--peppy-surface-panel); color: var(--peppy-text-primary); }
+html[data-window-rounded="true"] #media-viewer-window { border-radius: var(--peppy-window-radius); }
+#media-viewer-window [data-lightbox-toolbar] { flex: none; height: 40px; padding: 0 6px 0 12px; border: 0; user-select: none; -webkit-user-select: none; cursor: default; }
+#media-viewer-window [data-lightbox-counter] { min-width: 0; overflow: hidden; white-space: nowrap; font-size: 12px; pointer-events: none; }
+#media-viewer-window [data-lightbox-actions] { flex: none; margin-left: auto; gap: 2px; }
+#media-viewer-window [data-lightbox-actions] button { width: 32px; height: 32px; cursor: default; }
+#media-viewer-window #lightbox-close-btn { margin-left: 0; }
+#media-viewer-window [data-lightbox-stage] { flex: 1 1 0; min-height: 0; place-items: stretch; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+#media-viewer-window [data-lightbox-stage]:focus { outline: none; }
+#media-viewer-window [data-lightbox-media] { position: relative; width: 100%; min-width: 0; min-height: 0; }
+#media-viewer-window [data-lightbox-media] > img:not(.lightbox-backdrop), #media-viewer-window [data-lightbox-media] > video { position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; object-fit: contain; -webkit-user-drag: none; }
+#media-viewer-window [data-lightbox-media] > audio { width: calc(100% - 24px); max-width: 420px; }
+#media-viewer-window [data-lightbox-stage] > [data-lightbox-nav] { width: 32px; height: 32px; opacity: 0; transition: opacity var(--peppy-duration-base); }
+#media-viewer-window #lightbox-prev-btn { left: 8px; }
+#media-viewer-window #lightbox-next-btn { right: 8px; }
+#media-viewer-window [data-lightbox-stage]:hover > [data-lightbox-nav]:not(:disabled), #media-viewer-window [data-lightbox-stage] > [data-lightbox-nav]:focus-visible, #media-viewer-window [data-lightbox-stage] > [data-lightbox-nav][aria-busy="true"] { opacity: 1; }
+#media-viewer-window [data-lightbox-stage] > [data-lightbox-nav]:disabled { pointer-events: none; }
+@media (hover: none) { #media-viewer-window [data-lightbox-stage] > [data-lightbox-nav]:not(:disabled) { opacity: 1; } }
+#media-viewer-window [data-lightbox-pending], #media-viewer-window [data-lightbox-failure], #media-viewer-window [data-lightbox-loading] { max-width: 100%; padding: 16px; }
+#media-viewer-window [data-lightbox-media] > p[role="status"] { margin: 0; padding: 16px; max-width: 18rem; color: var(--peppy-text-secondary); font-size: 13px; text-align: center; }
+#media-viewer-window [data-lightbox-loading] { color: var(--peppy-text-secondary); }
+#media-viewer-window ~ #media-action-status, body:has(#media-viewer-window) #media-action-status { bottom: 36px; background: var(--peppy-surface-panel); backdrop-filter: none; }
+#media-viewer-window > [role="alert"] { flex: none; margin: 0; padding: 6px 12px; background: color-mix(in srgb, var(--peppy-error) 14%, var(--peppy-surface-panel)); color: var(--peppy-error-text); font-size: 12px; line-height: 1.35; }
+#media-viewer-window #lightbox-meta { flex: none; padding: 0 12px; overflow: hidden; color: var(--peppy-text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; line-height: 28px; text-align: center; text-overflow: ellipsis; white-space: nowrap; user-select: none; -webkit-user-select: none; cursor: default; }
+@media (forced-colors: active) { #media-viewer-window { border-color: CanvasText; background: Canvas; color: CanvasText; } #media-viewer-window [data-lightbox-stage] { background: Canvas; } #media-viewer-window [data-lightbox-actions] button { border: 1px solid ButtonText; } #media-viewer-window [data-lightbox-actions] button:disabled { border-color: GrayText; color: GrayText; } #media-viewer-window [data-lightbox-stage] > [data-lightbox-nav]:not(:disabled) { opacity: 1; } #media-viewer-window > [role="alert"] { border-top: 1px solid CanvasText; background: Canvas; color: CanvasText; } #media-viewer-window #lightbox-meta { color: CanvasText; } }
+@media (prefers-reduced-motion: reduce) { #media-viewer-window .lightbox-spinner { animation: none; } #media-viewer-window [data-lightbox-stage] > [data-lightbox-nav], #media-viewer-window [data-lightbox-media] > img, #media-viewer-window [data-lightbox-media] > video { transition: none; } }
