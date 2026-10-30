@@ -56,12 +56,14 @@ mod native {
     use std::sync::{Mutex, OnceLock};
     use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
     use windows::{
-        core::PCWSTR,
-        Wdk::System::SystemServices::RtlGetVersion,
+        core::{s, w, PCWSTR},
         Win32::{
             Foundation::{HWND, LPARAM, LRESULT, WPARAM},
             Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT},
-            System::{LibraryLoader::GetModuleHandleW, SystemInformation::OSVERSIONINFOW},
+            System::{
+                LibraryLoader::{GetModuleHandleW, GetProcAddress},
+                SystemInformation::OSVERSIONINFOW,
+            },
             UI::{
                 Input::KeyboardAndMouse::{
                     TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
@@ -190,11 +192,19 @@ mod native {
 
     fn is_windows_11_or_later() -> bool {
         *WINDOWS_11_OR_LATER.get_or_init(|| unsafe {
+            let Ok(ntdll) = GetModuleHandleW(w!("ntdll.dll")) else {
+                return false;
+            };
+            let Some(rtl_get_version) = GetProcAddress(ntdll, s!("RtlGetVersion")) else {
+                return false;
+            };
+            type RtlGetVersion = unsafe extern "system" fn(*mut OSVERSIONINFOW) -> i32;
+            let rtl_get_version: RtlGetVersion = std::mem::transmute(rtl_get_version);
             let mut version = OSVERSIONINFOW {
                 dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
                 ..Default::default()
             };
-            RtlGetVersion(&mut version).0 >= 0 && version.dwBuildNumber >= 22_000
+            rtl_get_version(&mut version) >= 0 && version.dwBuildNumber >= 22_000
         })
     }
 
