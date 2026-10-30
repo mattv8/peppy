@@ -107,5 +107,5 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
     {actionError && <p role="alert">{actionError}</p>}<div id="lightbox-meta" {...drag}>{formatDateTime(item.message.timestamp)}</div>
   </>;
   if (chrome === "window") return <main id="media-viewer-window" data-lightbox data-chrome="window" aria-labelledby="media-viewer-window-title"><h1 id="media-viewer-window-title" className="visually-hidden">Media viewer</h1>{content}</main>;
-  return <Modal id="media-lightbox" title="Media viewer" onDismiss={onDismiss} className="media-lightbox" actions={null}><div data-lightbox>{content}</div></Modal>;
+  return <Modal id="media-lightbox" title="Media viewer" onDismiss={onDismiss} className="media-lightbox" actions={null} windowDragOutside><div data-lightbox>{content}</div></Modal>;
 }
