@@ -158,7 +158,12 @@ Secret handling:
   Clear secret fields after use.
   Phone approval invokes worker-private Rust capability, not a DOM secret prompt.
   Browser computer enrollment activates from the verified handoff without a
-  Vault key phrase prompt; browser restart still asks for the Vault key phrase.
+  Vault key phrase prompt. Browser restart asks for the Vault key phrase unless
+  the user selected **Remember on this browser** during a manual unlock. Keep that
+  checkbox unchecked by default and show the browser-profile access warning even
+  when unchecked. Enrollment does not enable it. Lock and sign-out attempt to
+  forget recovery; never claim they or device revocation protect an offline or
+  copied browser profile.
 - App-lock credentials are a separate native gate. See
   [native enrollment](../apps/desktop/src-tauri/src/enrollment.rs),
   [app lock](../apps/desktop/src-tauri/src/app_lock.rs), and
