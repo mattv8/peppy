@@ -2,7 +2,7 @@ import type {
   AppLockStatus, AttachmentView, BridgeError, ComputerClaimantView, ContactBookView, ContactEditOutcome,
   ContactEditRequestInput, ContactEditStatus, ContactScanStatus, ContactSyncStatus, ContactView,
   DesktopBridge, DesktopSnapshot, DeviceRosterView, Draft, DraftInput, HistoryPage,
-  HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MediaCursor, MediaOpen, MediaPage, MessageWindow,
+  HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MaximizeButtonRegion, MediaCursor, MediaOpen, MediaPage, MessageWindow,
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
 } from "@peppy/desktop-ui/bridge-contracts";
@@ -478,6 +478,8 @@ export class BrowserBridge implements DesktopBridge {
   public list_restorable_contacts(bookId: string): Promise<RestorableContact[]> { return this.call("list_restorable_contacts", { bookId }); }
   public restore_contact(bookId: string, contactId: string): Promise<ContactEditOutcome> { return this.call("restore_contact", { bookId, contactId }); }
   public subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  public set_maximize_button_region(_region: MaximizeButtonRegion | null): Promise<void> { return Promise.resolve(); }
+  public subscribe_maximize_button_hover(_listener: (hovered: boolean) => void): () => void { return () => undefined; }
   public subscribe_lifecycle(): () => void { return () => undefined; }
   public subscribe_lifecycle_finished(): () => void { return () => undefined; }
   public lock_sync(): Promise<void> { return this.call("lock_sync"); }
