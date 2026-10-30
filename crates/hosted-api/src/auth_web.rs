@@ -5,6 +5,13 @@ use uuid::Uuid;
 
 use crate::IdentityProvider;
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebCapabilitiesResponse {
+    #[serde(default)]
+    pub manage_testers: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[derive(schemars::JsonSchema)]
@@ -40,6 +47,7 @@ pub struct WebAccountResponse {
 }
 
 pub mod routes {
+    pub const CAPABILITIES: &str = "/hosted/v1/web/capabilities";
     pub const SESSION: &str = "/hosted/v1/web/session";
     pub const SESSION_RENEW: &str = "/hosted/v1/web/session/renew";
     pub const APP_SESSION_RENEW: &str = "/hosted/v1/web/app-session/renew";
@@ -55,6 +63,14 @@ pub mod routes {
 mod tests {
     use super::*;
     use crate::IdentityProvider;
+
+    #[test]
+    fn absent_capability_denies_tester_administration() {
+        let capabilities: WebCapabilitiesResponse = serde_json::from_str("{}").unwrap();
+        assert!(!capabilities.manage_testers);
+        assert!(!WebCapabilitiesResponse::default().manage_testers);
+        assert_eq!(routes::CAPABILITIES, "/hosted/v1/web/capabilities");
+    }
 
     #[test]
     fn web_config_serializes_only_configured_identity_providers() {

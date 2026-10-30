@@ -977,6 +977,7 @@ pub mod computer_enrollment;
 pub mod devices;
 pub mod enrollment;
 pub mod presence;
+pub mod tester_admin;
 
 pub use devices::{DeviceRosterDevice, DeviceRosterResponse};
 pub use presence::{DevicePresence, PresenceState};
