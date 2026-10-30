@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $script:MaximumImages = 64
 
 function ConvertFrom-DumpbinImports {
-  param([Parameter(Mandatory)][string[]]$Lines)
+  param([Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines)
 
   $imports = [System.Collections.Generic.List[object]]::new()
   $currentDll = $null
@@ -33,7 +33,7 @@ function ConvertFrom-DumpbinImports {
 }
 
 function ConvertFrom-DumpbinExports {
-  param([Parameter(Mandatory)][string[]]$Lines)
+  param([Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines)
 
   $exports = [System.Collections.Generic.List[object]]::new()
   foreach ($line in $Lines) {
@@ -57,7 +57,7 @@ function ConvertFrom-DumpbinExports {
 }
 
 function Find-DumpbinExport {
-  param([Parameter(Mandatory)][object[]]$Exports, [Parameter(Mandatory)][object]$Import)
+  param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Exports, [Parameter(Mandatory)][object]$Import)
 
   # Windows export names are matched case-sensitively, so use -ceq for names.
   if ($Import.Kind -eq 'Ordinal') {
