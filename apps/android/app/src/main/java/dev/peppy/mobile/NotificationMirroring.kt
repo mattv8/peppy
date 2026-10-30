@@ -160,6 +160,7 @@ class NotificationMirrorService : NotificationListenerService() {
     private val pending = ConcurrentHashMap<String, NotificationExtraction.Captured>()
     private val callbacks = ConcurrentHashMap<String, Runnable>()
     private val observed = ConcurrentHashMap<String, ObservedNotificationApp>()
+    @Volatile private var phoneReadCallback: Runnable? = null
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         handler.post { capturePosted(sbn, null) }
@@ -170,6 +171,9 @@ class NotificationMirrorService : NotificationListenerService() {
     }
 
     private fun capturePosted(sbn: StatusBarNotification, rankingMap: RankingMap?) {
+        // Default-SMS notifications remain excluded from mirroring, but can wake the separate
+        // local effect runner. This runs on the listener handler, never the main thread.
+        if (phoneReadPendingHint && sbn.packageName == defaultSmsPackage()) schedulePhoneReads()
         val capture = NotificationExtraction.extract(applicationContext, sbn, isSilent(sbn, rankingMap)) ?: return
         observed[capture.packageName] = ObservedNotificationApp(capture.packageName, capture.appName)
         if (!permitted(capture.isSilent)) return
@@ -222,7 +226,35 @@ class NotificationMirrorService : NotificationListenerService() {
             NativeGateway.session(applicationContext) != null
     }
 
+    private fun defaultSmsPackage(): String? = try { android.provider.Telephony.Sms.getDefaultSmsPackage(this) } catch (_: Exception) { null }
+
+    private fun schedulePhoneReads() {
+        phoneReadCallback?.let(handler::removeCallbacks)
+        Runnable { phoneReadCallback = null; runPhoneReadsNow() }.also {
+            phoneReadCallback = it
+            handler.postDelayed(it, COALESCE_MS)
+        }
+    }
+
+    private fun runPhoneReadsNow() {
+        if (connected !== this || !NotificationMirrorAccess.granted(this)) return
+        val session = NativeGateway.session(applicationContext) ?: return
+        try {
+            phoneReadPendingHint = PhoneReadEffects(
+                applicationContext,
+                NativePhoneReadCore(applicationContext, session.client),
+                AndroidPhoneReadProvider(applicationContext),
+                AndroidPhoneReadNotifications(this),
+            ).run()
+        } catch (_: RuntimeException) {
+            // Provider/notification adapters and native calls are fail-closed; retain the wake hint.
+            phoneReadPendingHint = true
+        }
+    }
+
     internal fun observedApps(): List<ObservedNotificationApp> = observed.values.sortedBy { it.label.lowercase() }
+
+    internal fun currentNotifications(): Array<StatusBarNotification>? = try { activeNotifications } catch (_: SecurityException) { null }
 
     internal fun applyDismissals(): Int {
         if (!NotificationMirrorAccess.granted(this)) return 0
@@ -250,13 +282,23 @@ class NotificationMirrorService : NotificationListenerService() {
     private fun dismissalPermitted(): Boolean =
         GatewayPolicyHost(this).decision(notificationIsSilent = false)?.captureNotification == true
 
-    private fun clearPending() { pending.clear(); callbacks.values.forEach(handler::removeCallbacks); callbacks.clear() }
-    override fun onDestroy() { if (connected === this) connected = null; clearPending(); worker.quitSafely(); super.onDestroy() }
+    private fun clearPending() {
+        pending.clear(); callbacks.values.forEach(handler::removeCallbacks); callbacks.clear()
+        phoneReadCallback?.let(handler::removeCallbacks); phoneReadCallback = null
+    }
+    override fun onDestroy() { if (connected === this) { connected = null; phoneReadPendingHint = false }; clearPending(); worker.quitSafely(); super.onDestroy() }
 
     companion object {
         private const val COALESCE_MS = 2_000L
         @Volatile private var connected: NotificationMirrorService? = null
+        @Volatile private var phoneReadPendingHint = false
         fun runPendingDismissals(): Int = connected?.applyDismissals() ?: 0
+        fun runPhoneReads() {
+            val service = connected ?: return
+            service.handler.post {
+                if (connected === service) service.runPhoneReadsNow()
+            }
+        }
         fun observedApps(): List<ObservedNotificationApp> = connected?.observedApps().orEmpty()
         fun reconcile() { connected?.reconcile() }
         fun clearPendingCaptures() { connected?.clearPending() }
@@ -302,6 +344,6 @@ class NotificationMirrorService : NotificationListenerService() {
         val ranking = Ranking()
         return rankings?.getRanking(sbn.key, ranking) == true && ranking.importance <= NotificationManager.IMPORTANCE_LOW
     }
-    override fun onListenerDisconnected() { clearPending(); connected = null; super.onListenerDisconnected() }
+    override fun onListenerDisconnected() { clearPending(); connected = null; phoneReadPendingHint = false; super.onListenerDisconnected() }
     override fun onListenerConnected() { connected = this; super.onListenerConnected(); reconcile() }
 }

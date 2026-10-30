@@ -94,6 +94,7 @@ fn gateway_settings_defaults_persist_and_gate_host_facts() {
             sms_sync_enabled: false,
             mms_sync_enabled: true,
             media_wifi_only: true,
+            phone_read_enabled: false,
         })
         .unwrap();
     let decision = client
@@ -150,6 +151,76 @@ fn policy_is_not_a_destructive_sms_operation() {
 }
 
 #[test]
+fn phone_read_capability_and_policy_follow_the_platform_and_sms_truth_table() {
+    for (platform, facts, supported) in [
+        (
+            GatewayPlatform::Android,
+            GatewayHostFacts {
+                sms_available: true,
+                phone_read_available: true,
+                ..GatewayHostFacts::default()
+            },
+            true,
+        ),
+        (
+            GatewayPlatform::Android,
+            GatewayHostFacts {
+                phone_read_available: true,
+                ..GatewayHostFacts::default()
+            },
+            false,
+        ),
+        (
+            GatewayPlatform::Ios,
+            GatewayHostFacts {
+                sms_available: true,
+                phone_read_available: true,
+                ..GatewayHostFacts::default()
+            },
+            false,
+        ),
+    ] {
+        assert_eq!(
+            Client::gateway_capabilities(platform, facts).phone_read_supported,
+            supported
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let client = open(&config(&dir, "phone-read-policy", &vault));
+    let facts = GatewayHostFacts {
+        sms_available: true,
+        phone_read_available: true,
+        ..GatewayHostFacts::default()
+    };
+    let mut settings = client.gateway_settings().unwrap();
+    settings.phone_read_enabled = true;
+    client.set_gateway_settings(settings.clone()).unwrap();
+    assert!(
+        client
+            .gateway_policy_decision(GatewayPlatform::Android, facts)
+            .unwrap()
+            .apply_phone_read
+    );
+
+    settings.sms_sync_enabled = false;
+    client.set_gateway_settings(settings.clone()).unwrap();
+    assert!(
+        !client
+            .gateway_policy_decision(GatewayPlatform::Android, facts)
+            .unwrap()
+            .apply_phone_read
+    );
+    assert!(
+        !client
+            .gateway_policy_decision(GatewayPlatform::Ios, facts)
+            .unwrap()
+            .apply_phone_read
+    );
+}
+
+#[test]
 fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::new();
@@ -197,7 +268,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 39);
+    assert_eq!(version, 40);
     assert_eq!(status, (42, "sent".into(), None));
 }
 

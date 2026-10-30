@@ -246,6 +246,7 @@ internal fun SmsTab(
             if (actualCapture) resultHint?.let { Text(it, Modifier.testTag("sms-action-error")) }
          }
          MmsSettings(context, refresh, databaseOpen, onChanged)
+         PhoneReadSettings(context, refresh, onChanged)
          Section("battery-section", stringResource(R.string.peppy_toggle_android_background_sync), showDivider = false) {
              BatteryOptimizationRow(context)
          }

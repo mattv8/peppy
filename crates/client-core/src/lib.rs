@@ -48,6 +48,7 @@ mod mms;
 mod mms_backfill;
 mod mms_identity;
 mod notifications;
+mod phone_read;
 mod sms_acquisition;
 mod sms_reconciliation;
 mod snapshot_projection;
@@ -91,6 +92,7 @@ pub use peppy_protocol::{
     CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, GatewayRoute,
 };
 use peppy_protocol::{MAX_CIPHERTEXT_BYTES, MAX_COMPACTION_SUPERSEDES, PROTOCOL_VERSION};
+pub use phone_read::{PHONE_READ_EFFECT_TTL_MS, PhoneReadEffect, ProviderRowRef};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -104,7 +106,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 39;
+const SCHEMA_VERSION: i64 = 40;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1451,6 +1453,7 @@ impl Client {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         set_meta(&tx, "active_epoch", &epoch.to_string())?;
+        phone_read::retire_all_phone_read_effects(&tx)?;
         let retired: Vec<String> = {
             let mut query = tx.prepare(
                 "SELECT l.command_id FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id
@@ -3190,6 +3193,7 @@ impl Client {
             return Ok(false);
         }
         record_seen(&tx, message_id)?;
+        phone_read::enqueue_phone_read_effect_tx(&tx, message_id, notifications::now_ms())?;
         enqueue(
             &tx,
             &ctx,
@@ -3251,6 +3255,7 @@ impl Client {
         }
         for message_id in &unread {
             record_seen(&tx, *message_id)?;
+            phone_read::enqueue_phone_read_effect_tx(&tx, *message_id, notifications::now_ms())?;
             enqueue_without_sealing(
                 &tx,
                 &ctx,
@@ -3854,6 +3859,7 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        phone_read::retire_all_phone_read_effects(&tx)?;
         mms_backfill::record_snapshot_capacity(&tx, high_water.0, record_count)?;
         if active_generation(&tx)?.is_some_and(|g| g.published) {
             return Err(Error::InvalidRequest(
@@ -4112,7 +4118,14 @@ impl Client {
     /// attempts still report their state. Recovery is re-enrollment with a fresh device
     /// identity and database plus explicit reconciliation; there is intentionally no clear.
     pub fn mark_restored_gateway(&self) -> Result<(), Error> {
-        set_meta(&self.lock()?.conn, "restore_guard", "1")
+        let mut store = self.lock()?;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        phone_read::retire_all_phone_read_effects(&tx)?;
+        set_meta(&tx, "restore_guard", "1")?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn restore_guarded(&self) -> Result<bool, Error> {
@@ -5159,6 +5172,23 @@ CREATE TABLE IF NOT EXISTS notification_preferences(id INTEGER PRIMARY KEY CHECK
   logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
   producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
 ";
+const MIGRATION_40: &str = "
+CREATE TABLE IF NOT EXISTS phone_read_effects(message_id TEXT PRIMARY KEY, source_generation TEXT NOT NULL,
+  subscription_id TEXT NOT NULL, provider_message_id TEXT NOT NULL, provider_thread_id TEXT NOT NULL,
+  provider_date_ms INTEGER NOT NULL, source_row_fingerprint TEXT NOT NULL, created_at_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS phone_read_effects_created ON phone_read_effects(created_at_ms);
+CREATE TABLE IF NOT EXISTS phone_read_effect_terminals(message_id TEXT PRIMARY KEY);
+";
+
+fn apply_migration_40(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(
+        conn,
+        "gateway_settings",
+        "phone_read_enabled INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute_batch(MIGRATION_40)?;
+    Ok(())
+}
 
 fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
     let column = definition
@@ -5268,6 +5298,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_37)?;
             tx.execute_batch(MIGRATION_38)?;
             tx.execute_batch(MIGRATION_39)?;
+            apply_migration_40(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5276,7 +5307,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=38)) => {
+        Some(version @ (4..=39)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5381,6 +5412,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 38 {
                 tx.execute_batch(MIGRATION_39)?;
+            }
+            if version <= 39 {
+                apply_migration_40(&tx)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -6090,7 +6124,20 @@ fn apply_record(
             )?;
         }
         (EnvelopePurpose::Event, PrivatePayload::ReadState { message_id }) => {
+            let already_seen: bool = conn
+                .query_row(
+                    "SELECT seen FROM messages WHERE id=?",
+                    params![message_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(true);
             record_seen(conn, message_id)?;
+            // Read state from an inactive epoch remains historical message state, but must not
+            // create a current-device carrier side effect after a cutover.
+            if !historical && !already_seen && ctx.active_epoch == Some(envelope.key_epoch) {
+                phone_read::enqueue_phone_read_effect(conn, message_id, notifications::now_ms())?;
+            }
         }
         (
             EnvelopePurpose::Event,

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.Build
 import androidx.core.content.ContextCompat
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeGatewayHostFacts
@@ -37,6 +38,10 @@ class GatewayPolicyHost(private val context: Context) {
     var mediaWifiOnly: Boolean
         get() = settings()?.mediaWifiOnly ?: true
         set(value) = update { it.mediaWifiOnly = value }
+    /** A missing core session is not equivalent to the setting being off. */
+    fun phoneReadEnabledOrNull(): Boolean? = settings()?.phoneReadEnabled
+
+    fun setPhoneReadEnabled(value: Boolean) = update { it.phoneReadEnabled = value }
 
     fun decision(notificationIsSilent: Boolean = false, smsAvailable: Boolean = hasReceiveSmsPermission()): NativeGatewayPolicyDecision? {
         val client = NativeGateway.open(appContext) ?: return null
@@ -49,6 +54,9 @@ class GatewayPolicyHost(private val context: Context) {
                     NotificationMirrorAccess.granted(appContext),
                     smsAvailable,
                     notificationIsSilent,
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                        NotificationMirrorAccess.granted(appContext) &&
+                        hasReadSmsPermission(),
                 ),
             )
         } catch (_: MobileBindingsException) {
@@ -101,6 +109,8 @@ class GatewayPolicyHost(private val context: Context) {
     }
 
     private fun hasReceiveSmsPermission() = ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasReadSmsPermission() = ContextCompat.checkSelfPermission(appContext, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
 
     companion object {
         private const val LEGACY_MIRROR_NAME = "peppy-notification-mirroring"

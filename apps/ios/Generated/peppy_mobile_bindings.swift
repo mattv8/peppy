@@ -680,11 +680,15 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func completeNotificationDismissal(id: String) throws 
     
+    func completePhoneReadEffects(messageIds: [String]) throws 
+    
     func completeSmsAcquisition(id: String) throws  -> NativeCaptured
     
     func completeSmsReconciliation(sourceGeneration: String, providerScope: String, upperBound: String, cursor: String?, exhausted: Bool) throws 
     
     func composeDrafts() throws  -> [NativeComposeDraft]
+    
+    func consumePhoneReadEffects(messageIds: [String], rows: [NativeProviderRowRef], nowMs: Int64) throws  -> UInt32
     
     func contactApplyEvidenceJson(inputJson: String) throws  -> String
     
@@ -886,6 +890,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func pendingOutboxJsonBatch(limit: UInt64) throws  -> [String]
     
+    func pendingPhoneReadEffects(nowMs: Int64, limit: UInt32) throws  -> [NativePhoneReadEffect]
+    
     func pendingUploads() throws  -> [NativeCipherObject]
     
     func planMmsBackfillScans(generation: String, scope: String, observedMaxId: String) throws  -> [NativeMmsBackfillScanPlan]
@@ -993,6 +999,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func smsAcquisitionsAfter(afterId: String?, limit: UInt64) throws  -> [NativeSmsAcquisition]
     
     func smsHistoryStatus(sourceGeneration: String, providerScope: String) throws  -> NativeSmsHistoryStatus
+    
+    func smsProviderRowsSeen(rows: [NativeProviderRowRef]) throws  -> Bool
     
     func smsScanStatus(sourceGeneration: String, subscriptionId: String, imported: Bool) throws  -> NativeSmsScanStatus
     
@@ -1351,6 +1359,15 @@ open func completeNotificationDismissal(id: String)throws   {try rustCallWithErr
 }
 }
     
+open func completePhoneReadEffects(messageIds: [String])throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_phone_read_effects(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(messageIds),uniffiCallStatus
+    )
+}
+}
+    
 open func completeSmsAcquisition(id: String)throws  -> NativeCaptured  {
     return try  FfiConverterTypeNativeCaptured_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1379,6 +1396,18 @@ open func composeDrafts()throws  -> [NativeComposeDraft]  {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_compose_drafts(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func consumePhoneReadEffects(messageIds: [String], rows: [NativeProviderRowRef], nowMs: Int64)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_consume_phone_read_effects(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(messageIds),
+        FfiConverterSequenceTypeNativeProviderRowRef.lower(rows),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 })
 }
@@ -2113,6 +2142,17 @@ open func pendingOutboxJsonBatch(limit: UInt64)throws  -> [String]  {
 })
 }
     
+open func pendingPhoneReadEffects(nowMs: Int64, limit: UInt32)throws  -> [NativePhoneReadEffect]  {
+    return try  FfiConverterSequenceTypeNativePhoneReadEffect.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_phone_read_effects(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),
+        FfiConverterUInt32.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
 open func pendingUploads()throws  -> [NativeCipherObject]  {
     return try  FfiConverterSequenceTypeNativeCipherObject.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2621,6 +2661,16 @@ open func smsHistoryStatus(sourceGeneration: String, providerScope: String)throw
             self.uniffiCloneHandle(),
         FfiConverterString.lower(sourceGeneration),
         FfiConverterString.lower(providerScope),uniffiCallStatus
+    )
+})
+}
+    
+open func smsProviderRowsSeen(rows: [NativeProviderRowRef])throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_provider_rows_seen(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeNativeProviderRowRef.lower(rows),uniffiCallStatus
     )
 })
 }
@@ -4844,14 +4894,16 @@ public struct NativeGatewayCapabilities: Equatable, Hashable {
     public var smsSyncSupported: Bool
     public var mmsSyncSupported: Bool
     public var rcsSupported: Bool
+    public var phoneReadSupported: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(notificationMirroringSupported: Bool, smsSyncSupported: Bool, mmsSyncSupported: Bool, rcsSupported: Bool) {
+    public init(notificationMirroringSupported: Bool, smsSyncSupported: Bool, mmsSyncSupported: Bool, rcsSupported: Bool, phoneReadSupported: Bool) {
         self.notificationMirroringSupported = notificationMirroringSupported
         self.smsSyncSupported = smsSyncSupported
         self.mmsSyncSupported = mmsSyncSupported
         self.rcsSupported = rcsSupported
+        self.phoneReadSupported = phoneReadSupported
     }
 
     
@@ -4873,7 +4925,8 @@ public struct FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer 
                 notificationMirroringSupported: FfiConverterBool.read(from: &buf), 
                 smsSyncSupported: FfiConverterBool.read(from: &buf), 
                 mmsSyncSupported: FfiConverterBool.read(from: &buf), 
-                rcsSupported: FfiConverterBool.read(from: &buf)
+                rcsSupported: FfiConverterBool.read(from: &buf), 
+                phoneReadSupported: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -4882,6 +4935,7 @@ public struct FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer 
         FfiConverterBool.write(value.smsSyncSupported, into: &buf)
         FfiConverterBool.write(value.mmsSyncSupported, into: &buf)
         FfiConverterBool.write(value.rcsSupported, into: &buf)
+        FfiConverterBool.write(value.phoneReadSupported, into: &buf)
     }
 }
 
@@ -4906,14 +4960,16 @@ public struct NativeGatewayHostFacts: Equatable, Hashable {
     public var notificationListenerAvailable: Bool
     public var smsAvailable: Bool
     public var notificationIsSilent: Bool
+    public var phoneReadAvailable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(wifiConnected: Bool, notificationListenerAvailable: Bool, smsAvailable: Bool, notificationIsSilent: Bool) {
+    public init(wifiConnected: Bool, notificationListenerAvailable: Bool, smsAvailable: Bool, notificationIsSilent: Bool, phoneReadAvailable: Bool) {
         self.wifiConnected = wifiConnected
         self.notificationListenerAvailable = notificationListenerAvailable
         self.smsAvailable = smsAvailable
         self.notificationIsSilent = notificationIsSilent
+        self.phoneReadAvailable = phoneReadAvailable
     }
 
     
@@ -4935,7 +4991,8 @@ public struct FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer {
                 wifiConnected: FfiConverterBool.read(from: &buf), 
                 notificationListenerAvailable: FfiConverterBool.read(from: &buf), 
                 smsAvailable: FfiConverterBool.read(from: &buf), 
-                notificationIsSilent: FfiConverterBool.read(from: &buf)
+                notificationIsSilent: FfiConverterBool.read(from: &buf), 
+                phoneReadAvailable: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -4944,6 +5001,7 @@ public struct FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer {
         FfiConverterBool.write(value.notificationListenerAvailable, into: &buf)
         FfiConverterBool.write(value.smsAvailable, into: &buf)
         FfiConverterBool.write(value.notificationIsSilent, into: &buf)
+        FfiConverterBool.write(value.phoneReadAvailable, into: &buf)
     }
 }
 
@@ -5030,15 +5088,17 @@ public struct NativeGatewayPolicyDecision: Equatable, Hashable {
     public var captureMms: Bool
     public var transferMedia: Bool
     public var rcsSupported: Bool
+    public var applyPhoneRead: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(captureNotification: Bool, captureSms: Bool, captureMms: Bool, transferMedia: Bool, rcsSupported: Bool) {
+    public init(captureNotification: Bool, captureSms: Bool, captureMms: Bool, transferMedia: Bool, rcsSupported: Bool, applyPhoneRead: Bool) {
         self.captureNotification = captureNotification
         self.captureSms = captureSms
         self.captureMms = captureMms
         self.transferMedia = transferMedia
         self.rcsSupported = rcsSupported
+        self.applyPhoneRead = applyPhoneRead
     }
 
     
@@ -5061,7 +5121,8 @@ public struct FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
                 captureSms: FfiConverterBool.read(from: &buf), 
                 captureMms: FfiConverterBool.read(from: &buf), 
                 transferMedia: FfiConverterBool.read(from: &buf), 
-                rcsSupported: FfiConverterBool.read(from: &buf)
+                rcsSupported: FfiConverterBool.read(from: &buf), 
+                applyPhoneRead: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5071,6 +5132,7 @@ public struct FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
         FfiConverterBool.write(value.captureMms, into: &buf)
         FfiConverterBool.write(value.transferMedia, into: &buf)
         FfiConverterBool.write(value.rcsSupported, into: &buf)
+        FfiConverterBool.write(value.applyPhoneRead, into: &buf)
     }
 }
 
@@ -5101,16 +5163,18 @@ public struct NativeGatewaySettings: Equatable, Hashable {
     public var smsSyncEnabled: Bool
     public var mmsSyncEnabled: Bool
     public var mediaWifiOnly: Bool
+    public var phoneReadEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mirroringEnabled: Bool, mirroringWifiOnly: Bool, skipSilent: Bool, smsSyncEnabled: Bool, mmsSyncEnabled: Bool, mediaWifiOnly: Bool) {
+    public init(mirroringEnabled: Bool, mirroringWifiOnly: Bool, skipSilent: Bool, smsSyncEnabled: Bool, mmsSyncEnabled: Bool, mediaWifiOnly: Bool, phoneReadEnabled: Bool) {
         self.mirroringEnabled = mirroringEnabled
         self.mirroringWifiOnly = mirroringWifiOnly
         self.skipSilent = skipSilent
         self.smsSyncEnabled = smsSyncEnabled
         self.mmsSyncEnabled = mmsSyncEnabled
         self.mediaWifiOnly = mediaWifiOnly
+        self.phoneReadEnabled = phoneReadEnabled
     }
 
     
@@ -5134,7 +5198,8 @@ public struct FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer {
                 skipSilent: FfiConverterBool.read(from: &buf), 
                 smsSyncEnabled: FfiConverterBool.read(from: &buf), 
                 mmsSyncEnabled: FfiConverterBool.read(from: &buf), 
-                mediaWifiOnly: FfiConverterBool.read(from: &buf)
+                mediaWifiOnly: FfiConverterBool.read(from: &buf), 
+                phoneReadEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5145,6 +5210,7 @@ public struct FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer {
         FfiConverterBool.write(value.smsSyncEnabled, into: &buf)
         FfiConverterBool.write(value.mmsSyncEnabled, into: &buf)
         FfiConverterBool.write(value.mediaWifiOnly, into: &buf)
+        FfiConverterBool.write(value.phoneReadEnabled, into: &buf)
     }
 }
 
@@ -7230,6 +7296,130 @@ public func FfiConverterTypeNativePermit_lift(_ buf: RustBuffer) throws -> Nativ
 #endif
 public func FfiConverterTypeNativePermit_lower(_ value: NativePermit) -> RustBuffer {
     return FfiConverterTypeNativePermit.lower(value)
+}
+
+
+public struct NativePhoneReadEffect: Equatable, Hashable {
+    public var messageId: String
+    public var row: NativeProviderRowRef
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(messageId: String, row: NativeProviderRowRef) {
+        self.messageId = messageId
+        self.row = row
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativePhoneReadEffect: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePhoneReadEffect: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePhoneReadEffect {
+        return
+            try NativePhoneReadEffect(
+                messageId: FfiConverterString.read(from: &buf), 
+                row: FfiConverterTypeNativeProviderRowRef.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativePhoneReadEffect, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterTypeNativeProviderRowRef.write(value.row, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePhoneReadEffect_lift(_ buf: RustBuffer) throws -> NativePhoneReadEffect {
+    return try FfiConverterTypeNativePhoneReadEffect.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePhoneReadEffect_lower(_ value: NativePhoneReadEffect) -> RustBuffer {
+    return FfiConverterTypeNativePhoneReadEffect.lower(value)
+}
+
+
+public struct NativeProviderRowRef: Equatable, Hashable {
+    public var sourceGeneration: String
+    public var subscriptionId: String
+    public var providerMessageId: String
+    public var providerThreadId: String
+    public var providerDateMs: Int64
+    public var sourceRowFingerprint: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sourceGeneration: String, subscriptionId: String, providerMessageId: String, providerThreadId: String, providerDateMs: Int64, sourceRowFingerprint: String) {
+        self.sourceGeneration = sourceGeneration
+        self.subscriptionId = subscriptionId
+        self.providerMessageId = providerMessageId
+        self.providerThreadId = providerThreadId
+        self.providerDateMs = providerDateMs
+        self.sourceRowFingerprint = sourceRowFingerprint
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeProviderRowRef: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeProviderRowRef: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeProviderRowRef {
+        return
+            try NativeProviderRowRef(
+                sourceGeneration: FfiConverterString.read(from: &buf), 
+                subscriptionId: FfiConverterString.read(from: &buf), 
+                providerMessageId: FfiConverterString.read(from: &buf), 
+                providerThreadId: FfiConverterString.read(from: &buf), 
+                providerDateMs: FfiConverterInt64.read(from: &buf), 
+                sourceRowFingerprint: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeProviderRowRef, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sourceGeneration, into: &buf)
+        FfiConverterString.write(value.subscriptionId, into: &buf)
+        FfiConverterString.write(value.providerMessageId, into: &buf)
+        FfiConverterString.write(value.providerThreadId, into: &buf)
+        FfiConverterInt64.write(value.providerDateMs, into: &buf)
+        FfiConverterString.write(value.sourceRowFingerprint, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeProviderRowRef_lift(_ buf: RustBuffer) throws -> NativeProviderRowRef {
+    return try FfiConverterTypeNativeProviderRowRef.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeProviderRowRef_lower(_ value: NativeProviderRowRef) -> RustBuffer {
+    return FfiConverterTypeNativeProviderRowRef.lower(value)
 }
 
 
@@ -10877,6 +11067,56 @@ fileprivate struct FfiConverterSequenceTypeNativeNotificationTarget: FfiConverte
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNativePhoneReadEffect: FfiConverterRustBuffer {
+    typealias SwiftType = [NativePhoneReadEffect]
+
+    public static func write(_ value: [NativePhoneReadEffect], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativePhoneReadEffect.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativePhoneReadEffect] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativePhoneReadEffect]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativePhoneReadEffect.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeNativeProviderRowRef: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeProviderRowRef]
+
+    public static func write(_ value: [NativeProviderRowRef], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeProviderRowRef.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeProviderRowRef] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeProviderRowRef]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeProviderRowRef.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverterRustBuffer {
     typealias SwiftType = [NativeRawSnapshotRecord]
 
@@ -11303,6 +11543,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_notification_dismissal() != 45632) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_phone_read_effects() != 18468) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_acquisition() != 6650) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11310,6 +11553,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compose_drafts() != 45000) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_consume_phone_read_effects() != 12647) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_apply_evidence_json() != 47978) {
@@ -11513,6 +11759,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_outbox_json_batch() != 2130) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_phone_read_effects() != 55700) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads() != 38265) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11649,6 +11898,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_history_status() != 46876) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_provider_rows_seen() != 10168) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_scan_status() != 26765) {

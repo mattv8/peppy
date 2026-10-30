@@ -16,6 +16,7 @@ pub struct GatewaySettings {
     pub sms_sync_enabled: bool,
     pub mms_sync_enabled: bool,
     pub media_wifi_only: bool,
+    pub phone_read_enabled: bool,
 }
 
 impl Default for GatewaySettings {
@@ -27,6 +28,7 @@ impl Default for GatewaySettings {
             sms_sync_enabled: true,
             mms_sync_enabled: true,
             media_wifi_only: true,
+            phone_read_enabled: false,
         }
     }
 }
@@ -37,6 +39,7 @@ pub struct GatewayHostFacts {
     pub notification_listener_available: bool,
     pub sms_available: bool,
     pub notification_is_silent: bool,
+    pub phone_read_available: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +48,7 @@ pub struct GatewayCapabilities {
     pub sms_sync_supported: bool,
     pub mms_sync_supported: bool,
     pub rcs_supported: bool,
+    pub phone_read_supported: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +58,7 @@ pub struct GatewayPolicyDecision {
     pub capture_mms: bool,
     pub transfer_media: bool,
     pub rcs_supported: bool,
+    pub apply_phone_read: bool,
 }
 
 impl Client {
@@ -68,6 +73,9 @@ impl Client {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         save(&tx, &settings)?;
+        if !settings.phone_read_enabled {
+            super::phone_read::retire_all_phone_read_effects(&tx)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -84,6 +92,7 @@ impl Client {
             mms_sync_supported: carrier_supported,
             // Neither host has a legitimate general RCS integration.
             rcs_supported: false,
+            phone_read_supported: carrier_supported && facts.phone_read_available,
         }
     }
 
@@ -108,6 +117,9 @@ impl Client {
             // Media transfer is separately gated; acquisition and SMS text capture are not.
             transfer_media: !settings.media_wifi_only || facts.wifi_connected,
             rcs_supported: capabilities.rcs_supported,
+            apply_phone_read: settings.phone_read_enabled
+                && capabilities.phone_read_supported
+                && settings.sms_sync_enabled,
         })
     }
 }
@@ -136,19 +148,20 @@ pub(super) fn seed(conn: &Connection, legacy_enabled_installation: bool) -> Resu
 
 fn load(conn: &Connection) -> Result<GatewaySettings, Error> {
     conn.query_row(
-        "SELECT mirroring_enabled,mirroring_wifi_only,skip_silent,sms_sync_enabled,mms_sync_enabled,media_wifi_only FROM gateway_settings WHERE id=1",
+        "SELECT mirroring_enabled,mirroring_wifi_only,skip_silent,sms_sync_enabled,mms_sync_enabled,media_wifi_only,phone_read_enabled FROM gateway_settings WHERE id=1",
         [],
         |r| Ok(GatewaySettings {
             mirroring_enabled: r.get(0)?, mirroring_wifi_only: r.get(1)?, skip_silent: r.get(2)?,
             sms_sync_enabled: r.get(3)?, mms_sync_enabled: r.get(4)?, media_wifi_only: r.get(5)?,
+            phone_read_enabled: r.get(6)?,
         }),
     ).map_err(Into::into)
 }
 
 fn save(conn: &Connection, settings: &GatewaySettings) -> Result<(), Error> {
     conn.execute(
-        "UPDATE gateway_settings SET mirroring_enabled=?,mirroring_wifi_only=?,skip_silent=?,sms_sync_enabled=?,mms_sync_enabled=?,media_wifi_only=? WHERE id=1",
-        params![settings.mirroring_enabled, settings.mirroring_wifi_only, settings.skip_silent, settings.sms_sync_enabled, settings.mms_sync_enabled, settings.media_wifi_only],
+        "UPDATE gateway_settings SET mirroring_enabled=?,mirroring_wifi_only=?,skip_silent=?,sms_sync_enabled=?,mms_sync_enabled=?,media_wifi_only=?,phone_read_enabled=? WHERE id=1",
+        params![settings.mirroring_enabled, settings.mirroring_wifi_only, settings.skip_silent, settings.sms_sync_enabled, settings.mms_sync_enabled, settings.media_wifi_only, settings.phone_read_enabled],
     )?;
     Ok(())
 }
