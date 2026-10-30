@@ -1,8 +1,10 @@
 use super::*;
 
 pub const PHONE_READ_EFFECT_TTL_MS: i64 = 86_400_000;
+const PHONE_READ_BATCH_MAX: usize = 100;
 const PHONE_READ_ENABLED_SQL: &str =
     "SELECT phone_read_enabled AND sms_sync_enabled FROM gateway_settings WHERE id=1";
+const PHONE_READ_INGEST_ENABLED_SQL: &str = "SELECT phone_read_enabled AND sms_sync_enabled AND (?='sms' OR mms_sync_enabled) FROM gateway_settings WHERE id=1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderRowRef {
@@ -14,6 +16,23 @@ pub struct ProviderRowRef {
     pub source_row_fingerprint: String,
 }
 
+/// The Android provider namespace that supplied a phone-read observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneReadTransport {
+    Sms,
+    Mms,
+}
+
+/// A locally acquired incoming message that Android may reconcile with a provider `read=1` row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhoneReadCandidate {
+    pub message_id: MessageId,
+    pub transport: PhoneReadTransport,
+    pub local_order: i64,
+    pub row: ProviderRowRef,
+    pub transaction_id: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhoneReadEffect {
     pub message_id: MessageId,
@@ -21,6 +40,115 @@ pub struct PhoneReadEffect {
 }
 
 impl Client {
+    /// Lists bounded, exact incoming acquisition evidence for Android's read-only provider scan.
+    pub fn phone_read_candidates(
+        &self,
+        transport: PhoneReadTransport,
+        source_generation: &str,
+        after_order: i64,
+        limit: u32,
+    ) -> Result<Vec<PhoneReadCandidate>, Error> {
+        if after_order < 0 {
+            return Err(Error::InvalidRequest(
+                "phone-read cursor must not be negative",
+            ));
+        }
+        let store = self.lock()?;
+        if restore_guarded(&store.conn)?
+            || store
+                .active_epoch
+                .is_none_or(|epoch| !store.keys.contains_key(&epoch))
+        {
+            return Ok(Vec::new());
+        }
+        if !phone_read_ingest_enabled(&store.conn, transport)? {
+            return Ok(Vec::new());
+        }
+        let limit = i64::from(limit.min(PHONE_READ_BATCH_MAX as u32));
+        let query = match transport {
+            PhoneReadTransport::Sms => {
+                "SELECT a.message_id,a.local_order,a.source_generation,a.subscription_id,a.provider_message_id,COALESCE(json_extract(a.input,'$.source.provider_thread_id'),''),json_extract(a.input,'$.sent_at_ms'),a.source_row_fingerprint FROM sms_acquisitions a JOIN messages m ON m.id=a.message_id WHERE a.source_generation=? AND a.local_order>? AND m.seen=0 AND a.direction='incoming' AND a.state='complete' AND json_extract(a.input,'$.imported')=0 AND json_extract(a.input,'$.sent_at_ms')>0 AND COALESCE(json_extract(a.input,'$.source.provider_thread_id'),'')!='' ORDER BY a.local_order LIMIT ?"
+            }
+            PhoneReadTransport::Mms => {
+                "SELECT a.message_id,a.local_order,a.source_generation,a.subscription_id,a.provider_message_id,COALESCE(json_extract(a.input,'$.source.provider_thread_id'),''),json_extract(a.input,'$.observed_at_ms'),json_extract(a.input,'$.transaction_id') FROM mms_acquisitions a JOIN messages m ON m.id=a.message_id WHERE a.source_generation=? AND a.local_order>? AND m.seen=0 AND a.direction='incoming' AND a.state='complete' AND json_extract(a.input,'$.imported')=0 AND json_extract(a.input,'$.observed_at_ms')>0 AND COALESCE(json_extract(a.input,'$.source.provider_thread_id'),'')!='' ORDER BY a.local_order LIMIT ?"
+            }
+        };
+        let mut statement = store.conn.prepare(query)?;
+        statement
+            .query_map(params![source_generation, after_order, limit], |row| {
+                Ok(PhoneReadCandidate {
+                    message_id: parse(&row.get::<_, String>(0)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    transport,
+                    local_order: row.get(1)?,
+                    row: ProviderRowRef {
+                        source_generation: row.get(2)?,
+                        subscription_id: row.get(3)?,
+                        provider_message_id: row.get(4)?,
+                        provider_thread_id: row.get(5)?,
+                        provider_date_ms: row.get(6)?,
+                        source_row_fingerprint: match transport {
+                            PhoneReadTransport::Sms => row.get(7)?,
+                            PhoneReadTransport::Mms => String::new(),
+                        },
+                    },
+                    transaction_id: match transport {
+                        PhoneReadTransport::Sms => None,
+                        PhoneReadTransport::Mms => row.get(7)?,
+                    },
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Accepts only current acquisition evidence, then queues encrypted per-message read state.
+    /// This deliberately does not enqueue a local Peppy-to-phone effect.
+    pub fn apply_phone_reads(&self, candidates: &[PhoneReadCandidate]) -> Result<u32, Error> {
+        if candidates.len() > PHONE_READ_BATCH_MAX {
+            return Err(Error::InvalidRequest(
+                "phone-read batch exceeds the maximum size",
+            ));
+        }
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let mut store = self.lock()?;
+        let active_epoch_available = store
+            .active_epoch
+            .is_some_and(|epoch| store.keys.contains_key(&epoch));
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !active_epoch_available || restore_guarded(&tx)? {
+            tx.commit()?;
+            return Ok(0);
+        }
+        let mut applied = 0_u32;
+        for candidate in candidates {
+            if phone_read_candidate_current(&tx, candidate)?
+                && phone_read_ingest_enabled(&tx, candidate.transport)?
+            {
+                record_seen(&tx, candidate.message_id)?;
+                enqueue_without_sealing(
+                    &tx,
+                    &ctx,
+                    EnvelopePurpose::Event,
+                    None,
+                    None,
+                    &PrivatePayload::ReadState {
+                        message_id: candidate.message_id,
+                    },
+                )?;
+                applied += 1;
+            }
+        }
+        if applied > 0 {
+            seal_pending(&tx, &ctx, MAX_SEAL_BATCH)?;
+        }
+        tx.commit()?;
+        Ok(applied)
+    }
+
     pub fn pending_phone_read_effects(
         &self,
         now_ms: i64,
@@ -177,6 +305,77 @@ pub(crate) fn retire_all_phone_read_effects(tx: &rusqlite::Transaction<'_>) -> R
 fn phone_read_enabled(conn: &rusqlite::Transaction<'_>) -> Result<bool, Error> {
     conn.query_row(PHONE_READ_ENABLED_SQL, [], |row| row.get(0))
         .map_err(Into::into)
+}
+
+fn phone_read_ingest_enabled(
+    conn: &Connection,
+    transport: PhoneReadTransport,
+) -> Result<bool, Error> {
+    conn.query_row(
+        PHONE_READ_INGEST_ENABLED_SQL,
+        [match transport {
+            PhoneReadTransport::Sms => "sms",
+            PhoneReadTransport::Mms => "mms",
+        }],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn phone_read_candidate_current(
+    tx: &rusqlite::Transaction<'_>,
+    candidate: &PhoneReadCandidate,
+) -> Result<bool, Error> {
+    let row = &candidate.row;
+    if candidate.local_order <= 0
+        || row.provider_date_ms <= 0
+        || row.provider_thread_id.is_empty()
+        || (candidate.transport == PhoneReadTransport::Sms
+            && (row.source_row_fingerprint.is_empty() || candidate.transaction_id.is_some()))
+        || (candidate.transport == PhoneReadTransport::Mms
+            && !row.source_row_fingerprint.is_empty())
+    {
+        return Ok(false);
+    }
+    let sql = match candidate.transport {
+        PhoneReadTransport::Sms => {
+            "SELECT EXISTS(SELECT 1 FROM sms_acquisitions a JOIN messages m ON m.id=a.message_id WHERE a.message_id=? AND a.local_order=? AND a.source_generation=? AND a.subscription_id=? AND a.provider_message_id=? AND a.source_row_fingerprint=? AND a.direction='incoming' AND a.state='complete' AND json_extract(a.input,'$.imported')=0 AND json_extract(a.input,'$.sent_at_ms')=? AND COALESCE(json_extract(a.input,'$.source.provider_thread_id'),'')=? AND m.seen=0)"
+        }
+        PhoneReadTransport::Mms => {
+            "SELECT EXISTS(SELECT 1 FROM mms_acquisitions a JOIN messages m ON m.id=a.message_id WHERE a.message_id=? AND a.local_order=? AND a.source_generation=? AND a.subscription_id=? AND a.provider_message_id=? AND a.direction='incoming' AND a.state='complete' AND json_extract(a.input,'$.imported')=0 AND json_extract(a.input,'$.observed_at_ms')=? AND COALESCE(json_extract(a.input,'$.source.provider_thread_id'),'')=? AND json_extract(a.input,'$.transaction_id') IS ? AND m.seen=0)"
+        }
+    };
+    match candidate.transport {
+        PhoneReadTransport::Sms => tx.query_row(
+            sql,
+            params![
+                candidate.message_id.to_string(),
+                candidate.local_order,
+                row.source_generation,
+                row.subscription_id,
+                row.provider_message_id,
+                row.source_row_fingerprint,
+                row.provider_date_ms,
+                row.provider_thread_id
+            ],
+            |result| result.get(0),
+        ),
+        PhoneReadTransport::Mms => tx.query_row(
+            sql,
+            params![
+                candidate.message_id.to_string(),
+                candidate.local_order,
+                row.source_generation,
+                row.subscription_id,
+                row.provider_message_id,
+                row.provider_date_ms,
+                row.provider_thread_id,
+                candidate.transaction_id
+            ],
+            |result| result.get(0),
+        ),
+    }
+    .map_err(Into::into)
 }
 
 fn retire_expired(tx: &rusqlite::Transaction<'_>, now_ms: i64) -> Result<(), Error> {

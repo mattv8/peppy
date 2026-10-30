@@ -131,7 +131,8 @@ function androidResourceEscape(value) {
   return value
     .replace(/\\/g, "\\\\")        // Backslash must be escaped first
     .replace(/'/g, "\\'")          // Apostrophe to \'
-    .replace(/"/g, '\\"');         // Double quote to \"
+    .replace(/"/g, '\\"')          // Double quote to \"
+    .replace(/\n/g, "\\n");        // Newline to \n so aapt2 keeps paragraph breaks
 }
 function xmlEscape(value) { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function androidCopy() { return `<?xml version="1.0" encoding="utf-8"?>

@@ -733,6 +733,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_pending(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_phone_reads(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_info(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_contact_scan(
@@ -916,6 +918,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_phone_read_effects(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_phone_read_candidates(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_mms_backfill_scans(
     ): Int
@@ -1167,6 +1171,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_pending(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_phone_reads(`ptr`: Long,`candidates`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_info(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_contact_scan(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1350,6 +1356,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_phone_read_effects(`ptr`: Long,`nowMs`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_uploads(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_phone_read_candidates(`ptr`: Long,`transport`: RustBuffer.ByValue,`sourceGeneration`: RustBuffer.ByValue,`afterOrder`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_mms_backfill_scans(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`observedMaxId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1833,6 +1841,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_pending() and 0xFFFF) != 53530) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_phone_reads() and 0xFFFF) != 6156) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_info() and 0xFFFF) != 19943) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2107,6 +2118,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads() and 0xFFFF) != 38265) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_phone_read_candidates() and 0xFFFF) != 40864) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_mms_backfill_scans() and 0xFFFF) != 16952) {
@@ -2870,6 +2884,8 @@ public interface NativeClientInterface {
     
     fun `applyPending`(`limit`: kotlin.ULong): NativeApplyReport
     
+    fun `applyPhoneReads`(`candidates`: List<NativePhoneReadCandidate>): kotlin.UInt
+    
     fun `attachmentInfo`(`attachmentId`: kotlin.String): NativeAttachmentInfo
     
     fun `beginContactScan`(`inputJson`: kotlin.String): kotlin.String
@@ -3137,6 +3153,8 @@ public interface NativeClientInterface {
     fun `pendingPhoneReadEffects`(`nowMs`: kotlin.Long, `limit`: kotlin.UInt): List<NativePhoneReadEffect>
     
     fun `pendingUploads`(): List<NativeCipherObject>
+    
+    fun `phoneReadCandidates`(`transport`: NativePhoneReadTransport, `sourceGeneration`: kotlin.String, `afterOrder`: kotlin.Long, `limit`: kotlin.UInt): List<NativePhoneReadCandidate>
     
     fun `planMmsBackfillScans`(`generation`: kotlin.String, `scope`: kotlin.String, `observedMaxId`: kotlin.String): List<NativeMmsBackfillScanPlan>
     
@@ -3482,6 +3500,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterULong.lower(`limit`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `applyPhoneReads`(`candidates`: List<NativePhoneReadCandidate>): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_phone_reads(
+        it,
+        
+        FfiConverterSequenceTypeNativePhoneReadCandidate.lower(`candidates`),_status)
 }
     }
     )
@@ -4949,6 +4982,24 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_uploads(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `phoneReadCandidates`(`transport`: NativePhoneReadTransport, `sourceGeneration`: kotlin.String, `afterOrder`: kotlin.Long, `limit`: kotlin.UInt): List<NativePhoneReadCandidate> {
+            return FfiConverterSequenceTypeNativePhoneReadCandidate.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_phone_read_candidates(
+        it,
+        
+        FfiConverterTypeNativePhoneReadTransport.lower(`transport`),
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterLong.lower(`afterOrder`),
+        FfiConverterUInt.lower(`limit`),_status)
 }
     }
     )
@@ -8991,6 +9042,8 @@ data class NativeGatewayPolicyDecision (
     var `rcsSupported`: kotlin.Boolean
     , 
     var `applyPhoneRead`: kotlin.Boolean
+    , 
+    var `ingestPhoneRead`: kotlin.Boolean
     
 ){
     
@@ -9013,6 +9066,7 @@ public object FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -9022,7 +9076,8 @@ public object FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
             FfiConverterBoolean.allocationSize(value.`captureMms`) +
             FfiConverterBoolean.allocationSize(value.`transferMedia`) +
             FfiConverterBoolean.allocationSize(value.`rcsSupported`) +
-            FfiConverterBoolean.allocationSize(value.`applyPhoneRead`)
+            FfiConverterBoolean.allocationSize(value.`applyPhoneRead`) +
+            FfiConverterBoolean.allocationSize(value.`ingestPhoneRead`)
     )
 
     override fun write(value: NativeGatewayPolicyDecision, buf: ByteBuffer) {
@@ -9032,6 +9087,7 @@ public object FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
             FfiConverterBoolean.write(value.`transferMedia`, buf)
             FfiConverterBoolean.write(value.`rcsSupported`, buf)
             FfiConverterBoolean.write(value.`applyPhoneRead`, buf)
+            FfiConverterBoolean.write(value.`ingestPhoneRead`, buf)
     }
 }
 
@@ -10757,6 +10813,59 @@ public object FfiConverterTypeNativePermit: FfiConverterRustBuffer<NativePermit>
             FfiConverterTypeNativePermitState.write(value.`state`, buf)
             FfiConverterOptionalTypeNativeCarrierCommand.write(value.`command`, buf)
             FfiConverterOptionalString.write(value.`existingSendState`, buf)
+    }
+}
+
+
+
+data class NativePhoneReadCandidate (
+    var `messageId`: kotlin.String
+    , 
+    var `transport`: NativePhoneReadTransport
+    , 
+    var `localOrder`: kotlin.Long
+    , 
+    var `row`: NativeProviderRowRef
+    , 
+    var `transactionId`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePhoneReadCandidate: FfiConverterRustBuffer<NativePhoneReadCandidate> {
+    override fun read(buf: ByteBuffer): NativePhoneReadCandidate {
+        return NativePhoneReadCandidate(
+            FfiConverterString.read(buf),
+            FfiConverterTypeNativePhoneReadTransport.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterTypeNativeProviderRowRef.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativePhoneReadCandidate) = (
+            FfiConverterString.allocationSize(value.`messageId`) +
+            FfiConverterTypeNativePhoneReadTransport.allocationSize(value.`transport`) +
+            FfiConverterLong.allocationSize(value.`localOrder`) +
+            FfiConverterTypeNativeProviderRowRef.allocationSize(value.`row`) +
+            FfiConverterOptionalString.allocationSize(value.`transactionId`)
+    )
+
+    override fun write(value: NativePhoneReadCandidate, buf: ByteBuffer) {
+            FfiConverterString.write(value.`messageId`, buf)
+            FfiConverterTypeNativePhoneReadTransport.write(value.`transport`, buf)
+            FfiConverterLong.write(value.`localOrder`, buf)
+            FfiConverterTypeNativeProviderRowRef.write(value.`row`, buf)
+            FfiConverterOptionalString.write(value.`transactionId`, buf)
     }
 }
 
@@ -12691,6 +12800,40 @@ public object FfiConverterTypeNativePermitState: FfiConverterRustBuffer<NativePe
 
 
 
+enum class NativePhoneReadTransport {
+    
+    SMS,
+    MMS;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePhoneReadTransport: FfiConverterRustBuffer<NativePhoneReadTransport> {
+    override fun read(buf: ByteBuffer) = try {
+        NativePhoneReadTransport.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativePhoneReadTransport) = 4UL
+
+    override fun write(value: NativePhoneReadTransport, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class NativeSendResult {
     
     SUBMITTED,
@@ -13671,6 +13814,34 @@ public object FfiConverterSequenceTypeNativeNotificationTarget: FfiConverterRust
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNativeNotificationTarget.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativePhoneReadCandidate: FfiConverterRustBuffer<List<NativePhoneReadCandidate>> {
+    override fun read(buf: ByteBuffer): List<NativePhoneReadCandidate> {
+        val len = buf.getInt()
+        return List<NativePhoneReadCandidate>(len) {
+            FfiConverterTypeNativePhoneReadCandidate.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativePhoneReadCandidate>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativePhoneReadCandidate.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativePhoneReadCandidate>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativePhoneReadCandidate.write(it, buf)
         }
     }
 }

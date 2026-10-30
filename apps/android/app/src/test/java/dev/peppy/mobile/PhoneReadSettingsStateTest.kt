@@ -7,15 +7,13 @@ import org.junit.Test
 
 class PhoneReadSettingsStateTest {
     @Test
-    fun loadingAndUnavailableStatesCannotChangeTheSetting() {
-        assertFalse(phoneReadPresentation(enabled = null, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = true, supported = true, loading = true).toggleEnabled)
-        assertEquals(PhoneReadPresentation.State.UNAVAILABLE, phoneReadPresentation(false, true, true, true, false).state)
-        assertFalse(phoneReadPresentation(false, true, true, true, false).toggleEnabled)
+    fun loadingStateCannotChangeTheSetting() {
+        assertFalse(phoneReadPresentation(enabled = null, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = true, outboundSupported = true, loading = true).toggleEnabled)
     }
 
     @Test
     fun disabledPhoneReadRequiresSmsSyncBeforeItCanBeEnabled() {
-        val paused = phoneReadPresentation(enabled = false, smsSyncEnabled = false, smsReadAccess = true, notificationAccess = false, supported = true)
+        val paused = phoneReadPresentation(enabled = false, smsSyncEnabled = false, smsReadAccess = true, notificationAccess = false, outboundSupported = true)
 
         assertEquals(PhoneReadPresentation.State.SMS_SYNC_REQUIRED, paused.state)
         assertFalse(paused.toggleEnabled)
@@ -23,10 +21,10 @@ class PhoneReadSettingsStateTest {
 
     @Test
     fun enabledPhoneReadStaysSwitchableOffWhenAccessOrSmsSyncIsMissing() {
-        val accessPaused = phoneReadPresentation(enabled = true, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = false, supported = true)
-        val smsPaused = phoneReadPresentation(enabled = true, smsSyncEnabled = false, smsReadAccess = true, notificationAccess = false, supported = true)
+        val accessPaused = phoneReadPresentation(enabled = true, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = false, outboundSupported = true)
+        val smsPaused = phoneReadPresentation(enabled = true, smsSyncEnabled = false, smsReadAccess = true, notificationAccess = false, outboundSupported = true)
 
-        assertEquals(PhoneReadPresentation.State.ACCESS_PAUSED, accessPaused.state)
+        assertEquals(PhoneReadPresentation.State.ACCESS_LIMITED, accessPaused.state)
         assertTrue(accessPaused.toggleEnabled)
         assertTrue(accessPaused.showOpenAccess)
         assertEquals(PhoneReadPresentation.State.SMS_SYNC_PAUSED, smsPaused.state)
@@ -36,8 +34,8 @@ class PhoneReadSettingsStateTest {
 
     @Test
     fun smsReadAccessGatesEnableAndPausesAnAlreadyEnabledSetting() {
-        val disabled = phoneReadPresentation(enabled = false, smsSyncEnabled = true, smsReadAccess = false, notificationAccess = true, supported = true)
-        val enabled = phoneReadPresentation(enabled = true, smsSyncEnabled = true, smsReadAccess = false, notificationAccess = true, supported = true)
+        val disabled = phoneReadPresentation(enabled = false, smsSyncEnabled = true, smsReadAccess = false, notificationAccess = true, outboundSupported = true)
+        val enabled = phoneReadPresentation(enabled = true, smsSyncEnabled = true, smsReadAccess = false, notificationAccess = true, outboundSupported = true)
 
         assertEquals(PhoneReadPresentation.State.SMS_READ_REQUIRED, disabled.state)
         assertFalse(disabled.toggleEnabled)
@@ -54,8 +52,8 @@ class PhoneReadSettingsStateTest {
 
     @Test
     fun backgroundRefreshKeepsTheKnownSwitchStateAndActionable() {
-        val refreshingOn = phoneReadPresentation(enabled = true, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = true, supported = true, loading = true)
-        val refreshingOff = phoneReadPresentation(enabled = false, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = true, supported = true, loading = true)
+        val refreshingOn = phoneReadPresentation(enabled = true, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = true, outboundSupported = true, loading = true)
+        val refreshingOff = phoneReadPresentation(enabled = false, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = true, outboundSupported = true, loading = true)
 
         assertEquals(PhoneReadPresentation.State.WORKING, refreshingOn.state)
         assertTrue(refreshingOn.toggleEnabled)
@@ -65,38 +63,47 @@ class PhoneReadSettingsStateTest {
 
     @Test
     fun savingIsTheOnlyKnownValueStateThatDisablesTheSwitch() {
-        val saving = phoneReadPresentation(enabled = true, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = true, supported = true, saving = true)
+        val saving = phoneReadPresentation(enabled = true, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = true, outboundSupported = true, saving = true)
 
         assertEquals(PhoneReadPresentation.State.SAVING, saving.state)
         assertFalse(saving.toggleEnabled)
     }
 
     @Test
-    fun deniedAccessKeepsTheOffSettingActionableForANewAttempt() {
-        val denied = phoneReadPresentation(enabled = false, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = false, supported = true, accessDenied = true)
+    fun notificationAccessDoesNotBlockEnablement() {
+        val denied = phoneReadPresentation(enabled = false, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = false, outboundSupported = true, accessDenied = true)
 
-        assertEquals(PhoneReadPresentation.State.ACCESS_DENIED, denied.state)
+        assertEquals(PhoneReadPresentation.State.OFF_READY, denied.state)
         assertTrue(denied.toggleEnabled)
-        assertTrue(denied.showOpenAccess)
+        assertFalse(denied.showOpenAccess)
     }
 
     @Test
-    fun cancelledOrDeniedConsentCannotApplyAfterALaterGrant() {
-        val pending = ConsentGatedToggle().requestEnable().agree(hasAccess = false).state
+    fun agreeAppliesImmediatelyWithoutNotificationAccess() {
+        val transition = ConsentGatedToggle().requestEnable().agree(hasAccess = true)
 
-        assertEquals(ConsentEffect.NONE, pending.accessResult(granted = false).state.accessResult(granted = true).effect)
-        assertEquals(ConsentEffect.NONE, pending.cancel().accessResult(granted = true).effect)
+        assertEquals(ConsentEffect.APPLY, transition.effect)
     }
 
     @Test
-    fun deniedAccessShowsFeedbackButCannotEnableUntilANewConsentFlow() {
-        val pending = ConsentGatedToggle().requestEnable().agree(hasAccess = false).state
+    fun inboundSyncWorksWithoutAndroid9OrNotificationAccess() {
+        val off = phoneReadPresentation(enabled = false, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = false, outboundSupported = false)
+        val on = phoneReadPresentation(enabled = true, smsSyncEnabled = true, smsReadAccess = true, notificationAccess = false, outboundSupported = false)
 
-        val denied = phoneReadAccessResult(pending, granted = false)
+        assertEquals(PhoneReadPresentation.State.OFF_READY, off.state)
+        assertTrue(off.toggleEnabled)
+        assertEquals(PhoneReadPresentation.State.OUTBOUND_UNSUPPORTED, on.state)
+        assertTrue(on.toggleEnabled)
+        assertFalse(on.showOpenAccess)
+    }
 
-        assertTrue(denied.denied)
-        assertFalse(denied.apply)
-        assertFalse(phoneReadAccessResult(denied.consent, granted = true).apply)
+    @Test
+    fun unsupportedOutboundDoesNotOfferNotificationAccessWhileSmsSyncIsPaused() {
+        val paused = phoneReadPresentation(enabled = true, smsSyncEnabled = false, smsReadAccess = true, notificationAccess = false, outboundSupported = false)
+
+        assertEquals(PhoneReadPresentation.State.SMS_SYNC_PAUSED, paused.state)
+        assertTrue(paused.toggleEnabled)
+        assertFalse(paused.showOpenAccess)
     }
 
     @Test
