@@ -21,12 +21,11 @@ type TonePickerProps = {
   describedBy?: string;
   renderTrigger?(props: ButtonHTMLAttributes<HTMLButtonElement> & { ref: Ref<HTMLButtonElement> }): ReactElement;
   disabledReason?: string;
-  scope?: "contact" | "group";
 };
 
 const optionLabel = (index: number | undefined) => TONE_PRESETS.find((preset) => preset.index === index)?.label ?? (index === undefined ? "Automatic" : `Color ${index + 1}`);
 
-export function TonePicker({ id, seed, value, automaticIndex, disabled = false, pending = false, error, onSelect, variant = "icon", describedBy, renderTrigger, disabledReason = "Unlock Peppy to change colors.", scope = "contact" }: TonePickerProps) {
+export function TonePicker({ id, seed, value, automaticIndex, disabled = false, pending = false, error, onSelect, variant = "icon", describedBy, renderTrigger, disabledReason = "Unlock Peppy to change colors." }: TonePickerProps) {
   const wrapper = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
@@ -118,12 +117,11 @@ export function TonePicker({ id, seed, value, automaticIndex, disabled = false, 
     </button>}
     <span className="sr-only" role="status">{pending ? "Saving…" : announcement}</span>
     <div id={`${id}-panel`} style={position} data-tone-picker-panel role="dialog" aria-label="Conversation color" hidden={!open}>
-      <div id={`${id}-group`} role="radiogroup" aria-label="Conversation color" aria-describedby={`${id}-note ${id}-status`} aria-busy={pending}>
+      <div id={`${id}-group`} role="radiogroup" aria-label="Conversation color" aria-describedby={`${id}-status`} aria-busy={pending}>
         <span id={`${id}-heading`}>Conversation color</span>
         <ToneOption option={options[0]} automaticIndex={automaticIndex} position={0} selected={checkedIndex === 0} focused={focusIndex === 0} pending={pending} onClick={select} onKeyDown={onOptionKeyDown} />
         <div data-tone-picker-grid>{options.slice(1).map((option, offset) => <ToneOption key={option.index} option={option} automaticIndex={automaticIndex} position={offset + 1} selected={checkedIndex === offset + 1} focused={focusIndex === offset + 1} pending={pending} onClick={select} onKeyDown={onOptionKeyDown} />)}</div>
       </div>
-      <p id={`${id}-note`}>{scope === "group" ? "Applies to this exact group of people, on all your devices." : "Changes this contact's avatar and message color on all your devices."}</p>
       <p id={`${id}-status`}>{pending ? "Saving…" : ""}</p>
       {error && <p role="alert" data-tone-error>{error}</p>}
     </div>
