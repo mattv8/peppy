@@ -114,11 +114,39 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PEPPY_UPDATE_PUBLIC_KEY");
     #[cfg(feature = "dev-local-tls")]
     embed_development_tls_ca();
-    tauri_build::try_build(
-        tauri_build::Attributes::new()
-            .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
-    )
-    .expect("failed to run tauri-build");
+    let mut attributes = tauri_build::Attributes::new()
+        .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));
+    if embed_windows_common_controls_manifest() {
+        // The linker owns the sole application manifest on this target. tauri-winres would
+        // otherwise emit a second RT_MANIFEST resource that collides with it.
+        attributes = attributes.windows_attributes(
+            tauri_build::WindowsAttributes::new_without_app_manifest(),
+        );
+    }
+    tauri_build::try_build(attributes).expect("failed to run tauri-build");
+}
+
+/// Embeds the Common Controls v6 manifest through the MSVC linker for every package artifact,
+/// including the lib unit-test harness that Cargo gives no link-argument scope. Returns `true`
+/// when the linker owns the application manifest.
+fn embed_windows_common_controls_manifest() -> bool {
+    use std::{env, ffi::OsStr, path::PathBuf};
+
+    let target_os = env::var_os("CARGO_CFG_TARGET_OS");
+    let target_env = env::var_os("CARGO_CFG_TARGET_ENV");
+    if target_os.as_deref() != Some(OsStr::new("windows"))
+        || target_env.as_deref() != Some(OsStr::new("msvc"))
+    {
+        return false;
+    }
+
+    let manifest =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"))
+            .join("windows-common-controls-manifest.xml");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+    true
 }
 
 #[cfg(feature = "dev-local-tls")]
