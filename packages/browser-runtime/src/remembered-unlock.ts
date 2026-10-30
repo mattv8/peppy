@@ -1,5 +1,5 @@
 const CACHE_DATABASE_SUFFIX = "-remembered-unlock-v1";
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const RECORD_STORE = "records";
 const KEY_STORE = "keys";
 const CURRENT_KEY = "current";
@@ -20,7 +20,7 @@ interface RememberedUnlockOptions {
 }
 
 interface StoredRecovery {
-  version: 1;
+  version: 2;
   accountId: string;
   vaultId: string;
   origin: string;

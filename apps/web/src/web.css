@@ -70,6 +70,8 @@ dialog[data-browser-screen] label {
 
 dialog[data-browser-screen] form { gap: 16px; }
 
+dialog[data-browser-screen] label.browser-dialog-checkbox { display: flex; align-items: center; gap: 8px; }
+
 #instance-management,
 #instance-management-loading,
 #instance-management-sign-in,

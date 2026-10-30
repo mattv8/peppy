@@ -12,6 +12,7 @@ import type { HostedWebConfig } from "./newhosted-app-auth";
 import { createSingleFlightTrailingScheduler } from "./single-flight-scheduler";
 import { appSessionRenewal, armHostedSessionRenewal, restoreAfterPersistedPageShow } from "./app-session-renewal";
 import { UNSUPPORTED_DOWNLOADS_ID, renderAccountDownloadLink, unsupportedPageMarkup } from "./browser-unsupported";
+import { renderBrowserStopped } from "./browser-stopped";
 
 function unsupported(reasons: string[]): void {
   document.getElementById("root")!.innerHTML = unsupportedPageMarkup(reasons);
@@ -34,16 +35,6 @@ function missingCapabilities(): string[] {
 
 function showBooting(): void {
   document.getElementById("root")!.innerHTML = '<main id="browser-booting" data-browser-screen="browser-booting"><span role="status" aria-live="polite" aria-label="Starting Peppy"><span class="browser-boot-spinner" aria-hidden="true"></span></span></main>';
-}
-
-function showStopped(reason: string): void {
-  const locked = reason === "locked";
-  const conflictingWorker = reason === "already-open";
-  const heading = locked ? "Peppy is locked" : conflictingWorker ? "Peppy could not use this worker" : "Peppy stopped";
-  const message = locked ? "This shared browser session was locked. Reload to reconnect securely." : conflictingWorker ? "Another incompatible Peppy worker owns this browser session. Close that copy, then try again." : "Your running Peppy session stopped. Reload to reconnect securely.";
-  document.getElementById("root")!.innerHTML = `<main id="browser-stopped" data-browser-screen="browser-stopped" data-stop-reason="${reason}" role="main" aria-labelledby="browser-stopped-heading"><section><h1 id="browser-stopped-heading" tabindex="-1">${heading}</h1><p>${message}</p><button id="browser-stopped-reload" class="primary-button" type="button">Reload Peppy</button></section></main>`;
-  document.getElementById("browser-stopped-reload")?.addEventListener("click", () => location.reload());
-  document.getElementById("browser-stopped-heading")?.focus();
 }
 
 function showStartupFailure(reason: string): void {
@@ -109,7 +100,7 @@ function boot(): void {
         isActive: () => !disposed,
       });
     });
-    bridge.onStopped((reason) => { disposed = true; root.unmount(); if (ready) showStopped(reason); else showStartupFailure(reason); });
+    bridge.onStopped((reason) => { disposed = true; root.unmount(); if (ready) renderBrowserStopped(document.getElementById("root")!, reason, () => location.reload()); else showStartupFailure(reason); });
     worker.onerror = () => bridge.workerError();
     window.addEventListener("pagehide", () => {
       disposed = true;

@@ -4594,6 +4594,22 @@ describe("host state display", () => {
     delete bridge.lock_sync;
   });
 
+  it("shows the remembered unlock warning and refreshes after browser lock cleanup fails", async () => {
+    const lock = vi.fn().mockRejectedValue({ code: "recovery-clear-failed", message: "Browser recovery could not be forgotten." });
+    bridge.lock_sync = function() { return lock(); };
+    const snapshot = host.load();
+    vi.mocked(bridge.load_state).mockResolvedValue({ ...snapshot, mode: "browser", desktop: undefined });
+    const loadState = vi.mocked(bridge.load_state);
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Lock now" }));
+
+    expect(await screen.findByText("Sync is locked, but this browser may still remember your Vault key phrase.")).toBeInTheDocument();
+    await waitFor(() => expect(loadState).toHaveBeenCalledTimes(2));
+    delete bridge.lock_sync;
+  });
+
   it("omits native update settings from the browser host", async () => {
     render(<App hostKind="browser" fixedOrigin="https://community.example" />);
     await screen.findByText("Hello from Aurora");

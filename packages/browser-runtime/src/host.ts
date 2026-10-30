@@ -39,7 +39,7 @@ export interface HostSession {
   readonly phase: BrowserSessionPhase;
   query(command: string, args: Record<string, unknown>): Promise<CoreResult>;
   mutate(command: string, args: Record<string, unknown>): Promise<CoreResult>;
-  unlock(passphrase: string): Promise<void>;
+  unlock(passphrase: string, signal?: AbortSignal, options?: { remember?: boolean }): Promise<void>;
   enroll(metadata: unknown, deviceToken: string, passphrase: string): Promise<void>;
   clearRememberedUnlock?(): Promise<void>;
   validateRememberedUnlock?(): Promise<void>;
@@ -241,6 +241,12 @@ function deviceManagementError(error: unknown): RpcError {
   return errorFor(error);
 }
 
+function shouldForgetRememberedUnlock(error: unknown, request: RpcRequest, currentDeviceId: string | undefined): boolean {
+  if (!(error instanceof TransportError)) return false;
+  if (error.kind === "revoked" || error.code === "invalid_bearer") return true;
+  return error.code === "device_not_found" && request.command === "revoke_device" && request.args.deviceId === currentDeviceId;
+}
+
 function errorDetails(error: object): Pick<RpcError, "conversationId" | "currentRevision" | "draftId"> {
   const details = "details" in error && typeof error.details === "object" && error.details !== null ? error.details : undefined;
   if (!details) return {};
@@ -338,7 +344,7 @@ async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcReq
     if (command === "unlock") {
       const passphrase = secretString(args, "passphrase");
       if (!passphrase) throw { code: "invalid-request" };
-      await session.unlock(passphrase);
+      await session.unlock(passphrase, undefined, { remember: args.remember === true });
       return { id, ok: true, value: undefined };
     }
     if (command === "prepare_attachment") return { id, ok: true, value: await addAttachmentPreview(session, await prepareAttachment(session, args)) };
@@ -755,7 +761,7 @@ export class BrowserWorkerHost {
     if (request.command === "lock_sync") {
       let clearFailed = false;
       try { await this.owner.owner.clearRememberedUnlock?.(); } catch { clearFailed = true; }
-      await this.stop("locked", () => port.postMessage(clearFailed ? { id: request.id, ok: false, error: RECOVERY_CLEAR_ERROR } : { id: request.id, ok: true, value: undefined }));
+      await this.stop(clearFailed ? "locked-recovery-clear-failed" : "locked", () => port.postMessage(clearFailed ? { id: request.id, ok: false, error: RECOVERY_CLEAR_ERROR } : { id: request.id, ok: true, value: undefined }));
       return;
     }
     if (request.command === "disconnect") {
@@ -827,6 +833,9 @@ export class BrowserWorkerHost {
       response = await dispatchValidatedBrowserRpc(this.owner.owner, request, this.dependencies.legacySettings, this.dependencies.publisher, this.portMediaLeases(port), this.dependencies.network?.syncProgress?.());
     } finally {
       this.dispatchesInFlight -= 1;
+    }
+    if (!response.ok && response.error.code === "device-revoked") {
+      try { await this.owner.owner.clearRememberedUnlock?.(); } catch {}
     }
     if (response.ok && command === "load_state" && this.dependencies.network?.epochStatus?.()) {
       const value = response.value;
@@ -1121,15 +1130,22 @@ export class BrowserWorkerHost {
   private async deviceManagement(request: RpcRequest): Promise<RpcResponse> {
     const network = this.dependencies.network;
     if (!network) return { id: request.id, ok: false, error: { code: "unavailable", message: "Browser operation failed." } };
+    let currentDeviceId: string | undefined;
     try {
       if (request.command === "list_devices") {
         const identity = object(await this.owner!.owner.query("_worker_identity_metadata", {}));
-        return { id: request.id, ok: true, value: deviceRoster(await network.listDevices(), requiredDeviceId(identity.deviceId)) };
+        currentDeviceId = requiredDeviceId(identity.deviceId);
+        return { id: request.id, ok: true, value: deviceRoster(await network.listDevices(), currentDeviceId) };
       }
       const deviceId = requiredDeviceId(request.args.deviceId);
+      const identity = object(await this.owner!.owner.query("_worker_identity_metadata", {}));
+      currentDeviceId = requiredDeviceId(identity.deviceId);
       await network.revokeDevice(deviceId);
       return { id: request.id, ok: true, value: undefined };
     } catch (error: unknown) {
+      if (shouldForgetRememberedUnlock(error, request, currentDeviceId)) {
+        try { await this.owner?.owner.clearRememberedUnlock?.(); } catch {}
+      }
       return { id: request.id, ok: false, error: deviceManagementError(error) };
     }
   }
@@ -1267,6 +1283,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let pollPromise: Promise<void> | undefined;
   let pollDelay = 5_000;
   let syncProgress: SchedulerSyncProgress | undefined;
+  let activeSession: BrowserSession | undefined;
   const changeListeners = new Set<() => void>();
   const stopNetwork = async () => {
     polling = false;
@@ -1280,7 +1297,10 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     if (!polling || !scheduler) return;
     pollPromise = scheduler.poll().then(status => {
       for (const listener of changeListeners) listener();
-      if (status.connection === "revoked") polling = false;
+      if (status.connection === "revoked") {
+        polling = false;
+        void activeSession?.clearRememberedUnlock().catch(() => undefined);
+      }
       pollDelay = status.connection === "connected" ? 5_000 : Math.min(pollDelay * 2, 60_000);
     }).catch(() => {
       for (const listener of changeListeners) listener();
@@ -1341,6 +1361,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       const module = await modulePromise as EmscriptenCoreModule & { FS: EmscriptenFilesystem };
       const origins = await browserOrigins();
       const session = await BrowserSession.boot({ origin: origins.logicalOrigin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), rememberedUnlock: browserRememberedUnlock(origins.fetchBase), onFatal });
+      activeSession = session;
         enrollmentAbort = new AbortController();
         enrollment = new BrowserEnrollment(core, session, origins.logicalOrigin, undefined, origins.fetchBase, enrollmentAbort.signal);
       publicTransport = new OriginTransport({ origin: self.location.origin, deviceToken: () => session.tokenForTransport() });

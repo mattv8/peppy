@@ -28,7 +28,7 @@ function unlock(fetch = sessionFetch(), databaseName = `remembered-${crypto.rand
 
 async function cacheRecords(databaseName: string): Promise<{ record: unknown; key: CryptoKey | undefined }> {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(`${databaseName}-remembered-unlock-v1`, 1);
+    const request = indexedDB.open(`${databaseName}-remembered-unlock-v1`, 2);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -105,7 +105,7 @@ describe("RememberedUnlock", () => {
     const databaseName = `remembered-${crypto.randomUUID()}`;
     await unlock(sessionFetch(), databaseName).remember(identity, "phrase");
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open(`${databaseName}-remembered-unlock-v1`, 1);
+      const request = indexedDB.open(`${databaseName}-remembered-unlock-v1`, 2);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -132,6 +132,7 @@ describe("RememberedUnlock", () => {
     await unlock(sessionFetch(), databaseName).remember(identity, "phrase");
 
     await expect(unlock(sessionFetch(), databaseName).recover(rotatedIdentity)).resolves.toBeUndefined();
+    expect((await cacheRecords(databaseName)).record).toBeUndefined();
     await unlock(sessionFetch(), databaseName).remember(identity, "phrase");
     const otherOrigin = new RememberedUnlock(databaseName, { origin: "https://other.peppy.test", fetch: sessionFetch(), crypto });
     await expect(otherOrigin.recover(identity)).resolves.toBeUndefined();
@@ -145,6 +146,43 @@ describe("RememberedUnlock", () => {
     expect(JSON.stringify(record)).not.toContain("a private phrase");
     expect(key?.extractable).toBe(false);
     await expect(crypto.subtle.exportKey("raw", key!)).rejects.toThrow();
+  });
+
+  it("deletes a valid baseline automatic record instead of recovering it", async () => {
+    const databaseName = `remembered-${crypto.randomUUID()}`;
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(`${databaseName}-remembered-unlock-v1`, 1);
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore("records");
+        request.result.createObjectStore("keys");
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const identityDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
+    const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const aad = new TextEncoder().encode(`peppy.remembered-unlock.v1\0${account}\0${origin}\0${[...new Uint8Array(identityDigest)].map(byte => byte.toString(16).padStart(2, "0")).join("")}`);
+    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: aad }, key, new TextEncoder().encode("phrase"));
+    const transaction = database.transaction(["records", "keys"], "readwrite");
+    transaction.objectStore("records").put({ version: 1, accountId: account, vaultId: vault, origin, identityDigest, iv: iv.buffer, ciphertext }, "current");
+    transaction.objectStore("keys").put(key, "current");
+    await new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+
+    await expect(unlock(sessionFetch(), databaseName).recover(identity)).resolves.toBeUndefined();
+    expect((await cacheRecords(databaseName)).record).toBeUndefined();
+  });
+
+  it("recovers a version 2 explicit opt-in record", async () => {
+    const databaseName = `remembered-${crypto.randomUUID()}`;
+    await unlock(sessionFetch(), databaseName).remember(identity, "phrase");
+
+    await expect(unlock(sessionFetch(), databaseName).recover(identity)).resolves.toBe("phrase");
+    expect((await cacheRecords(databaseName)).record).toMatchObject({ version: 2 });
   });
 
   it("fences a pending save when cleared", async () => {
