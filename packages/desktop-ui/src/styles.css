@@ -72,8 +72,9 @@ select:focus-visible {
 [data-tone-option]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 3px; }
 [data-tone-option]:hover { box-shadow: 0 0 0 2px var(--peppy-surface-hover); }
 [data-tone-option][aria-disabled="true"] { opacity: .6; cursor: progress; }
-[data-tone-picker-grid] { display: grid; grid-template-columns: repeat(4, 28px); gap: 8px; }
-@media (max-width: 600px) { [data-tone-picker-grid] { grid-template-columns: repeat(4, 32px); } [data-tone-option] { width: 32px; height: 32px; } }
+[data-tone-picker-panel] p:empty { margin: 0; }
+[data-tone-picker-grid] { display: grid; grid-template-columns: repeat(6, 28px); justify-content: space-between; gap: 8px; }
+@media (max-width: 600px) { [data-tone-picker-grid] { grid-template-columns: repeat(6, 32px); } [data-tone-picker-grid] [data-tone-option] { width: 32px; height: 32px; } [data-tone-option="auto"] { height: 32px; } }
 @media (forced-colors: active) { [data-tone-picker-panel] { border-color: CanvasText; background: Canvas; box-shadow: none; } [data-tone-option] { forced-color-adjust: none; } [data-tone-option][aria-checked="true"] { outline-color: Highlight; } }
 .titlebar {
   container: titlebar / inline-size;
