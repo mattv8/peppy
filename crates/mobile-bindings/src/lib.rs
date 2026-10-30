@@ -10,9 +10,10 @@ use peppy_client_core::{
     MmsBackfillRecheckOutcome, MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome,
     MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource,
     NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
-    PermitBlock, PermitDecision, ProviderRowRef, QuarantineReason, ReceivedCommand, SendResult,
-    SendState, SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan,
-    SmsScanPlan, SmsSource, Transport, VaultCheckHeader, VaultId,
+    PermitBlock, PermitDecision, PhoneReadCandidate, PhoneReadTransport, ProviderRowRef,
+    QuarantineReason, ReceivedCommand, SendResult, SendState, SmsAcquisitionInput,
+    SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource,
+    Transport, VaultCheckHeader, VaultId,
 };
 use std::{
     fmt,
@@ -91,6 +92,13 @@ pub struct NativeGatewayPolicyDecision {
     pub transfer_media: bool,
     pub rcs_supported: bool,
     pub apply_phone_read: bool,
+    pub ingest_phone_read: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativePhoneReadTransport {
+    SMS,
+    MMS,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -107,6 +115,15 @@ pub struct NativeProviderRowRef {
 pub struct NativePhoneReadEffect {
     pub message_id: String,
     pub row: NativeProviderRowRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativePhoneReadCandidate {
+    pub message_id: String,
+    pub transport: NativePhoneReadTransport,
+    pub local_order: i64,
+    pub row: NativeProviderRowRef,
+    pub transaction_id: Option<String>,
 }
 
 /// Android's local message-history source facts. The provider UUID stays on this device; the host
@@ -863,6 +880,39 @@ fn provider_row_ref(row: NativeProviderRowRef) -> ProviderRowRef {
         source_row_fingerprint: row.source_row_fingerprint,
     }
 }
+fn phone_read_transport(value: NativePhoneReadTransport) -> PhoneReadTransport {
+    match value {
+        NativePhoneReadTransport::SMS => PhoneReadTransport::Sms,
+        NativePhoneReadTransport::MMS => PhoneReadTransport::Mms,
+    }
+}
+fn phone_read_transport_view(value: PhoneReadTransport) -> NativePhoneReadTransport {
+    match value {
+        PhoneReadTransport::Sms => NativePhoneReadTransport::SMS,
+        PhoneReadTransport::Mms => NativePhoneReadTransport::MMS,
+    }
+}
+fn phone_read_candidate(
+    value: NativePhoneReadCandidate,
+) -> Result<PhoneReadCandidate, MobileBindingsError> {
+    Ok(PhoneReadCandidate {
+        message_id: MessageId::from_str(&value.message_id)
+            .map_err(|_| MobileBindingsError::InvalidRequest)?,
+        transport: phone_read_transport(value.transport),
+        local_order: value.local_order,
+        row: provider_row_ref(value.row),
+        transaction_id: value.transaction_id,
+    })
+}
+fn phone_read_candidate_view(value: PhoneReadCandidate) -> NativePhoneReadCandidate {
+    NativePhoneReadCandidate {
+        message_id: value.message_id.to_string(),
+        transport: phone_read_transport_view(value.transport),
+        local_order: value.local_order,
+        row: provider_row_ref_view(value.row),
+        transaction_id: value.transaction_id,
+    }
+}
 fn provider_row_ref_view(row: ProviderRowRef) -> NativeProviderRowRef {
     NativeProviderRowRef {
         source_generation: row.source_generation,
@@ -1595,6 +1645,7 @@ impl NativeClient {
             transfer_media: decision.transfer_media,
             rcs_supported: decision.rcs_supported,
             apply_phone_read: decision.apply_phone_read,
+            ingest_phone_read: decision.ingest_phone_read,
         })
     }
 
@@ -2604,6 +2655,40 @@ impl NativeClient {
                 })
                 .collect()
         })
+    }
+
+    pub fn phone_read_candidates(
+        &self,
+        transport: NativePhoneReadTransport,
+        source_generation: String,
+        after_order: i64,
+        limit: u32,
+    ) -> Result<Vec<NativePhoneReadCandidate>, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.phone_read_candidates(
+                phone_read_transport(transport),
+                &source_generation,
+                after_order,
+                limit,
+            )
+        })
+        .map(|candidates| {
+            candidates
+                .into_iter()
+                .map(phone_read_candidate_view)
+                .collect()
+        })
+    }
+
+    pub fn apply_phone_reads(
+        &self,
+        candidates: Vec<NativePhoneReadCandidate>,
+    ) -> Result<u32, MobileBindingsError> {
+        let candidates = candidates
+            .into_iter()
+            .map(phone_read_candidate)
+            .collect::<Result<Vec<_>, _>>()?;
+        with_client(&self.client, |client| client.apply_phone_reads(&candidates))
     }
 
     pub fn complete_phone_read_effects(

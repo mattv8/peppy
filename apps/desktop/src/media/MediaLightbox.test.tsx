@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import type { ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MediaLightbox } from "./MediaLightbox";
@@ -97,6 +97,13 @@ describe("MediaLightbox", () => {
     expect(screen.getByRole("button", { name: "Copy image" })).toBeInTheDocument();
   });
 
+  it("lets the app window be dragged from the area around the in-app viewer", async () => {
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:one" });
+    render(<MediaLightbox items={[items[0]]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn()} />);
+    await act(async () => {});
+    expect(document.querySelector("#media-lightbox")).toHaveAttribute("data-tauri-drag-region", "true");
+  });
+
   it("renders the native window chrome without a modal or sharing action", async () => {
     const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:one" });
     render(<MediaLightbox chrome="window" items={[items[0]]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn()} />);
@@ -148,6 +155,31 @@ describe("MediaLightbox", () => {
     await act(async () => {});
     expect(requestOriginal).toHaveBeenCalledTimes(1);
     expect(checkOriginal).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { initialAttachmentId: "one", navigationButton: "Older image", selectedAttachmentId: "two" },
+    { initialAttachmentId: "two", navigationButton: "Newer image", selectedAttachmentId: "one" },
+  ])("keeps the newly selected original when navigation and a retry hint are batched", async ({ initialAttachmentId, navigationButton, selectedAttachmentId }) => {
+    let resolveOriginal!: (result: { state: "ready"; url: string }) => void;
+    const requestOriginal = vi.fn()
+      .mockResolvedValueOnce({ state: "pending" as const })
+      .mockImplementationOnce(() => new Promise<{ state: "ready"; url: string }>((resolve) => { resolveOriginal = resolve; }));
+    const releaseMedia = vi.fn();
+
+    function LightboxWithRetryHint() {
+      const [retryKey, setRetryKey] = useState(0);
+      return <div onClickCapture={() => setRetryKey(current => current + 1)}><MediaLightbox items={items} initialAttachmentId={initialAttachmentId} onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={vi.fn().mockResolvedValue({ state: "pending" })} saveMedia={vi.fn()} releaseMedia={releaseMedia} retryKey={retryKey} /></div>;
+    }
+
+    render(<LightboxWithRetryHint />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: navigationButton }));
+    await act(async () => {});
+    await act(async () => resolveOriginal({ state: "ready", url: `blob:${selectedAttachmentId}` }));
+
+    expect(screen.getByRole("img", { name: selectedAttachmentId })).toHaveAttribute("src", `blob:${selectedAttachmentId}`);
+    expect(releaseMedia).not.toHaveBeenCalledWith(selectedAttachmentId, `blob:${selectedAttachmentId}`);
   });
 
   it("offers Retry for a failed original even when the producer marked the preview unavailable", async () => {

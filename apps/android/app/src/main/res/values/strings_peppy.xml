@@ -112,21 +112,20 @@
     <string name="peppy_toggle_android_mirroring_hero_body">See this phone\'s notifications on your other devices.</string>
     <string name="peppy_toggle_android_mirroring_next_access">Next, Android will open notification access settings so you can allow Peppy.</string>
     <string name="peppy_toggle_android_phone_read_section">Phone messaging app</string>
-    <string name="peppy_toggle_android_phone_read_label">Mark read in phone messaging app</string>
-    <string name="peppy_toggle_android_phone_read_off_hint">Asks your messaging app to mark a conversation read after you read it in Peppy. Best effort.</string>
-    <string name="peppy_toggle_android_phone_read_on_hint">Best effort. Works when your messaging app supports it.</string>
-    <string name="peppy_toggle_android_phone_read_access_paused">Paused: notification access is needed.</string>
+    <string name="peppy_toggle_android_phone_read_label">Sync read status with phone</string>
+    <string name="peppy_toggle_android_phone_read_off_hint">Keeps read status in step between your phone\'s messaging app and Peppy. Best effort.</string>
+    <string name="peppy_toggle_android_phone_read_on_hint">Messages you read on your phone are marked read in Peppy. SMS you read in Peppy can be marked read on your phone. Best effort.</string>
+    <string name="peppy_toggle_android_phone_read_access_limited">Phone reads sync to Peppy. Allow notification access to also mark SMS read on your phone.</string>
     <string name="peppy_toggle_android_phone_read_sms_required">Turn on SMS sync to use this.</string>
     <string name="peppy_toggle_android_phone_read_sms_read_required">Allow SMS read access to use this.</string>
     <string name="peppy_toggle_android_phone_read_sms_paused">Paused: SMS sync is off.</string>
     <string name="peppy_toggle_android_phone_read_sms_read_paused">Paused: SMS read access is needed.</string>
-    <string name="peppy_toggle_android_phone_read_unavailable">Not available on this phone.</string>
     <string name="peppy_toggle_android_phone_read_saving">Saving…</string>
     <string name="peppy_toggle_android_phone_read_error">Could not update this setting. Try again.</string>
-    <string name="peppy_toggle_android_phone_read_access_denied">Notification access was not allowed. Try again when you are ready.</string>
+    <string name="peppy_toggle_android_phone_read_access_denied">Notification access was not allowed. Phone reads still sync to Peppy.</string>
     <string name="peppy_toggle_android_phone_read_open_access">Open notification access</string>
-    <string name="peppy_toggle_android_phone_read_consent_title">Mark conversations read on this phone?</string>
-    <string name="peppy_toggle_android_phone_read_next">Next, Android will open notification access settings.</string>
+    <string name="peppy_toggle_android_phone_read_consent_title">Sync read status with your phone?</string>
+    <string name="peppy_toggle_android_phone_read_outbound_unsupported">Phone reads sync to Peppy. Marking SMS read on your phone from Peppy needs Android 9 or later.</string>
     <string name="peppy_toggle_android_mirroring_consent_title">Mirror app notifications?</string>
     <string name="peppy_toggle_android_contacts_hero_title">Contacts on your devices</string>
     <string name="peppy_toggle_android_contacts_hero_body">Peppy publishes this phone\'s contacts, encrypted, to your configured server. Edits from your other devices can come back here.</string>
@@ -143,9 +142,7 @@
     <string name="peppy_help_ios_carrier_title">Carrier messaging</string>
     <string name="peppy_help_ios_carrier_unavailable">iOS cannot capture or send carrier SMS/MMS. Use an Android phone for carrier messaging. RCS is unavailable.</string>
     <string name="peppy_help_ios_sms_title">SMS and MMS</string>
-    <string name="peppy_help_ios_sms_unavailable">iOS does not provide an SMS inbox listener. An Android phone receives and sends SMS.
-
-MMS capture requires a carrier listener not available in this iOS build.</string>
+    <string name="peppy_help_ios_sms_unavailable">iOS does not provide an SMS inbox listener. An Android phone receives and sends SMS.\n\nMMS capture requires a carrier listener not available in this iOS build.</string>
     <string name="peppy_help_ios_contacts_title">Contacts</string>
     <string name="peppy_help_ios_contacts">iOS decides when background updates run; it can take hours or days. Notes are not synced from iOS.</string>
     <string name="peppy_help_ios_contacts_footer">This phone publishes its own contact book to your Peppy server and applies edits from your other devices.</string>
@@ -165,17 +162,13 @@ MMS capture requires a carrier listener not available in this iOS build.</string
     <string name="peppy_contacts_allow_edits_footer">Optional. Lets this phone save contact edits you approve from another device.</string>
     <string name="peppy_contacts_read_label">Contacts read on this phone</string>
     <string name="peppy_contacts_book_limit">This book exceeds 20,000 contacts; only part of it is uploaded.</string>
-    <string name="peppy_help_android_messaging_limits">MMS messages sync after the phone finishes downloading them and uploading encrypted copies.
-
-RCS requires a verified carrier or OEM integration and is not available in this build.
-
-Android can delay background sync in Doze or battery saver. Force-stopping Peppy pauses capture until you open it again. Some one-time-code texts may not reach companion apps.</string>
+    <string name="peppy_help_android_messaging_limits">MMS messages sync after the phone finishes downloading them and uploading encrypted copies.\n\nRCS requires a verified carrier or OEM integration and is not available in this build.\n\nAndroid can delay background sync in Doze or battery saver. Force-stopping Peppy pauses capture until you open it again. Some one-time-code texts may not reach companion apps.</string>
     <string name="peppy_help_android_mms_capture">Captures MMS after your phone\'s messaging app downloads it.</string>
     <string name="peppy_help_android_mms_wifi">Live messages and small encrypted previews may sync over mobile data. Originals and imported history wait for Wi-Fi unless you choose Sync image in a conversation. Downloads needed to send a message are not delayed. Wi-Fi means an active Wi-Fi connection, not Ethernet or unlimited cellular.</string>
     <string name="peppy_help_android_own_number">Needed only so replies to group MMS threads exclude this phone.</string>
     <string name="peppy_help_android_notification_mirroring">Upgrade your other Peppy clients before enabling mirroring. Notification history is retained like messages and shares the vault\'s 100,000-record recovery limit. Mute noisy apps to limit growth.</string>
     <string name="peppy_help_android_notification_mirroring_toggle">Send app notifications to your desktop. Off by default.</string>
-    <string name="peppy_help_android_phone_read">Best effort. Needs notification access, SMS sync, and SMS read access. Peppy skips ambiguous or unseen conversations, and pending attempts expire after one day.</string>
+    <string name="peppy_help_android_phone_read">Best effort. Messages you read in your phone\'s messaging app are marked read in Peppy, including after time away. SMS always counts; MMS counts when MMS sync is on. This needs SMS sync and SMS read access. Reading an SMS in Peppy can also mark it read on your phone, which needs notification access and Android 9 or later. Peppy never marks messages unread. RCS conversations are stored privately by your messaging app and cannot be read by Peppy. When marking SMS read on your phone, Peppy skips ambiguous or unseen conversations, and pending phone attempts expire after one day.</string>
     <string name="peppy_help_android_notification_wifi">WiFi only uses the active WiFi connection. Ethernet and cellular (even unlimited plans) are not included.</string>
     <string name="peppy_app_name">Peppy</string>
     <string name="peppy_server_offline_title">Server offline</string>
@@ -198,7 +191,7 @@ Android can delay background sync in Doze or battery saver. Force-stopping Peppy
     <string name="peppy_cancel">Cancel</string>
     <string name="peppy_mirroring">Mirroring</string>
     <string name="peppy_notification_mirroring_disclosure">Notification access lets Peppy read the content Android makes available, which may include verification codes or bank alerts. Mirroring is off by default. When you enable it, Peppy encrypts copies for your vault and stores them on your configured server for your authorized vault devices. Dismissing a mirrored notification on another device may also clear it on this phone while mirroring is permitted. Turning mirroring off stops new captures and remote phone clearing. Already-synced history stays in your vault.</string>
-    <string name="peppy_phone_read_disclosure">When you read a conversation in Peppy, Peppy can ask your phone\'s messaging app to use its own mark-read action. That updates the messaging app\'s read status for the whole conversation, and a message arriving at that moment or RCS messages Peppy cannot inspect may also be marked read. It acts only when exact message-time evidence is unambiguous; time is not a guaranteed conversation identity. Notification access can see all notifications, but this path inspects only the current default messaging app. No per-app support is promised. Older reads are not backfilled.</string>
+    <string name="peppy_phone_read_disclosure">Peppy can keep read status in step between your phone\'s messaging app and Peppy.\n\nFrom your phone: when you read an SMS or downloaded MMS in your messaging app, Peppy marks that one message read in Peppy and on your other devices. This only reads the message\'s read flag. It does not change your phone\'s messages, and dismissing a notification does not count as reading. It also catches up after time away, but only for messages Peppy already captured and still shows as unread. It needs SMS sync and SMS read access, and MMS needs MMS sync. Notification access is not needed. RCS messages are kept privately by your messaging app and cannot be read by Peppy.\n\nFrom Peppy: when you read an SMS in Peppy, Peppy can ask your phone\'s messaging app to use its own mark-read action. This is best effort, covers SMS only, and needs notification access and Android 9 or later. It updates the messaging app\'s read status for the whole conversation, and a message arriving at that moment or RCS messages Peppy cannot inspect may also be marked read. It acts only when exact message-time evidence is unambiguous; time is not a guaranteed conversation identity. Notification access can see all notifications, but this path inspects only the current default messaging app. Older reads in Peppy are not sent to your phone.\n\nRead status syncs encrypted through your configured server to your authorized devices, like your other messages. Peppy never marks messages unread.</string>
     <string name="peppy_sms_sync">SMS synchronization</string>
     <string name="peppy_sms_history_title">Phone message sync</string>
     <string name="peppy_sms_history_description">With SMS sync enabled, Peppy imports existing and new sent and received messages available in Android\'s SMS storage. They may include verification codes or bank alerts. Peppy encrypts copies for your vault and stores them on your configured server for access by your authorized vault devices. SMS access may also let Peppy read your SIM phone number and sync an encrypted copy for group MMS recipient matching, even if MMS capture is off. Carrier SMS itself is not end-to-end encrypted.</string>

@@ -1138,7 +1138,7 @@ describe("ContactsView", () => {
       const consumed = vi.fn();
       render(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 72 }} onTargetConsumed={consumed} />);
 
-      expect(await screen.findByText("Select a contact book first.")).toBeInTheDocument();
+      await waitFor(() => expect(document.querySelector("#contacts-target-error")).toHaveAttribute("data-target-state", "error"));
       expect(screen.queryByRole("form", { name: "Create contact" })).not.toBeInTheDocument();
       expect(consumed).toHaveBeenCalledWith(72);
     });
@@ -1176,7 +1176,7 @@ describe("ContactsView", () => {
       expect(screen.getByLabelText("Phone 1 number")).toHaveValue("+18014320853");
     });
 
-    it("keeps the selected book when opening a create target", async () => {
+    it("keeps the selected usable book when opening a create target", async () => {
       const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone" };
       vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, secondBook]);
       const { rerender } = render(<ContactsView />);
@@ -1186,6 +1186,53 @@ describe("ContactsView", () => {
 
       await screen.findByRole("form", { name: "Create contact" });
       expect(screen.getByRole("button", { name: /iPhone/ })).toHaveAttribute("aria-current", "location");
+    });
+
+    it("switches a create target from a read-only book to the first usable book", async () => {
+      const readOnlyBook = { ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canWrite: false } };
+      const writableBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone" };
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([readOnlyBook, writableBook]);
+      const consumed = vi.fn();
+      render(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 81 }} onTargetConsumed={consumed} />);
+
+      expect(await screen.findByRole("form", { name: "Create contact" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /iPhone/ })).toHaveAttribute("aria-current", "location");
+      expect(consumed).toHaveBeenCalledWith(81);
+    });
+
+    it("reports and consumes a create target when no usable book is available", async () => {
+      const readOnlyBook = { ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canWrite: false } };
+      const revokedBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone", sourceRevoked: true };
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([readOnlyBook, revokedBook]);
+      const consumed = vi.fn();
+      render(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 82 }} onTargetConsumed={consumed} />);
+
+      await waitFor(() => expect(document.querySelector("#contacts-target-error")).toHaveAttribute("data-target-state", "error"));
+      expect(screen.queryByRole("form", { name: "Create contact" })).not.toBeInTheDocument();
+      expect(consumed).toHaveBeenCalledWith(82);
+    });
+
+    it("waits for dirty draft confirmation before switching to a usable book for a create target", async () => {
+      const readOnlyBook = { ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canWrite: false } };
+      const writableBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone" };
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([readOnlyBook, writableBook]);
+      const consumed = vi.fn();
+      const { rerender } = render(<ContactsView />);
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Unsaved" } });
+
+      rerender(<ContactsView target={{ kind: "create", phone: "+18014320853", requestId: 83 }} onTargetConsumed={consumed} />);
+
+      expect(await screen.findByText("You have unsaved changes.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Pixel 8/ })).toHaveAttribute("aria-current", "location");
+      expect(screen.getByRole("button", { name: /iPhone/ })).not.toHaveAttribute("aria-current", "location");
+      expect(consumed).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+
+      expect(await screen.findByRole("form", { name: "Create contact" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /iPhone/ })).toHaveAttribute("aria-current", "location");
+      expect(consumed).toHaveBeenCalledWith(83);
     });
 
     it("sends the prefilled phone when saving a create target", async () => {

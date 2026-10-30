@@ -128,6 +128,15 @@ describe("Modal", () => {
     expect(document.querySelector("[data-modal-panel]")).toHaveClass("peppy-modal-panel", "wide-panel");
   });
 
+  it("marks only the dialog's own surface as a window drag region when requested", () => {
+    const view = renderModal();
+    expect(document.querySelector("#test-modal")).not.toHaveAttribute("data-tauri-drag-region");
+    view.unmount();
+    renderModal({ windowDragOutside: true });
+    expect(document.querySelector("#test-modal")).toHaveAttribute("data-tauri-drag-region", "true");
+    expect(document.querySelector("[data-modal-panel]")).not.toHaveAttribute("data-tauri-drag-region");
+  });
+
   it("returns focus to the opener or fallback after unmount", () => {
     const fallback = { current: document.createElement("button") };
     document.body.append(fallback.current);

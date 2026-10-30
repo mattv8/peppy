@@ -626,6 +626,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func applyPending(limit: UInt64) throws  -> NativeApplyReport
     
+    func applyPhoneReads(candidates: [NativePhoneReadCandidate]) throws  -> UInt32
+    
     func attachmentInfo(attachmentId: String) throws  -> NativeAttachmentInfo
     
     func beginContactScan(inputJson: String) throws  -> String
@@ -894,6 +896,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func pendingUploads() throws  -> [NativeCipherObject]
     
+    func phoneReadCandidates(transport: NativePhoneReadTransport, sourceGeneration: String, afterOrder: Int64, limit: UInt32) throws  -> [NativePhoneReadCandidate]
+    
     func planMmsBackfillScans(generation: String, scope: String, observedMaxId: String) throws  -> [NativeMmsBackfillScanPlan]
     
     func planSmsReconciliation(sourceGeneration: String, providerScope: String, observedHighWater: String, liveAnchorFingerprint: String?) throws  -> NativeSmsReconciliationPlan?
@@ -1150,6 +1154,16 @@ open func applyPending(limit: UInt64)throws  -> NativeApplyReport  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_pending(
             self.uniffiCloneHandle(),
         FfiConverterUInt64.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
+open func applyPhoneReads(candidates: [NativePhoneReadCandidate])throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_phone_reads(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeNativePhoneReadCandidate.lower(candidates),uniffiCallStatus
     )
 })
 }
@@ -2158,6 +2172,19 @@ open func pendingUploads()throws  -> [NativeCipherObject]  {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_uploads(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func phoneReadCandidates(transport: NativePhoneReadTransport, sourceGeneration: String, afterOrder: Int64, limit: UInt32)throws  -> [NativePhoneReadCandidate]  {
+    return try  FfiConverterSequenceTypeNativePhoneReadCandidate.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_phone_read_candidates(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativePhoneReadTransport_lower(transport),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterInt64.lower(afterOrder),
+        FfiConverterUInt32.lower(limit),uniffiCallStatus
     )
 })
 }
@@ -5089,16 +5116,18 @@ public struct NativeGatewayPolicyDecision: Equatable, Hashable {
     public var transferMedia: Bool
     public var rcsSupported: Bool
     public var applyPhoneRead: Bool
+    public var ingestPhoneRead: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(captureNotification: Bool, captureSms: Bool, captureMms: Bool, transferMedia: Bool, rcsSupported: Bool, applyPhoneRead: Bool) {
+    public init(captureNotification: Bool, captureSms: Bool, captureMms: Bool, transferMedia: Bool, rcsSupported: Bool, applyPhoneRead: Bool, ingestPhoneRead: Bool) {
         self.captureNotification = captureNotification
         self.captureSms = captureSms
         self.captureMms = captureMms
         self.transferMedia = transferMedia
         self.rcsSupported = rcsSupported
         self.applyPhoneRead = applyPhoneRead
+        self.ingestPhoneRead = ingestPhoneRead
     }
 
     
@@ -5122,7 +5151,8 @@ public struct FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
                 captureMms: FfiConverterBool.read(from: &buf), 
                 transferMedia: FfiConverterBool.read(from: &buf), 
                 rcsSupported: FfiConverterBool.read(from: &buf), 
-                applyPhoneRead: FfiConverterBool.read(from: &buf)
+                applyPhoneRead: FfiConverterBool.read(from: &buf), 
+                ingestPhoneRead: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5133,6 +5163,7 @@ public struct FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
         FfiConverterBool.write(value.transferMedia, into: &buf)
         FfiConverterBool.write(value.rcsSupported, into: &buf)
         FfiConverterBool.write(value.applyPhoneRead, into: &buf)
+        FfiConverterBool.write(value.ingestPhoneRead, into: &buf)
     }
 }
 
@@ -7296,6 +7327,72 @@ public func FfiConverterTypeNativePermit_lift(_ buf: RustBuffer) throws -> Nativ
 #endif
 public func FfiConverterTypeNativePermit_lower(_ value: NativePermit) -> RustBuffer {
     return FfiConverterTypeNativePermit.lower(value)
+}
+
+
+public struct NativePhoneReadCandidate: Equatable, Hashable {
+    public var messageId: String
+    public var transport: NativePhoneReadTransport
+    public var localOrder: Int64
+    public var row: NativeProviderRowRef
+    public var transactionId: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(messageId: String, transport: NativePhoneReadTransport, localOrder: Int64, row: NativeProviderRowRef, transactionId: String?) {
+        self.messageId = messageId
+        self.transport = transport
+        self.localOrder = localOrder
+        self.row = row
+        self.transactionId = transactionId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativePhoneReadCandidate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePhoneReadCandidate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePhoneReadCandidate {
+        return
+            try NativePhoneReadCandidate(
+                messageId: FfiConverterString.read(from: &buf), 
+                transport: FfiConverterTypeNativePhoneReadTransport.read(from: &buf), 
+                localOrder: FfiConverterInt64.read(from: &buf), 
+                row: FfiConverterTypeNativeProviderRowRef.read(from: &buf), 
+                transactionId: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativePhoneReadCandidate, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterTypeNativePhoneReadTransport.write(value.transport, into: &buf)
+        FfiConverterInt64.write(value.localOrder, into: &buf)
+        FfiConverterTypeNativeProviderRowRef.write(value.row, into: &buf)
+        FfiConverterOptionString.write(value.transactionId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePhoneReadCandidate_lift(_ buf: RustBuffer) throws -> NativePhoneReadCandidate {
+    return try FfiConverterTypeNativePhoneReadCandidate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePhoneReadCandidate_lower(_ value: NativePhoneReadCandidate) -> RustBuffer {
+    return FfiConverterTypeNativePhoneReadCandidate.lower(value)
 }
 
 
@@ -10018,6 +10115,72 @@ public func FfiConverterTypeNativePermitState_lower(_ value: NativePermitState) 
 
 
 
+public enum NativePhoneReadTransport: Equatable, Hashable {
+    
+    case sms
+    case mms
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativePhoneReadTransport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePhoneReadTransport: FfiConverterRustBuffer {
+    typealias SwiftType = NativePhoneReadTransport
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePhoneReadTransport {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sms
+        
+        case 2: return .mms
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativePhoneReadTransport, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .sms:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .mms:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePhoneReadTransport_lift(_ buf: RustBuffer) throws -> NativePhoneReadTransport {
+    return try FfiConverterTypeNativePhoneReadTransport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePhoneReadTransport_lower(_ value: NativePhoneReadTransport) -> RustBuffer {
+    return FfiConverterTypeNativePhoneReadTransport.lower(value)
+}
+
+
+
+
 public enum NativeSendResult: Equatable, Hashable {
     
     case submitted
@@ -11067,6 +11230,31 @@ fileprivate struct FfiConverterSequenceTypeNativeNotificationTarget: FfiConverte
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNativePhoneReadCandidate: FfiConverterRustBuffer {
+    typealias SwiftType = [NativePhoneReadCandidate]
+
+    public static func write(_ value: [NativePhoneReadCandidate], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativePhoneReadCandidate.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativePhoneReadCandidate] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativePhoneReadCandidate]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativePhoneReadCandidate.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNativePhoneReadEffect: FfiConverterRustBuffer {
     typealias SwiftType = [NativePhoneReadEffect]
 
@@ -11489,6 +11677,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_pending() != 53530) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_phone_reads() != 6156) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_info() != 19943) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11763,6 +11954,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads() != 38265) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_phone_read_candidates() != 40864) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_mms_backfill_scans() != 16952) {

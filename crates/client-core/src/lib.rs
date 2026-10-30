@@ -92,7 +92,10 @@ pub use peppy_protocol::{
     CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, GatewayRoute,
 };
 use peppy_protocol::{MAX_CIPHERTEXT_BYTES, MAX_COMPACTION_SUPERSEDES, PROTOCOL_VERSION};
-pub use phone_read::{PHONE_READ_EFFECT_TTL_MS, PhoneReadEffect, ProviderRowRef};
+pub use phone_read::{
+    PHONE_READ_EFFECT_TTL_MS, PhoneReadCandidate, PhoneReadEffect, PhoneReadTransport,
+    ProviderRowRef,
+};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
