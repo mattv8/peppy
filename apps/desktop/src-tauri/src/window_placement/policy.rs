@@ -66,6 +66,54 @@ pub(super) fn monitor_bounds(area: Rect, scale: f64, logical_desktop: bool) -> O
     })
 }
 
+/// Calculates a bounded floating viewer frame in the desktop coordinate space used by the
+/// platform. macOS/Linux use logical desktop coordinates; Windows uses physical coordinates.
+pub(super) fn media_viewer_placement(
+    parent: Rect,
+    work_area: Rect,
+    scale: f64,
+    logical_desktop: bool,
+    cascade: i32,
+) -> Option<Placement> {
+    let parent = window_bounds(parent, scale, logical_desktop);
+    let monitor = monitor_bounds(work_area, scale, logical_desktop)?;
+    let width = if logical_desktop {
+        420
+    } else {
+        (420.0 * scale).round() as u32
+    }
+    .min(monitor.work_area.width);
+    let height = if logical_desktop {
+        600
+    } else {
+        (600.0 * scale).round() as u32
+    }
+    .min(monitor.work_area.height);
+    let right = monitor.work_area.x + monitor.work_area.width as i32
+        - (parent.bounds.x + parent.bounds.width as i32);
+    let left = parent.bounds.x - monitor.work_area.x;
+    let x = if right >= left {
+        parent.bounds.x + parent.bounds.width as i32 + 12 + cascade
+    } else {
+        parent.bounds.x - width as i32 - 12 - cascade
+    };
+    Some(Placement {
+        bounds: Rect {
+            x: x.clamp(
+                monitor.work_area.x,
+                monitor.work_area.x + (monitor.work_area.width - width) as i32,
+            ),
+            y: (parent.bounds.y + cascade).clamp(
+                monitor.work_area.y,
+                monitor.work_area.y + (monitor.work_area.height - height) as i32,
+            ),
+            width,
+            height,
+        },
+        scale_factor: monitor.scale_factor,
+    })
+}
+
 pub(super) fn plan(
     current: Placement,
     monitors: &[Monitor],
@@ -336,6 +384,28 @@ mod tests {
                 .placement,
             current
         );
+    }
+
+    #[test]
+    fn media_viewer_uses_target_scale_and_clamps_negative_logical_work_area() {
+        let target = media_viewer_placement(
+            rect(-3200, 200, 1200, 1000),
+            rect(-3840, 60, 3840, 2100),
+            2.0,
+            true,
+            24,
+        )
+        .unwrap();
+        assert_eq!(target.bounds, rect(-964, 124, 420, 600));
+        let short = media_viewer_placement(
+            rect(100, 100, 400, 400),
+            rect(0, 0, 640, 450),
+            1.0,
+            false,
+            24,
+        )
+        .unwrap();
+        assert_eq!(short.bounds, rect(220, 0, 420, 450));
     }
 
     #[test]

@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "media",
+  "description": "Peppy floating media viewer windows",
+  "windows": [
+    "media-*"
+  ],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "allow-media-page",
+    "allow-media-page-around",
+    "allow-media-page-newer",
+    "allow-open-media",
+    "allow-load-media",
+    "allow-close-media",
+    "allow-save-attachment",
+    "allow-copy-attachment-image"
+  ]
+}

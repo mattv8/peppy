@@ -381,6 +381,7 @@ fn configure_composer(window: &tauri::WebviewWindow, head_panel: bool) {
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
     }
     let _ = window.set_always_on_top(head_panel);
+    crate::sync_media_viewer_topmost(window.app_handle(), window.label(), head_panel);
     crate::window_chrome::prepare_material(window, head_panel);
     crate::window_chrome::sync_webview_window(window, head_panel);
 }

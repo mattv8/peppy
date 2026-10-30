@@ -224,6 +224,21 @@ fn position(window: &WebviewWindow, placement: Placement) -> tauri::Result<()> {
     }
 }
 
+pub(crate) fn media_viewer_placement(
+    parent: Rect,
+    work_area: Rect,
+    scale: f64,
+    cascade: i32,
+) -> Option<Placement> {
+    policy::media_viewer_placement(
+        parent,
+        work_area,
+        scale,
+        cfg!(not(target_os = "windows")),
+        cascade,
+    )
+}
+
 fn capture(window: &WebviewWindow, visible_only: bool) -> Option<Placement> {
     if !position_supported() || !normal(window) || (visible_only && !window.is_visible().ok()?) {
         return None;

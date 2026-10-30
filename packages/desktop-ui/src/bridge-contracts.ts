@@ -174,6 +174,7 @@ export interface DesktopBridge {
   request_attachment_download(id: string): Promise<void>;
   /** Explicit user request to release named held originals using mobile data. */
   media_sync_request?(attachmentIds: string[]): Promise<void>;
+  open_media_viewer?(conversationId: string, attachmentId: string, messageId: string): Promise<void>;
   media_page(conversationId: string, cursor?: MediaCursor, limit?: number): Promise<MediaPage>;
   media_page_around(conversationId: string, attachmentId: string, messageId?: string, limit?: number): Promise<MediaPageAround>;
   media_page_newer(conversationId: string, cursor: MediaCursor, limit?: number): Promise<MediaPage>;

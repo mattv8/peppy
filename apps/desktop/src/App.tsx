@@ -3886,6 +3886,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const openGalleryItem = async (item: GalleryMediaPageItem) => {
     const conversationId = active?.id;
     if (!conversationId) return;
+    if (composerConversation && bridge.open_media_viewer) {
+      try {
+        await bridge.open_media_viewer(conversationId, item.attachment.id, item.message.id);
+      } catch {
+        setNotice("Could not open media viewer.");
+      }
+      return;
+    }
     const session = gallerySessionRef.current;
     const isCurrent = () => gallerySessionRef.current === session && galleryConversationRef.current === conversationId;
     try {

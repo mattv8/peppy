@@ -539,6 +539,7 @@ export const tauriBridge: DesktopBridge = {
   get_notification_sound: () => invoke("get_notification_sound"),
   set_notification_sound: enabled => invoke("set_notification_sound", { enabled }),
   media_sync_request: attachmentIds => invoke("media_sync_request", { attachmentIds }),
+  open_media_viewer: (conversationId, attachmentId, messageId) => invoke("open_media_viewer", { conversationId, attachmentId, messageId }),
   media_page_around: (conversationId, attachmentId, messageId, limit) => invoke("media_page_around", { conversationId, attachmentId, messageId, limit }),
   media_page_newer: (conversationId, cursor, limit) => invoke("media_page_newer", { conversationId, cursor, limit }),
   hydrate_media_preview: (messageId, id) => invoke("hydrate_media_preview", { messageId, id }),
