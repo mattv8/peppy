@@ -38,7 +38,8 @@ class ContributionPolicyTest < Minitest::Test
     assert_equal ['pull_request'], review.fetch('rules').map { |entry| entry['type'] }
     parameters = rule(review, 'pull_request').fetch('parameters')
 
-    assert_equal %w[allowed_merge_methods dismiss_stale_reviews_on_push require_code_owner_review require_extra_approval_for_unattributed_changes require_last_push_approval required_approving_review_count required_review_thread_resolution], parameters.keys.sort
+    assert_equal %w[allowed_merge_methods dismiss_stale_reviews_on_push require_code_owner_review require_extra_approval_for_unattributed_changes require_last_push_approval required_approving_review_count required_review_thread_resolution required_reviewers], parameters.keys.sort
+    assert_equal [], parameters['required_reviewers']
     assert_equal %w[merge rebase], parameters['allowed_merge_methods']
     assert_equal 1, parameters['required_approving_review_count']
     assert_equal false, parameters['required_review_thread_resolution']
@@ -46,7 +47,28 @@ class ContributionPolicyTest < Minitest::Test
     assert_equal true, parameters['require_extra_approval_for_unattributed_changes']
     assert_equal true, parameters['dismiss_stale_reviews_on_push']
     assert_equal true, parameters['require_last_push_approval']
-    assert_equal [{ 'actor_id' => 5, 'actor_type' => 'RepositoryRole', 'bypass_mode' => 'pull_request' }], review['bypass_actors']
+  end
+
+  def test_contribution_review_exempts_only_the_named_owner_user
+    review = payload('contribution-review.json')
+    assert_equal [{ 'actor_id' => 9_312_603, 'actor_type' => 'User', 'bypass_mode' => 'exempt' }], review['bypass_actors']
+  end
+
+  def test_pull_request_baseline_applies_even_to_the_review_exempt_owner
+    baseline = payload('pull-request-required.json')
+    assert_branch_scope(baseline)
+    assert_equal ['pull_request'], baseline.fetch('rules').map { |entry| entry['type'] }
+    assert_equal [], baseline['bypass_actors']
+    assert_equal({
+      'allowed_merge_methods' => %w[merge rebase],
+      'dismiss_stale_reviews_on_push' => false,
+      'required_reviewers' => [],
+      'require_code_owner_review' => false,
+      'require_extra_approval_for_unattributed_changes' => false,
+      'require_last_push_approval' => false,
+      'required_approving_review_count' => 0,
+      'required_review_thread_resolution' => false
+    }, rule(baseline, 'pull_request').fetch('parameters'))
   end
 
   def test_required_ci_uses_the_exact_gate_check_in_strict_mode_without_bypass
