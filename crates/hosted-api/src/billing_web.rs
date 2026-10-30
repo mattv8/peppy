@@ -3,7 +3,27 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Required for billing mutations after the account's first binding retirement.
+pub const BILLING_BINDING_HEADER: &str = "X-Peppy-Billing-Binding";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WebProviderLane {
+    Primary,
+    Sandbox,
+}
+
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebBillingContextResponse {
+    pub binding_id: Uuid,
+    pub provider_lane: WebProviderLane,
+    pub config: crate::auth_web::WebConfigResponse,
+    pub summary: BillingSummary,
+}
+
 pub mod routes {
+    pub const CONTEXT: &str = "/hosted/v1/web/billing/context";
     pub const BILLING: &str = "/hosted/v1/web/billing";
     pub const PLANS: &str = "/hosted/v1/web/billing/plans";
     pub const SUBSCRIBE: &str = "/hosted/v1/web/billing/subscribe";
@@ -144,6 +164,51 @@ pub struct PaymentMethodSetupResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_context_adds_no_required_fields_to_legacy_mutations() {
+        let request: BillingOperationRequest =
+            serde_json::from_str(r#"{"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#)
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(request)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(BILLING_BINDING_HEADER, "X-Peppy-Billing-Binding");
+        assert_eq!(routes::CONTEXT, "/hosted/v1/web/billing/context");
+        assert_eq!(
+            serde_json::to_value(WebProviderLane::Primary).unwrap(),
+            "primary"
+        );
+        assert_eq!(
+            serde_json::to_value(WebProviderLane::Sandbox).unwrap(),
+            "sandbox"
+        );
+        assert!(serde_json::from_str::<WebProviderLane>("\"other\"").is_err());
+    }
+
+    #[test]
+    fn context_roundtrip_bundles_binding_lane_configuration_and_summary() {
+        let plan = serde_json::json!({"price_id":"price_test","product_name":"Test",
+            "unit_amount":100,"currency":"usd","interval":"month","interval_count":1,
+            "discount_percent":null,"comped":false});
+        let input = serde_json::json!({
+            "binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","provider_lane":"sandbox",
+            "config":{"stripe_publishable_key":"pk_test","available_providers":["google"]},
+            "summary":{"subscription_id":null,"subscription_status":"none","paid_through":0,
+                "cancel_at_period_end":false,"access":"read_only","price_id":"price_test",
+                "plan":plan,"invoices":[],"storage":{"used_bytes":0,"limit_bytes":100,
+                    "base_bytes":100,"pack_quantity":0,"pack_bytes":100,"pack_max_quantity":null,
+                    "pack_purchase_available":false,"pack_pending":false,
+                    "pack_mutation_blocked_reason":null,"pack":null}}
+        });
+        let parsed: WebBillingContextResponse = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), input);
+    }
 
     #[test]
     fn subscription_action_keeps_secrets_out_of_zero_charge_response() {

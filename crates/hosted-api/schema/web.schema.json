@@ -1,5 +1,21 @@
 {
   "$defs": {
+    "AddTesterRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/TesterInput"
+        },
+        "expected_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "entry"
+      ],
+      "type": "object"
+    },
     "BillingOperationRequest": {
       "additionalProperties": false,
       "properties": {
@@ -82,6 +98,36 @@
       ],
       "type": "object"
     },
+    "CiphertextV1": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "aes-256-gcm",
+          "type": "string"
+        },
+        "ciphertext": {
+          "type": "string"
+        },
+        "keyId": {
+          "type": "string"
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "algorithm",
+        "keyId",
+        "nonce",
+        "ciphertext"
+      ],
+      "type": "object"
+    },
     "DeletionState": {
       "enum": [
         "none",
@@ -96,6 +142,52 @@
         "google"
       ],
       "type": "string"
+    },
+    "InitializeTestersRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/CiphertextV1"
+        },
+        "confirm_legacy_retirement": {
+          "type": "boolean"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/TesterInput"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "type": "string"
+        },
+        "kdf": {
+          "$ref": "#/$defs/KdfV1"
+        },
+        "legacy_mappings": {
+          "items": {
+            "$ref": "#/$defs/LegacyTesterMapping"
+          },
+          "type": "array"
+        },
+        "retire_legacy_accounts": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "kdf",
+        "check",
+        "entries",
+        "legacy_mappings",
+        "retire_legacy_accounts",
+        "confirm_legacy_retirement"
+      ],
+      "type": "object"
     },
     "InvoiceSummary": {
       "additionalProperties": false,
@@ -135,6 +227,55 @@
         "amount_paid",
         "currency",
         "created_at"
+      ],
+      "type": "object"
+    },
+    "KdfV1": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "pbkdf2-sha256+hkdf-sha256",
+          "type": "string"
+        },
+        "iterations": {
+          "const": 600000,
+          "type": "integer"
+        },
+        "keyId": {
+          "type": "string"
+        },
+        "salt": {
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "algorithm",
+        "iterations",
+        "salt",
+        "keyId"
+      ],
+      "type": "object"
+    },
+    "LegacyTesterMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "account_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "entry_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "entry_id"
       ],
       "type": "object"
     },
@@ -213,6 +354,93 @@
         "interval",
         "interval_count",
         "comped"
+      ],
+      "type": "object"
+    },
+    "ReencryptedTesterEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "ciphertext": {
+          "$ref": "#/$defs/CiphertextV1"
+        },
+        "entry_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry_id",
+        "ciphertext"
+      ],
+      "type": "object"
+    },
+    "RekeyTestersRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/CiphertextV1"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/ReencryptedTesterEntry"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "type": "string"
+        },
+        "kdf": {
+          "$ref": "#/$defs/KdfV1"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "kdf",
+        "check",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "RemoveTesterRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision"
+      ],
+      "type": "object"
+    },
+    "ResetTestersRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/CiphertextV1"
+        },
+        "confirmation": {
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/TesterInput"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "type": "string"
+        },
+        "kdf": {
+          "$ref": "#/$defs/KdfV1"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "confirmation",
+        "kdf",
+        "check",
+        "entries"
       ],
       "type": "object"
     },
@@ -406,6 +634,151 @@
         }
       ]
     },
+    "TesterEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "ciphertext": {
+          "$ref": "#/$defs/CiphertextV1"
+        },
+        "entry_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TesterStatus"
+        }
+      },
+      "required": [
+        "entry_id",
+        "ciphertext",
+        "status"
+      ],
+      "type": "object"
+    },
+    "TesterErrorResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "TesterInput": {
+      "additionalProperties": false,
+      "properties": {
+        "ciphertext": {
+          "$ref": "#/$defs/CiphertextV1"
+        },
+        "email": {
+          "type": "string"
+        },
+        "entry_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry_id",
+        "email",
+        "ciphertext"
+      ],
+      "type": "object"
+    },
+    "TesterMutationResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TesterEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "type": "object"
+    },
+    "TesterRegistryResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CiphertextV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/TesterEntry"
+          },
+          "type": "array"
+        },
+        "initialized": {
+          "type": "boolean"
+        },
+        "kdf": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KdfV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "legacy_accounts": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "registry_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "registry_id",
+        "revision",
+        "initialized",
+        "entries",
+        "legacy_accounts"
+      ],
+      "type": "object"
+    },
+    "TesterStatus": {
+      "enum": [
+        "pending_verification",
+        "active",
+        "blocked",
+        "revoked"
+      ],
+      "type": "string"
+    },
     "WebAccountResponse": {
       "additionalProperties": false,
       "properties": {
@@ -421,6 +794,41 @@
         "account_id",
         "deletion_state"
       ],
+      "type": "object"
+    },
+    "WebBillingContextResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "config": {
+          "$ref": "#/$defs/WebConfigResponse"
+        },
+        "provider_lane": {
+          "$ref": "#/$defs/WebProviderLane"
+        },
+        "summary": {
+          "$ref": "#/$defs/BillingSummary"
+        }
+      },
+      "required": [
+        "binding_id",
+        "provider_lane",
+        "config",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "WebCapabilitiesResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "manage_testers": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
       "type": "object"
     },
     "WebConfigResponse": {
@@ -447,6 +855,13 @@
         "available_providers"
       ],
       "type": "object"
+    },
+    "WebProviderLane": {
+      "enum": [
+        "primary",
+        "sandbox"
+      ],
+      "type": "string"
     },
     "WebSessionResponse": {
       "additionalProperties": false,
@@ -482,6 +897,12 @@
     "billing": {
       "$ref": "#/$defs/BillingSummary"
     },
+    "billing_context": {
+      "$ref": "#/$defs/WebBillingContextResponse"
+    },
+    "capabilities": {
+      "$ref": "#/$defs/WebCapabilitiesResponse"
+    },
     "config": {
       "$ref": "#/$defs/WebConfigResponse"
     },
@@ -511,9 +932,43 @@
     },
     "subscribe_response": {
       "$ref": "#/$defs/SubscribeResponse"
+    },
+    "tester_add": {
+      "$ref": "#/$defs/AddTesterRequest"
+    },
+    "tester_error": {
+      "$ref": "#/$defs/TesterErrorResponse"
+    },
+    "tester_initialize": {
+      "$ref": "#/$defs/InitializeTestersRequest"
+    },
+    "tester_mutation": {
+      "$ref": "#/$defs/TesterMutationResponse"
+    },
+    "tester_registry": {
+      "$ref": "#/$defs/TesterRegistryResponse"
+    },
+    "tester_rekey": {
+      "$ref": "#/$defs/RekeyTestersRequest"
+    },
+    "tester_remove": {
+      "$ref": "#/$defs/RemoveTesterRequest"
+    },
+    "tester_reset": {
+      "$ref": "#/$defs/ResetTestersRequest"
     }
   },
   "required": [
+    "capabilities",
+    "billing_context",
+    "tester_registry",
+    "tester_initialize",
+    "tester_add",
+    "tester_remove",
+    "tester_rekey",
+    "tester_reset",
+    "tester_mutation",
+    "tester_error",
     "session",
     "session_renewal",
     "config",
@@ -534,6 +989,7 @@
     "appSessionRenew": "/hosted/v1/web/app-session/renew",
     "authStart": "/hosted/v1/web/auth/{provider}/start",
     "billing": "/hosted/v1/web/billing",
+    "billingContext": "/hosted/v1/web/billing/context",
     "cancel": "/hosted/v1/web/billing/cancel",
     "config": "/hosted/v1/web/config",
     "invoices": "/hosted/v1/web/billing/invoices",
@@ -547,6 +1003,13 @@
     "session": "/hosted/v1/web/session",
     "sessionRenew": "/hosted/v1/web/session/renew",
     "storagePack": "/hosted/v1/web/billing/storage-pack",
-    "subscribe": "/hosted/v1/web/billing/subscribe"
+    "subscribe": "/hosted/v1/web/billing/subscribe",
+    "testerCapabilities": "/hosted/v1/web/capabilities",
+    "testerEntries": "/hosted/v1/web/admin/testers/entries",
+    "testerInitialize": "/hosted/v1/web/admin/testers/initialize",
+    "testerRegistry": "/hosted/v1/web/admin/testers",
+    "testerRekey": "/hosted/v1/web/admin/testers/rekey",
+    "testerRemove": "/hosted/v1/web/admin/testers/entries/{entry_id}",
+    "testerReset": "/hosted/v1/web/admin/testers/reset"
   }
 }
