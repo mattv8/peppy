@@ -25,6 +25,7 @@ peppy-crypto = { path = "crates/crypto", version = "0.1.0" }
 peppy-domain = { path = "crates/domain", version = "0.1.0" }
 peppy-hosted-api = { path = "crates/hosted-api", version = "0.1.0" }
 peppy-protocol = { path = "crates/protocol", version = "0.1.0" }
+peppy-tester-crypto = { path = "crates/tester-crypto", version = "0.1.0" }
 rand = "=0.8.8"
 reqwest = { version = "=0.12.24", default-features = false }
 schemars = "=1.0.4"

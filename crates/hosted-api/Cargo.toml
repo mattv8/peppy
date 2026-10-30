@@ -10,6 +10,7 @@ license = "MPL-2.0"
 
 [dependencies]
 base64.workspace = true
+peppy-crypto.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
