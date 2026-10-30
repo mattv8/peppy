@@ -45,5 +45,36 @@ Assert-Equal $null $wrongCaseExport 'Export lookup must not match a wrong-case n
 $ordinalExport = Find-DumpbinExport -Exports $exports -Import ([pscustomobject]@{ Kind = 'Ordinal'; Symbol = 16 })
 Assert-Equal 'HexHint10' $ordinalExport.Name 'Export lookup must match ordinals'
 
+# dumpbin output routinely contains blank lines; these must bind and parse without error.
+$blankImports = @(ConvertFrom-DumpbinImports -Lines @('', '    KERNEL32.dll', '', '                         336 GetLastError', ''))
+Assert-Equal 1 $blankImports.Count 'Import parser must accept blank string elements'
+Assert-Equal 'GetLastError' $blankImports[0].Symbol 'Import parser must keep symbols around blank lines'
+
+$blankExports = @(ConvertFrom-DumpbinExports -Lines @('', '  ordinal hint RVA      name', '', '        1    0 00011000 NormalExport', ''))
+Assert-Equal 1 $blankExports.Count 'Export parser must accept blank string elements'
+Assert-Equal 'NormalExport' $blankExports[0].Name 'Export parser must keep exports around blank lines'
+
+# Empty output (zero imports or zero exports) must bind and yield zero rows, not a bind error.
+$emptyImports = @(ConvertFrom-DumpbinImports -Lines @())
+Assert-Equal 0 $emptyImports.Count 'Import parser must accept an empty array and return zero imports'
+$emptyExports = @(ConvertFrom-DumpbinExports -Lines @())
+Assert-Equal 0 $emptyExports.Count 'Export parser must accept an empty array and return zero exports'
+
+$emptyLookup = $null
+try {
+  $emptyLookup = Find-DumpbinExport -Exports @() -Import ([pscustomobject]@{ Kind = 'Name'; Symbol = 'NormalExport' })
+} catch {
+  $failures.Add("Export lookup must accept an empty export list without a bind error ($($_.Exception.Message))")
+}
+Assert-Equal $null $emptyLookup 'Export lookup over zero exports must report a missing symbol (null)'
+
+$emptyLookupOrdinal = $null
+try {
+  $emptyLookupOrdinal = Find-DumpbinExport -Exports @() -Import ([pscustomobject]@{ Kind = 'Ordinal'; Symbol = 16 })
+} catch {
+  $failures.Add("Ordinal lookup must accept an empty export list without a bind error ($($_.Exception.Message))")
+}
+Assert-Equal $null $emptyLookupOrdinal 'Ordinal lookup over zero exports must report a missing symbol (null)'
+
 if ($failures.Count -gt 0) { $failures | ForEach-Object { [Console]::Error.WriteLine($_) }; exit 1 }
 Write-Output 'windows-loader-diagnostics.Tests.ps1: passed'
