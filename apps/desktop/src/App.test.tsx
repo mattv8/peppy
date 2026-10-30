@@ -3329,7 +3329,7 @@ describe("draft durability", () => {
     await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("request-close-after-session-change", true));
   });
 
-  it("keeps late-save text visible with Retry when a save fails with a not-found draft", async () => {
+  it("keeps late-save text visible and explicitly saves a deleted draft as new", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     host.failSaves = { code: "not-found", message: "deleted" };
@@ -3337,12 +3337,17 @@ describe("draft durability", () => {
 
     const failure = await screen.findByRole("alert");
     expect(failure).toHaveAttribute("data-draft-notice", "save-failed");
-    expect(within(failure).getByRole("button", { name: "Retry" })).toBeEnabled();
+    const recover = within(failure).getByRole("button", { name: "Save as new draft" });
+    expect(recover).toHaveAttribute("data-draft-action", "save-new");
     expect(message()).toHaveValue("late local text");
     expect(document.querySelector("[data-draft-conflict-comparison]")).toBeNull();
 
+    host.failSaves = undefined;
+    fireEvent.click(recover);
+    await waitFor(() => expect(message()).toHaveValue("late local text"));
+
     await act(async () => hint?.());
-    expect(screen.getByRole("alert")).toHaveAttribute("data-draft-notice", "save-failed");
+    expect(document.querySelector("[data-draft-notice='save-failed']")).toBeNull();
     expect(message()).toHaveValue("late local text");
   });
 
@@ -3412,7 +3417,7 @@ describe("draft durability", () => {
     expect(message()).toHaveValue("other window");
   });
 
-  it("keeps local text retryable and does not recreate a draft that was deleted elsewhere", async () => {
+  it("keeps local text until explicit recovery recreates a draft deleted elsewhere", async () => {
     host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
     render(<App />);
     await waitFor(() => expect(message()).toHaveValue("stored"));
@@ -3421,9 +3426,53 @@ describe("draft durability", () => {
 
     const failure = await screen.findByRole("alert");
     expect(failure).toHaveAttribute("data-draft-notice", "save-failed");
-    expect(within(failure).getByRole("button", { name: "Retry" })).toBeEnabled();
+    const recover = within(failure).getByRole("button", { name: "Save as new draft" });
     expect(message()).toHaveValue("local version");
     expect(host.drafts.has("aurora")).toBe(false);
+    fireEvent.click(recover);
+    await waitFor(() => expect(message()).toHaveValue("local version"));
+  });
+
+  it("requires explicit confirmation before discarding a deleted draft's local changes", async () => {
+    host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("stored"));
+    host.drafts.delete("aurora");
+    type("local version");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Discard local changes" }));
+    const confirmation = screen.getByRole("alertdialog", { name: "Discard local changes?" });
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+    fireEvent.keyDown(confirmation, { key: "Escape" });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(message()).toHaveValue("local version");
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard local changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard local changes" }));
+    await waitFor(() => expect(document.querySelector("[data-draft-notice='save-failed']")).toBeNull());
+    expect(bridge.discard_draft).not.toHaveBeenCalled();
+    expect(host.drafts.has("aurora")).toBe(false);
+  });
+
+  it("reloads the conversation after a confirmed local discard so the composer leaves loading without an external event", async () => {
+    host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("stored"));
+    host.drafts.delete("aurora");
+    type("local version");
+    await waitFor(() => expect(document.querySelector("[data-draft-notice='save-failed']")).not.toBeNull());
+    vi.mocked(bridge.save_draft).mockClear();
+    vi.mocked(bridge.discard_draft).mockClear();
+    vi.mocked(bridge.load_state).mockClear();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Discard local changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard local changes" }));
+
+    await waitFor(() => expect(vi.mocked(bridge.load_state).mock.calls.some(([id]) => id === "aurora")).toBe(true));
+    await waitFor(() => expect(message().readOnly).toBe(false));
+    expect(message().placeholder).not.toBe("Loading draft…");
+    expect(bridge.save_draft).not.toHaveBeenCalled();
+    expect(bridge.discard_draft).not.toHaveBeenCalled();
   });
 
   it("keeps local text and retries when the catch-up lookup returns a mismatched identity", async () => {

@@ -104,6 +104,7 @@ export class DraftStore {
   private retainedVersions = new Map<string, DraftContent[]>();
   private reviewRequired = new Set<string>();
   private pendingSentVerification = new Map<string, number>();
+  private recoverySaves = new Map<string, Promise<SaveOutcome>>();
   private saveStates = new Map<string, DraftSaveState>();
   private newCount = 0;
   private sessionGeneration = 0;
@@ -213,6 +214,7 @@ export class DraftStore {
     this.undoVersions.clear();
     this.retainedVersions.clear();
     this.pendingSentVerification.clear();
+    this.recoverySaves.clear();
     this.reviewRequired.clear();
     this.saveStates.clear();
     this.events.changed();
@@ -230,6 +232,42 @@ export class DraftStore {
       return Promise.resolve({ ok: true });
     }
     return this.enqueue(slot);
+  }
+
+  /** Explicitly creates a replacement for a draft the host has deleted, preserving local content. */
+  saveAsNew(key: string): Promise<SaveOutcome> {
+    const slot = this.get(key);
+    if (!slot) return Promise.resolve({ ok: false, error: "This draft was deleted or moved elsewhere." });
+    const pending = this.recoverySaves.get(slot.key);
+    if (pending) return pending;
+    if (slot.error?.code !== "not-found") return Promise.resolve({ ok: false, error: slot.error?.message ?? "Draft recovery is unavailable." });
+
+    const recoveryKey = slot.key;
+    const session = this.sessionGeneration;
+    const recovery = slot.queue.catch(() => undefined).then(() => this.saveAsNewRecovery(slot, session));
+    this.recoverySaves.set(recoveryKey, recovery);
+    slot.queue = recovery.catch(() => undefined);
+    void recovery.finally(() => {
+      if (this.recoverySaves.get(recoveryKey) === recovery) this.recoverySaves.delete(recoveryKey);
+    });
+    return recovery;
+  }
+
+  /** Explicitly removes only this window's unrecoverable local state; it never writes to the host. */
+  discardLocalChanges(key: string): boolean {
+    const slot = this.get(key);
+    if (!slot || slot.error?.code !== "not-found" || this.recoverySaves.has(slot.key)) return false;
+    if (slot.id) this.retireIdentity(slot);
+    this.slots.delete(slot.key);
+    this.hydrated.delete(slot.conversationId);
+    this.undoVersions.delete(slot.key);
+    this.retainedVersions.delete(slot.key);
+    this.reviewRequired.delete(slot.key);
+    this.pendingSentVerification.delete(slot.key);
+    this.saveStates.delete(slot.key);
+    this.recoverySaves.delete(slot.key);
+    this.events.changed();
+    return true;
   }
 
   async undo(key: string): Promise<SaveOutcome> {
@@ -624,6 +662,61 @@ export class DraftStore {
     this.events.changed();
     this.saveStates.set(slot.key, "idle");
     this.events.notice?.(slot.key, "saved");
+    return { ok: true };
+  }
+
+  private async saveAsNewRecovery(slot: DraftSlot, session: number): Promise<SaveOutcome> {
+    const key = slot.key;
+    if (!this.isCurrent(slot, key, session)) return { ok: true };
+    if (slot.error?.code !== "not-found") return { ok: true };
+    if (slot.held) return { ok: false, error: "A send is in progress; your edits are kept and saved afterwards." };
+    const generation = slot.generation;
+    const submittedContent = { ...slot.content };
+    this.saveStates.set(key, "saving");
+    this.events.changed();
+    let saved: Draft;
+    try {
+      saved = await this.persist({
+        id: "",
+        conversationId: slot.conversationId,
+        ...submittedContent,
+        expectedRevision: "0",
+      });
+    } catch (error) {
+      if (!this.isCurrent(slot, key, session)) return { ok: true };
+      if (errorCode(error) !== "not-found") return this.failSave(slot, errorText(error), "not-found");
+      try {
+        saved = await this.persist({
+          id: "",
+          conversationId: "",
+          ...submittedContent,
+          expectedRevision: "0",
+        });
+      } catch (fallbackError) {
+        if (!this.isCurrent(slot, key, session)) return { ok: true };
+        return this.failSave(slot, errorText(fallbackError), "not-found");
+      }
+    }
+    if (!this.isCurrent(slot, key, session)) return { ok: true };
+    const recoveryKey = slot.key;
+    if (saved.conversationId !== slot.conversationId && !this.rekey(slot, saved.conversationId))
+      return this.failSave(slot, "New draft could not be opened safely. Your text is kept.", "not-found");
+    if (recoveryKey !== slot.key) this.aliases.set(recoveryKey, slot.key);
+
+    Object.assign(slot, {
+      id: saved.id,
+      revision: saved.revision,
+      savedGeneration: Math.max(slot.savedGeneration, generation),
+      error: undefined,
+      acknowledgedContent: contentOf(saved),
+    });
+    this.reviewRequired.delete(slot.key);
+    this.hydrated.add(saved.conversationId);
+    this.saveStates.set(slot.key, "idle");
+    if (slot.generation === generation) slot.content = contentOf(saved);
+    this.events.changed();
+    this.events.notice?.(slot.key, "saved");
+    if (isDirty(slot)) void this.enqueue(slot);
     return { ok: true };
   }
 

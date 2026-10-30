@@ -104,6 +104,160 @@ describe("DraftStore authoritative coordination", () => {
     });
   });
 
+  it("recreates a deleted draft only on explicit recovery with its complete local content", async () => {
+    const writes: DraftInput[] = [];
+    let missing = true;
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      if (missing) throw { code: "not-found", message: "deleted" };
+      return draft({ ...input, id: "replacement", conversationId: "conversation-recovered", revision: "1" });
+    }, events);
+    store.adopt("conversation-one", draft({ gatewayId: "gateway", simId: "sim", attachmentIds: ["file"] }));
+
+    await expect(store.edit("conversation-one", { text: "kept", recipientIds: ["+15550002"] })).resolves.toMatchObject({ ok: false });
+    expect(writes).toHaveLength(1);
+    await expect(store.flush("conversation-one")).resolves.toMatchObject({ ok: false });
+
+    missing = false;
+    await expect(store.saveAsNew("conversation-one")).resolves.toEqual({ ok: true });
+    expect(writes.at(-1)).toMatchObject({ id: "", conversationId: "conversation-one", expectedRevision: "0", text: "kept", recipientIds: ["+15550002"], attachmentIds: ["file"], gatewayId: "gateway", simId: "sim" });
+    expect(store.get("conversation-one")).toMatchObject({ id: "replacement", conversationId: "conversation-recovered", revision: "1", error: undefined });
+    await expect(store.flush("conversation-one")).resolves.toEqual({ ok: true });
+  });
+
+  it("falls back to a blank conversation only when the original conversation no longer exists", async () => {
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      if (!input.id) {
+        if (input.conversationId) throw { code: "not-found", message: "no history" };
+        return draft({ ...input, id: "replacement", conversationId: "conversation-new", revision: "1" });
+      }
+      throw { code: "not-found", message: "deleted" };
+    }, events);
+    store.adopt("conversation-one", draft());
+    await store.edit("conversation-one", { text: "kept" });
+
+    await expect(store.saveAsNew("conversation-one")).resolves.toEqual({ ok: true });
+    expect(writes.slice(-2)).toEqual([
+      expect.objectContaining({ id: "", conversationId: "conversation-one", expectedRevision: "0" }),
+      expect.objectContaining({ id: "", conversationId: "", expectedRevision: "0" }),
+    ]);
+    expect(store.get("conversation-one")).toMatchObject({ conversationId: "conversation-new", id: "replacement" });
+  });
+
+  it("keeps deleted-draft recovery actionable after a failed create and coalesces double clicks", async () => {
+    let resolveCreate!: (value: Draft) => void;
+    const persist = vi.fn(async (input: DraftInput) => {
+      if (input.id) throw { code: "not-found", message: "deleted" };
+      return new Promise<Draft>(resolve => { resolveCreate = resolve; });
+    });
+    const store = new DraftStore(persist, events);
+    store.adopt("conversation-one", draft());
+    await store.edit("conversation-one", { text: "kept" });
+
+    const first = store.saveAsNew("conversation-one");
+    const second = store.saveAsNew("conversation-one");
+    expect(first).toBe(second);
+    await vi.waitFor(() => expect(resolveCreate).toBeTypeOf("function"));
+    resolveCreate(draft({ id: "replacement", text: "kept", revision: "2" }));
+    await expect(first).resolves.toEqual({ ok: true });
+    expect(persist).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains complete content and allows another explicit recovery attempt after creation fails", async () => {
+    let recoverAttempts = 0;
+    const store = new DraftStore(async input => {
+      if (input.id) throw { code: "not-found", message: "deleted" };
+      recoverAttempts += 1;
+      if (recoverAttempts === 1) throw { code: "io", message: "offline" };
+      return draft({ ...input, id: "replacement", revision: "2" });
+    }, events);
+    store.adopt("conversation-one", draft({ attachmentIds: ["file"], gatewayId: "gateway", simId: "sim" }));
+    await store.edit("conversation-one", { text: "kept" });
+
+    await expect(store.saveAsNew("conversation-one")).resolves.toEqual({ ok: false, error: "offline" });
+    expect(store.get("conversation-one")).toMatchObject({ error: { code: "not-found" }, content: { text: "kept", attachmentIds: ["file"], gatewayId: "gateway", simId: "sim" } });
+    await expect(store.saveAsNew("conversation-one")).resolves.toEqual({ ok: true });
+  });
+
+  it("saves edits made during deleted-draft recovery against the new identity", async () => {
+    let resolveCreate!: (value: Draft) => void;
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      if (input.id) throw { code: "not-found", message: "deleted" };
+      if (!resolveCreate) return new Promise(resolve => { resolveCreate = resolve; });
+      return draft({ ...input, revision: "3" });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "old" }));
+    await store.edit("conversation-one", { text: "first" });
+
+    const recovery = store.saveAsNew("conversation-one");
+    await vi.waitFor(() => expect(resolveCreate).toBeTypeOf("function"));
+    await store.edit("conversation-one", { text: "during recovery", attachmentIds: ["new-file"] });
+    resolveCreate(draft({ id: "replacement", text: "first", revision: "2" }));
+    await expect(recovery).resolves.toEqual({ ok: true });
+    await vi.waitFor(() => expect(writes.at(-1)).toMatchObject({ id: "replacement", expectedRevision: "2", text: "during recovery", attachmentIds: ["new-file"] }));
+  });
+
+  it("ignores a deleted-draft recovery completion after session reset", async () => {
+    let resolveCreate!: (value: Draft) => void;
+    const store = new DraftStore(async input => {
+      if (input.id) throw { code: "not-found", message: "deleted" };
+      return new Promise(resolve => { resolveCreate = resolve; });
+    }, events);
+    store.adopt("conversation-one", draft());
+    await store.edit("conversation-one", { text: "kept" });
+    const recovery = store.saveAsNew("conversation-one");
+    await vi.waitFor(() => expect(resolveCreate).toBeTypeOf("function"));
+    store.reset();
+    resolveCreate(draft({ id: "replacement", text: "kept", revision: "2" }));
+
+    await expect(recovery).resolves.toEqual({ ok: true });
+    expect(store.get("conversation-one")).toBeUndefined();
+  });
+
+  it("keeps local content blocked when blank recovery finds an occupied host draft", async () => {
+    const occupied = draft({ id: "occupied", text: "other window", attachmentIds: ["other-file"], revision: "4" });
+    const store = new DraftStore(async input => {
+      if (input.id) throw { code: "not-found", message: "deleted" };
+      throw { code: "draft-moved", message: "occupied" };
+    }, events);
+    store.adopt("conversation-one", draft({ text: "stored" }));
+    await store.edit("conversation-one", { text: "local", attachmentIds: ["local-file"] });
+
+    await expect(store.saveAsNew("conversation-one")).resolves.toEqual({ ok: false, error: "occupied" });
+    expect(occupied).toMatchObject({ text: "other window", attachmentIds: ["other-file"] });
+    expect(store.get("conversation-one")).toMatchObject({ content: { text: "local", attachmentIds: ["local-file"] }, error: { code: "not-found" } });
+    await expect(store.flush("conversation-one")).resolves.toMatchObject({ ok: false });
+  });
+
+  it("discards only the failed local slot without a host write", async () => {
+    const persist = vi.fn(async () => { throw { code: "not-found", message: "deleted" }; });
+    const store = new DraftStore(persist, events);
+    store.adopt("conversation-one", draft());
+    await store.edit("conversation-one", { text: "local", attachmentIds: ["file"] });
+
+    expect(store.discardLocalChanges("conversation-one")).toBe(true);
+    expect(store.get("conversation-one")).toBeUndefined();
+    expect(persist).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a discarded local failure to hydrate and save again in the same conversation", async () => {
+    const store = new DraftStore(async input => {
+      if (input.id === "draft-one") throw { code: "not-found", message: "deleted" };
+      return draft({ ...input, id: "replacement", revision: "2" });
+    }, events);
+    store.adopt("conversation-one", draft());
+    await store.edit("conversation-one", { text: "local" });
+    expect(store.discardLocalChanges("conversation-one")).toBe(true);
+
+    store.adopt("conversation-one", undefined);
+    await expect(store.edit("conversation-one", { text: "fresh" })).resolves.toEqual({ ok: true });
+    expect(store.get("conversation-one")).toMatchObject({ content: { text: "fresh" }, id: "replacement" });
+  });
+
   it("moves retained text to the destination key after a verified draft move", async () => {
     const destination = draft({ id: "destination-draft", conversationId: "conversation-two", text: "remote", revision: "2" });
     const store = new DraftStore(async () => {

@@ -16,7 +16,10 @@ pub struct MaximizeButtonRegion {
     pub height: f64,
 }
 
-pub fn set_region(_window: WebviewWindow, region: Option<MaximizeButtonRegion>) -> BridgeResult<()> {
+pub fn set_region(
+    _window: WebviewWindow,
+    region: Option<MaximizeButtonRegion>,
+) -> BridgeResult<()> {
     if let Some(region) = region {
         validate_region(&region)
             .map_err(|message| BridgeError::new("invalid-maximize-button-region", message))?;
