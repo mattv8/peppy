@@ -4,6 +4,8 @@ This reference records non-obvious Peppy domain constraints. Related references:
 
 - [Infrastructure and release boundaries](infra.md): public/private images,
   source pins, Harbor signing, and native/browser build pitfalls.
+- [Hosted platform security](platform-security.md): purpose-separated encryption,
+  lookup keys, tester authority and billing-binding lifecycle.
 - [Desktop frontend](frontend-style-guide.md) and
   [native mobile](mobile-style-guide.md): shared design APIs and platform rules.
 
