@@ -12,6 +12,8 @@ export type ModalProps = {
   opener?: RefObject<HTMLElement | null>;
   focusFallback?: RefObject<HTMLElement | null>;
   className?: string;
+  /** The modal covers the titlebar; let presses on the area around the panel drag the host window. */
+  windowDragOutside?: boolean;
 };
 
 const focusedElement = () => document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
@@ -27,6 +29,7 @@ export function Modal({
   opener,
   focusFallback,
   className,
+  windowDragOutside = false,
 }: ModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -94,6 +97,7 @@ export function Modal({
     className="peppy-modal"
     aria-labelledby={`${id}-title`}
     aria-busy={busy || undefined}
+    data-tauri-drag-region={windowDragOutside || undefined}
     onCancel={(event) => {
       event.preventDefault();
       if (!busyRef.current) dismissRef.current();

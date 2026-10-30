@@ -97,6 +97,13 @@ describe("MediaLightbox", () => {
     expect(screen.getByRole("button", { name: "Copy image" })).toBeInTheDocument();
   });
 
+  it("lets the app window be dragged from the area around the in-app viewer", async () => {
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:one" });
+    render(<MediaLightbox items={[items[0]]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn()} />);
+    await act(async () => {});
+    expect(document.querySelector("#media-lightbox")).toHaveAttribute("data-tauri-drag-region", "true");
+  });
+
   it("renders the native window chrome without a modal or sharing action", async () => {
     const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:one" });
     render(<MediaLightbox chrome="window" items={[items[0]]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn()} />);

@@ -4,6 +4,7 @@ import { Check, ContactAvatar, Clock, ListFilter, ResizeHandle, RotateCw, Smartp
 import { bridge, type ContactBookView, type ContactScanStatus, type ContactSort, type ContactSyncStatus, type ContactView, type RestorableContact } from "./bridge";
 import { ContactForm, type ContactEditDraft } from "./ContactForm";
 import { CONTACTS_PAGE_SIZE, findContactTarget } from "./contact-target";
+import { canCreateContactInBook } from "./conversation-contact";
 import { persistLayoutPatch, readContactsDetailWidth } from "./layout-persistence";
 import "./contacts.css";
 
@@ -659,11 +660,28 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     if (completedTargetRef.current === activeTargetKey) return;
 
     const openCreateForm = () => {
-      const pinnedBookId = currentBookRef.current;
-      if (!booksRef.current.some(candidate => candidate.id === pinnedBookId)) {
-        setTargetError("Select a contact book first.");
+      const selectedBook = booksRef.current.find(candidate => candidate.id === currentBookRef.current);
+      const targetBook = selectedBook && canCreateContactInBook(selectedBook)
+        ? selectedBook
+        : booksRef.current.find(canCreateContactInBook);
+      if (!targetBook) {
+        setTargetError("No writable contact book is available.");
         consumeTarget(requestedTarget);
         return;
+      }
+      const pinnedBookId = targetBook.id;
+      if (currentBookRef.current !== pinnedBookId) {
+        currentBookRef.current = pinnedBookId;
+        ++pageRequestRef.current;
+        ++scanStatusRequestRef.current;
+        ++syncActionRef.current;
+        setBookId(pinnedBookId);
+        setOffset(0);
+        setScanStatus(null);
+        setSyncing(false);
+        setContacts([]);
+        setSelected(null);
+        setRestore(null);
       }
       setEditing({ createPrefill: { phone: requestedTarget.phone }, requestId: requestedTarget.requestId });
       editorBookIdRef.current = pinnedBookId;
@@ -678,11 +696,6 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
     if (busyRef.current) {
       setNotice("Finish saving the current contact before adding a new one.");
-      consumeTarget(requestedTarget);
-      return;
-    }
-    if (!booksRef.current.some(candidate => candidate.id === currentBookRef.current)) {
-      setTargetError("Select a contact book first.");
       consumeTarget(requestedTarget);
       return;
     }

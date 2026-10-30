@@ -46,6 +46,7 @@ import {
   SyncProgress,
   TriangleAlert,
   Trash2,
+  UserPlus,
   X,
   type Attachment,
   type AvatarIdentity,
@@ -124,6 +125,7 @@ import { GatewayPicker } from "./GatewayPicker";
 import { installHostedSessionRenewal } from "./hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars } from "./layout-persistence";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
+import { conversationContactAddress } from "./conversation-contact";
 import { hiddenTimeIds } from "./timestamp-bursts";
 import { createSeenReactionLedger, linkReactions, locateReactionTarget, NO_REACTIONS, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
 import { normalizeReactionText, quoteMatches } from "./reactions/parse";
@@ -3820,6 +3822,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       : { kind: "create", phone: address, requestId };
     void openContactTarget(target, "Sender not opened");
   };
+  const addConversationContactAddress = conversationLoaded
+    ? conversationContactAddress({ conversation: active, resolution, books: snapshot?.contactBooks })
+    : undefined;
   const revealReactionTarget = (row: HTMLElement) => {
     reactionHighlightCleanupRef.current();
     let addedTabIndex = false;
@@ -4446,6 +4451,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             </div>
             {contactsOpen && <div id="contacts-header-slot" className="header-actions" ref={setContactsHeaderHost} />}
             <div className="header-actions" hidden={settingsOpen || notificationsOpen || contactsOpen}>
+              {addConversationContactAddress && <button
+                id="add-conversation-contact"
+                aria-label={`Add ${formatPhoneNumber(addConversationContactAddress)} to contacts`}
+                title={`Add ${formatPhoneNumber(addConversationContactAddress)} to contacts`}
+                onClick={() => openSender(addConversationContactAddress)}
+              >
+                <UserPlus size={16} aria-hidden />
+              </button>}
               {!browserHost && <button
                 id="new-composer-window"
                 aria-label="New message window"
