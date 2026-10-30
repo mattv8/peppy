@@ -575,11 +575,16 @@ const subscribeEvent = (event: string, listener: (payload: unknown) => void) => 
   void import("@tauri-apps/api/event").then(({ listen }) => listen(event, payload => listener(payload.payload))).then(stop => { unlisten = stop; if (disposed) stop(); }).catch(() => {});
   return () => { disposed = true; unlisten?.(); };
 };
-const subscribeWindowEvent = (event: string, listener: (payload: unknown) => void) => {
+type WindowSubscription = (() => void) & { ready: Promise<void> };
+const subscribeWindowEvent = (event: string, listener: (payload: unknown) => void): WindowSubscription => {
   let disposed = false;
   let unlisten: (() => void) | undefined;
-  void import("@tauri-apps/api/webviewWindow").then(({ getCurrentWebviewWindow }) => getCurrentWebviewWindow().listen(event, payload => listener(payload.payload))).then(stop => { unlisten = stop; if (disposed) stop(); }).catch(() => {});
-  return () => { disposed = true; unlisten?.(); };
+  const ready = import("@tauri-apps/api/webviewWindow")
+    .then(({ getCurrentWebviewWindow }) => getCurrentWebviewWindow().listen(event, payload => listener(payload.payload)))
+    .then(stop => { unlisten = stop; if (disposed) stop(); });
+  // Legacy callers ignore readiness; the attached handler keeps registration failures from surfacing as unhandled rejections.
+  ready.catch(() => {});
+  return Object.assign(() => { disposed = true; unlisten?.(); }, { ready });
 };
 const missingHost = (method: keyof DesktopBridge) => async () => { throw { code: "missing-native-host", message: `Native host is required for ${String(method)}.` } satisfies BridgeError; };
 export const missingHostBridge: DesktopBridge = Object.fromEntries((Object.keys(fixtureBridge) as (keyof DesktopBridge)[]).map(key => [key, key === "subscribe" || key === "subscribe_maximize_button_hover" || key === "subscribe_drafts" || key === "subscribe_lifecycle" || key === "subscribe_lifecycle_finished" ? (() => () => undefined) : missingHost(key)])) as unknown as DesktopBridge;

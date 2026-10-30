@@ -199,7 +199,8 @@ export interface DesktopBridge {
   set_maximize_button_region(region: MaximizeButtonRegion | null): Promise<void>;
   subscribe(listener: () => void): () => void;
   subscribe_maximize_button_hover(listener: (hovered: boolean) => void): () => void;
-  subscribe_drafts?(listener: (draft: Draft) => void): () => void;
+  /** `ready` resolves once the native listener is installed and rejects if registration fails; legacy callers may ignore it. */
+  subscribe_drafts?(listener: (draft: Draft) => void): (() => void) & { ready?: Promise<void> };
   subscribe_lifecycle(listener: (request: { id: string; action: "quit" | "close" | "collapse" }) => void): () => void;
   subscribe_lifecycle_finished(listener: (result: { id: string; ok: boolean }) => void): () => void;
   acknowledge_lifecycle(id: string, ok: boolean): Promise<void>;

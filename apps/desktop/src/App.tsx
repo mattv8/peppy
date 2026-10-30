@@ -135,10 +135,13 @@ import {
   isLocalDraftKey,
   shouldConfirmPostFlushDelete,
   type DraftContent,
-  type DraftRecovery,
   type DraftSlot,
   type SaveOutcome,
+  type DraftNoticeEvent,
 } from "./drafts/DraftStore";
+import { DraftNotice } from "./drafts/DraftNotice";
+import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
+import { measureComposerChrome } from "./composerChrome";
 
 type RefreshRequest = {
   conversationId?: string;
@@ -148,7 +151,7 @@ type RefreshRequest = {
 
 type ActionNotice = Omit<AppNotice, "source">;
 type ComposerFeedback = Pick<AppNotice, "message" | "severity"> & { key: string };
-type StoredDraftConflict = { key: string; draft?: Draft; generation: number; revision: string };
+type DraftNoticeState = { key: string; event: DraftNoticeEvent | "stale-send" | "send-failed" | "loading"; sequence: number; detail?: string; persistent?: boolean };
 type PinFocusRestoreIntent = {
   conversationId: string;
   origin: HTMLElement;
@@ -584,18 +587,6 @@ function HeadRoutePill({ content, gateways }: { content: DraftContent; gateways:
     <span id="head-panel-route-description" className="visually-hidden">{description}</span>
     <span className="visually-hidden" role="status" aria-live="polite">{label}</span>
   </section>;
-}
-
-function DraftRecovery({ error, onRetry }: { error: string; onRetry(): void }) {
-  return (
-    <section id="draft-recovery" role="alert" aria-label="Unsaved draft">
-      <p>
-        Draft not saved: {error} Your text is still here; sending and closing
-        stay blocked until it is saved.
-      </p>
-      <button onClick={onRetry}>Retry save</button>
-    </section>
-  );
 }
 
 type RowRegistry = (id: string, row: HTMLElement | null) => void;
@@ -1546,6 +1537,21 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [actionNotice, setActionNotice] = useState<ActionNotice>();
   const [refreshNotice, setRefreshNotice] = useState("");
   const [composerFeedback, setComposerFeedback] = useState<ComposerFeedback>();
+  const [draftNotice, setDraftNotice] = useState<DraftNoticeState>();
+  const [draftSubscriptionError, setDraftSubscriptionError] = useState<string>();
+  const draftNoticeSequence = useRef(0);
+  const draftNoticesRef = useRef(new Map<string, DraftNoticeState>());
+  // Drafts whose latest store save failed and has not yet been followed by a successful save.
+  const saveFailedKeysRef = useRef(new Set<string>());
+  const restartDraftSubscriptionRef = useRef<(() => void) | undefined>(undefined);
+  const suspendDraftSubscriptionRef = useRef<(() => void) | undefined>(undefined);
+  const bindDraftSubscriptionAfterRefreshRef = useRef<(() => void) | undefined>(undefined);
+  const draftSubscriptionSessionRef = useRef<string | undefined>(undefined);
+  const draftSubscriptionStateRef = useRef<{ session: string; unlocked: boolean } | undefined>(undefined);
+  const reviewNoticeSequenceRef = useRef<number | undefined>(undefined);
+  const noticeActionOwnedFocusRef = useRef(false);
+  const noticeActionBusyRef = useRef(false);
+  const [noticeActionBusy, setNoticeActionBusy] = useState(false);
   const [notificationActionNotice, setNotificationActionNotice] = useState("");
   const [notificationFocus, setNotificationFocus] = useState<{ requestId: string; target: NotificationActivationTarget }>();
   const notificationFocusContext = useRef<{ requestId: string; context: ActivationContext; reported?: boolean } | undefined>(undefined);
@@ -1586,9 +1592,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingPinId, setPendingPinId] = useState<string | null>(null);
-  const [storedConflict, setStoredConflict] = useState<StoredDraftConflict | null>(null);
-  const [resolutionPendingKey, setResolutionPendingKey] = useState<string | null>(null);
-  const [conflictFeedback, setConflictFeedback] = useState<string>();
   const [overlayHeight, setOverlayHeight] = useState<number | null>(
     typeof ResizeObserver === "undefined" ? 120 : null,
   );
@@ -1631,7 +1634,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const historyFocusPendingRef = useRef(false);
   const mountedRef = useRef(true);
   const focusRestorePendingRef = useRef(false);
-  const conflictFocusIntentRef = useRef<StoredDraftConflict | null>(null);
   const pinFocusRestoreRef = useRef<PinFocusRestoreIntent | undefined>(undefined);
   const refreshInFlightRef = useRef(false);
   const pendingRefreshRef = useRef<RefreshRequest | undefined>(undefined);
@@ -1650,7 +1652,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const navigationGeneration = useRef(0);
   const reactionNavigationGeneration = useRef(0);
   const previousReactionViewRef = useRef(activeView);
-  const recoveryRestoreSequence = useRef(0);
   const latestRequiredConversationRef = useRef<string | undefined>(undefined);
   const previousSearchSessionKeyRef = useRef("");
   const activateSearchHitHandlerRef = useRef<(hit: LocalSearchHit) => void>(() => undefined);
@@ -1667,12 +1668,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     previousReactionViewRef.current = activeView;
     invalidateReactionNavigation();
   }, [activeView]);
-  useLayoutEffect(() => {
-    const intent = conflictFocusIntentRef.current;
-    if (!intent || intent !== storedConflict) return;
-    conflictFocusIntentRef.current = null;
-    document.getElementById("draft-conflict-comparison-title")?.focus();
-  }, [storedConflict]);
   useEffect(() => {
     const intent = pinFocusRestoreRef.current;
     if (!intent || pendingPinId) return;
@@ -1685,7 +1680,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   useEffect(() => () => pinFocusRestoreRef.current?.dispose(), []);
   const handlers = useRef({
     rekeyed: (_from: string, _to: string) => {},
-    unavailable: (_from: string, _to?: string, _message?: string) => {},
     close: () => {},
     collapse: () => {},
     closeHead: () => {},
@@ -1695,7 +1689,37 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     storeRef.current = new DraftStore((input) => bridge.save_draft(input), {
       changed: () => rerender(),
       rekeyed: (from, to) => handlers.current.rekeyed(from, to),
-      unavailable: (from, to, message) => handlers.current.unavailable(from, to, message),
+      notice: (key, event) => {
+        if (event === "save-failed") saveFailedKeysRef.current.add(key);
+        // A healthy ordinary save stays quiet; "saved" shows only when it settles an earlier failure on this draft.
+        if (event === "saved" && !saveFailedKeysRef.current.delete(key)) return;
+        draftNoticeSequence.current += 1;
+        const next = { key, event, sequence: draftNoticeSequence.current };
+        setDraftNotice((current) => {
+          draftNoticesRef.current.set(key, next);
+          if (key !== selectedRef.current) return current;
+          if (!current) return next;
+          if (current.key !== key) return current;
+          const priority: Record<DraftNoticeState["event"], number> = {
+            "save-failed": 0,
+            "stale-send": 1,
+            "send-failed": 2,
+            moved: 3,
+            "remote-update": 4,
+            replaced: 4,
+            saved: 5,
+            loading: 7,
+          };
+          if (current.event === "save-failed" && event === "saved" && !storeRef.current?.get(key)?.error) return next;
+          return priority[current.event] < priority[event] ? current : next;
+        });
+      },
+    }, async (conversationId) => {
+      const state = await bridge.load_state(conversationId);
+      if (state.activeConversationId !== conversationId || state.encryption.state !== "unlocked") return undefined;
+      if (state.draft && state.draft.conversationId !== conversationId)
+        throw new Error("Draft lookup returned a different conversation.");
+      return state.draft;
     });
   const store = storeRef.current;
   const setDetached = (next: DetachedHistory | undefined) => {
@@ -1722,6 +1746,47 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     searchReadGate.current = false;
   };
   const currentSearchSessionKey = () => createSearchSessionKey(snapshotRef.current, Boolean(appLockRef.current?.locked));
+  const applyAuthoritativeDraft = (draft: Draft) => store.applyAuthoritative(draft);
+
+  useEffect(() => {
+    if (!draftNotice || reviewNoticeSequenceRef.current !== draftNotice.sequence) return;
+    reviewNoticeSequenceRef.current = undefined;
+    store.acknowledgeReview(draftNotice.key);
+  }, [draftNotice, store]);
+
+  useLayoutEffect(() => {
+    if (!noticeActionOwnedFocusRef.current || document.getElementById("draft-notice-action")) return;
+    noticeActionOwnedFocusRef.current = false;
+    if (document.activeElement === document.body) document.getElementById("composer-textarea")?.focus();
+  }, [draftNotice]);
+
+  useEffect(() => {
+    if (!draftNotice || draftNotice.persistent) return;
+    const durations: Partial<Record<DraftNoticeState["event"], number>> = {
+      saved: 2000,
+      "remote-update": 4000,
+      moved: 5000,
+      replaced: 6000,
+    };
+    const durationMs = durations[draftNotice.event];
+    if (!durationMs) return;
+    let retryTimer: number | undefined;
+    const dismiss = () => {
+      const action = document.activeElement?.id === "draft-notice-action";
+      if (action) {
+        retryTimer = window.setTimeout(dismiss, 250);
+        return;
+      }
+      setDraftNotice((current) => current?.sequence === draftNotice.sequence ? undefined : current);
+      const stored = draftNoticesRef.current.get(draftNotice.key);
+      if (stored?.sequence === draftNotice.sequence) draftNoticesRef.current.delete(draftNotice.key);
+    };
+    const timer = window.setTimeout(dismiss, durationMs);
+    return () => {
+      window.clearTimeout(timer);
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
+  }, [draftNotice]);
 
   const captureHistoryAnchor = (fallbackMessageId?: string) => {
     const list = messageListRef.current;
@@ -1895,7 +1960,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       const composerArea = document.getElementById("composer-area");
       const textarea = document.getElementById("composer-textarea");
       if (!(composerArea instanceof HTMLElement) || !(textarea instanceof HTMLElement)) return;
-      const chrome = composerArea.offsetHeight - textarea.offsetHeight;
+      const chrome = measureComposerChrome(composerArea, textarea);
       setComposerChrome((current) => (current === chrome ? current : chrome));
     };
     measure();
@@ -1908,8 +1973,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (paneRef.current) observer.observe(paneRef.current);
     const composerArea = document.getElementById("composer-area");
     if (composerArea) observer.observe(composerArea);
+    document.querySelectorAll("#composer-field, #composer-status-row, #attachment-tray, #composer-toolbar").forEach((element) => observer.observe(element));
     return () => observer.disconnect();
-  }, [activeView, headPanel, loading, Boolean(snapshot), snapshot?.connection.state, Boolean(selected)]);
+  }, [activeView, headPanel, loading, Boolean(snapshot), snapshot?.connection.state, Boolean(selected), draftsVersion]);
   useEffect(() => {
     const root = mainRef.current;
     if (!root) return;
@@ -1950,7 +2016,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const reportAction = (prefix: string) => (error: unknown) =>
     setNotice(`${prefix}${errorText(error)}`);
   const prepareFocusRestore = (owner: HTMLElement | null = document.activeElement instanceof HTMLElement ? document.activeElement : null) => {
-    focusRestorePendingRef.current = Boolean(owner?.closest("#app-notice-banner, #draft-recovery"));
+    focusRestorePendingRef.current = Boolean(owner?.closest("#app-notice-banner"));
   };
   const restoreFocusIfPending = () => {
     if (!focusRestorePendingRef.current) return;
@@ -2038,7 +2104,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             : item),
         };
       });
-      if (state.activeConversationId) store.adopt(state.activeConversationId, state.draft);
+      if (state.activeConversationId) {
+        if (state.draft && store.isHydrated(state.activeConversationId)) applyAuthoritativeDraft(state.draft);
+        else store.adopt(state.activeConversationId, state.draft);
+      }
       setRefreshNotice("");
       return;
     }
@@ -2096,7 +2165,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (latestRequiredConversationRef.current === conversationId && !detached) {
       latestRequiredConversationRef.current = undefined;
     }
-    if (state.activeConversationId) store.adopt(state.activeConversationId, state.draft);
+    if (state.activeConversationId) {
+      if (state.draft && store.isHydrated(state.activeConversationId)) applyAuthoritativeDraft(state.draft);
+      else store.adopt(state.activeConversationId, state.draft);
+    }
     setRefreshNotice("");
     if (!composerConversation && !selectedRef.current && state.activeConversationId) choose(state.activeConversationId);
     const responseHasOlder = refreshedDetached?.hasOlder ?? refreshed?.hasOlderMessages ?? false;
@@ -2108,6 +2180,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       setHasOlderMessages(responseHasOlder);
       if (responseHasOlder) setHistoryExhausted(false);
     }
+    bindDraftSubscriptionAfterRefreshRef.current?.();
   };
   const startRefresh = (request: RefreshRequest) => {
     refreshInFlightRef.current = true;
@@ -2286,30 +2359,89 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     choose(to);
     void refresh(to).catch(reportRefresh(""));
   };
-  handlers.current.unavailable = (from, to, message) => {
-    if (selectedRef.current === from && to) choose(to);
-    else if (selectedRef.current === from) choose("");
-    if (to) void refresh(to).catch(reportRefresh(""));
-  };
 
   useEffect(() => {
     mountedRef.current = true;
-    void refresh(composerConversation ?? undefined)
-      .catch(reportRefresh(""))
-      .finally(() => setLoading(false));
     const unsubscribe = bridge.subscribe(() => {
       setMediaStateHint(current => current + 1);
-      setStoredConflict(null);
       void retryPendingSaves();
       void refresh().then(() => notificationDrain.current?.retry()).catch(reportRefresh(""));
     });
-    const unsubscribeDrafts = bridge.subscribe_drafts?.((draft) => {
-      if (mountedRef.current && snapshotRef.current?.encryption.state === "unlocked" && !appLockRef.current?.locked) {
-        setStoredConflict(null);
-        store.applyAuthoritative(draft);
-      }
-    }) ?? (() => undefined);
+    let unsubscribeDrafts: () => void = () => undefined;
+    let subscriptionAttempt = 0;
+      const installDraftSubscription = () => {
+      unsubscribeDrafts();
+      const attempt = ++subscriptionAttempt;
+        let boundSession: string | undefined;
+        const bufferedDrafts: Draft[] = [];
+        const bindAfterVerifiedRefresh = () => {
+          if (!mountedRef.current || attempt !== subscriptionAttempt || boundSession) return;
+          boundSession = currentSearchSessionKey();
+          draftSubscriptionSessionRef.current = boundSession;
+          setDraftSubscriptionError(undefined);
+          bufferedDrafts.splice(0).forEach(applyDraft);
+          bindDraftSubscriptionAfterRefreshRef.current = undefined;
+        };
+      const applyDraft = (draft: Draft) => {
+        if (
+          mountedRef.current &&
+          attempt === subscriptionAttempt &&
+          boundSession === currentSearchSessionKey() &&
+          snapshotRef.current?.encryption.state === "unlocked" &&
+          !appLockRef.current?.locked
+        ) applyAuthoritativeDraft(draft);
+      };
+      const subscription = bridge.subscribe_drafts?.((draft) => {
+        if (!boundSession) bufferedDrafts.push(draft);
+        else applyDraft(draft);
+      }) ?? Object.assign(() => undefined, { ready: Promise.resolve() });
+      unsubscribeDrafts = subscription;
+      void (async () => {
+        try {
+          await (subscription.ready ?? Promise.resolve());
+        } catch (error) {
+          if (mountedRef.current && attempt === subscriptionAttempt) {
+            setDraftSubscriptionError(errorText(error));
+            draftNoticeSequence.current += 1;
+            setDraftNotice({
+              key: selectedRef.current,
+              event: "send-failed",
+              detail: `Draft updates unavailable: ${errorText(error)}`,
+              sequence: draftNoticeSequence.current,
+              persistent: true,
+            });
+          }
+          if (mountedRef.current && attempt === subscriptionAttempt) setLoading(false);
+          return;
+        }
+          if (!mountedRef.current || attempt !== subscriptionAttempt) return;
+          try {
+            bindDraftSubscriptionAfterRefreshRef.current = bindAfterVerifiedRefresh;
+            await refresh(composerConversation ?? undefined);
+            if (!mountedRef.current || attempt !== subscriptionAttempt) return;
+        } catch (error) {
+          if (mountedRef.current && attempt === subscriptionAttempt) reportRefresh("")(error);
+        } finally {
+          if (mountedRef.current && attempt === subscriptionAttempt) setLoading(false);
+        }
+      })();
+    };
+      const suspendDraftSubscription = () => {
+      subscriptionAttempt += 1;
+      unsubscribeDrafts();
+      unsubscribeDrafts = () => undefined;
+        draftSubscriptionSessionRef.current = undefined;
+        bindDraftSubscriptionAfterRefreshRef.current = undefined;
+      if (snapshotRef.current) setLoading(false);
+    };
+    restartDraftSubscriptionRef.current = installDraftSubscription;
+    suspendDraftSubscriptionRef.current = suspendDraftSubscription;
+    installDraftSubscription();
     return () => {
+      restartDraftSubscriptionRef.current = undefined;
+      suspendDraftSubscriptionRef.current = undefined;
+      draftSubscriptionSessionRef.current = undefined;
+      bindDraftSubscriptionAfterRefreshRef.current = undefined;
       mountedRef.current = false;
       const pending = pendingRefreshRef.current;
       pendingRefreshRef.current = undefined;
@@ -2322,10 +2454,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       historyAnchorRef.current = null;
       unsubscribe();
       unsubscribeDrafts();
+      store.reset();
+       draftNoticesRef.current.clear();
     };
   }, []);
   useEffect(() => {
     if (snapshot?.encryption.state !== "locked" && !appLock?.locked) return;
+    store.reset();
+    saveFailedKeysRef.current.clear();
+    draftNoticesRef.current.clear();
+    setDraftNotice(undefined);
+    setDraftSubscriptionError(undefined);
     historySequence.current += 1;
     historyLoadingRef.current = false;
     historyAnchorRef.current = null;
@@ -2338,6 +2477,20 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setContactTarget(undefined);
   }, [appLock?.locked, snapshot?.encryption.state]);
   const renderedSearchSessionKey = currentSearchSessionKey();
+  useEffect(() => {
+    if (!snapshot) return;
+    const unlocked = snapshot.encryption.state === "unlocked" && !appLock?.locked;
+    const previous = draftSubscriptionStateRef.current;
+    draftSubscriptionStateRef.current = { session: renderedSearchSessionKey, unlocked };
+    if (!unlocked) {
+      suspendDraftSubscriptionRef.current?.();
+      return;
+    }
+    const installedSession = draftSubscriptionSessionRef.current;
+    const resumedFromLock = previous && !previous.unlocked;
+    const replacedUnlockedSession = previous?.unlocked && installedSession && installedSession !== renderedSearchSessionKey;
+    if (resumedFromLock || replacedUnlockedSession) restartDraftSubscriptionRef.current?.();
+  }, [renderedSearchSessionKey, snapshot?.encryption.state, appLock?.locked]);
   notificationHandler.current = async (request, context) => {
     const session = currentSearchSessionKey();
     if (notificationNavigation.current?.requestId !== request.requestId || notificationNavigation.current.sessionGeneration !== request.sessionGeneration) {
@@ -2462,8 +2615,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       previousSearchSessionKeyRef.current = renderedSearchSessionKey;
       return;
     }
-    if (previousSearchSessionKeyRef.current === renderedSearchSessionKey) return;
+    const previousSessionKey = previousSearchSessionKeyRef.current;
+    if (previousSessionKey === renderedSearchSessionKey) return;
     previousSearchSessionKeyRef.current = renderedSearchSessionKey;
+    if (!previousSessionKey.includes(":unavailable:")) {
+      store.reset();
+      saveFailedKeysRef.current.clear();
+      draftNoticesRef.current.clear();
+      setDraftNotice(undefined);
+      setDraftSubscriptionError(undefined);
+    }
     invalidateReactionNavigation();
     const detachedConversationId = detachedHistoryRef.current?.conversationId;
     clearDetached();
@@ -2495,6 +2656,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   useEffect(() => {
     setPendingRecipient(false);
     setComposerFeedback(current => current?.key === slotKey ? current : undefined);
+    setDraftNotice(slotKey ? draftNoticesRef.current.get(slotKey) : undefined);
   }, [slotKey]);
   const active = snapshot?.conversations.find(
     (conversation) => conversation.id === slotKey,
@@ -2850,7 +3012,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
 
   const slot = store.get(slotKey);
-  const recoveries = store.recoveriesFor(slotKey || undefined);
   const content = slot?.content ?? blankContent();
   const gateways = snapshot?.gateways ?? [];
   const route = resolveRoute(content, gateways);
@@ -2871,7 +3032,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
 
   const edit = (patch: Partial<DraftContent>) => {
-    if (slotKey && deletingId !== slotKey) void store.edit(slotKey, patch);
+    if (!slotKey || deletingId === slotKey) return;
+    setDraftNotice((notice) => notice?.key === slotKey && notice.event === "stale-send" ? undefined : notice);
+    draftNoticesRef.current.delete(slotKey);
+    void store.edit(slotKey, patch);
   };
   const commitRecipients = (recipientIds: string[]) => {
     if (!slotKey) return;
@@ -3021,74 +3185,22 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     else begin();
   };
 
-  const restoreRecovery = async (recovery: DraftRecovery, feedbackKey: string) => {
-    const destination = recovery.destination;
-    if (!destination) return;
-    const requestSequence = ++recoveryRestoreSequence.current;
-    const sessionKey = currentSearchSessionKey();
-    const initialSlot = store.get(destination);
-    const initialGeneration = initialSlot?.generation;
-    const initialRevision = initialSlot?.revision;
-    try {
-      const state = await bridge.load_state(destination);
-      if (
-        !mountedRef.current ||
-        requestSequence !== recoveryRestoreSequence.current ||
-        sessionKey !== currentSearchSessionKey() ||
-        !store.recoveriesFor(destination).some((candidate) => candidate.id === recovery.id)
-      ) return;
-      const currentSlot = store.get(destination);
-      const slotChanged = initialSlot
-        ? currentSlot !== initialSlot || currentSlot.generation !== initialGeneration || currentSlot.revision !== initialRevision
-        : Boolean(currentSlot && (isDirty(currentSlot) || currentSlot.id !== state.draft?.id || currentSlot.revision !== (state.draft?.revision ?? "0")));
-      if (
-        slotChanged ||
-        state.activeConversationId !== destination ||
-        (state.draft && state.draft.conversationId !== destination)
-      ) {
-        setComposerNotice(feedbackKey, "Retained text was not applied because the destination draft changed or could not be verified.");
-        return;
-      }
-      store.adopt(destination, state.draft);
-      const outcome = await store.edit(destination, recovery.content);
-      if (outcome.ok) store.discardRecovery(recovery.id);
-      else setComposerNotice(feedbackKey, `Retained text was not applied: ${outcome.error}`);
-    } catch (error) {
-      if (
-        mountedRef.current &&
-        requestSequence === recoveryRestoreSequence.current &&
-        sessionKey === currentSearchSessionKey()
-      ) setComposerNotice(feedbackKey, `Retained text was not applied: ${errorText(error)}`);
-    }
-  };
-
   const retrySave = async () => {
-    const current = store.get(slotKey);
-    if (!current) return;
-    if (current.error?.code === "stale-draft") {
-      if (!current.conversationId) return;
-      setResolutionPendingKey(current.key);
-      setConflictFeedback(undefined);
-      try {
-        const state = await bridge.load_state(current.conversationId);
-        const currentSlot = store.get(current.key);
-        if (!mountedRef.current) return;
-        if (currentSlot !== current || state.activeConversationId !== current.conversationId || (state.draft && state.draft.conversationId !== current.conversationId)) {
-          setConflictFeedback("The saved draft could not be verified. Your local draft remains unchanged.");
-          return;
-        }
-        const conflict = { key: current.key, draft: state.draft, generation: current.generation, revision: current.revision };
-        conflictFocusIntentRef.current = conflict;
-        setStoredConflict(conflict);
-      } catch (error) {
-        setConflictFeedback(errorText(error));
-      } finally {
-        if (mountedRef.current) setResolutionPendingKey(null);
-      }
+    if (draftSubscriptionError) {
+      setDraftSubscriptionError(undefined);
+      restartDraftSubscriptionRef.current?.();
       return;
     }
-    const outcome = await store.flush(slotKey);
-    if (outcome.ok) setComposerNotice(slotKey, "");
+    if (!slotKey) return;
+    const current = store.get(slotKey);
+    const session = currentSearchSessionKey();
+    const outcome = await store.retry(slotKey);
+    if (!mountedRef.current || session !== currentSearchSessionKey() || store.get(slotKey) !== current) return;
+    if (!outcome.ok) return;
+    // A successful save already replaced the failure with its "saved" event, which then lasts its normal 2s.
+    // Only a retry that wrote nothing clears the failure here.
+    saveFailedKeysRef.current.delete(slotKey);
+    setDraftNotice((notice) => notice?.key === slotKey && notice.event === "save-failed" ? undefined : notice);
   };
 
   const deleteDraft = async (conversationId: string) => {
@@ -3177,12 +3289,26 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   const send = async () => {
     if (sendingRef.current || !slotKey) return;
+    const session = currentSearchSessionKey();
     sendingRef.current = true;
     setSending(true);
     setComposerNotice(slotKey, "");
+    setDraftNotice((notice) => notice?.key === slotKey && notice.event === "stale-send" ? undefined : notice);
+    draftNoticesRef.current.delete(slotKey);
     try {
-      const flushed = await store.flush(slotKey);
-      const resolvedKey = store.resolve(slotKey);
+      let resolvedKey = store.resolve(slotKey);
+      let flushed = await store.flush(resolvedKey);
+      while (flushed.ok && Boolean(store.get(resolvedKey) && isDirty(store.get(resolvedKey)!))) {
+        flushed = await store.flush(resolvedKey);
+        resolvedKey = store.resolve(resolvedKey);
+      }
+      if (!mountedRef.current || session !== currentSearchSessionKey() || !store.get(resolvedKey)) return;
+      if (!flushed.ok && flushed.reviewRequired) {
+        draftNoticeSequence.current += 1;
+        reviewNoticeSequenceRef.current = draftNoticeSequence.current;
+        setDraftNotice({ key: resolvedKey, event: "stale-send", sequence: draftNoticeSequence.current, persistent: true });
+        return;
+      }
       if (!flushed.ok)
         return setComposerNotice(resolvedKey,
           `Not sent: the draft could not be saved (${flushed.error}).`,
@@ -3205,36 +3331,104 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       );
       if (blocked || chosen.kind !== "route")
         return setComposerNotice(current.key, `Not sent: ${blocked ?? "choose a phone and SIM"}.`);
-      const sentGeneration = current.generation;
+      const sendContent = { ...current.content, recipientIds: [...current.content.recipientIds], attachmentIds: [...current.content.attachmentIds] };
+      const restoreUnsent = async () => {
+        const next = store.get(current.key)?.content ?? blankContent();
+        await store.edit(current.key, {
+          text: next.text === sendContent.text || next.text.startsWith(`${sendContent.text}\n`)
+            ? next.text
+            : [sendContent.text, next.text].filter(Boolean).join("\n"),
+          attachmentIds: [...new Set([...sendContent.attachmentIds, ...next.attachmentIds])],
+        });
+        store.release(current.key);
+      };
       store.hold(current.key);
+      await store.edit(current.key, { text: "", attachmentIds: [] });
+      const sentSlot = store.get(current.key);
+      if (!sentSlot || !mountedRef.current || session !== currentSearchSessionKey()) return;
+      const sentGeneration = sentSlot.generation;
       try {
         const result = await bridge.send_draft({
           id: current.id,
           conversationId: current.conversationId,
-          ...current.content,
+          ...sendContent,
           expectedRevision: current.revision,
           gatewayId: chosen.gateway.id,
           simId: chosen.gateway.simId,
         });
+        if (!mountedRef.current || session !== currentSearchSessionKey() || !store.get(current.key)) return;
         if (!result.accepted) {
-          store.release(current.key);
+          await restoreUnsent();
           return setComposerNotice(current.key,
-            `${STATUS_LABEL[result.status]}: ${result.reason ?? "The draft was preserved."}`,
+            result.reason ?? `${STATUS_LABEL[result.status]}. The draft was preserved.`,
           );
         }
-        store.markSent(current.key, sentGeneration);
+        const postSendContent = store.get(current.key)?.content;
+        store.markSent(current.key, sentGeneration, result.revision, postSendContent);
         setNewComposeKey(null);
         if (detachedHistoryRef.current?.conversationId === current.conversationId) clearDetached();
       } catch (error) {
-        store.release(current.key);
-        if (errorCode(error) === "draft-moved") {
-          const destination = store.retireUnavailable(current.key, error);
-          if (destination) {
-            choose(destination);
-            void refresh(destination).catch(reportRefresh(""));
+        if (!mountedRef.current || session !== currentSearchSessionKey() || !store.get(current.key)) return;
+        const staleSend = errorCode(error) === "draft-moved" || errorCode(error) === "stale-draft";
+        if (staleSend) {
+          const details = typeof error === "object" && error !== null && "details" in error
+            ? (error as { details?: { conversationId?: unknown; draftId?: unknown } }).details
+            : undefined;
+          const destinationId = typeof details?.conversationId === "string" ? details.conversationId : current.conversationId;
+          const expectedDraftId = typeof details?.draftId === "string" ? details.draftId : current.id;
+          const verificationSequence = loadSequence.current;
+          const movedToAnotherConversation = destinationId !== current.conversationId;
+          try {
+            const state = await bridge.load_state(destinationId);
+            if (!mountedRef.current || session !== currentSearchSessionKey() || !store.get(current.key)) return;
+            if (verificationSequence !== loadSequence.current) {
+              await restoreUnsent();
+              draftNoticeSequence.current += 1;
+              const retryNotice = { key: current.key, event: "save-failed" as const, sequence: draftNoticeSequence.current, persistent: true };
+              draftNoticesRef.current.set(current.key, retryNotice);
+              setDraftNotice(retryNotice);
+              return;
+            }
+            const verifiedHost = state.activeConversationId === destinationId
+              && state.encryption.state === "unlocked"
+              && createSearchSessionKey(state, false) === session
+              && state.draft?.id === expectedDraftId
+              && state.draft.conversationId === destinationId
+              ? state.draft
+              : undefined;
+            if (!verifiedHost) {
+              await restoreUnsent();
+              draftNoticeSequence.current += 1;
+              setDraftNotice({ key: current.key, event: "save-failed", sequence: draftNoticeSequence.current, persistent: true });
+              return;
+            }
+            const nextContent = store.get(current.key)?.content ?? blankContent();
+            const outcome = store.reconcileForReview(current.key, verifiedHost, [sendContent, nextContent]);
+            if (!outcome.ok) {
+              const reviewKey = outcome.key ?? store.resolve(current.key);
+              if (outcome.reviewRequired) {
+                draftNoticeSequence.current += 1;
+                reviewNoticeSequenceRef.current = draftNoticeSequence.current;
+                setDraftNotice({
+                  key: reviewKey,
+                  event: movedToAnotherConversation ? "moved" : "stale-send",
+                  sequence: draftNoticeSequence.current,
+                  persistent: true,
+                });
+                return;
+              }
+              return setComposerNotice(reviewKey, `Not sent: ${outcome.error}`);
+            }
+            return;
+          } catch (lookupError) {
+            if (!mountedRef.current || session !== currentSearchSessionKey() || !store.get(current.key)) return;
+            await restoreUnsent();
+            draftNoticeSequence.current += 1;
+            setDraftNotice({ key: current.key, event: "save-failed", sequence: draftNoticeSequence.current, persistent: true });
+            return;
           }
-          return;
         }
+        await restoreUnsent();
         return setComposerNotice(current.key, `Send failed: ${errorText(error)}`);
       }
       await refresh(current.conversationId).catch(reportRefresh(""));
@@ -3292,15 +3486,36 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
 
   /** Closing never discards an unsaved draft: a failed save keeps the window open. */
+  const flushForClose = async () => {
+    const reviewedKeys = new Set<string>();
+    for (;;) {
+      const outcome = await store.flushAll();
+      if (outcome.ok || !outcome.reviewRequired || !outcome.key || reviewedKeys.has(outcome.key)) return outcome;
+      // The store reports reviewRequired only for a clean, durably adopted host row.
+      reviewedKeys.add(outcome.key);
+      store.acknowledgeReview(outcome.key);
+    }
+  };
+  const showFlushFailure = (outcome: Extract<SaveOutcome, { ok: false }>, prefix: string) => {
+    if (outcome.key) {
+      setActiveView("conversations");
+      if (outcome.key !== selectedRef.current) choose(outcome.key);
+    }
+    if (outcome.key) {
+      draftNoticeSequence.current += 1;
+      const notice = { key: outcome.key, event: "save-failed" as const, sequence: draftNoticeSequence.current, persistent: true };
+      draftNoticesRef.current.set(outcome.key, notice);
+      setDraftNotice(notice);
+    }
+    setNotice(`${prefix} (${outcome.error}).`);
+  };
   const closeAfterSave = async (close: () => Promise<void>) => {
     if (closingRef.current) return;
     closingRef.current = true;
     try {
-      const outcome = await store.flushAll();
+      const outcome = await flushForClose();
       if (!outcome.ok)
-        return setNotice(
-          `The window stayed open because the draft was not saved (${outcome.error}).`,
-        );
+        return showFlushFailure(outcome, "The window stayed open because the draft was not saved");
       await close();
     } catch (error) {
       setNotice(errorText(error));
@@ -3316,9 +3531,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (closingRef.current) return;
     closingRef.current = true;
     setClosingHead(true);
-    void store.flushAll().then(async outcome => {
+    void flushForClose().then(async outcome => {
       if (!outcome.ok) {
-        setNotice(`The window stayed open because the draft was not saved (${outcome.error}).`);
+        showFlushFailure(outcome, "The window stayed open because the draft was not saved");
         return;
       }
       await bridge.close_head_panel();
@@ -3332,9 +3547,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   useEffect(() => bridge.subscribe_lifecycle(request => {
     setLifecyclePending(request.id);
-    void store.flushAll().then(async outcome => {
+    void flushForClose().then(async outcome => {
       if (!outcome.ok) {
-        setNotice(`The window stayed open because a draft was not saved (${outcome.error}).`);
+        showFlushFailure(outcome, "The window stayed open because a draft was not saved");
         await bridge.acknowledge_lifecycle(request.id, false);
         return;
       }
@@ -3429,9 +3644,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const lock = bridge.lock_sync?.bind(bridge);
   const lockSync = lock ? async () => {
-    const saved = await store.flushAll();
+    const saved = await flushForClose();
     if (!saved.ok) {
-      setNotice(`Not locked: the draft could not be saved (${saved.error}).`);
+      showFlushFailure(saved, "Not locked: the draft could not be saved");
       return;
     }
     try {
@@ -3690,7 +3905,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const composerUnavailableReason = mainWindowRouteRecovery
     ? `${unavailableReason} in the main window`
     : unavailableReason;
-  const statusActive = Boolean(unavailableReason || mmsLimitShown);
+  const draftHydrated = Boolean(slotKey && store.isHydrated(slotKey));
+  const composerReadOnly = Boolean(slotKey && !draftHydrated && !isLocalDraftKey(slotKey));
   const composerResizeHandle = (
     <ResizeHandle
       id="handle-h2"
@@ -3713,117 +3929,82 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       }}
     />
   );
-  const draftFeedback = slot?.error || recoveries.length || composerFeedback?.key === slotKey ? (
-    <>
-      {slot?.error?.code === "stale-draft" ? (
-        <section id="draft-recovery" data-draft-recovery="conflict" aria-label="Draft conflict">
-          <p role="alert">Draft changed elsewhere. Review both versions before choosing. Sending and closing stay blocked until the chosen version is saved.</p>
-          {conflictFeedback && <p role="status">{conflictFeedback}</p>}
-          {!storedConflict || storedConflict.key !== slotKey || storedConflict.generation !== slot?.generation || storedConflict.revision !== slot?.revision ? <button type="button" disabled={resolutionPendingKey === slotKey} onClick={() => void retrySave()}>{resolutionPendingKey === slotKey ? "Loading saved draft…" : "Review saved draft"}</button> : <div data-draft-conflict-comparison role="group" aria-labelledby="draft-conflict-comparison-title">
-            <p id="draft-conflict-comparison-title" tabIndex={-1}>Compare the saved and local drafts before choosing.</p>
-            <p id="draft-conflict-saved-label">Saved version</p>
-            <pre aria-labelledby="draft-conflict-saved-label">{storedConflict.draft?.text ?? "No saved draft"}</pre>
-            <p id="draft-conflict-local-label">Local version</p>
-            <pre aria-labelledby="draft-conflict-local-label">{store.get(slotKey)?.content.text}</pre>
-            <div data-draft-conflict-actions><button className="secondary-button" type="button" disabled={resolutionPendingKey === slotKey} onClick={() => {
-            prepareFocusRestore();
-            setResolutionPendingKey(slotKey);
-            void (async () => {
-              const current = store.get(slotKey);
-              if (!current) return;
-              const state = await bridge.load_state(current.conversationId);
-              const reviewed = storedConflict;
-              const latest = store.get(slotKey);
-              if (!latest || latest !== current || latest.generation !== reviewed.generation || latest.revision !== reviewed.revision || state.activeConversationId !== current.conversationId || state.draft?.id !== reviewed.draft?.id || state.draft?.revision !== reviewed.draft?.revision) {
-                setStoredConflict(null);
-                setConflictFeedback("The saved draft changed. Review it again before choosing.");
-                return;
-              }
-              await store.resolveUseStored(current.key, state.draft);
-              setStoredConflict(null);
-              restoreFocusIfPending();
-            })().catch(error => setConflictFeedback(errorText(error))).finally(() => mountedRef.current && setResolutionPendingKey(null));
-            }}>Use saved draft</button>
-            <button type="button" disabled={resolutionPendingKey === slotKey} onClick={() => {
-            prepareFocusRestore();
-            setResolutionPendingKey(slotKey);
-            void (async () => {
-              const current = store.get(slotKey);
-              if (!current) return { ok: false, error: "This draft was deleted or moved elsewhere." } as const;
-              const state = await bridge.load_state(current.conversationId);
-              const reviewed = storedConflict;
-              const latest = store.get(slotKey);
-              if (!latest || latest !== current || latest.generation !== reviewed.generation || latest.revision !== reviewed.revision || state.activeConversationId !== current.conversationId || state.draft?.id !== reviewed.draft?.id || state.draft?.revision !== reviewed.draft?.revision) {
-                setStoredConflict(null);
-                setConflictFeedback("The saved draft changed. Review it again before choosing.");
-                return { ok: false, error: "The saved draft changed. Review it again before choosing." } as const;
-              }
-              return store.resolveKeepLocal(current.key, state.draft);
-            })().then(outcome => {
-              setStoredConflict(null);
-              if (!outcome.ok) setConflictFeedback(`Draft not saved: ${outcome.error}`);
-              else restoreFocusIfPending();
-              }).finally(() => {
-                if (mountedRef.current) setResolutionPendingKey(null);
-              });
-            }}>{resolutionPendingKey === slotKey ? "Saving local draft…" : "Replace saved draft with local version"}</button></div>
-          </div>}
-        </section>
-      ) : slot?.error && <DraftRecovery error={slot.error.message} onRetry={() => void retrySave()} />}
-      {composerFeedback?.key === slotKey && <p role={composerFeedback.severity === "error" ? "alert" : "status"} data-composer-feedback={slotKey}>{composerFeedback.message}</p>}
-      {recoveries.map(recovery => <section
-        key={recovery.id}
-        id={`draft-recovery-${recovery.id.replace(/[^A-Za-z0-9_-]/g, "-")}`}
-        data-draft-recovery={recovery.id}
-        aria-label="Recoverable unsaved draft"
-        role="status"
-      >
-        <p>{recovery.message}</p>
-        {recovery.content.text && <pre>{recovery.content.text}</pre>}
-        {recovery.destination ? <button className="secondary-button" type="button" onClick={() => {
-          void restoreRecovery(recovery, slotKey);
-         }}>Replace draft with retained content</button> : <button className="secondary-button" type="button" onClick={() => {
-          const { key } = store.createNew();
-          setNewComposeKey(key);
-          choose(key);
-          store.discardRecovery(recovery.id);
-          void store.edit(key, recovery.content);
-        }}>Restore in new draft</button>}
-        {recovery.content.text && <button className="secondary-button" type="button" onClick={() => {
-          void navigator.clipboard?.writeText(recovery.content.text).then(
-            () => setComposerNotice(slotKey, "Recoverable text copied.", "info"),
-            () => setComposerNotice(slotKey, "Could not copy recoverable text; select it above to copy."),
-          );
-        }}>Copy retained text</button>}
-        <button className="secondary-button" type="button" onClick={() => store.discardRecovery(recovery.id)}>Discard retained text</button>
-      </section>)}
-    </>
-  ) : undefined;
-  const noSelectionFeedback = draftFeedback ? (
-    <>
-      {draftFeedback}
-    </>
-  ) : undefined;
+  const noticeCandidates: DraftNoticeCandidate[] = [];
+  if (draftSubscriptionError) noticeCandidates.push({ kind: "save-failed", detail: `Draft updates unavailable: ${draftSubscriptionError}`, sequence: Number.MAX_SAFE_INTEGER });
+  if (slotKey && !store.isHydrated(slotKey) && !isLocalDraftKey(slotKey)) noticeCandidates.push({ kind: "loading", sequence: 0 });
+  if (slotKey && store.saveState(slotKey) === "saving") noticeCandidates.push({ kind: "saving", sequence: 1 });
+  if (slot?.error) noticeCandidates.push({ kind: "save-failed", sequence: 2 });
+  const retainedTextAvailable = Boolean(slotKey && store.retainedText(slotKey));
+  if (draftNotice?.key === slotKey) {
+    const undoAvailable = store.hasUndo(slotKey);
+    if (draftNotice.event === "send-failed") noticeCandidates.push({ kind: "send-failed", detail: draftNotice.detail ?? "Draft updates are unavailable.", sequence: draftNotice.sequence });
+    else if (draftNotice.event === "moved") noticeCandidates.push({ kind: "moved", detail: activeDisplay?.name ?? "this conversation", sequence: draftNotice.sequence, undoAvailable, retainedTextAvailable });
+    else noticeCandidates.push({ kind: draftNotice.event, sequence: draftNotice.sequence, undoAvailable, retainedTextAvailable });
+  } else if (retainedTextAvailable) {
+    noticeCandidates.push({ kind: "remote-update", sequence: -1, retainedTextAvailable: true });
+  }
+  if (composerFeedback?.key === slotKey) noticeCandidates.push({ kind: "send-failed", detail: composerFeedback.message, sequence: draftNoticeSequence.current + 1 });
+  const visibleDraftNotice = selectDraftNotice(noticeCandidates);
+  const statusActive = Boolean(unavailableReason || mmsLimitShown || visibleDraftNotice);
+  const onDraftNoticeAction = (action: "retry" | "undo" | "copy") => {
+    if (!slotKey || noticeActionBusyRef.current) return;
+    noticeActionOwnedFocusRef.current = document.activeElement?.id === "draft-notice-action";
+    noticeActionBusyRef.current = true;
+    setNoticeActionBusy(true);
+    const run = async () => {
+      if (action === "retry") await retrySave();
+      else if (action === "undo") {
+        const outcome = await store.undo(slotKey);
+        if (outcome.ok) {
+          draftNoticesRef.current.delete(slotKey);
+          setDraftNotice(undefined);
+        }
+      } else {
+        const text = store.retainedText(slotKey);
+        if (!text) return;
+        try {
+          if (!navigator.clipboard?.writeText) throw new Error("Clipboard is unavailable.");
+          await navigator.clipboard.writeText(text);
+          store.clearUndo(slotKey);
+          draftNoticesRef.current.delete(slotKey);
+          setDraftNotice(undefined);
+        } catch {
+          setNotice("Could not copy retained text. It is still available to copy.", "warning");
+        }
+      }
+    };
+    void run().finally(() => {
+      noticeActionBusyRef.current = false;
+      if (mountedRef.current) setNoticeActionBusy(false);
+      window.setTimeout(() => {
+        if (!noticeActionOwnedFocusRef.current || document.getElementById("draft-notice-action")) return;
+        noticeActionOwnedFocusRef.current = false;
+        if (document.activeElement === document.body) document.getElementById("composer-textarea")?.focus();
+      });
+    });
+  };
+  const noSelectionFeedback = undefined;
   const composer = (
             <section
       id="composer-area"
       aria-label="Composer"
       aria-busy={sending}
       data-user-sized={composerHeight !== null || undefined}
-      style={composerHeight === null ? undefined : { height: composerHeight }}
+      style={composerHeight === null ? undefined : { height: Math.max(composerHeight, composerMinimum()) }}
     >
       {composerResizeHandle}
       <Composer
         draft={content.text}
         attachments={attachments}
-        sendSupported={Boolean(slotKey) && !unavailableReason && !sending && slot?.error?.code !== "stale-draft"}
-        unavailableReason={sending ? "sending…" : slot?.error?.code === "stale-draft" ? "review the draft conflict before sending" : composerUnavailableReason}
+        sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending}
+        unavailableReason={sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
+        readOnly={composerReadOnly}
+        placeholder={composerReadOnly ? "Loading draft…" : undefined}
         onDraftChange={(text) => edit({ text })}
         onSend={() => void send()}
-        onAddAttachment={slotKey ? () => void addAttachment() : undefined}
-        onRemoveAttachment={slotKey ? (id) => edit({ attachmentIds: content.attachmentIds.filter((attachmentId) => attachmentId !== id) }) : undefined}
+        onAddAttachment={slotKey && !composerReadOnly ? () => void addAttachment() : undefined}
+        onRemoveAttachment={slotKey && !composerReadOnly ? (id) => edit({ attachmentIds: content.attachmentIds.filter((attachmentId) => attachmentId !== id) }) : undefined}
         statusActive={statusActive}
-        bannerSlot={draftFeedback}
         statusSlot={
           <>
             <span id="unavailable-hint" hidden={!unavailableReason}>
@@ -3834,6 +4015,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
               </span>
             )}
+            <DraftNotice notice={visibleDraftNotice} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
           </>
         }
         composerName={title}
@@ -4145,8 +4327,25 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           notificationUnread={notificationUnread}
           contactsPending={contactsPending}
         />}
-        {loading ? (
-          <section id="desktop-loading-state">Loading messaging state…</section>
+        {loading || (!snapshot && draftSubscriptionError) ? (
+          <section id="desktop-loading-state">
+            {draftSubscriptionError ? (
+              <DraftNotice
+                notice={{
+                  kind: "save-failed",
+                  message: "Draft updates unavailable. Retry setup to load messaging state.",
+                  tone: "error",
+                  role: "alert",
+                  action: "retry",
+                }}
+                onAction={() => {
+                  setLoading(true);
+                  setDraftSubscriptionError(undefined);
+                  restartDraftSubscriptionRef.current?.();
+                }}
+              />
+            ) : "Loading messaging state…"}
+          </section>
         ) : <>
         <aside
           id="thread-list"
