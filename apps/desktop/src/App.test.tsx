@@ -2600,10 +2600,7 @@ describe("new-recipient drafts", () => {
     fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));
     fireEvent.keyDown(omni, { key: "Escape" });
     pendingSave.resolve({ id: "draft-aurora", conversationId: "aurora", text: "pending flush", recipientIds: [], attachmentIds: [], revision: "1" });
-    await act(async () => {
-      await pendingSave.promise;
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+    await act(async () => { await pendingSave.promise; });
 
     expect(vi.mocked(bridge.save_draft).mock.calls.some(
       ([input]) => input.recipientIds.includes("+12025550100"),
@@ -3045,8 +3042,8 @@ describe("draft durability", () => {
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("first quiet edit"));
     type("second quiet edit");
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("second quiet edit"));
-    // Let the store's post-save notice settle before asserting nothing was shown.
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    const latestSave = vi.mocked(bridge.save_draft).mock.results.at(-1)?.value;
+    await act(async () => { await latestSave; });
 
     expect(document.querySelector("[data-draft-notice]")).toBeNull();
     expect(screen.queryByText("Draft saved.")).not.toBeInTheDocument();
@@ -3062,20 +3059,26 @@ describe("draft durability", () => {
     retry.focus();
 
     host.failSaves = undefined;
-    fireEvent.click(retry);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fireEvent.click(retry);
 
-    const saved = await screen.findByText("Draft saved.");
-    expect(saved.closest("[data-draft-notice]")).toHaveAttribute("data-draft-notice", "saved");
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    // The action vanished, so focus returns to the composer and is not moved later.
-    expect(message()).toHaveFocus();
-    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("recover me"));
+      const saved = await screen.findByText("Draft saved.");
+      expect(saved.closest("[data-draft-notice]")).toHaveAttribute("data-draft-notice", "saved");
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      // The action vanished, so focus returns to the composer and is not moved later.
+      expect(message()).toHaveFocus();
+      await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("recover me"));
 
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)); });
-    expect(screen.getByText("Draft saved.")).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(screen.getByText("Draft saved.")).toBeInTheDocument();
 
-    await waitFor(() => expect(screen.queryByText("Draft saved.")).not.toBeInTheDocument(), { timeout: 4000 });
-    expect(message()).toHaveFocus();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(screen.queryByText("Draft saved.")).not.toBeInTheDocument();
+      expect(message()).toHaveFocus();
+    } finally {
+      vi.useRealTimers();
+    }
   }, 10_000);
 
   it("keeps the next message buffer when an accepted send resolves after typing", async () => {
@@ -3916,19 +3919,25 @@ describe("draft durability", () => {
     const aurora = host.drafts.get("aurora")!;
     const firstRemote = { ...aurora, text: "Aurora remote", revision: String(Number(aurora.revision) + 1) };
     host.drafts.set("aurora", firstRemote);
-    await act(async () => draftHint?.(firstRemote));
-    await screen.findByRole("button", { name: "Undo" });
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument(), { timeout: 5_000 });
+    vi.useFakeTimers();
+    try {
+      await act(async () => draftHint?.(firstRemote));
+      expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
 
-    const river = host.drafts.get("river")!;
-    const riverRemote = { ...river, text: "River remote", revision: String(Number(river.revision) + 1) };
-    host.drafts.set("river", riverRemote);
-    await act(async () => draftHint?.(riverRemote));
-    const secondRemote = { ...firstRemote, text: "Aurora remote again", revision: String(Number(firstRemote.revision) + 1) };
-    host.drafts.set("aurora", secondRemote);
-    await act(async () => draftHint?.(secondRemote));
+      const river = host.drafts.get("river")!;
+      const riverRemote = { ...river, text: "River remote", revision: String(Number(river.revision) + 1) };
+      host.drafts.set("river", riverRemote);
+      await act(async () => draftHint?.(riverRemote));
+      const secondRemote = { ...firstRemote, text: "Aurora remote again", revision: String(Number(firstRemote.revision) + 1) };
+      host.drafts.set("aurora", secondRemote);
+      await act(async () => draftHint?.(secondRemote));
 
-    expect(await screen.findByRole("button", { name: "Undo" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Undo" })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
   }, 10_000);
 
   it("P12 restores composer focus after fallback retained-text copy", async () => {
@@ -3939,17 +3948,23 @@ describe("draft durability", () => {
     const local = host.drafts.get("aurora")!;
     const structuralRemote = { ...local, text: "remote structural", recipientIds: ["+18015550000"], revision: String(Number(local.revision) + 1) };
     host.drafts.set("aurora", structuralRemote);
-    await act(async () => draftHint?.(structuralRemote));
-    await screen.findByRole("button", { name: "Copy text of retained draft" });
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 4_250)); });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await act(async () => draftHint?.(structuralRemote));
+      expect(screen.getByRole("button", { name: "Copy text of retained draft" })).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_250); });
+      vi.useRealTimers();
 
-    const copy = await screen.findByRole("button", { name: "Copy text of retained draft" });
-    const clipboard = stubClipboard();
-    copy.focus();
-    fireEvent.click(copy);
+      const copy = await screen.findByRole("button", { name: "Copy text of retained draft" });
+      const clipboard = stubClipboard();
+      copy.focus();
+      fireEvent.click(copy);
 
-    await waitFor(() => expect(clipboard).toHaveBeenCalledWith("local retained text"));
-    await waitFor(() => expect(message()).toHaveFocus());
+      await waitFor(() => expect(clipboard).toHaveBeenCalledWith("local retained text"));
+      await waitFor(() => expect(message()).toHaveFocus());
+    } finally {
+      vi.useRealTimers();
+    }
   }, 12_000);
 
   it("flushes typing that arrives during send preparation before native sends the stored row", async () => {
