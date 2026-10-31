@@ -30,7 +30,6 @@ use url::Url;
 use uuid::Uuid;
 
 const ROTATED_PHRASE: &str = "different manual rotation phrase";
-static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -250,7 +249,6 @@ fn queued_envelope(client: &Client, envelope_id: EnvelopeId) -> Envelope {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simulated_sms_checkpoint_over_real_postgres_http_and_ws() {
-    let _guard = LOCK.lock().await;
     eprintln!("phase=E01 status=start");
     let server = Server::start().await;
     eprintln!("phase=E01 status=server_ready");
@@ -485,7 +483,6 @@ async fn simulated_sms_checkpoint_over_real_postgres_http_and_ws() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simulated_mms_storage_and_public_copy_over_real_postgres_and_seaweed() {
-    let _guard = LOCK.lock().await;
     eprintln!("phase=EM01 status=start");
     let server = Server::start().await;
     let desktop_p = server.enroll_fixture_device("device").await;
@@ -763,7 +760,6 @@ async fn simulated_mms_storage_and_public_copy_over_real_postgres_and_seaweed() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simulator_resyncs_pruned_replay_without_executing_snapshot_commands() {
-    let _guard = LOCK.lock().await;
     eprintln!("phase=ES01 status=start");
     let server = Server::start().await;
     let desktop_p = server.enroll_fixture_device("device").await;
@@ -940,7 +936,6 @@ async fn simulator_resyncs_pruned_replay_without_executing_snapshot_commands() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn advertised_sim_route_is_discoverable_and_foreign_route_never_effects() {
-    let _guard = LOCK.lock().await;
     let server = Server::start().await;
     let desktop_p = server.enroll_fixture_device("device").await;
     let gateway_p = server.enroll_fixture_device("gateway").await;
@@ -1017,7 +1012,6 @@ async fn advertised_sim_route_is_discoverable_and_foreign_route_never_effects() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_passphrase_rotation_retires_old_commands_and_revokes_gateway() {
-    let _guard = LOCK.lock().await;
     eprintln!("phase=EROT01 status=start");
     let server = Server::start().await;
     let desktop_p = server.enroll_fixture_device("device").await;

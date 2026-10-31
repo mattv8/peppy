@@ -24,11 +24,8 @@ use tokio_tungstenite::{connect_async, tungstenite};
 use url::Url;
 use uuid::Uuid;
 
-static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[tokio::test]
 async fn presence_leases_require_a_responsive_pong_and_cleanup_on_close() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let connection = Uuid::new_v4();
     let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
@@ -73,7 +70,6 @@ async fn presence_leases_require_a_responsive_pong_and_cleanup_on_close() {
 
 #[tokio::test]
 async fn presence_caps_sockets_and_revocation_invalidates_renewal() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let mut connections = Vec::new();
     for _ in 0..32 {
@@ -117,7 +113,6 @@ async fn presence_caps_sockets_and_revocation_invalidates_renewal() {
 
 #[tokio::test]
 async fn presence_batch_and_direct_lookup_keep_never_seen_devices_never() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let batch = presence::lookup_many_best_effort(
         &server.pool,
@@ -457,7 +452,6 @@ async fn start_fake_relay() -> (Url, FakeRelay, JoinHandle<()>) {
 
 #[tokio::test]
 async fn newer_commit_during_inflight_wake_rotates_the_delivery_hint() {
-    let _guard = TEST_LOCK.lock().await;
     let (relay_url, relay, relay_task) = start_fake_relay().await;
     let server = TestServer::start_with_relay(relay_url).await;
     let gateway = server.provision_device("gateway").await;
@@ -509,7 +503,6 @@ async fn newer_commit_during_inflight_wake_rotates_the_delivery_hint() {
 
 #[tokio::test]
 async fn durable_wakes_use_random_opaque_ids_coalesce_and_replace_invalid_routes() {
-    let _guard = TEST_LOCK.lock().await;
     let (relay_url, relay, relay_task) = start_fake_relay().await;
     let server = TestServer::start_with_relay(relay_url).await;
     let gateway = server.provision_device("gateway").await;
@@ -599,7 +592,6 @@ async fn durable_wakes_use_random_opaque_ids_coalesce_and_replace_invalid_routes
 
 #[tokio::test]
 async fn legacy_pairing_routes_are_absent_while_instance_discovery_remains_available() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let client = Client::new();
     for path in [
@@ -633,7 +625,6 @@ async fn legacy_pairing_routes_are_absent_while_instance_discovery_remains_avail
 
 #[tokio::test]
 async fn device_revocation_enforces_owner_scope_last_owner_and_token_cleanup() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let device = server.provision_device("device").await;
 
@@ -692,7 +683,6 @@ async fn device_revocation_enforces_owner_scope_last_owner_and_token_cleanup() {
 
 #[tokio::test]
 async fn devices_roster_includes_nullable_names_and_revoked_devices() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let device = server.provision_device("device").await;
     sqlx::query("UPDATE devices SET name=$1, kind=$2 WHERE vault_id=$3 AND device_id=$4")
@@ -748,7 +738,6 @@ async fn devices_roster_includes_nullable_names_and_revoked_devices() {
 
 #[tokio::test]
 async fn vault_delete_is_owner_only_requires_echo_and_queues_all_object_cleanup() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let device = server.provision_device("device").await;
     let client = Client::new();
@@ -883,7 +872,6 @@ async fn insert_computer_enrollment(
 
 #[tokio::test]
 async fn vault_delete_removes_device_owned_phone_invitations_and_keeps_other_vaults() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let device = server.provision_device("device").await;
     for (owner, state, expired) in [
@@ -985,7 +973,6 @@ async fn ingest_state(server: &TestServer) -> (i64, i64) {
 
 #[tokio::test]
 async fn ingest_rejects_sequences_beyond_bigint_without_advancing_the_cursor() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let beyond_bigint = i64::MAX as u64 + 1;
     assert_eq!(beyond_bigint.to_string(), "9223372036854775808");
@@ -1083,7 +1070,6 @@ async fn send_detached(request: reqwest::RequestBuilder) -> (StatusCode, Value) 
 
 #[tokio::test]
 async fn ingest_rejects_a_credential_revoked_while_waiting_for_the_vault_lock() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let device = server.provision_device("device").await;
     let envelope = set_fingerprint(
@@ -1115,7 +1101,6 @@ async fn ingest_rejects_a_credential_revoked_while_waiting_for_the_vault_lock() 
 
 #[tokio::test]
 async fn attachment_release_rejects_a_credential_revoked_while_waiting_for_the_vault_lock() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let device = server.provision_device("device").await;
     let attachment = Uuid::new_v4();
@@ -1156,7 +1141,6 @@ async fn attachment_release_rejects_a_credential_revoked_while_waiting_for_the_v
 
 #[tokio::test]
 async fn cross_vault_foreign_gateway_and_non_target_receipts_are_denied() {
-    let _guard = TEST_LOCK.lock().await;
     let first = TestServer::start().await;
     let target = first.provision_device("gateway").await;
     let other = first.provision_device("gateway").await;
@@ -1257,7 +1241,6 @@ async fn cross_vault_foreign_gateway_and_non_target_receipts_are_denied() {
 
 #[tokio::test]
 async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let gateway = server.provision_device("gateway").await;
     let ordinary = server.provision_device("device").await;
@@ -1477,7 +1460,6 @@ async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
 
 #[tokio::test]
 async fn exact_retry_returns_cursor_and_changed_identity_or_sequence_conflicts() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let client = Client::new();
     let envelope_id = Uuid::new_v4();
@@ -1533,7 +1515,6 @@ async fn exact_retry_returns_cursor_and_changed_identity_or_sequence_conflicts()
 
 #[tokio::test]
 async fn concurrent_commits_have_gapless_high_water_and_ordered_replay() {
-    let _guard = TEST_LOCK.lock().await;
     let server = Arc::new(TestServer::start().await);
     let mut tasks = Vec::new();
     for sequence in 1..=16_u64 {
@@ -1585,7 +1566,6 @@ async fn concurrent_commits_have_gapless_high_water_and_ordered_replay() {
 
 #[tokio::test]
 async fn websocket_presence_hint_is_vault_scoped_and_tracks_pong_and_close() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let device = server.provision_device("device").await;
 
@@ -1656,7 +1636,6 @@ async fn websocket_presence_hint_is_vault_scoped_and_tracks_pong_and_close() {
 
 #[tokio::test]
 async fn websocket_handshake_replays_and_revocation_closes_active_socket() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let device = server.provision_device("device").await;
     let body = set_fingerprint(
@@ -1915,7 +1894,6 @@ where
 
 #[tokio::test]
 async fn snapshot_pages_are_stable_under_concurrent_writes_and_converge_with_tail() {
-    let _guard = TEST_LOCK.lock().await;
     let server = Arc::new(TestServer::start().await);
     for sequence in 1..=25 {
         server.commit(&server.owner_event(sequence)).await;
@@ -2026,7 +2004,6 @@ async fn snapshot_pages_are_stable_under_concurrent_writes_and_converge_with_tai
 
 #[tokio::test]
 async fn compaction_only_prunes_replay_expired_explicit_targets_and_fences_snapshot_pages() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let first = set_fingerprint(
         compacting_event(server.vault, server.owner_device, 1, Uuid::new_v4(), vec![]),
@@ -2184,7 +2161,6 @@ fn keyed(mut value: Value, group: u8) -> Value {
 
 #[tokio::test]
 async fn expired_terminal_root_is_kept_while_a_same_key_record_survives_outside_its_ancestry() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let (o, v, f) = (
         server.owner_device,
@@ -2221,7 +2197,6 @@ async fn expired_terminal_root_is_kept_while_a_same_key_record_survives_outside_
 
 #[tokio::test]
 async fn expired_terminal_roots_self_expire_with_their_ancestry_and_keep_retry_identity() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let (o, v, f) = (
         server.owner_device,
@@ -2308,7 +2283,6 @@ async fn expired_terminal_roots_self_expire_with_their_ancestry_and_keep_retry_i
 
 #[tokio::test]
 async fn unsaturated_compaction_pass_waits_the_full_daily_interval() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let (o, v, f) = (
         server.owner_device,
@@ -2336,7 +2310,6 @@ async fn unsaturated_compaction_pass_waits_the_full_daily_interval() {
 
 #[tokio::test]
 async fn compaction_collapses_chains_protects_targets_holds_pending_and_keeps_retry_identity() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let gateway = server.provision_device("gateway").await;
     let (o, v, f) = (
@@ -2492,7 +2465,6 @@ async fn compaction_collapses_chains_protects_targets_holds_pending_and_keeps_re
 
 #[tokio::test]
 async fn replay_expiry_and_ahead_cursors_resync_while_immutable_records_survive_pruning() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let mut bodies = Vec::new();
     for sequence in 1..=10 {
@@ -2580,7 +2552,6 @@ async fn replay_expiry_and_ahead_cursors_resync_while_immutable_records_survive_
 
 #[tokio::test]
 async fn websocket_negotiation_has_distinct_close_codes() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start_with(TransportOptions {
         hello_timeout: Duration::from_secs(1),
         ..TransportOptions::default()
@@ -2626,7 +2597,6 @@ async fn websocket_negotiation_has_distinct_close_codes() {
 
 #[tokio::test]
 async fn outbox_drainer_recovers_a_lost_hint_and_retires_references() {
-    let _guard = TEST_LOCK.lock().await;
     // The durable rescan is pushed beyond the test window, so only the
     // drainer's hint can deliver the injected commit in time.
     let server = TestServer::start_with(TransportOptions {
@@ -2725,7 +2695,6 @@ fn with_epoch(mut envelope: Value, epoch: u32, fingerprint: &str) -> Value {
 
 #[tokio::test]
 async fn key_profiles_are_owner_only_immutable_forward_and_gate_epochs() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     sqlx::query("INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) VALUES($1,1,$2,$3)")
         .bind(server.vault)
@@ -2911,7 +2880,6 @@ async fn key_profiles_are_owner_only_immutable_forward_and_gate_epochs() {
 
 #[tokio::test]
 async fn key_profile_activation_requires_a_matching_admission_verifier() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let (profile_two, fingerprint_two) = profile(server.vault, 2);
     let header_two = vec![2_u8; 80];
@@ -2950,7 +2918,6 @@ async fn key_profile_activation_requires_a_matching_admission_verifier() {
 
 #[tokio::test]
 async fn pending_command_references_never_retarget_a_gateway() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let owner = server.owner_token.clone();
     let first = server.provision_device("gateway").await;
@@ -3057,7 +3024,6 @@ async fn pending_command_references_never_retarget_a_gateway() {
 
 #[tokio::test]
 async fn legacy_local_schema_upgrades_without_losing_records_or_identity() {
-    let _guard = TEST_LOCK.lock().await;
     let database_url = std::env::var("TEST_DATABASE_URL")
         .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
     let admin = PgPoolOptions::new()
@@ -3248,7 +3214,6 @@ async fn legacy_local_schema_upgrades_without_losing_records_or_identity() {
 
 #[tokio::test]
 async fn near_limit_envelopes_page_within_the_byte_budget_and_advance() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let budget = 8 * 1024 * 1024_usize;
     for sequence in 1..=8_u64 {
@@ -3325,7 +3290,6 @@ async fn near_limit_envelopes_page_within_the_byte_budget_and_advance() {
 #[tokio::test]
 async fn real_client_history_purges_on_the_real_server_and_fresh_snapshot_does_not_resurrect() {
     use peppy_client_core as core;
-    let _guard = TEST_LOCK.lock().await;
     let pass = "correct horse battery staple";
     let vault = Uuid::new_v4();
     let key_profile = peppy_crypto::KeyProfile::new(vault, 1).unwrap();

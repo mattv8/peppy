@@ -6,31 +6,3 @@ test-threads = 4
 fail-fast = false
 failure-output = "immediate-final"
 slow-timeout = { period = "60s" }
-
-[[profile.ci.overrides]]
-filter = 'package(peppy-server) & binary(attachments)'
-test-group = 'server-attachments'
-
-[[profile.ci.overrides]]
-filter = 'package(peppy-server) & binary(transport)'
-test-group = 'server-transport'
-
-[[profile.ci.overrides]]
-filter = 'package(peppy-server) & binary(policy)'
-test-group = 'server-policy'
-
-[[profile.ci.overrides]]
-filter = 'package(peppy-gateway-simulator) & binary(sms_end_to_end)'
-test-group = 'gateway-simulator-sms-end-to-end'
-
-[test-groups.server-attachments]
-max-threads = 1
-
-[test-groups.server-transport]
-max-threads = 1
-
-[test-groups.server-policy]
-max-threads = 1
-
-[test-groups.gateway-simulator-sms-end-to-end]
-max-threads = 1
