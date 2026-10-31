@@ -6,7 +6,10 @@ use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use time::OffsetDateTime;
 
-use crate::{config::Config, storage::Storage};
+use crate::{
+    config::Config,
+    storage::{DisposableObject, Storage},
+};
 
 #[derive(Clone)]
 pub struct HealthState(Arc<Dependencies>);
@@ -86,27 +89,40 @@ pub async fn storage_contract_check(
         OffsetDateTime::now_utc().unix_timestamp_nanos()
     );
     let payload = b"peppy-private-s3-contract";
-    storage.put_bytes(&key, payload.to_vec()).await?;
-    let mut stream = storage.get(&key).await?;
-    let mut downloaded = Vec::with_capacity(payload.len());
-    while let Some(chunk) = stream.next().await {
-        downloaded.extend_from_slice(&chunk?);
-        if downloaded.len() > payload.len() {
-            break;
+    let object = DisposableObject::new(storage.clone(), key);
+    let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
+        object.put_bytes(payload.to_vec()).await?;
+        let mut stream = storage.get(object.key()).await?;
+        let mut downloaded = Vec::with_capacity(payload.len());
+        while let Some(chunk) = stream.next().await {
+            downloaded.extend_from_slice(&chunk?);
+            if downloaded.len() > payload.len() {
+                break;
+            }
         }
+        if downloaded != payload {
+            return Err("signed S3 round trip returned an unexpected body".into());
+        }
+        let unsigned_status = storage.unsigned_get_status(object.key()).await?;
+        if unsigned_status != StatusCode::FORBIDDEN && unsigned_status != StatusCode::UNAUTHORIZED {
+            return Err(format!(
+                "unsigned private S3 GET returned {unsigned_status}, expected 401 or 403"
+            )
+            .into());
+        }
+        Ok(())
     }
-    if downloaded != payload {
-        return Err("signed S3 round trip returned an unexpected body".into());
+    .await;
+    let cleanup = object.cleanup().await;
+    match (result, cleanup) {
+        (Err(error), Err(cleanup_error)) => {
+            tracing::warn!(%error, %cleanup_error, "storage contract check cleanup failed");
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error.into()),
+        (Ok(()), Ok(())) => Ok(()),
     }
-    let unsigned_status = storage.unsigned_get_status(&key).await?;
-    if unsigned_status != StatusCode::FORBIDDEN && unsigned_status != StatusCode::UNAUTHORIZED {
-        return Err(format!(
-            "unsigned private S3 GET returned {unsigned_status}, expected 401 or 403"
-        )
-        .into());
-    }
-    storage.delete(&key).await?;
-    Ok(())
 }
 
 pub async fn readiness(State(state): State<HealthState>) -> StatusCode {

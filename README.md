@@ -131,7 +131,7 @@ Private attachment ciphertext and explicitly published plaintext image derivativ
 
 Published derivatives remain plaintext when delivered through their existing `public/` prefix and retain their expiry and revocation behavior. This does not make those derivatives end-to-end encrypted and does not add forward secrecy.
 
-SSE response metadata and ciphertext framing are backend and format assertions, not independent proof that stored bytes are encrypted. Peppy fails startup when a custom S3 backend does not confirm the required SSE-S3 behavior; its initial multichunk storage probe is bounded at 360 seconds, while recurring readiness uses the configured shorter timeout. Hosted-provider support and its image-pin rollout are unverified in this repository and require follow-up in the private deployment repository.
+SSE response metadata and ciphertext framing are backend and format assertions, not independent proof that stored bytes are encrypted. Peppy fails startup when a custom S3 backend does not confirm the required SSE-S3 behavior; its initial multichunk storage probe is bounded at 360 seconds, while recurring readiness uses the configured shorter timeout. On versioned backends (Backblaze B2 and versioned AWS), deletion removes every version of an object; the S3 access key needs ListObjectVersions and DeleteObjectVersion (B2: listFiles and deleteFiles), which startup checks, and changing versioning requires a restart. Crash-orphaned probes can be expired with a lifecycle rule scoped to the `peppy-storage-probe-` and `peppy-readiness-check-` prefixes. Hosted-provider support and its image-pin rollout are unverified in this repository and require follow-up in the private deployment repository.
 
 ## Local server and TLS experiments
 

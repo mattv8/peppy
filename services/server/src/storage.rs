@@ -2,6 +2,10 @@ use std::{
     io::{Error as IoError, SeekFrom},
     path::PathBuf,
     pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -14,6 +18,7 @@ use aws_sigv4::{
     sign::v4,
 };
 use futures_util::{Stream, StreamExt};
+use quick_xml::{Reader, escape::resolve_predefined_entity, events::Event};
 use reqwest::{
     Client, Method, RequestBuilder, StatusCode,
     header::{CONTENT_LENGTH, CONTENT_RANGE, HeaderName, HeaderValue},
@@ -50,6 +55,39 @@ const SSE_VALUE: &str = "AES256";
 const PROBE_BYTES: usize = 20 * 1024 * 1024;
 const PROBE_RANGE_START: usize = 8 * 1024 * 1024 + 13;
 const PROBE_RANGE_BYTES: usize = 64;
+const VERSION_LIST_BODY_LIMIT: usize = 1024 * 1024;
+const VERSION_LIST_PAGE_LIMIT: usize = 10;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectVersion(String);
+
+impl ObjectVersion {
+    pub fn parse(value: &str) -> Option<Self> {
+        (value != "null" && Self::is_valid(value)).then(|| Self(value.to_owned()))
+    }
+
+    pub(crate) fn listed(value: &str) -> Option<Self> {
+        Self::is_valid(value).then(|| Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn is_valid(value: &str) -> bool {
+        (1..=1024).contains(&value.len())
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'.' | b'_' | b'-' | b'/' | b'+' | b'=')
+            })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionEntry {
+    pub version: ObjectVersion,
+    pub delete_marker: bool,
+}
 
 /// Storage failures callers must distinguish: a missing object is a durable
 /// fact (409/404/410 at the API), anything else is transient (503).
@@ -80,6 +118,8 @@ pub struct Storage {
     credentials: Credentials,
     signing_region: String,
     client: Client,
+    // Toggling backend versioning requires a restart so this probe-derived value can refresh.
+    versioned: Arc<AtomicBool>,
 }
 
 impl Storage {
@@ -117,7 +157,12 @@ impl Storage {
             credentials,
             signing_region: config.signing_region.clone(),
             client,
+            versioned: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn is_versioned(&self) -> bool {
+        self.versioned.load(Ordering::Relaxed)
     }
 
     /// Streams a spooled file to `key` with a signed content hash and length.
@@ -179,6 +224,15 @@ impl Storage {
 
     /// Uploads an in-memory object used by the startup contract check.
     pub async fn put_bytes(&self, key: &str, bytes: Vec<u8>) -> Result<(), StorageError> {
+        self.put_bytes_recording(key, bytes, None).await
+    }
+
+    async fn put_bytes_recording(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        version: Option<&Mutex<Option<ObjectVersion>>>,
+    ) -> Result<(), StorageError> {
         let url = self.object_url(key)?;
         let request = self.signed_request(
             Method::PUT,
@@ -195,11 +249,117 @@ impl Storage {
         if !response.status().is_success() {
             return Err(StorageError::Unavailable("S3 PUT rejected"));
         }
+        if let Some(version) = version {
+            *version
+                .lock()
+                .expect("disposable object version mutex poisoned") = response
+                .headers()
+                .get("x-amz-version-id")
+                .and_then(|value| value.to_str().ok())
+                .and_then(ObjectVersion::parse);
+        }
         require_sse_acknowledgement(
             response.headers(),
             "S3 PUT encryption acknowledgement missing",
         )?;
         Ok(())
+    }
+
+    pub async fn list_versions(&self, key: &str) -> Result<Vec<VersionEntry>, StorageError> {
+        let mut entries = Vec::new();
+        let mut markers: Option<(String, String)> = None;
+        for _ in 0..VERSION_LIST_PAGE_LIMIT {
+            let mut url = self.bucket_url()?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("versions", "");
+                query.append_pair("prefix", key);
+                query.append_pair("max-keys", "1000");
+                if let Some((key_marker, version_marker)) = &markers {
+                    query.append_pair("key-marker", key_marker);
+                    query.append_pair("version-id-marker", version_marker);
+                }
+            }
+            let response = self
+                .signed_request(Method::GET, &url, &[], SignableBody::empty())?
+                .timeout(CONTROL_TIMEOUT)
+                .send()
+                .await
+                .map_err(|_| StorageError::Unavailable("S3 version listing request failed"))?;
+            if response.status() == StatusCode::FORBIDDEN {
+                return Err(StorageError::Unavailable("S3 version listing forbidden"));
+            }
+            if !response.status().is_success() {
+                return Err(StorageError::Unavailable("S3 version listing rejected"));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > VERSION_LIST_BODY_LIMIT as u64)
+            {
+                return Err(StorageError::Unavailable("S3 version listing too large"));
+            }
+            let page = parse_version_page(&read_limited_body(response).await?, key)?;
+            entries.extend(page.entries);
+            if !page.truncated {
+                return Ok(entries);
+            }
+            let next_markers = page
+                .next_markers
+                .ok_or(StorageError::Unavailable("S3 version listing malformed"))?;
+            if markers.as_ref() == Some(&next_markers) {
+                return Err(StorageError::Unavailable("S3 version listing malformed"));
+            }
+            markers = Some(next_markers);
+        }
+        Err(StorageError::Unavailable("S3 version listing malformed"))
+    }
+
+    pub async fn delete_version(
+        &self,
+        key: &str,
+        version: &ObjectVersion,
+    ) -> Result<(), StorageError> {
+        let mut url = self.object_url(key)?;
+        url.query_pairs_mut()
+            .append_pair("versionId", version.as_str());
+        let response = self
+            .signed_request(Method::DELETE, &url, &[], SignableBody::empty())?
+            .timeout(CONTROL_TIMEOUT)
+            .send()
+            .await
+            .map_err(|_| StorageError::Unavailable("S3 version delete request failed"))?;
+        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            Ok(())
+        } else if response.status() == StatusCode::FORBIDDEN {
+            Err(StorageError::Unavailable("S3 version delete forbidden"))
+        } else {
+            Err(StorageError::Unavailable("S3 version delete rejected"))
+        }
+    }
+
+    /// Callers must purge only write-once keys: every stored version is destroyed irreversibly.
+    /// Unversioned buckets fall back to a key-only delete.
+    pub async fn purge(&self, key: &str) -> Result<(), StorageError> {
+        if !self.is_versioned() {
+            return self.delete(key).await;
+        }
+        let entries = self.list_versions(key).await?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+        for delete_marker in [false, true] {
+            for entry in entries
+                .iter()
+                .filter(|entry| entry.delete_marker == delete_marker)
+            {
+                self.delete_version(key, &entry.version).await?;
+            }
+        }
+        if self.list_versions(key).await?.is_empty() {
+            Ok(())
+        } else {
+            Err(StorageError::Unavailable("S3 purge incomplete"))
+        }
     }
 
     pub async fn head_bytes(&self, key: &str) -> Result<i64, StorageError> {
@@ -347,15 +507,22 @@ impl Storage {
     }
 
     async fn verify_encryption_contract(&self) -> Result<(), StorageError> {
-        let key = format!("peppy-storage-probe-{}", uuid::Uuid::new_v4());
-        let result =
-            match tokio::time::timeout(STARTUP_PROBE_TIMEOUT, self.run_encryption_contract(&key))
-                .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(StorageError::Unavailable("S3 encryption probe timed out")),
-            };
-        let cleanup = self.delete(&key).await;
+        let object = DisposableObject::new(
+            self.clone(),
+            format!("peppy-storage-probe-{}", uuid::Uuid::new_v4()),
+        );
+        let result = match tokio::time::timeout(
+            STARTUP_PROBE_TIMEOUT,
+            self.run_encryption_contract(&object),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(StorageError::Unavailable("S3 encryption probe timed out")),
+        };
+        self.versioned
+            .store(object.version().is_some(), Ordering::Relaxed);
+        let cleanup = object.cleanup().await;
         match (result, cleanup) {
             (Err(error), Err(cleanup_error)) => {
                 tracing::warn!(%error, %cleanup_error, "storage encryption probe cleanup failed");
@@ -367,9 +534,10 @@ impl Storage {
         }
     }
 
-    async fn run_encryption_contract(&self, key: &str) -> Result<(), StorageError> {
+    async fn run_encryption_contract(&self, object: &DisposableObject) -> Result<(), StorageError> {
+        let key = object.key();
         let payload = probe_bytes();
-        self.put_bytes(key, payload.clone()).await?;
+        object.put_bytes(payload.clone()).await?;
         if self.head_bytes(key).await? != payload.len() as i64 {
             return Err(StorageError::Unavailable(
                 "S3 encryption probe has invalid content length",
@@ -514,6 +682,193 @@ impl Storage {
     }
 }
 
+pub(crate) struct DisposableObject {
+    storage: Storage,
+    key: String,
+    version: Mutex<Option<ObjectVersion>>,
+}
+
+impl DisposableObject {
+    pub(crate) fn new(storage: Storage, key: String) -> Self {
+        Self {
+            storage,
+            key,
+            version: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub(crate) fn version(&self) -> Option<ObjectVersion> {
+        self.version
+            .lock()
+            .expect("disposable object version mutex poisoned")
+            .clone()
+    }
+
+    pub(crate) async fn put_bytes(&self, bytes: Vec<u8>) -> Result<(), StorageError> {
+        self.storage
+            .put_bytes_recording(&self.key, bytes, Some(&self.version))
+            .await
+    }
+
+    pub(crate) async fn cleanup(&self) -> Result<(), StorageError> {
+        match (self.storage.is_versioned(), self.version()) {
+            (true, Some(version)) => {
+                self.storage.delete_version(&self.key, &version).await?;
+                self.storage.purge(&self.key).await
+            }
+            (true, None) => self.storage.purge(&self.key).await,
+            (false, _) => self.storage.delete(&self.key).await,
+        }
+    }
+}
+
+struct VersionPage {
+    entries: Vec<VersionEntry>,
+    truncated: bool,
+    next_markers: Option<(String, String)>,
+}
+
+async fn read_limited_body(response: reqwest::Response) -> Result<Vec<u8>, StorageError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| StorageError::Unavailable("S3 version listing rejected"))?;
+        if body.len().saturating_add(chunk.len()) > VERSION_LIST_BODY_LIMIT {
+            return Err(StorageError::Unavailable("S3 version listing too large"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn parse_version_page(body: &[u8], requested_key: &str) -> Result<VersionPage, StorageError> {
+    let malformed = || StorageError::Unavailable("S3 version listing malformed");
+    let mut reader = Reader::from_reader(body);
+    let mut buffer = Vec::new();
+    let mut field: Option<Vec<u8>> = None;
+    let mut field_value = String::new();
+    let mut entry = None;
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    let mut next_key_marker = None;
+    let mut next_version_marker = None;
+    let mut saw_first_start = false;
+
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| malformed())?
+        {
+            Event::Start(start) => {
+                let name = start.local_name().as_ref().to_vec();
+                if !saw_first_start {
+                    if name.as_slice() != b"ListVersionsResult" {
+                        return Err(malformed());
+                    }
+                    saw_first_start = true;
+                }
+                match name.as_slice() {
+                    b"Version" => entry = Some((false, None, None)),
+                    b"DeleteMarker" => entry = Some((true, None, None)),
+                    b"Key"
+                    | b"VersionId"
+                    | b"IsTruncated"
+                    | b"NextKeyMarker"
+                    | b"NextVersionIdMarker" => {
+                        field = Some(name);
+                        field_value.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Event::Text(text) => {
+                if field.is_some() {
+                    field_value.push_str(&text.decode().map_err(|_| malformed())?);
+                }
+            }
+            Event::GeneralRef(reference) => {
+                if field.is_some() {
+                    if let Some(character) =
+                        reference.resolve_char_ref().map_err(|_| malformed())?
+                    {
+                        field_value.push(character);
+                    } else {
+                        let name = reference.decode().map_err(|_| malformed())?;
+                        field_value
+                            .push_str(resolve_predefined_entity(&name).ok_or_else(malformed)?);
+                    }
+                }
+            }
+            Event::CData(text) => {
+                if field.is_some() {
+                    field_value.push_str(&text.decode().map_err(|_| malformed())?);
+                }
+            }
+            Event::End(end) => {
+                let name = end.local_name().as_ref().to_vec();
+                if field.as_deref() == Some(name.as_slice()) {
+                    let value = std::mem::take(&mut field_value);
+                    field = None;
+                    match name.as_slice() {
+                        b"Key" => {
+                            if let Some((_, key, _)) = &mut entry {
+                                *key = Some(value);
+                            }
+                        }
+                        b"VersionId" => {
+                            if let Some((_, _, version)) = &mut entry {
+                                *version = Some(value);
+                            }
+                        }
+                        b"IsTruncated" => match value.trim() {
+                            "true" => truncated = true,
+                            "false" => truncated = false,
+                            _ => return Err(malformed()),
+                        },
+                        b"NextKeyMarker" => next_key_marker = Some(value),
+                        b"NextVersionIdMarker" => next_version_marker = Some(value),
+                        _ => {}
+                    }
+                }
+                match name.as_slice() {
+                    b"Version" | b"DeleteMarker" => {
+                        let (delete_marker, key, version) = entry.take().ok_or_else(malformed)?;
+                        let key = key.ok_or_else(malformed)?;
+                        let version = ObjectVersion::listed(&version.ok_or_else(malformed)?)
+                            .ok_or_else(malformed)?;
+                        if key == requested_key {
+                            entries.push(VersionEntry {
+                                version,
+                                delete_marker,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    if !saw_first_start || entry.is_some() || field.is_some() {
+        return Err(malformed());
+    }
+    let next_markers = next_key_marker.zip(next_version_marker);
+    if truncated && next_markers.is_none() {
+        return Err(malformed());
+    }
+    Ok(VersionPage {
+        entries,
+        truncated,
+        next_markers,
+    })
+}
+
 fn require_sse_acknowledgement(
     headers: &reqwest::header::HeaderMap,
     missing_message: &'static str,
@@ -623,6 +978,225 @@ mod tests {
             range,
             4
         ));
+    }
+
+    #[test]
+    fn object_version_accepts_s3_identifiers_only() {
+        let b2 =
+            "4_z27c88f1d182b150646ff0b16_f1004ba650fe24e6b_d20180809_m012156_c100_v0009990_t0003";
+        let aws = "abc/def+ghi=jkl";
+        assert_eq!(ObjectVersion::parse(b2).unwrap().as_str(), b2);
+        assert_eq!(ObjectVersion::parse(aws).unwrap().as_str(), aws);
+        for invalid in [
+            "null".to_owned(),
+            String::new(),
+            "has space".to_owned(),
+            "has&and".to_owned(),
+            "a".repeat(1025),
+        ] {
+            assert_eq!(ObjectVersion::parse(&invalid), None);
+        }
+        assert_eq!(ObjectVersion::listed("null").unwrap().as_str(), "null");
+    }
+
+    #[test]
+    fn parses_version_pages_with_exact_key_filtering_and_markers() {
+        let page = parse_version_page(
+            br#"<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><IsTruncated>true</IsTruncated><NextKeyMarker>private/v/o</NextKeyMarker><NextVersionIdMarker>next/+=</NextVersionIdMarker><Version><Key>private/v/o</Key><VersionId>first</VersionId></Version><Version><Key>private/v/other</Key><VersionId>second</VersionId></Version><DeleteMarker><Key>private/v/o</Key><VersionId>third</VersionId></DeleteMarker></ListVersionsResult>"#,
+            "private/v/o",
+        )
+        .expect("valid version page");
+        assert!(page.truncated);
+        assert_eq!(
+            page.next_markers,
+            Some(("private/v/o".into(), "next/+=".into()))
+        );
+        assert_eq!(
+            page.entries,
+            vec![
+                VersionEntry {
+                    version: ObjectVersion::parse("first").unwrap(),
+                    delete_marker: false
+                },
+                VersionEntry {
+                    version: ObjectVersion::parse("third").unwrap(),
+                    delete_marker: true
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_version_pages() {
+        for page in [
+            &br#"<ListVersionsResult><IsTruncated>true</IsTruncated></ListVersionsResult>"#[..],
+            &br#"<ListVersionsResult><Version><Key>private/v/o</Key><VersionId>invalid id</VersionId></Version></ListVersionsResult>"#[..],
+            &br#"<ListVersionsResult><Version>"#[..],
+        ] {
+            assert!(matches!(
+                parse_version_page(page, "private/v/o"),
+                Err(StorageError::Unavailable("S3 version listing malformed"))
+            ));
+        }
+    }
+
+    #[test]
+    fn parses_split_and_untrimmed_version_fields_exactly() {
+        let cases = [
+            (
+                br#"<ListVersionsResult><IsTruncated>false</IsTruncated><Version><Key>private/v/o&amp;</Key><VersionId>one</VersionId></Version></ListVersionsResult>"#
+                    .as_slice(),
+                "private/v/o",
+                0,
+            ),
+            (
+                br#"<ListVersionsResult><IsTruncated>false</IsTruncated><Version><Key>a&amp;b</Key><VersionId>two</VersionId></Version></ListVersionsResult>"#
+                    .as_slice(),
+                "a&b",
+                1,
+            ),
+            (
+                br#"<ListVersionsResult><IsTruncated>false</IsTruncated><Version><Key><![CDATA[private/v/o]]></Key><VersionId>three</VersionId></Version></ListVersionsResult>"#
+                    .as_slice(),
+                "private/v/o",
+                1,
+            ),
+            (
+                br#"<ListVersionsResult><IsTruncated>false</IsTruncated><Version><Key> private/v/o </Key><VersionId>four</VersionId></Version></ListVersionsResult>"#
+                    .as_slice(),
+                "private/v/o",
+                0,
+            ),
+        ];
+        for (body, key, expected_entries) in cases {
+            assert_eq!(
+                parse_version_page(body, key)
+                    .expect("valid version page")
+                    .entries
+                    .len(),
+                expected_entries
+            );
+        }
+    }
+
+    #[test]
+    fn version_pages_accept_null_version_ids() {
+        let page = parse_version_page(
+            br#"<ListVersionsResult><IsTruncated>false</IsTruncated><Version><Key>private/v/o</Key><VersionId>null</VersionId></Version></ListVersionsResult>"#,
+            "private/v/o",
+        )
+        .expect("listing version id null is valid");
+        assert_eq!(page.entries[0].version.as_str(), "null");
+    }
+
+    #[tokio::test]
+    async fn disposable_object_retains_its_version_after_cancellation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let port = listener.local_addr().expect("local address").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let expected = |request: &[u8]| -> Option<usize> {
+                let head_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")?;
+                let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))?
+                    .trim()
+                    .parse::<usize>()
+                    .ok()?;
+                Some(head_end + 4 + length)
+            };
+            while expected(&request).is_none_or(|total| request.len() < total) {
+                let read = socket.read(&mut chunk).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nx-amz-server-side-encryption: AES256\r\nx-amz-version-id: V1\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .expect("write response");
+        });
+        let storage = Storage::new(&S3Config {
+            endpoint: Url::parse(&format!("http://127.0.0.1:{port}")).expect("endpoint"),
+            bucket: "bucket".into(),
+            access_key: "access".into(),
+            secret_key: "secret".into(),
+            signing_region: "us-west-000".into(),
+            precreated_bucket: true,
+            readiness_timeout: Duration::from_secs(5),
+        });
+        let object = DisposableObject::new(storage, "private/v/o".into());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), async {
+                object.put_bytes(b"object".to_vec()).await.unwrap();
+                std::future::pending::<()>().await;
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(object.version(), ObjectVersion::parse("V1"));
+        server.await.expect("stub finished");
+    }
+
+    #[tokio::test]
+    async fn delete_version_signs_the_form_encoded_target() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let port = listener.local_addr().expect("local address").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .expect("write response");
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        let storage = Storage::new(&S3Config {
+            endpoint: Url::parse(&format!("http://127.0.0.1:{port}")).expect("endpoint"),
+            bucket: "bucket".into(),
+            access_key: "access".into(),
+            secret_key: "secret".into(),
+            signing_region: "us-west-000".into(),
+            precreated_bucket: true,
+            readiness_timeout: Duration::from_secs(5),
+        });
+        let version = ObjectVersion::parse("abc/def+ghi=jkl").unwrap();
+        storage
+            .delete_version("private/v/o", &version)
+            .await
+            .expect("local stub accepts delete");
+        let request = server.await.expect("captured request");
+        let head = request.split("\r\n\r\n").next().unwrap_or_default();
+        assert!(
+            head.starts_with("DELETE /bucket/private/v/o?versionId=abc%2Fdef%2Bghi%3Djkl HTTP/1.1")
+        );
+        assert!(
+            head.lines().any(
+                |line| line.starts_with("authorization:") || line.starts_with("Authorization:")
+            )
+        );
     }
 
     /// Backblaze B2 rejects a PUT carrying two `content-length` headers as malformed

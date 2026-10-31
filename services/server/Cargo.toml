@@ -16,6 +16,7 @@ peppy-hosted-api.workspace = true
 peppy-crypto.workspace = true
 peppy-domain.workspace = true
 hex.workspace = true
+quick-xml = "=0.41.0"
 # Unused since health signing moved to the aws-sigv4 adapter; removal needs a root Cargo.lock refresh.
 hmac.workspace = true
 ipnet.workspace = true

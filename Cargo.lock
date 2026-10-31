@@ -2144,6 +2144,7 @@ dependencies = [
  "peppy-hosted-api",
  "peppy-hosted-client",
  "peppy-protocol",
+ "quick-xml",
  "reqwest",
  "serde",
  "serde_json",
