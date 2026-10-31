@@ -1,4 +1,4 @@
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{Executor, PgPool, Postgres, postgres::PgPoolOptions};
 use url::Url;
 use uuid::Uuid;
 
@@ -30,6 +30,56 @@ const LEGACY_DELETE_TABLES: &[&str] = &[
     "device_credentials",
     "devices",
 ];
+
+#[tokio::test]
+async fn index_metadata_lookup_survives_a_stale_snapshot_after_sibling_schema_drop() {
+    let database_url = std::env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL is required; migration compatibility uses a disposable fixture");
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let noise_schema = format!("migration_compat_noise_{}", Uuid::new_v4().simple());
+    let mut noise_ddl = format!(
+        "CREATE SCHEMA {noise_schema}; CREATE TABLE {noise_schema}.catalog_noise(value bigint);"
+    );
+    for index in 0..128 {
+        noise_ddl.push_str(&format!(
+            "CREATE INDEX catalog_noise_{index} ON {noise_schema}.catalog_noise(value);"
+        ));
+    }
+    sqlx::raw_sql(&noise_ddl).execute(&admin).await.unwrap();
+    let (schema, pool) = migrated_schema(&admin, &database_url).await;
+
+    let mut snapshot = pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *snapshot)
+        .await
+        .unwrap();
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pg_class")
+        .fetch_one(&mut *snapshot)
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP SCHEMA {noise_schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let lookup = retention_device_index_columns(&mut *snapshot).await;
+    snapshot.rollback().await.unwrap();
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        lookup.unwrap(),
+        vec!["vault_id", "device_id"],
+        "the retention device index must keep its exact migrated columns"
+    );
+}
 
 #[tokio::test]
 async fn attachment_retention_migration_preserves_legacy_vault_delete_contract() {
@@ -119,13 +169,21 @@ async fn assert_retention_foreign_keys(pool: &PgPool) {
             ),
         ]
     );
-    let indexed: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND tablename='attachment_retention_uses' AND indexdef LIKE '%(vault_id, device_id)%')",
+    assert_eq!(
+        retention_device_index_columns(pool).await.unwrap(),
+        vec!["vault_id", "device_id"]
+    );
+}
+
+async fn retention_device_index_columns<'e, E>(executor: E) -> Result<Vec<String>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_scalar(
+        "SELECT attribute.attname FROM pg_index index_metadata JOIN pg_class index_relation ON index_relation.oid=index_metadata.indexrelid CROSS JOIN LATERAL unnest(index_metadata.indkey) WITH ORDINALITY AS key(attnum,ordinality) JOIN pg_attribute attribute ON attribute.attrelid=index_metadata.indrelid AND attribute.attnum=key.attnum WHERE index_relation.oid='attachment_retention_uses_device'::regclass AND index_relation.relnamespace=current_schema()::regnamespace AND index_metadata.indrelid='attachment_retention_uses'::regclass ORDER BY key.ordinality",
     )
-    .fetch_one(pool)
+    .fetch_all(executor)
     .await
-    .unwrap();
-    assert!(indexed);
 }
 
 async fn assert_trigger_seeds_protected_metadata(pool: &PgPool) {
