@@ -489,9 +489,9 @@ mod tests {
 
     #[test]
     fn capability_accepts_only_empty_204_and_old_server_fallbacks() {
-        assert_eq!(classify_capability_response(204, "").unwrap(), true);
-        assert_eq!(classify_capability_response(404, "{}").unwrap(), false);
-        assert_eq!(classify_capability_response(405, "").unwrap(), false);
+        assert!(classify_capability_response(204, "").unwrap());
+        assert!(!classify_capability_response(404, "{}").unwrap());
+        assert!(!classify_capability_response(405, "").unwrap());
         assert!(classify_capability_response(204, "unexpected").is_err());
         assert!(classify_capability_response(500, "{}").is_err());
     }

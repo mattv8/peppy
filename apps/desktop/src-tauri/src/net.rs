@@ -770,19 +770,92 @@ pub mod tests {
         head: String,
         body: Vec<u8>,
     ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        const MAX_HEADER_BYTES: usize = 64 * 1024;
+        const MAX_BODY_BYTES: usize = 1024 * 1024;
+        const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = vec![0u8; 8192];
-            let read = socket.read(&mut request).await.unwrap();
-            let _ = sender.send(String::from_utf8_lossy(&request[..read]).into_owned());
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let header_end = loop {
+                let read = tokio::time::timeout(READ_TIMEOUT, socket.read(&mut buffer))
+                    .await
+                    .expect("request headers timed out")
+                    .unwrap();
+                assert!(
+                    read > 0,
+                    "connection closed before request headers completed"
+                );
+                request.extend_from_slice(&buffer[..read]);
+                assert!(
+                    request.len() <= MAX_HEADER_BYTES,
+                    "request headers too large"
+                );
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            assert!(content_length <= MAX_BODY_BYTES, "request body too large");
+            let request_length = header_end.checked_add(content_length).unwrap();
+            while request.len() < request_length {
+                let remaining = request_length - request.len();
+                let read_size = remaining.min(buffer.len());
+                let read =
+                    tokio::time::timeout(READ_TIMEOUT, socket.read(&mut buffer[..read_size]))
+                        .await
+                        .expect("request body timed out")
+                        .unwrap();
+                assert!(read > 0, "connection closed before request body completed");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            request.truncate(request_length);
+            let _ = sender.send(String::from_utf8_lossy(&request).into_owned());
             let _ = socket.write_all(head.as_bytes()).await;
             let _ = socket.write_all(&body).await;
             let _ = socket.shutdown().await;
         });
         (format!("http://{address}"), receiver)
+    }
+
+    #[tokio::test]
+    async fn capture_once_waits_for_the_complete_request_body() {
+        let (origin, mut captured) = capture_once(
+            "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+            vec![],
+        )
+        .await;
+        let address = origin.strip_prefix("http://").unwrap();
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket
+            .write_all(b"PUT /upload HTTP/1.1\r\ncontent-length: 1\r\n\r\n")
+            .await
+            .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut captured)
+                .await
+                .is_err()
+        );
+
+        socket.write_all(b"x").await.unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(1), captured)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(request.ends_with("\r\n\r\nx"));
     }
 
     #[tokio::test]
