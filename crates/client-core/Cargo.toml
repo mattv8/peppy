@@ -3,6 +3,11 @@ name = "peppy-client-core"
 version = "0.1.0"
 edition = "2024"
 publish = false
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
 
 [dependencies]
 base64.workspace = true

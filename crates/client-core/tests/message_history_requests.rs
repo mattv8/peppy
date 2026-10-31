@@ -1,6 +1,4 @@
-mod common;
-
-use common::*;
+use crate::common::*;
 use peppy_client_core::{
     HistorySearchReason, HistorySearchReplayProof, HistorySearchState, HistorySearchSyncContext,
     HistorySearchSyncFacts, HistorySearchWork,

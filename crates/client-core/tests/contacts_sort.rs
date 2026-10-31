@@ -1,5 +1,4 @@
-mod common;
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

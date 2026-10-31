@@ -1,7 +1,6 @@
 //! Compatibility coverage for lifecycle continuation exposed by the existing backfill DTO.
-mod common;
 
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 fn input(id: &str) -> MmsAcquisitionInput {

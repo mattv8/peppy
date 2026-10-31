@@ -1,8 +1,7 @@
 //! Platform capture with lazily loaded photos: text-only rescans keep the stored photo and
 //! owner-local photo fingerprint; explicit null removes the photo; source-key context is
 //! owner-only; the fingerprint never reaches peers or views.
-mod common;
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

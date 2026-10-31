@@ -1,7 +1,6 @@
 //! Gateway-only MMS ciphertext cleanup retains remote restoration metadata.
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::fs;
 use tempfile::TempDir;
 

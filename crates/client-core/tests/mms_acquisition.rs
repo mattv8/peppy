@@ -1,6 +1,5 @@
 //! Durable, local-only provider acquisition before an immutable MMS event is published.
-mod common;
-use common::*;
+use crate::common::*;
 use std::fs;
 use tempfile::TempDir;
 

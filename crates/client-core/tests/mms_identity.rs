@@ -1,6 +1,5 @@
 //! Own-address metadata is encrypted, convergent, and only changes reply presentation.
-mod common;
-use common::*;
+use crate::common::*;
 
 #[test]
 fn own_address_sync_excludes_self_from_an_existing_mms_group_without_rekeying_it() {

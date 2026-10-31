@@ -1,7 +1,6 @@
 //! Public outbox ordering and release contracts for the bounded lookup indexes.
-mod common;
 
-use common::*;
+use crate::common::*;
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;

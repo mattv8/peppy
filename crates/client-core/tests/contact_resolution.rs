@@ -1,7 +1,6 @@
 //! Address resolution uses real captured contact projections, never native IDs.
 
-mod common;
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

@@ -1,6 +1,6 @@
 //! Shared two-client fixtures: real SQLCipher clients and a minimal in-memory server that
 //! assigns contiguous vault cursors exactly like `/v1/events`.
-#![allow(dead_code)] // each test crate uses a subset
+#![allow(dead_code)] // individual suites use only a subset of the shared fixtures
 
 pub use peppy_client_core::*;
 use peppy_crypto::{create_vault_check_header, derive_root_key};

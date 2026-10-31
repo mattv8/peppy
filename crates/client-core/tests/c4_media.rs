@@ -1,7 +1,6 @@
 //! C4: encrypted MMS media between two real clients. Object transfer is an in-memory map that
 //! stands in for the native host's HTTP upload/download; it is not a claim about the S3 path.
-mod common;
-use common::*;
+use crate::common::*;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, fs, path::Path};
 use tempfile::TempDir;

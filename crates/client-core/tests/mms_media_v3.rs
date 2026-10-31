@@ -1,7 +1,6 @@
 //! v3 MMS media lifecycle regressions: thumbnails are private derivatives, never visible parts.
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::{collections::HashMap, fs, path::Path};
 use tempfile::TempDir;
 

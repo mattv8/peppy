@@ -1,6 +1,5 @@
 //! Private MMS envelopes remain out of the normal outbox until their media is uploaded.
-mod common;
-use common::*;
+use crate::common::*;
 use std::fs;
 use tempfile::TempDir;
 

@@ -1,7 +1,6 @@
 //! Provider-ID reuse only creates a second immutable message with strong source evidence.
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::fs;
 use tempfile::TempDir;
 

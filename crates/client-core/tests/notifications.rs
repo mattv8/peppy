@@ -1,7 +1,6 @@
 //! SQLCipher-backed notification lifecycle regression coverage.
-mod common;
+use crate::common::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use common::*;
 use tempfile::TempDir;
 
 fn capture(key: &str, instance: &str, text: &str) -> NotificationCapture {

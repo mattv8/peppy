@@ -1,6 +1,4 @@
-mod common;
-
-use common::*;
+use crate::common::*;
 use serde_json::json;
 
 fn request(query: &str) -> LocalSearchRequest {
