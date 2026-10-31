@@ -1372,7 +1372,7 @@ async fn removed_attachment_id_is_gone_on_every_authorization_path() {
     let cases = [
         (
             "POST",
-            format!("/v1/attachments/reserve"),
+            "/v1/attachments/reserve".to_owned(),
             json!({"attachment_id":attachment_id,"declared_ciphertext_bytes":1,"declared_ciphertext_sha256":hash}),
             json_headers.as_slice(),
         ),
@@ -1740,7 +1740,7 @@ async fn full_quota_restart_preregisters_protection_before_reserve_and_finalize(
     let blocked = cleanup_reserve(&server, &owner, 1).await;
     assert_eq!(blocked.0, StatusCode::PAYLOAD_TOO_LARGE, "{}", blocked.1);
     let classes: Vec<String> = sqlx::query_scalar("SELECT retention_class FROM attachments WHERE vault_id=$1 AND attachment_id=ANY($2) ORDER BY attachment_id")
-        .bind(owner.vault_id).bind(&[future, legacy]).fetch_all(&server.pool).await.unwrap();
+        .bind(owner.vault_id).bind([future, legacy]).fetch_all(&server.pool).await.unwrap();
     assert!(classes.contains(&"message_media".to_owned()));
     assert!(classes.contains(&"protected".to_owned()));
     assert_eq!(

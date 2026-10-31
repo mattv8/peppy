@@ -828,12 +828,11 @@ fn contact_photo_tracking_provenance_survives_enable_and_fresh_reprepare() {
     p.owner
         .configure_attachment_retention_protocol(true)
         .unwrap();
-    assert_eq!(
+    assert!(
         p.owner
             .attachment_upload_retention(legacy.attachment_id)
             .unwrap()
             .reference_tracking,
-        true,
         "enabling retention must not erase legacy contact tracking provenance"
     );
     let fresh = p

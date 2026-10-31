@@ -194,7 +194,7 @@ async fn create_challenge(
     .ok_or(ManualError(StatusCode::NOT_FOUND, "vault_not_found"))?;
     if let Some(device_id) = authorization_device {
         crate::attachment_retention::withdraw_legacy_retention_readiness_on_connection(
-            &mut *transaction,
+            &mut transaction,
             &headers,
             vault_id,
             device_id,
@@ -457,7 +457,7 @@ async fn complete_challenge(
         .and_then(|context| context.device_id)
     {
         crate::attachment_retention::withdraw_legacy_retention_readiness_on_connection(
-            &mut *transaction,
+            &mut transaction,
             &headers,
             vault_id,
             device_id,

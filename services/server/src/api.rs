@@ -2203,7 +2203,7 @@ pub(crate) async fn withdraw_legacy_retention_mutation(
     device_id: Uuid,
 ) -> ApiResult<()> {
     crate::attachment_retention::withdraw_legacy_retention_readiness_on_connection(
-        &mut **tx, headers, vault_id, device_id,
+        tx, headers, vault_id, device_id,
     )
     .await
     .map_err(|error| database_unavailable(&error, "retention_readiness_withdraw"))

@@ -38,8 +38,8 @@ use uuid::Uuid;
 use super::sync::parse_cursor;
 use super::{
     AccessPrincipal, ApiError, ApiResult, ApiState, DeviceAttachmentRetentionError, Operation,
-    attachment_quota, auth_with_mode, authorize, authorize_resolved, database_unavailable,
-    insert_error, revalidate_principal, withdraw_legacy_retention_mutation,
+    Principal, attachment_quota, auth_with_mode, authorize, authorize_resolved,
+    database_unavailable, insert_error, revalidate_principal, withdraw_legacy_retention_mutation,
 };
 use crate::attachment_retention::retention_storage_status_on_connection;
 use crate::scope;
@@ -511,7 +511,7 @@ pub(super) async fn reserve_attachment(
                 role: principal.role.clone(),
             },
             legacy_resolved_limit,
-            &mut *tx,
+            &mut tx,
         )
         .await
         .map_err(|error| database_unavailable(&error, "attachment_storage_policy"))?;
@@ -557,7 +557,7 @@ pub(super) async fn reserve_attachment(
                 "vault_quota_exceeded",
             ));
         }
-        let facts = retention_storage_status_on_connection(&mut *tx, principal.vault)
+        let facts = retention_storage_status_on_connection(&mut tx, principal.vault)
             .await
             .map_err(|error| database_unavailable(&error, "retention_storage_status"))?;
         // Unpurged serving objects are still charged. Waiting for their queue
@@ -669,8 +669,7 @@ pub(super) async fn upload_attachment(
     drop(spool);
     match attach_upload(
         &s.db,
-        principal.vault,
-        principal.device,
+        &principal,
         attachment_id,
         &h,
         &key,
@@ -692,14 +691,14 @@ pub(super) async fn upload_attachment(
 /// any) is queued for deletion in the same transaction.
 async fn attach_upload(
     db: &PgPool,
-    vault: Uuid,
-    device: Uuid,
+    principal: &Principal,
     attachment_id: Uuid,
     headers: &HeaderMap,
     key: &str,
     bytes: i64,
     sha256: &[u8],
 ) -> ApiResult<()> {
+    let (vault, device) = (principal.vault, principal.device);
     let mut tx = scope::begin(db, vault)
         .await
         .map_err(|error| database_unavailable(&error, "attachment_upload_begin"))?;

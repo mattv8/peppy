@@ -535,7 +535,7 @@ async fn withdraw_legacy_enrollment(
     owner: &Owner,
 ) -> Result<(), InvitationError> {
     crate::attachment_retention::withdraw_legacy_retention_readiness_on_connection(
-        &mut **tx,
+        tx,
         headers,
         owner.vault_id,
         owner.device_id,
