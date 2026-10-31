@@ -385,6 +385,16 @@ jobs:
           watchdog_pid=$!
           trap 'pkill -P "$watchdog_pid" 2>/dev/null || true; kill "$watchdog_pid" 2>/dev/null || true' EXIT
           timeout --signal=TERM --kill-after=30s 8m ./gradlew --console=plain :app:testDebugUnitTest
+      - name: Preserve Android unit test failure reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-unit-test-failures-${{ github.run_attempt }}
+          path: |
+            apps/android/app/build/test-results/testDebugUnitTest/*.xml
+            apps/android/app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Lint and assemble Android artifacts
         working-directory: apps/android
         run: ./gradlew --console=plain --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest

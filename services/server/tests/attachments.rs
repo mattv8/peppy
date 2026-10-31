@@ -1,12 +1,26 @@
-use std::{io::Cursor, time::Duration};
+use std::{
+    io::Cursor,
+    time::{Duration, SystemTime},
+};
 
+use aws_credential_types::Credentials;
+use aws_sigv4::{
+    http_request::{
+        PayloadChecksumKind, PercentEncodingMode, SignableBody, SignableRequest, SigningParams,
+        SigningSettings, UriPathNormalizationMode, sign,
+    },
+    sign::v4,
+};
 use peppy_server::{
     ServerBuilder,
     api::create_owner,
-    config::Config,
+    config::{Config, S3Config},
     storage::{Storage, StorageError},
 };
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{
+    Client, Method, Response, StatusCode,
+    header::{HeaderName, HeaderValue},
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
@@ -39,15 +53,24 @@ impl TestServer {
     }
 
     async fn start() -> Self {
+        Self::start_with_s3(None).await
+    }
+
+    async fn start_with_s3(s3: Option<S3Config>) -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
         let mut config = Config::from_env().expect("complete S3 test configuration is required");
-        let storage = Storage::new(
+        if let Some(s3) = s3 {
+            config.s3 = Some(s3);
+        }
+        let storage = Storage::initialize(
             config
                 .s3
                 .as_ref()
                 .expect("S3 is required for attachment tests"),
-        );
+        )
+        .await
+        .unwrap();
         let admin = PgPoolOptions::new()
             .max_connections(2)
             .connect(&database_url)
@@ -1564,6 +1587,14 @@ async fn deletion_queue_never_deletes_referenced_objects_and_retries_failures() 
         .unwrap()
     })
     .await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM storage_deletions WHERE object_key=$1")
+            .bind(&purged_key)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap(),
+        0
+    );
     assert!(matches!(
         server.storage.head_bytes(&purged_key).await,
         Err(StorageError::NotFound)
@@ -1632,6 +1663,76 @@ async fn deletion_queue_never_deletes_referenced_objects_and_retries_failures() 
         .await
         .unwrap();
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn versioned_deletion_queue_preserves_referenced_versions_and_purges_unreferenced_versions() {
+    let _guard = TEST_LOCK.lock().await;
+    let bucket = VersionedTestBucket::create().await;
+    let server = TestServer::start_with_s3(Some(bucket.config.clone())).await;
+    assert!(server.storage.is_versioned());
+
+    let referenced_attachment = server
+        .finalized_attachment(b"referenced versioned object")
+        .await;
+    let referenced_key = server.object_key(referenced_attachment).await;
+    let referenced_versions = server.storage.list_versions(&referenced_key).await.unwrap();
+    sqlx::query("INSERT INTO storage_deletions(object_key,vault_id,reason) VALUES($1,$2,'superseded_upload')")
+        .bind(&referenced_key)
+        .bind(server.vault)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    let unreferenced_key = format!("private/test/{}", Uuid::new_v4().simple());
+    server
+        .storage
+        .put_bytes(&unreferenced_key, b"first".to_vec())
+        .await
+        .unwrap();
+    server
+        .storage
+        .put_bytes(&unreferenced_key, b"second".to_vec())
+        .await
+        .unwrap();
+    server.storage.delete(&unreferenced_key).await.unwrap();
+    let removal = Uuid::new_v4();
+    sqlx::query("INSERT INTO attachment_removals(vault_id,attachment_id,object_key,ciphertext_bytes) VALUES($1,$2,$3,1)")
+        .bind(server.vault).bind(removal).bind(&unreferenced_key).execute(&server.pool).await.unwrap();
+    sqlx::query("INSERT INTO storage_deletions(object_key,vault_id,reason) VALUES($1,$2,'retention_cleanup')")
+        .bind(&unreferenced_key).bind(server.vault).execute(&server.pool).await.unwrap();
+
+    wait_until(
+        10,
+        "the versioned unreferenced object to be purged",
+        || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT purged_at IS NOT NULL FROM attachment_removals WHERE attachment_id=$1",
+            )
+            .bind(removal)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap()
+        },
+    )
+    .await;
+    assert_eq!(
+        server.storage.list_versions(&referenced_key).await.unwrap(),
+        referenced_versions
+    );
+    assert!(
+        server
+            .storage
+            .list_versions(&unreferenced_key)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(server.queued("retention_cleanup").await, 0);
+
+    server.storage.purge(&referenced_key).await.unwrap();
+    server.shutdown().await;
+    bucket.cleanup().await;
 }
 
 #[tokio::test]
@@ -1998,4 +2099,123 @@ async fn private_attachment_downloads_validate_and_serve_single_byte_ranges() {
         );
     }
     server.shutdown().await;
+}
+
+struct VersionedTestBucket {
+    config: S3Config,
+    url: Url,
+}
+
+impl VersionedTestBucket {
+    async fn create() -> Self {
+        let config = Config::from_env().expect("complete S3 test configuration is required");
+        let default = config.s3.expect("S3 is required for attachment tests");
+        let bucket = format!("peppy-attachment-versioned-{}", Uuid::new_v4().simple());
+        let url = bucket_url(&default.endpoint, &bucket);
+        let response = signed_s3_request(&default, Method::PUT, &url, "", &[])
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "CreateBucket rejected: {}",
+            response.status()
+        );
+        let versioning_url = Url::parse(&format!("{url}?versioning=")).unwrap();
+        let body = "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Enabled</Status></VersioningConfiguration>";
+        let response = signed_s3_request(
+            &default,
+            Method::PUT,
+            &versioning_url,
+            body,
+            &[("content-type", "application/xml")],
+        )
+        .await
+        .unwrap();
+        if !response.status().is_success() {
+            let error = format!(
+                "{} {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+            delete_bucket(&default, &url).await;
+            panic!("PutBucketVersioning rejected: {error}");
+        }
+        Self {
+            config: S3Config {
+                bucket,
+                precreated_bucket: true,
+                ..default
+            },
+            url,
+        }
+    }
+
+    async fn cleanup(&self) {
+        delete_bucket(&self.config, &self.url).await;
+    }
+}
+
+fn bucket_url(endpoint: &Url, bucket: &str) -> Url {
+    let mut url = endpoint.clone();
+    url.path_segments_mut().unwrap().pop_if_empty().push(bucket);
+    url
+}
+
+async fn delete_bucket(config: &S3Config, url: &Url) {
+    let response = signed_s3_request(config, Method::DELETE, url, "", &[]).await;
+    if let Ok(response) = response {
+        assert!(response.status().is_success() || response.status() == StatusCode::NOT_FOUND);
+    }
+}
+
+async fn signed_s3_request(
+    config: &S3Config,
+    method: Method,
+    url: &Url,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> Result<Response, String> {
+    let identity = Credentials::new(
+        config.access_key.clone(),
+        config.secret_key.clone(),
+        None,
+        None,
+        "attachment-version-test",
+    )
+    .into();
+    let mut settings = SigningSettings::default();
+    settings.percent_encoding_mode = PercentEncodingMode::Single;
+    settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
+    settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
+    let params = v4::SigningParams::builder()
+        .identity(&identity)
+        .region(&config.signing_region)
+        .name("s3")
+        .time(SystemTime::now())
+        .settings(settings)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let params: SigningParams<'_> = params.into();
+    let signable = SignableRequest::new(
+        method.as_str(),
+        url.as_str(),
+        headers.iter().copied(),
+        SignableBody::Bytes(body.as_bytes()),
+    )
+    .map_err(|error| error.to_string())?;
+    let (instructions, _) = sign(signable, &params)
+        .map_err(|error| error.to_string())?
+        .into_parts();
+    let client = Client::builder()
+        .no_proxy()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client.request(method, url.clone()).body(body.to_owned());
+    for (name, value) in headers.iter().copied().chain(instructions.headers()) {
+        request = request.header(
+            HeaderName::from_bytes(name.as_bytes()).map_err(|error| error.to_string())?,
+            HeaderValue::from_str(value).map_err(|error| error.to_string())?,
+        );
+    }
+    request.send().await.map_err(|error| error.to_string())
 }
