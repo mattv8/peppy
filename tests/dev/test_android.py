@@ -17,6 +17,8 @@ except ModuleNotFoundError:
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+# Hang guard only: the emulator boot wait expects success, and a loaded machine running modules in parallel can exceed a few seconds.
+BOOT_HANG_GUARD_TIMEOUT = 30
 
 
 class AndroidHelperTests(unittest.TestCase):
@@ -308,12 +310,12 @@ class AndroidHelperTests(unittest.TestCase):
             env = os.environ.copy()
             for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT", "PEPPY_ANDROID_SERIAL", "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_BOOT_TIMEOUT", "PEPPY_ANDROID_ARTIFACTS"):
                 env.pop(name, None)
-            env.update({"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_AVD": "test-avd", "PEPPY_ANDROID_BOOT_TIMEOUT": "5", "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "STARTED": str(state), "EMULATOR_PID": str(pid_path)})
+            env.update({"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_AVD": "test-avd", "PEPPY_ANDROID_BOOT_TIMEOUT": str(BOOT_HANG_GUARD_TIMEOUT), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "STARTED": str(state), "EMULATOR_PID": str(pid_path)})
             child, terminal = pty.fork()
             if child == 0:
                 os.execvpe("bash", ["bash", str(ROOT / "infra/dev/android.sh"), "emulator"], env)
             output = ""
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + 2 * BOOT_HANG_GUARD_TIMEOUT
             try:
                 while "Android emulator ready:" not in output:
                     remaining = deadline - time.monotonic()
@@ -418,7 +420,7 @@ class AndroidHelperTests(unittest.TestCase):
             emulator.write_text("#!/bin/sh\n[ \"$1\" = -list-avds ] && { echo race-avd; exit; }\ntouch \"$STARTED\"\nread ignored < \"$EXIT_FIFO\"\ntouch \"$EXITED\"\nprintf x > \"$EXIT_DONE_FIFO\"\n")
             adb.chmod(0o755); emulator.chmod(0o755)
 
-            result = self.run_helper("emulator", env={"ANDROID_SDK_ROOT": str(sdk), "STARTED": str(state), "ADB_COUNT": str(count_path), "EXIT_FIFO": str(fifo), "EXIT_DONE_FIFO": str(done_fifo), "EXITED": str(exited), "ADB_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "PEPPY_ANDROID_BOOT_TIMEOUT": "2"})
+            result = self.run_helper("emulator", env={"ANDROID_SDK_ROOT": str(sdk), "STARTED": str(state), "ADB_COUNT": str(count_path), "EXIT_FIFO": str(fifo), "EXIT_DONE_FIFO": str(done_fifo), "EXITED": str(exited), "ADB_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "PEPPY_ANDROID_BOOT_TIMEOUT": str(BOOT_HANG_GUARD_TIMEOUT)})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("process exited", result.stderr)
             self.assertNotIn("emu kill", log.read_text())

@@ -96,7 +96,7 @@ class CiTestRunnerTests(unittest.TestCase):
             "just audit-secrets",
             "node packages/mobile-design/scripts/generate.mjs --check",
             "node --test packages/mobile-design/test/generate.test.mjs",
-            "python3 -m unittest discover -s tests/dev -p test_*.py",
+            "python3 tests/dev/run_parallel.py",
             "bash -n infra/dev/dev.sh",
             "shellcheck infra/dev/dev.sh",
             "bash .github/scripts/test-ci-scripts.sh",
