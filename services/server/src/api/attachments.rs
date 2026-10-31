@@ -1,5 +1,6 @@
 //! Ciphertext attachments, public image copies, quota admission and the
-//! durable object-deletion queue.
+//! durable object-deletion queue. The worker removes every stored version of
+//! each unreferenced object key.
 //!
 //! Object-key safety rules:
 //! - Every upload attempt writes a fresh key. A late or failed attempt can only
@@ -11,7 +12,11 @@
 //! - The worker re-checks references before deleting and retries failures with
 //!   backoff; nothing depends on a single inline delete.
 
-use std::{fs::File, path::PathBuf, time::Duration};
+use std::{
+    fs::File,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json,
@@ -48,6 +53,7 @@ use crate::storage::{ObjectRange, Storage, StorageError};
 const MAX_ATTACHMENT_BYTES: i64 = 64 * 1024 * 1024;
 const MAX_PUBLIC_COPY_BYTES: i64 = 10 * 1024 * 1024;
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const PURGE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Grace before an unclaimed attempt intent becomes deletable. It exceeds the
 /// body deadline plus the storage PUT deadline, so a live attempt is never reaped.
 const ATTEMPT_INTENT_GRACE_SECONDS: i64 = 30 * 60;
@@ -1650,13 +1656,14 @@ pub struct DeletionStats {
 }
 
 /// Deletes due queued objects that nothing references. Claimed rows stay
-/// locked during their bounded storage delete, so an attempt cannot be
+/// locked during their bounded storage purge, so an attempt cannot be
 /// attached and reaped concurrently. Failures are retried with backoff.
 pub(super) async fn process_storage_deletions(
     db: &PgPool,
     store: &Storage,
     limit: i64,
 ) -> Result<DeletionStats, sqlx::Error> {
+    let deadline = Instant::now() + PURGE_TIMEOUT;
     let mut stats = DeletionStats::default();
     let mut tx = db.begin().await?;
     let due = sqlx::query("SELECT d.object_key,d.attempts,(EXISTS (SELECT 1 FROM attachments a WHERE a.object_key=d.object_key) OR EXISTS (SELECT 1 FROM upload_reservations r WHERE r.object_key=d.object_key AND r.uploaded_at IS NOT NULL AND r.finalized_at IS NULL) OR EXISTS (SELECT 1 FROM public_attachment_copies p WHERE p.object_key=d.object_key AND p.retired_at IS NULL AND p.ready_at IS NOT NULL)) AS referenced FROM storage_deletions d WHERE d.not_before <= now() ORDER BY d.not_before LIMIT $1 FOR UPDATE OF d SKIP LOCKED")
@@ -1675,34 +1682,48 @@ pub(super) async fn process_storage_deletions(
             stats.skipped_referenced += 1;
             continue;
         }
-        match store.delete(&key).await {
-            Ok(()) => {
-                sqlx::query("DELETE FROM storage_deletions WHERE object_key=$1")
-                    .bind(&key)
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query("UPDATE public_attachment_copies SET retired_at=COALESCE(retired_at,now()),purged_at=now() WHERE object_key=$1")
-                    .bind(&key)
-                    .execute(&mut *tx)
-                    .await?;
-                // Retention removal debt clears only after the object deletion
-                // and this durable completion update both succeed.
-                sqlx::query("UPDATE attachment_removals SET purged_at=now() WHERE object_key=$1 AND purged_at IS NULL")
-                    .bind(&key)
-                    .execute(&mut *tx)
-                    .await?;
-                stats.deleted += 1;
-            }
-            Err(error) => {
-                tracing::warn!(error_kind = %error, "storage delete failed; will retry");
-                sqlx::query("UPDATE storage_deletions SET attempts=attempts+1,not_before=now() + ($2::bigint * interval '1 second') WHERE object_key=$1")
-                    .bind(&key)
-                    .bind(delete_backoff_seconds(row.get::<i32, _>("attempts")))
-                    .execute(&mut *tx)
-                    .await?;
-                stats.retried += 1;
-            }
+        // Leave later rows due so the shared maintenance loop can return to draining outbox work.
+        if Instant::now() >= deadline {
+            break;
         }
+        let retry = match tokio::time::timeout(PURGE_TIMEOUT, store.purge(&key)).await {
+            Err(_) => {
+                tracing::warn!(
+                    error_kind = "storage purge timed out",
+                    "storage purge failed; will retry"
+                );
+                true
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(error_kind = %error, "storage purge failed; will retry");
+                true
+            }
+            Ok(Ok(())) => false,
+        };
+        if retry {
+            sqlx::query("UPDATE storage_deletions SET attempts=attempts+1,not_before=now() + ($2::bigint * interval '1 second') WHERE object_key=$1")
+                .bind(&key)
+                .bind(delete_backoff_seconds(row.get::<i32, _>("attempts")))
+                .execute(&mut *tx)
+                .await?;
+            stats.retried += 1;
+            continue;
+        }
+        sqlx::query("DELETE FROM storage_deletions WHERE object_key=$1")
+            .bind(&key)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE public_attachment_copies SET retired_at=COALESCE(retired_at,now()),purged_at=now() WHERE object_key=$1")
+            .bind(&key)
+            .execute(&mut *tx)
+            .await?;
+        // Retention removal debt clears only after the object deletion
+        // and this durable completion update both succeed.
+        sqlx::query("UPDATE attachment_removals SET purged_at=now() WHERE object_key=$1 AND purged_at IS NULL")
+            .bind(&key)
+            .execute(&mut *tx)
+            .await?;
+        stats.deleted += 1;
     }
     tx.commit().await?;
     Ok(stats)
@@ -1717,9 +1738,9 @@ pub(super) async fn storage_maintenance(
 ) -> Result<DeletionStats, sqlx::Error> {
     retire_expired_reservations(db, None, limit).await?;
     retire_expired_public_copies(db, limit).await?;
-    // Recreate a lost queue reference without clearing debt. Object deletion is
-    // idempotent, so a crash after storage success but before SQL commit safely
-    // retries and only then records purged_at.
+    // Recreate a lost queue reference without clearing debt. Purge is idempotent,
+    // so a crash before the SQL commit safely retries; purged_at is recorded only
+    // after a full purge.
     crate::attachment_retention::repair_retention_cleanup_queue(db, limit).await?;
     process_storage_deletions(db, store, limit).await
 }
