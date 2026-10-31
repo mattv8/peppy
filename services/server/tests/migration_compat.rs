@@ -40,14 +40,10 @@ async fn attachment_retention_migration_preserves_legacy_vault_delete_contract()
         .connect(&database_url)
         .await
         .unwrap();
-    let schema = format!("migration_compat_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let pool = isolated_pool(&database_url, &schema).await;
-    peppy_server::MIGRATOR.run(&pool).await.unwrap();
-
+    let (schema, pool) = migrated_schema(&admin, &database_url).await;
+    // A sibling migrated schema on the shared database must not leak its catalog rows into this one.
+    let (control_schema, control_pool) = migrated_schema(&admin, &database_url).await;
+    assert_retention_foreign_keys(&control_pool).await;
     assert_retention_foreign_keys(&pool).await;
     assert_trigger_seeds_protected_metadata(&pool).await;
     assert_legacy_delete_succeeds_without_debt(&pool).await;
@@ -56,10 +52,26 @@ async fn attachment_retention_migration_preserves_legacy_vault_delete_contract()
     assert_down_refuses_debt_and_applies_when_empty(&pool).await;
 
     pool.close().await;
+    control_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await
         .unwrap();
+    sqlx::query(&format!("DROP SCHEMA {control_schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+async fn migrated_schema(admin: &PgPool, database_url: &str) -> (String, PgPool) {
+    let schema = format!("migration_compat_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(admin)
+        .await
+        .unwrap();
+    let pool = isolated_pool(database_url, &schema).await;
+    peppy_server::MIGRATOR.run(&pool).await.unwrap();
+    (schema, pool)
 }
 
 async fn isolated_pool(database_url: &str, schema: &str) -> PgPool {
@@ -76,7 +88,7 @@ async fn isolated_pool(database_url: &str, schema: &str) -> PgPool {
 
 async fn assert_retention_foreign_keys(pool: &PgPool) {
     let constraints: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT source.relname,target.relname,foreign_key.confdeltype::text FROM pg_constraint foreign_key JOIN pg_class source ON source.oid=foreign_key.conrelid JOIN pg_class target ON target.oid=foreign_key.confrelid WHERE foreign_key.contype='f' AND source.relname IN ('attachment_retention_uses','attachment_retention_devices','attachment_removals') ORDER BY source.relname,target.relname,foreign_key.confdeltype",
+        "SELECT source.relname,target.relname,foreign_key.confdeltype::text FROM pg_constraint foreign_key JOIN pg_class source ON source.oid=foreign_key.conrelid JOIN pg_class target ON target.oid=foreign_key.confrelid WHERE foreign_key.contype='f' AND foreign_key.connamespace=current_schema()::regnamespace AND target.relnamespace=current_schema()::regnamespace AND source.relname IN ('attachment_retention_uses','attachment_retention_devices','attachment_removals') ORDER BY source.relname,target.relname,foreign_key.confdeltype",
     )
     .fetch_all(pool)
     .await
