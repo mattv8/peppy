@@ -7,6 +7,11 @@ import sys
 import tempfile
 import unittest
 
+try:
+    from tests.dev.stub_commands import write_stub
+except ModuleNotFoundError:
+    from stub_commands import write_stub
+
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "infra/dev/ios.sh"
@@ -110,9 +115,7 @@ esac
             (self.xcode27_developer / "usr/bin" / name).symlink_to(self.tools / name)
 
     def fake(self, name, body):
-        path = self.tools / name
-        path.write_text("#!/bin/sh\nset -eu\n" + body)
-        path.chmod(0o755)
+        write_stub(self.tools / name, "set -eu\n" + body)
 
     def inventory(self, devices, runtimes=None):
         if runtimes is None:

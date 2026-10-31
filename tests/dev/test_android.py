@@ -10,6 +10,11 @@ import tempfile
 import time
 import unittest
 
+try:
+    from tests.dev.stub_commands import write_stub
+except ModuleNotFoundError:
+    from stub_commands import write_stub
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -664,12 +669,11 @@ class AndroidHelperTests(unittest.TestCase):
         verify_log = temp / "verify.log"
 
         sdkmanager = bin_dir / "sdkmanager"
-        sdkmanager.write_text("#!/bin/sh\nexit 0\n")
-        sdkmanager.chmod(0o755)
+        write_stub(sdkmanager, "exit 0\n")
 
         gradlew = repo / "apps/android/gradlew"
         gradlew.parent.mkdir(parents=True)
-        gradle_script = "#!/bin/sh\necho \"$@\" >> \"$GRADLE_LOG\"\n"
+        gradle_script = "echo \"$@\" >> \"$GRADLE_LOG\"\n"
         if gradle_exit_code == 0:
             gradle_script += (
                 "root=$(cd \"$(dirname \"$0\")/../..\" && pwd)\n"
@@ -681,13 +685,10 @@ class AndroidHelperTests(unittest.TestCase):
                     "mkdir -p \"$root/apps/android/app/build/outputs/apk/androidTest/debug\"\n"
                     "touch \"$root/apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk\"\n"
                 )
-        gradlew.write_text(f"{gradle_script}exit {gradle_exit_code}\n")
-        gradlew.chmod(0o755)
+        write_stub(gradlew, f"{gradle_script}exit {gradle_exit_code}\n")
 
         verifier = repo / "infra/compose/verify-android-native.sh"
-        verifier.parent.mkdir(parents=True)
-        verifier.write_text("#!/bin/sh\necho verify >> \"$VERIFY_LOG\"\n")
-        verifier.chmod(0o755)
+        write_stub(verifier, "echo verify >> \"$VERIFY_LOG\"\n")
 
         return {
             "artifacts": artifacts,
@@ -761,8 +762,7 @@ class AndroidHelperTests(unittest.TestCase):
             (repo / ".env").touch()
             docker_log = pathlib.Path(temp) / "docker.log"
             docker = pathlib.Path(temp) / "bin/docker"
-            docker.write_text("#!/bin/sh\necho \"$@\" >> \"$DOCKER_LOG\"\nexit 0\n")
-            docker.chmod(0o755)
+            write_stub(docker, "echo \"$@\" >> \"$DOCKER_LOG\"\nexit 0\n")
             env = fixture["env"] | {
                 "DOCKER_LOG": str(docker_log),
                 "PEPPY_ANDROID_CONTAINER": "0",
