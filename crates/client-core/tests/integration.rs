@@ -2,6 +2,7 @@
 
 mod common;
 
+mod attachment_retention;
 mod battery_outbox;
 mod c3_additions;
 mod c4_media;

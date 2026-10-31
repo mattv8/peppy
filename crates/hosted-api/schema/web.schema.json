@@ -1,5 +1,17 @@
 {
   "$defs": {
+    "AcknowledgeRetentionNoticeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "policy_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version"
+      ],
+      "type": "object"
+    },
     "AddTesterRequest": {
       "additionalProperties": false,
       "properties": {
@@ -33,6 +45,62 @@
         "expected_revision",
         "binding",
         "entry"
+      ],
+      "type": "object"
+    },
+    "AttachmentStorageStatusResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "base_bytes": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cleanup_state": {
+          "$ref": "#/$defs/StorageCleanupState"
+        },
+        "cleanup_unavailable_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StorageCleanupUnavailableReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit_bytes": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "notice": {
+          "$ref": "#/$defs/RetentionNoticeResponse"
+        },
+        "pack_bytes": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "protected_bytes": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "removed_bytes": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "used_bytes": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "used_bytes",
+        "limit_bytes",
+        "base_bytes",
+        "pack_bytes",
+        "protected_bytes",
+        "removed_bytes",
+        "notice",
+        "cleanup_state"
       ],
       "type": "object"
     },
@@ -700,6 +768,53 @@
       ],
       "type": "object"
     },
+    "RetentionNoticeResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "acknowledged_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "activation_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "policy_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "presented_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/RetentionNoticeState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "RetentionNoticeState": {
+      "enum": [
+        "not_presented",
+        "grace_period",
+        "eligible"
+      ],
+      "type": "string"
+    },
     "SessionRenewalResponse": {
       "additionalProperties": false,
       "description": "Response confirming that an authenticated session remains active.",
@@ -719,6 +834,27 @@
         "expires_in_seconds"
       ],
       "type": "object"
+    },
+    "StorageCleanupState": {
+      "enum": [
+        "disabled",
+        "blocked",
+        "pending",
+        "available"
+      ],
+      "type": "string"
+    },
+    "StorageCleanupUnavailableReason": {
+      "enum": [
+        "notice_not_eligible",
+        "device_not_ready",
+        "read_only",
+        "entitlement_unavailable",
+        "provider_reconciliation_pending",
+        "billing_mutation_pending",
+        "cleanup_disabled"
+      ],
+      "type": "string"
     },
     "StoragePackRequest": {
       "additionalProperties": false,
@@ -1357,6 +1493,9 @@
     "account": {
       "$ref": "#/$defs/WebAccountResponse"
     },
+    "attachment_storage_status": {
+      "$ref": "#/$defs/AttachmentStorageStatusResponse"
+    },
     "billing": {
       "$ref": "#/$defs/BillingSummary"
     },
@@ -1380,6 +1519,9 @@
     },
     "plan_catalog": {
       "$ref": "#/$defs/BillingPlans"
+    },
+    "retention_notice_acknowledgement": {
+      "$ref": "#/$defs/AcknowledgeRetentionNoticeRequest"
     },
     "session": {
       "$ref": "#/$defs/WebSessionResponse"
@@ -1475,13 +1617,16 @@
     "subscribe_response",
     "storage_pack_request",
     "payment_method_confirm",
-    "payment_method_setup"
+    "payment_method_setup",
+    "attachment_storage_status",
+    "retention_notice_acknowledgement"
   ],
   "title": "HostedWebContracts",
   "type": "object",
   "x-peppy-routes": {
     "account": "/hosted/v1/web/account",
     "appSessionRenew": "/hosted/v1/web/app-session/renew",
+    "attachmentStorageStatus": "/hosted/v1/attachment-storage/status",
     "authStart": "/hosted/v1/web/auth/{provider}/start",
     "billing": "/hosted/v1/web/billing",
     "billingContext": "/hosted/v1/web/billing/context",
@@ -1495,6 +1640,7 @@
     "plans": "/hosted/v1/web/billing/plans",
     "reconcile": "/hosted/v1/web/billing/reconcile",
     "resume": "/hosted/v1/web/billing/resume",
+    "retentionNoticeAcknowledgement": "/hosted/v1/attachment-storage/notice/acknowledgement",
     "session": "/hosted/v1/web/session",
     "sessionRenew": "/hosted/v1/web/session/renew",
     "storagePack": "/hosted/v1/web/billing/storage-pack",

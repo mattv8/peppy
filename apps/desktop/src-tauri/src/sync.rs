@@ -50,6 +50,10 @@ pub(crate) struct DownloadRetryState {
     retry_at: Instant,
 }
 
+pub(crate) fn is_storage_policy_removal(error: &NetError) -> bool {
+    error.is_status(410, "attachment_removed_by_storage_policy")
+}
+
 fn is_recoverable_download_unavailable(failure: &Failure) -> bool {
     matches!(
         failure,
@@ -572,6 +576,8 @@ async fn import_cut(
         tokio::task::yield_now().await;
     }
     let (c, generation) = (client(session), progress.generation);
+    let _retention = session.attachment_retention_maintenance.lock().await;
+    session.begin_attachment_retention_restore();
     blocking(move || c.finish_snapshot(generation).map_err(core_error)).await?;
     drain_apply(session, usize::MAX).await?;
     Ok(())
@@ -581,6 +587,7 @@ async fn import_cut(
 async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
     let mut limit = 100usize;
     let mut pages = 0;
+    let mut caught_up = false;
     while pages < MAX_REPLAY_PAGES_PER_ROUND && !session.cancel.is_cancelled() {
         let c = client(session);
         let after = blocking(move || c.receive_cursor().map_err(core_error))
@@ -627,6 +634,7 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
                 });
         if count == 0 {
             let _ = observe_history_replay(session, contexts, proof).await;
+            caught_up = true;
             break;
         }
         match ingest_page(session, page.events).await {
@@ -645,8 +653,14 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
         let _ = observe_history_replay(session, contexts, proof).await;
         pages += 1;
         if count < limit {
+            caught_up = true;
             break;
         }
+    }
+    if caught_up && !session.cancel.is_cancelled() {
+        session
+            .attachment_retention_replay_observed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
     Ok(())
 }
@@ -818,30 +832,59 @@ struct Finalized {
     duplicate: bool,
 }
 
+pub(crate) async fn record_storage_policy_removal(
+    session: &Arc<Session>,
+    attachment_id: peppy_client_core::AttachmentId,
+) -> Result<(), Failure> {
+    let client = client(session);
+    blocking(move || {
+        client
+            .report_attachment_removed_by_storage_policy(attachment_id)
+            .map_err(core_error)
+    })
+    .await
+    .map_err(Failure::Permanent)?;
+    clear_download_retry(session, &attachment_id);
+    session
+        .transfer_errors
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(&attachment_id);
+    session.notify();
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) async fn upload_one(
     session: &Arc<Session>,
     object: peppy_client_core::CipherObject,
 ) -> Result<(), Failure> {
-    upload_object(session, object, false).await
+    upload_object(session, object).await
 }
 
-/// Reserve/upload/finalize one prepared object. Contact photos are reserved with
-/// `reference_tracking:true` so the server can later prove their release.
+/// Reserve/upload/finalize one prepared object using core-owned classification and tracking.
 async fn upload_object(
     session: &Arc<Session>,
     object: peppy_client_core::CipherObject,
-    reference_tracking: bool,
 ) -> Result<(), Failure> {
     if session.cancel.is_cancelled() {
         return Ok(());
     }
     let id = object.attachment_id;
+    let core = client(session);
+    let retention = blocking(move || core.attachment_upload_retention(id).map_err(core_error))
+        .await
+        .map_err(Failure::Permanent)?;
+    let retention_class = match retention.retention_class {
+        peppy_client_core::AttachmentRetentionClass::Protected => "protected",
+        peppy_client_core::AttachmentRetentionClass::MessageMedia => "message_media",
+    };
     let body = serde_json::json!({
         "attachment_id": id.to_string(),
         "declared_ciphertext_bytes": object.ciphertext_bytes,
         "declared_ciphertext_sha256": object.ciphertext_sha256,
-        "reference_tracking": reference_tracking,
+        "reference_tracking": retention.reference_tracking,
+        "retention_class": retention_class,
     });
     let recovering_finalized = match session
         .api
@@ -860,6 +903,10 @@ async fn upload_object(
         // Probe finalize with the same authenticated origin/token; only its typed duplicate proof
         // is enough to recover without uploading bytes again.
         Err(NetError::Status { status: 409, .. }) => true,
+        Err(error) if is_storage_policy_removal(&error) => {
+            record_storage_policy_removal(session, id).await?;
+            return Ok(());
+        }
         Err(error) => return Err(error.into()),
     };
     let remote = id.to_string();
@@ -882,13 +929,25 @@ async fn upload_object(
             Err(NetError::Status {
                 status: 404 | 409, ..
             }) => {}
+            Err(error) if is_storage_policy_removal(&error) => {
+                record_storage_policy_removal(session, id).await?;
+                return Ok(());
+            }
             Err(error) => return Err(error.into()),
         }
     }
-    let finalized: Finalized = session
+    let finalized: Finalized = match session
         .api
         .post_empty(&format!("/v1/attachments/{remote}/finalize"))
-        .await?;
+        .await
+    {
+        Ok(finalized) => finalized,
+        Err(error) if is_storage_policy_removal(&error) => {
+            record_storage_policy_removal(session, id).await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let finalized_id =
         uuid::Uuid::parse_str(&finalized.attachment_id).map_err(|_| NetError::Invalid)?;
     if finalized_id.to_string() != id.to_string() || (recovering_finalized && !finalized.duplicate)
@@ -925,14 +984,22 @@ async fn download_one(
     }
     let target = dir.join(format!("{}.part", object.attachment_id));
     let _ = tokio::fs::remove_file(&target).await;
-    session
+    match session
         .api
         .download_to(
             &format!("/v1/attachments/{remote}"),
             &target,
             object.ciphertext_bytes,
         )
-        .await?;
+        .await
+    {
+        Ok(()) => {}
+        Err(error) if is_storage_policy_removal(&error) => {
+            record_storage_policy_removal(session, object.attachment_id).await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    }
     let (c, id, file) = (client(session), object.attachment_id, target.clone());
     let installed = blocking(move || {
         c.install_downloaded_attachment(id, &file)
@@ -948,6 +1015,29 @@ async fn download_one(
 pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
     // Each round reports only its own problems.
     session.set_status(|status| status.work_error = None);
+    // A transient retention transport failure defers quota-bearing producers, but does not turn
+    // the negotiated protocol off or prevent safe replay/outbox work from making progress.
+    let retention_maintenance_ready = if !session
+        .attachment_retention_negotiated
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        false
+    } else if !session
+        .attachment_retention_supported
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        true
+    } else {
+        match crate::attachment_retention::drain_due_operations(session, &session.generation).await
+        {
+            Ok(()) => true,
+            Err(error) if error.code != "revoked" => {
+                record_work_error(session, "attachment-retention-deferred");
+                false
+            }
+            Err(error) => return Err(error),
+        }
+    };
     let mut changed = false;
     let failed: Vec<_> = session
         .transfer_errors
@@ -960,26 +1050,24 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
     if !tracked.unavailable.is_empty() {
         record_work_error(session, "contact-photo-unavailable");
     }
-    let c = client(session);
-    let uploads = blocking(move || c.pending_uploads().map_err(core_error)).await?;
-    for object in uploads
-        .into_iter()
-        .filter(|o| !failed.contains(&o.attachment_id))
-        .take(MEDIA_PER_ROUND)
-    {
-        if session.cancel.is_cancelled() {
-            return Ok(());
-        }
-        let id = object.attachment_id;
-        let reference_tracking = tracked
-            .uploads
-            .iter()
-            .any(|upload| upload.attachment_id == id.to_string());
-        match upload_object(session, object, reference_tracking).await {
-            Ok(()) => changed = true,
-            Err(failure) => {
-                handle_media_failure(session, id, failure)?;
-                changed = true;
+    if retention_maintenance_ready {
+        let c = client(session);
+        let uploads = blocking(move || c.pending_uploads().map_err(core_error)).await?;
+        for object in uploads
+            .into_iter()
+            .filter(|o| !failed.contains(&o.attachment_id))
+            .take(MEDIA_PER_ROUND)
+        {
+            if session.cancel.is_cancelled() {
+                return Ok(());
+            }
+            let id = object.attachment_id;
+            match upload_object(session, object).await {
+                Ok(()) => changed = true,
+                Err(failure) => {
+                    handle_media_failure(session, id, failure)?;
+                    changed = true;
+                }
             }
         }
     }
@@ -999,7 +1087,9 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         }
     }
     // Held contact-photo envelopes become uploadable only after every reference is registered.
-    changed |= register_contact_photo_references(session).await?;
+    if retention_maintenance_ready {
+        changed |= register_contact_photo_references(session).await?;
+    }
     'outbox: for _ in 0..MAX_OUTBOX_BATCHES {
         if session.cancel.is_cancelled() {
             return Ok(());
@@ -1069,6 +1159,24 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
     // Records journaled while keys were locked (for example history that arrived before an
     // unlock or key-cache import) are applied here; the worker is woken after every unlock.
     drain_apply(session, APPLY_STEPS).await?;
+    if session
+        .attachment_retention_supported
+        .load(std::sync::atomic::Ordering::Acquire)
+        && session
+            .attachment_retention_replay_observed
+            .load(std::sync::atomic::Ordering::Acquire)
+        && !session
+            .attachment_retention_ready_advertised
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
+        match crate::attachment_retention::reconcile_after_replay(session, &session.generation)
+            .await
+        {
+            Ok(()) => {}
+            Err(error) if error.code == "revoked" => return Err(error),
+            Err(_) => record_work_error(session, "attachment-retention-deferred"),
+        }
+    }
     if changed {
         session.notify();
     }
@@ -1078,8 +1186,6 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
 #[derive(Deserialize, Default)]
 struct ContactPhotoTransfers {
     #[serde(default)]
-    uploads: Vec<TrackedUpload>,
-    #[serde(default)]
     registrations: Vec<PhotoRegistration>,
     #[serde(default)]
     reclaims: Vec<PhotoReclaim>,
@@ -1087,12 +1193,10 @@ struct ContactPhotoTransfers {
     unavailable: Vec<serde_json::Value>,
 }
 #[derive(Deserialize)]
-struct TrackedUpload {
-    attachment_id: String,
-}
-#[derive(Deserialize)]
 struct PhotoRegistration {
     envelope_id: String,
+    /// Local attachment ID used for durable acknowledgement and removal bookkeeping.
+    local_attachment_id: String,
     /// Remote object ID.
     attachment_id: String,
     producer_device_id: String,
@@ -1158,6 +1262,18 @@ async fn register_contact_photo_references(session: &Arc<Session>) -> BridgeResu
                 })
                 .await?;
                 released = true;
+            }
+            Err(error) if is_storage_policy_removal(&error) => {
+                let attachment_id = registration
+                    .local_attachment_id
+                    .parse()
+                    .map_err(|_| BridgeError::host_state())?;
+                record_storage_policy_removal(session, attachment_id)
+                    .await
+                    .map_err(|failure| match failure {
+                        Failure::Net(error) => BridgeError::from(error),
+                        Failure::Permanent(error) => error,
+                    })?;
             }
             Err(error) if transport_fatal(&error) => return Err(error.into()),
             // Not acknowledged: the envelope stays held and is retried next round.
@@ -1244,6 +1360,38 @@ async fn reclaim_contact_photos(
                 status: status @ (404 | 409),
                 ..
             }) => status,
+            Err(error) if is_storage_policy_removal(&error) => {
+                let attachment_id = reclaim
+                    .attachment_id
+                    .parse()
+                    .map_err(|_| BridgeError::host_state())?;
+                record_storage_policy_removal(session, attachment_id)
+                    .await
+                    .map_err(|failure| match failure {
+                        Failure::Net(error) => BridgeError::from(error),
+                        Failure::Permanent(error) => error,
+                    })?;
+                let (c, input) = (
+                    client(session),
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "attachment_id": reclaim.attachment_id,
+                        // A storage-policy tombstone is terminal like an already absent object.
+                        "http_status": 404,
+                    })
+                    .to_string(),
+                );
+                if blocking(move || {
+                    c.acknowledge_contact_photo_reclaim_json(&input)
+                        .map_err(core_error)
+                })
+                .await
+                .is_err()
+                {
+                    record_work_error(session, "contact-photo-reclaim");
+                }
+                continue;
+            }
             Err(error) if transport_fatal(&error) => return Err(error.into()),
             Err(_) => {
                 record_work_error(session, "contact-photo-reclaim");
@@ -1576,6 +1724,21 @@ async fn live(session: Arc<Session>) {
             refresh_vault(&session).await?;
             probe_snapshot_capability(&session).await?;
             replay(&session).await?;
+            if session
+                .attachment_retention_supported
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                match crate::attachment_retention::reconcile_after_replay(
+                    &session,
+                    &session.generation,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(error) if error.code == "revoked" => return Err(error),
+                    Err(_) => record_work_error(&session, "attachment-retention-deferred"),
+                }
+            }
             repair_if_required(&session).await?;
             drain_apply(&session, APPLY_STEPS).await.map(|_| ())
         }
@@ -1622,6 +1785,11 @@ async fn live(session: Arc<Session>) {
 #[cfg(test)]
 mod transport_status_tests {
     use super::*;
+    use crate::{
+        contacts::tests::mock_server,
+        tests::{fixture_at, open},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn presence_hints_coalesce_without_dropping_the_first_refresh() {
@@ -1650,6 +1818,97 @@ mod transport_status_tests {
             .code,
             "server-rejected"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn replay_resync_during_held_capability_negotiation_completes_the_current_open() {
+        let (entered_sender, entered) = std::sync::mpsc::channel();
+        let (release_sender, release) = std::sync::mpsc::channel();
+        let release = Arc::new(std::sync::Mutex::new(Some(release)));
+        let events = Arc::new(AtomicUsize::new(0));
+        let capabilities = Arc::new(AtomicUsize::new(0));
+        let capability_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let route_release = release.clone();
+        let route_events = events.clone();
+        let route_capabilities = capabilities.clone();
+        let route_capability_bodies = capability_bodies.clone();
+        let (origin, _) = mock_server(move |method, path, body| match (method, path) {
+            ("PUT", "/v1/devices/self/retention-capability") => {
+                route_capability_bodies.lock().unwrap().push(body.to_owned());
+                if route_capabilities.fetch_add(1, Ordering::SeqCst) == 0 {
+                    entered_sender.send(()).unwrap();
+                    route_release.lock().unwrap().take().unwrap().recv().unwrap();
+                }
+                (204, String::new())
+            }
+            ("GET", "/v1/snapshot") => (200, serde_json::json!({"high_water_cursor":"0","record_count":"0","compaction_supported":false,"compaction_active":false}).to_string()),
+            ("GET", path) if path.starts_with("/v1/events") => {
+                if route_events.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (409, serde_json::json!({"code":"resync_required"}).to_string())
+                } else {
+                    (200, serde_json::json!({"events":[]}).to_string())
+                }
+            }
+            _ => (404, "{}".into()),
+        }).await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        let negotiating = tokio::spawn({
+            let session = session.clone();
+            async move { crate::attachment_retention::negotiate(&session).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while entered.try_recv().is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let replaying = tokio::spawn({
+            let session = session.clone();
+            async move { replay(&session).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while session
+                .attachment_retention_epoch
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        release_sender.send(()).unwrap();
+        replaying.await.unwrap().unwrap();
+        negotiating.await.unwrap().unwrap();
+        crate::attachment_retention::reconcile_after_replay(&session, &session.generation)
+            .await
+            .unwrap();
+
+        assert!(session
+            .attachment_retention_negotiated
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(session
+            .client
+            .attachment_retention_protocol_enabled()
+            .unwrap());
+        assert!(session
+            .attachment_retention_replay_observed
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            session
+                .attachment_retention_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert!(session
+            .attachment_retention_ready_advertised
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(capabilities.load(Ordering::Acquire), 2);
+        assert!(capability_bodies.lock().unwrap()[0].contains("cleanup_ready\":false"));
+        assert!(capability_bodies.lock().unwrap()[1].contains("cleanup_ready\":true"));
     }
 
     #[tokio::test]
@@ -1803,11 +2062,94 @@ mod contact_photo_tests {
         reclaim_contact_photos(&session, &reclaims).await.unwrap();
         assert!(seen.lock().unwrap().iter().all(|s| s.method != "DELETE"));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn storage_policy_reclaim_tombstones_the_local_id_and_completes_without_retry() {
+        let remote = uuid::Uuid::new_v4().to_string();
+        let route_remote = remote.clone();
+        let (origin, seen) = mock_server(move |method, path, _| match (method, path) {
+            ("GET", "/v1/snapshot") => (
+                200,
+                json!({
+                    "high_water_cursor": "80",
+                    "record_count": "0",
+                    "compaction_supported": true,
+                    "compaction_generation": "3",
+                })
+                .to_string(),
+            ),
+            ("GET", path) if path.starts_with("/v1/events") => (
+                200,
+                json!({"replay_floor_cursor": "50", "events": []}).to_string(),
+            ),
+            ("DELETE", path) => {
+                assert_eq!(path, format!("/v1/attachments/{route_remote}"));
+                (
+                    410,
+                    json!({"code": "attachment_removed_by_storage_policy"}).to_string(),
+                )
+            }
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        let source = fixture.dir.path().join("reclaimed-local.txt");
+        std::fs::write(&source, b"verified local bytes").unwrap();
+        let local = session
+            .client
+            .prepare_attachment(&source, "text/plain", "reclaimed-local.txt")
+            .unwrap()
+            .attachment_id;
+        let reclaims = vec![PhotoReclaim {
+            attachment_id: local.to_string(),
+            remote_object_id: remote,
+            release_after_cursor: Some("40".into()),
+        }];
+
+        reclaim_contact_photos(&session, &reclaims).await.unwrap();
+
+        let state = session.client.attachment_retention_state(local).unwrap();
+        assert_eq!(
+            state.remote,
+            peppy_client_core::RemoteAttachmentState::RemovedByStoragePolicy
+        );
+        assert!(state.local_available);
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.method == "DELETE")
+                .count(),
+            1,
+            "a typed storage-policy response is terminal rather than retried"
+        );
+    }
 }
 
 #[cfg(test)]
 mod download_scheduling_tests {
     use super::*;
+
+    #[test]
+    fn only_exact_typed_gone_is_storage_policy_removal() {
+        let removed = NetError::Status {
+            status: 410,
+            code: Some("attachment_removed_by_storage_policy".into()),
+        };
+        let generic_gone = NetError::Status {
+            status: 410,
+            code: None,
+        };
+        let missing = NetError::Status {
+            status: 404,
+            code: Some("attachment_removed_by_storage_policy".into()),
+        };
+
+        assert!(is_storage_policy_removal(&removed));
+        assert!(!is_storage_policy_removal(&generic_gone));
+        assert!(!is_storage_policy_removal(&missing));
+    }
 
     #[test]
     fn only_structured_attachment_unavailable_is_recoverable() {
@@ -1823,6 +2165,31 @@ mod download_scheduling_tests {
         assert!(is_recoverable_download_unavailable(&unavailable));
         assert!(!is_recoverable_download_unavailable(&missing));
         assert_eq!(classify(&missing), MediaOutcome::Permanent);
+    }
+
+    #[tokio::test]
+    async fn recording_policy_removal_preserves_a_verified_local_copy() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        let source = fixture.dir.path().join("retained-local.png");
+        std::fs::write(&source, b"verified local bytes").unwrap();
+        let prepared = session.prepare_attachment(&source).unwrap();
+        let attachment_id = prepared.id.parse().unwrap();
+
+        assert!(record_storage_policy_removal(&session, attachment_id)
+            .await
+            .is_ok());
+
+        let state = session
+            .client
+            .attachment_retention_state(attachment_id)
+            .unwrap();
+        assert_eq!(
+            state.remote,
+            peppy_client_core::RemoteAttachmentState::RemovedByStoragePolicy
+        );
+        assert!(state.local_available);
+        assert!(source.exists());
     }
 
     #[test]
@@ -1910,6 +2277,23 @@ mod download_scheduling_tests {
 
 pub fn start(session: &Arc<Session>) {
     Session::register_started(session);
+    let opening_session = session.clone();
+    session.track_worker(tokio::spawn(async move {
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            match crate::attachment_retention::negotiate(&opening_session).await {
+                Ok(()) => return,
+                Err(error) if error.code == "revoked" => return revoke(&opening_session),
+                Err(_) => {}
+            }
+            let retry = jitter(backoff);
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+            tokio::select! {
+                _ = opening_session.cancel.cancelled() => return,
+                _ = sleep(retry) => {}
+            }
+        }
+    }));
     session.track_worker(tokio::spawn(worker(session.clone())));
     session.track_worker(tokio::spawn(live(session.clone())));
 }

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { attachmentStorageRemovalText } from "@peppy/desktop-ui";
 import type { GalleryAttachment } from "./grouping";
+import { peppyCopy } from "../generated/peppyCopy";
 
 type MediaResult = { state: "ready"; url: string } | { state: "pending" };
 
@@ -26,6 +28,8 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
   const requested = useRef(false);
   const mediaKind = attachment.mediaType.startsWith("video/") ? "video" : attachment.mediaType.startsWith("audio/") ? "audio" : undefined;
   const mediaDuration = duration(attachment.mediaMeta?.durationMs);
+  const removedRemoteOnly = attachment.remoteState === "removed_by_storage_policy" && !attachment.localAvailable;
+  const removedWithLocalCopy = attachment.remoteState === "removed_by_storage_policy" && attachment.localAvailable;
   const load = async () => {
     const version = ++requestVersion.current;
     requested.current = true;
@@ -63,10 +67,12 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
     if (pending && requested.current) void check();
   }, [retryKey]);
   if (!mediaKind) return null;
+  if (removedRemoteOnly) return <div data-inline-media data-attachment-storage-removed role="status">{attachmentStorageRemovalText(false, peppyCopy).body}</div>;
   if (url) return mediaKind === "video" ? <video data-inline-media controls autoPlay preload="metadata" src={url} aria-label={attachment.name || "Video"} /> : <audio data-inline-media controls autoPlay preload="metadata" src={url} aria-label={attachment.name || "Audio"} />;
   return <div data-inline-media>
     <button type="button" className="media-play-trigger" data-media-play-trigger data-media-kind={mediaKind} data-attachment-id={attachment.id} aria-busy={loading || undefined} aria-label={`Play ${mediaKind}: ${attachment.name || mediaKind}`} onClick={() => void load()}>{loading || pending ? "Downloading…" : `Play ${mediaKind}`}</button>
     {mediaDuration && <span data-media-duration>{mediaDuration}</span>}
     {error && <p role="alert">{error}</p>}
+    {removedWithLocalCopy && <p data-attachment-storage-local-copy role="status">{attachmentStorageRemovalText(true, peppyCopy).body}</p>}
   </div>;
 }

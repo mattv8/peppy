@@ -1980,6 +1980,8 @@ dependencies = [
  "base64 0.22.1",
  "image",
  "peppy-client-core",
+ "peppy-hosted-api",
+ "peppy-hosted-client",
  "serde",
  "serde_json",
  "ts-rs",

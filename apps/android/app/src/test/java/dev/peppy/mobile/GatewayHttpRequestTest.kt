@@ -8,6 +8,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionProtocolHeader
+import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionRequest
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -67,6 +69,69 @@ class GatewayHttpRequestTest {
             assertThrows(IllegalArgumentException::class.java) { http.get("/v1/events#fragment") }
 
             assertEquals(0, requests)
+        }
+    }
+
+    @Test fun retentionRequestUsesGeneratedMethodBodyHeaderAndBoundedResponse() {
+        val requests = mutableListOf<LoopbackHttpServer.Request>()
+        LoopbackHttpServer { request ->
+            requests += request
+            LoopbackHttpServer.Response(200, "{\"use_id\":\"use\"}")
+        }.use { server ->
+            val request = NativeAttachmentRetentionRequest(
+                "PUT",
+                "/v1/attachments/uses/use",
+                "{\"kind\":\"message_media\"}",
+                NativeAttachmentRetentionProtocolHeader("Peppy-Attachment-Retention", "1"),
+                200u,
+            )
+
+            val response = GatewayHttp(server.origin, "test-token").retentionRequest(request, 128u)
+
+            assertEquals(200, response.code)
+            assertEquals("{\"use_id\":\"use\"}", response.body)
+            assertEquals("PUT", requests.single().method)
+            assertEquals("1", requests.single().headers["peppy-attachment-retention"])
+            assertEquals("{\"kind\":\"message_media\"}", requests.single().body)
+        }
+    }
+
+
+    @Test fun retentionRequestSupportsGeneratedGetAndCanonicalInitializedHeader() {
+        val requests = mutableListOf<LoopbackHttpServer.Request>()
+        LoopbackHttpServer { request ->
+            requests += request
+            LoopbackHttpServer.Response(200, "{}")
+        }.use { server ->
+            val http = GatewayHttp(server.origin, "test-token")
+            http.initializeRetentionProtocol(true)
+            val request = NativeAttachmentRetentionRequest("GET", "/v1/attachments/storage", null, null, 200u)
+
+            assertEquals(200, http.retentionRequest(request, 128u).code)
+            http.postJson("/v1/events", "{}")
+            assertNull(requests[0].headers["peppy-attachment-retention-protocol"])
+            assertEquals("1", requests[1].headers["peppy-attachment-retention-protocol"])
+        }
+    }
+
+    @Test fun generatedRequestWithoutHeaderDoesNotInheritNegotiatedMutationHeader() {
+        val requests = mutableListOf<LoopbackHttpServer.Request>()
+        LoopbackHttpServer { request -> requests += request; LoopbackHttpServer.Response(204) }.use { server ->
+            val http = GatewayHttp(server.origin, "test-token")
+            http.initializeRetentionProtocol(true)
+            val request = NativeAttachmentRetentionRequest("PUT", "/v1/devices/self/retention-capability", "{}", null, 204u)
+
+            assertEquals(204, http.retentionRequest(request, 128u).code)
+            assertNull(requests.single().headers["peppy-attachment-retention-protocol"])
+        }
+    }
+
+    @Test fun retentionRequestRejectsInvalidUtf8() {
+        LoopbackHttpServer { LoopbackHttpServer.Response(200, rawBody = byteArrayOf(0xC3.toByte(), 0x28)) }.use { server ->
+            val request = NativeAttachmentRetentionRequest("GET", "/v1/attachments/storage", null, null, 200u)
+            assertThrows(GatewayTransportException::class.java) {
+                GatewayHttp(server.origin, "test-token").retentionRequest(request, 128u)
+            }
         }
     }
 

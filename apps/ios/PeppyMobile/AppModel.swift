@@ -32,6 +32,17 @@ final class AppModel {
     private(set) var lastSync: SyncReport?
     private(set) var lastSyncDate: Date?
     private(set) var serverReachability: ServerReachabilityState = .unknown
+    private(set) var attachmentStorage: AttachmentStorageStatusResult?
+    private(set) var attachmentStorageRefreshing = false
+    private(set) var attachmentStorageIsStale = false
+    enum AttachmentStorageAcknowledgement: Equatable {
+        case idle
+        case inFlight(scopeId: String)
+        case failed(scopeId: String)
+        case succeeded(scopeId: String)
+    }
+    private(set) var attachmentStorageAcknowledgement = AttachmentStorageAcknowledgement.idle
+    @ObservationIgnored private var acknowledgedAttachmentStoragePolicy: (identity: EnrollmentIdentity, version: String)?
     private(set) var devices: [DeviceRosterItem] = []
     private(set) var devicesLoaded = false
     private(set) var relay: RelayWakeClient?
@@ -139,6 +150,75 @@ final class AppModel {
         await run(.refreshing) { try await $0.refreshEnrollment() }
     }
 
+    /// Invoked only from the visible Account settings surface or its explicit refresh control.
+    func refreshAttachmentStorage() async {
+        guard let identity = status.identity, identity.origin == "https://peppy.pro" else {
+            clearAttachmentStorage()
+            return
+        }
+        attachmentStorageRefreshing = true
+        defer { if status.identity == identity { attachmentStorageRefreshing = false } }
+        do {
+            let result = try await session.attachmentStorageStatus()
+            guard status.identity == identity else { return }
+            if case .temporarilyUnavailable = result, case .available = attachmentStorage {
+                attachmentStorageIsStale = true
+            } else {
+                attachmentStorage = result
+                attachmentStorageIsStale = false
+            }
+        } catch is CancellationError {
+        } catch ClientError.canceled {
+        } catch {
+            guard status.identity == identity else { return }
+            if case .available = attachmentStorage {
+                attachmentStorageIsStale = true
+            } else {
+                attachmentStorage = .temporarilyUnavailable
+            }
+        }
+    }
+
+    func attachmentStorageNoticeRendered(scopeId: String, status visibleStatus: NativeAttachmentStorageStatus) async {
+        guard let identity = status.identity,
+              case .available(let activeScope, let activeStatus) = attachmentStorage,
+              activeScope == scopeId, activeStatus == visibleStatus,
+              AttachmentStoragePresentation(status: visibleStatus).shouldAcknowledgeVisibleCopy,
+              let policyVersion = visibleStatus.notice.policyVersion,
+              acknowledgedAttachmentStoragePolicy?.identity != identity
+                  || acknowledgedAttachmentStoragePolicy?.version != policyVersion
+        else { return }
+        if case .inFlight(let activeScope) = attachmentStorageAcknowledgement, activeScope == scopeId { return }
+        attachmentStorageAcknowledgement = .inFlight(scopeId: scopeId)
+        do {
+            try await session.acknowledgeAttachmentStorageNotice(scopeId: scopeId, policyVersion: policyVersion)
+            guard self.status.identity == identity else { return }
+            acknowledgedAttachmentStoragePolicy = (identity, policyVersion)
+            attachmentStorageAcknowledgement = .succeeded(scopeId: scopeId)
+            await refreshAttachmentStorage()
+            if case .available(let refreshedScope, let refreshedStatus) = attachmentStorage,
+               refreshedStatus.notice.state == .notPresented {
+                acknowledgedAttachmentStoragePolicy = nil
+                attachmentStorageAcknowledgement = .failed(scopeId: refreshedScope)
+            }
+        } catch is CancellationError {
+            if self.status.identity == identity { attachmentStorageAcknowledgement = .idle }
+        } catch ClientError.canceled {
+            if self.status.identity == identity { attachmentStorageAcknowledgement = .idle }
+        } catch {
+            guard self.status.identity == identity else { return }
+            attachmentStorageAcknowledgement = .failed(scopeId: scopeId)
+        }
+    }
+
+    private func clearAttachmentStorage() {
+        attachmentStorage = nil
+        attachmentStorageRefreshing = false
+        attachmentStorageIsStale = false
+        attachmentStorageAcknowledgement = .idle
+        acknowledgedAttachmentStoragePolicy = nil
+    }
+
     /// Non-destructive: the encrypted database, keys and queued work stay archived on this device.
     func disconnect() async {
         await prepareIdentityTeardown()
@@ -165,14 +245,14 @@ final class AppModel {
         let unlocked = try await session.unlock(passphrase: passphrase)
         guard unlocked.identity == identity, unlocked.keysUnlocked else { throw ClientError.identityMismatch }
         try await client.bindVerifiedEnrollmentSecret(passphrase, identity: identity)
-        status = unlocked
+        setStatus(unlocked)
     }
 
     func claimInstance(origin: String, setupToken: String, username: String, adminPassword: String, passphrase: String) async {
         activity = .enrolling
         defer { activity = .idle }
         do {
-            status = try await session.claimInstance(
+            let claimed = try await session.claimInstance(
                 origin: origin,
                 setupToken: setupToken,
                 username: username,
@@ -180,6 +260,7 @@ final class AppModel {
                 passphrase: passphrase,
                 deviceName: UIDevice.current.name
             )
+            setStatus(claimed)
             lastError = nil
             enrollmentBlocked = false
         } catch {
@@ -305,7 +386,7 @@ final class AppModel {
         activity = .enrolling
         defer { activity = .idle }
         do {
-            status = try await session.confirmPhoneEnrollment(sharedSecret: sharedSecret)
+            setStatus(try await session.confirmPhoneEnrollment(sharedSecret: sharedSecret))
             lastError = nil
             enrollmentBlocked = false
             await reconcileWakeRegistration()
@@ -395,6 +476,7 @@ final class AppModel {
     }
 
     private func prepareIdentityTeardown() async {
+        clearAttachmentStorage()
         stopForegroundReachability()
         wakeFence.preferenceChanged()
         wakeEnrollmentBinding = nil
@@ -416,6 +498,7 @@ final class AppModel {
         lastSyncDate = nil
         devices = []
         serverReachability = .unknown
+        clearAttachmentStorage()
     }
 
     func configureRelay() {
@@ -471,7 +554,7 @@ final class AppModel {
     /// leaves it to finish; preference changes start a new generation, while the identity component
     /// separates work after identity changes. Older work stops at its next fence checkpoint.
     func reconcileWakeRegistration() async {
-        if status.identity == nil { status = (try? await session.open()) ?? status }
+        if status.identity == nil, let opened = try? await session.open() { setStatus(opened) }
         let captured = wakeFence.generation
         let key = WakeReconcileKey(generation: captured, identity: status.identity)
         await wakeReconcile.run(key: key) { [weak self] in
@@ -674,7 +757,7 @@ final class AppModel {
         } catch {
             lastError = (error as? ClientError)?.userMessage ?? "Sync failed."
         }
-        status = (try? await session.open()) ?? status
+        if let opened = try? await session.open() { setStatus(opened) }
         await publishServerReachability()
         await runContactsPass(.foreground)
     }
@@ -731,12 +814,18 @@ final class AppModel {
         if serverReachability == .unavailable { startForegroundReachabilityIfNeeded() }
     }
 
+    private func setStatus(_ nextStatus: SessionStatus) {
+        if status.identity != nextStatus.identity { clearAttachmentStorage() }
+        status = nextStatus
+    }
+
     private func run(_ activity: Activity, _ body: (NativeSession) async throws -> SessionStatus) async {
         self.activity = activity
         defer { self.activity = .idle }
         do {
             let previousIdentity = status.identity
-            status = try await body(session)
+            let nextStatus = try await body(session)
+            setStatus(nextStatus)
             if status.identity != previousIdentity {
                 serverReachability = .unknown
                 wakeFence.preferenceChanged()

@@ -14,6 +14,14 @@ import type {
   SearchKind,
   StartHistorySearchInput,
 } from "@peppy/generated/local-search";
+import type {
+  AttachmentRetentionStateDto,
+  AttachmentRetentionNoticeAcknowledgementInput,
+  AttachmentRetentionNoticeAcknowledgementResult,
+  AttachmentStorageStatusDto,
+  AttachmentRetentionStatusResult,
+} from "@peppy/generated/attachment-retention";
+import { SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION } from "@peppy/generated/attachment-retention";
 export type {
   HistorySearchAttemptInput,
   HistorySearchReason,
@@ -29,11 +37,19 @@ export type {
   SearchKind,
   StartHistorySearchInput,
 } from "@peppy/generated/local-search";
+export type {
+  AttachmentRetentionStateDto,
+  AttachmentRetentionNoticeAcknowledgementInput,
+  AttachmentRetentionNoticeAcknowledgementResult,
+  AttachmentStorageStatusDto,
+  AttachmentRetentionStatusResult,
+} from "@peppy/generated/attachment-retention";
+export { SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION } from "@peppy/generated/attachment-retention";
 
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
-export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView };
+export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
 export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
@@ -52,7 +68,7 @@ export type GatewayView = { id: string; name: string; simId: string; online: boo
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
 /** Exact durable cursors only; `targetHighWater` is a transient authenticated replay cut, not a percentage denominator. */
 export type SyncProgress = { phase: "receiving" | "applying" | "waitingForKeys" | "current"; receivedThrough: string; processedThrough: string; targetHighWater?: string; snapshotReceived?: string; snapshotExpected?: string; snapshotRemaining?: string };
-export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress };
+export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type DiscardDraftInput = Pick<Draft, "id" | "conversationId"> & { expectedRevision: string };
@@ -133,6 +149,8 @@ export type HostedPreviewView = {
 /** App-open password state; no password or verifier crosses this boundary. */
 export type AppLockStatus = { enabled: boolean; locked: boolean; storageAvailable: boolean };
 export type MaximizeButtonRegion = { x: number; y: number; width: number; height: number };
+export const attachmentRetentionNoticeCopySupported = (policyVersion: string | null | undefined): boolean =>
+  policyVersion === SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION;
 
 export interface DesktopBridge {
   load_state(conversationId?: string, historyFromMessageId?: string, options?: { metadataOnly?: boolean }): Promise<DesktopSnapshot>;
@@ -228,6 +246,12 @@ export interface DesktopBridge {
   hosted_sign_out(): Promise<void>;
   hosted_open_billing(): Promise<void>;
   hosted_provision(): Promise<void>;
+  /** Optional while older fixture hosts do not implement device retention status. Fetch only on settings open, explicit refresh, or one notice presentation. */
+  attachment_retention_status?(): Promise<AttachmentRetentionStatusResult>;
+  /** Optional device-authenticated acknowledgement. The host rejects a stale scope before credential selection or HTTP. */
+  acknowledge_attachment_retention_notice?(input: AttachmentRetentionNoticeAcknowledgementInput): Promise<AttachmentRetentionNoticeAcknowledgementResult>;
+  /** Optional host read of one attachment's core-owned remote/local availability. */
+  attachment_retention_state?(attachmentId: string): Promise<AttachmentRetentionStateDto>;
   enrollment_discover(origin?: string): Promise<EnrollmentView>;
   enrollment_start_over(): Promise<EnrollmentView>;
   enrollment_create_owner(input?: { username?: string }): Promise<EnrollmentView>;

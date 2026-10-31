@@ -3,7 +3,7 @@ import { peppyCopy } from "./generated/peppyCopy";
 
 export const PRIVACY_POLICY_URL = "https://peppy.pro/privacy";
 
-async function openPrivacyPolicy(): Promise<void> {
+export async function openPrivacyPolicy(): Promise<void> {
   const { openUrl } = await import("@tauri-apps/plugin-opener");
   await openUrl(PRIVACY_POLICY_URL);
 }

@@ -24,6 +24,7 @@ import uniffi.peppy_mobile_bindings.NativeSnapshotProjectionState
 @Config(sdk = [34])
 class GatewaySyncTest : GatewayTestBase() {
     private val requests = mutableListOf<Pair<String, String>>()
+    private val requestHeaders = mutableListOf<Map<String, String>>()
     private var events = JSONArray()
     private var snapshot = JSONArray()
     private var eventsStatus = 200
@@ -34,14 +35,19 @@ class GatewaySyncTest : GatewayTestBase() {
     /** Overrides the `/v1/snapshot` cut as (high_water_cursor, record_count). */
     private var snapshotCut: Pair<String, String>? = null
     private var compactionCapabilityResponse = LoopbackHttpServer.Response(204)
+    private var retentionCapabilityResponse = LoopbackHttpServer.Response(404)
     private var snapshotCompactionSupported = false
     private var snapshotCompactionActive = false
 
     private val server = LoopbackHttpServer { request ->
-        synchronized(requests) { requests += "${request.method} ${request.target}" to request.body }
+        synchronized(requests) {
+            requests += "${request.method} ${request.target}" to request.body
+            requestHeaders += request.headers
+        }
         val path = request.target.substringBefore('?')
         when {
             unauthorized || request.headers["authorization"] != "Bearer $TEST_TOKEN" -> LoopbackHttpServer.Response(401)
+            request.method == "PUT" && path == "/v1/devices/self/retention-capability" -> retentionCapabilityResponse
             request.method == "POST" && path == "/v1/capabilities" -> LoopbackHttpServer.Response(204)
             request.method == "POST" && path == "/v1/compaction/capability" -> compactionCapabilityResponse
             request.method == "GET" && path == "/v1/events" ->
@@ -88,6 +94,7 @@ class GatewaySyncTest : GatewayTestBase() {
         contacts: () -> Boolean = { false },
         contactPhotos: () -> Boolean = { false },
         nowMs: () -> Long = { System.currentTimeMillis() },
+        sessionCurrent: () -> Boolean = { true },
     ) = GatewaySync(
         client, GatewayHttp(server.origin, TEST_TOKEN), state, deviceId,
         dispatch = dispatch,
@@ -95,6 +102,7 @@ class GatewaySyncTest : GatewayTestBase() {
         media = media,
         contacts = contacts,
         contactPhotos = contactPhotos,
+        sessionCurrent = sessionCurrent,
         nowMs = nowMs,
     )
 
@@ -736,6 +744,53 @@ class GatewaySyncTest : GatewayTestBase() {
     private fun traceFields(line: String): Map<String, Long> = line.split(' ').associate { token ->
         val (key, value) = token.split('=', limit = 2)
         key to value.toLong()
+    }
+
+    @Test
+    fun negotiatedProtocolHeadersSteadyStateMutationsAcrossTwoPasses() {
+        retentionCapabilityResponse = LoopbackHttpServer.Response(204)
+        val client = live()
+
+        assertNull(sync(client).run().failure)
+        assertNull(sync(client).run().failure)
+
+        val capabilityIndexes = requests.indices.filter { requests[it].first == "POST /v1/capabilities" }
+        assertEquals(2, capabilityIndexes.size)
+        capabilityIndexes.forEach { index ->
+            assertEquals("1", requestHeaders[index]["peppy-attachment-retention-protocol"])
+        }
+        val negotiationIndex = requests.indexOfFirst { it.first == "PUT /v1/devices/self/retention-capability" }
+        assertTrue(negotiationIndex < capabilityIndexes.first())
+        assertNull(requestHeaders[negotiationIndex]["peppy-attachment-retention-protocol"])
+    }
+
+    @Test
+    fun transientRetentionNegotiationDefersProducersButKeepsSafeLiveReceiveAndCarrier() {
+        retentionCapabilityResponse = LoopbackHttpServer.Response(503, """{"code":"busy"}""")
+        val client = live()
+        val (_, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "safe carrier command")
+        events = JSONArray().put(record(1, wire))
+        val carrier = FakeCarrier()
+        var mediaCalls = 0
+
+        val result = sync(client, carrier, media = { mediaCalls++; MmsTransferResult(false, 0, 0, emptyList()) }).run()
+
+        assertTrue(result.failure is GatewayTransportException)
+        assertEquals(1, mediaCalls)
+        assertEquals(1, carrier.calls.size)
+        assertTrue(requests.any { it.first == "GET /v1/events?after=0&limit=50" })
+        assertTrue(requests.any { it.first == "POST /v1/events" })
+    }
+
+    @Test
+    fun staleRetentionResponseCancelsTheWholeObsoletePass() {
+        val client = live()
+
+        val result = sync(client, sessionCurrent = { false }).run()
+
+        assertNull(result.failure)
+        assertFalse(result.more)
+        assertEquals(listOf("PUT /v1/devices/self/retention-capability"), requests.map { it.first })
     }
 
     @Test

@@ -2,18 +2,19 @@
 //! transport, scheduling, carrier effects, and secure persistence.
 
 use peppy_client_core::{
-    AttachmentInfo, AttachmentState, Captured, CipherObject, Client, ClientConfig,
-    ComposeDraftUpdate, DatabaseKey, DeviceId, Error as CoreError, GatewayHostFacts,
-    GatewayMmsCleanup, GatewayPlatform, GatewaySettings, HistoryImportConditions, IncomingSms,
-    KeyProfile, MAX_SEAL_BATCH, Message, MessageId, MmsAcquisitionInput, MmsAcquisitionState,
-    MmsBackfillPause, MmsBackfillPhase, MmsBackfillRecheck, MmsBackfillRecheckConditions,
-    MmsBackfillRecheckOutcome, MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome,
-    MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource,
-    NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
-    PermitBlock, PermitDecision, PhoneReadCandidate, PhoneReadTransport, ProviderRowRef,
-    QuarantineReason, ReceivedCommand, SendResult, SendState, SmsAcquisitionInput,
-    SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource,
-    Transport, VaultCheckHeader, VaultId,
+    AttachmentInfo, AttachmentRetentionClass, AttachmentRetentionState, AttachmentState,
+    AttachmentUseKind, AttachmentUseOperationKind, AttachmentUseResponse, AttachmentUseState,
+    Captured, CipherObject, Client, ClientConfig, ComposeDraftUpdate, DatabaseKey, DeviceId,
+    Error as CoreError, GatewayHostFacts, GatewayMmsCleanup, GatewayPlatform, GatewaySettings,
+    HistoryImportConditions, IncomingSms, KeyProfile, MAX_SEAL_BATCH, Message, MessageId,
+    MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause, MmsBackfillPhase,
+    MmsBackfillRecheck, MmsBackfillRecheckConditions, MmsBackfillRecheckOutcome,
+    MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome, MmsLegacyBackfillState,
+    MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource, NativeKeyCache, NotificationCapture,
+    NotificationCaptureOutcome, NotificationTarget, PermitBlock, PermitDecision,
+    PhoneReadCandidate, PhoneReadTransport, ProviderRowRef, QuarantineReason, ReceivedCommand,
+    SendResult, SendState, SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus,
+    SmsReconciliationPlan, SmsScanPlan, SmsSource, Transport, VaultCheckHeader, VaultId,
 };
 use std::{
     fmt,
@@ -22,6 +23,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
+mod attachment_retention;
 mod hosted;
 pub mod newenrollment;
 
@@ -603,6 +605,68 @@ pub struct NativeCipherObject {
     pub remote_object_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeAttachmentUseKind {
+    MessageHistory,
+    PendingSend,
+    ContactPhoto,
+    RestoreCritical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeAttachmentUseOperationKind {
+    Register,
+    Release,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativePendingAttachmentRetentionOperation {
+    pub operation: NativeAttachmentUseOperationKind,
+    pub use_id: String,
+    pub attachment_id: String,
+    pub device_id: String,
+    pub kind: NativeAttachmentUseKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeAttachmentUseState {
+    Registered,
+    Released,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeAttachmentUseResponse {
+    pub use_id: String,
+    pub attachment_id: String,
+    pub device_id: String,
+    pub kind: NativeAttachmentUseKind,
+    pub state: NativeAttachmentUseState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeAttachmentRetentionClass {
+    Protected,
+    MessageMedia,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct NativeAttachmentUploadRetention {
+    pub retention_class: NativeAttachmentRetentionClass,
+    pub reference_tracking: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRemoteAttachmentState {
+    Available,
+    RemovedByStoragePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct NativeAttachmentRetentionState {
+    pub remote: NativeRemoteAttachmentState,
+    pub local_available: bool,
+}
+
 /// Bounded Android-only cleanup of finalized gateway MMS capture ciphertext.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct NativeGatewayMmsCleanup {
@@ -721,6 +785,8 @@ pub enum MobileBindingsError {
     KeysUnavailable,
     #[error("attachment media is invalid or unavailable")]
     InvalidMedia,
+    #[error("attachment was removed by storage policy")]
+    AttachmentRemovedByStoragePolicy,
     #[error("native media storage is unavailable")]
     Storage,
     #[error("MMS acquisition limit reached")]
@@ -755,6 +821,7 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::InvalidKeyCache => Self::InvalidKeyCache,
             CoreError::KeysUnavailable => Self::KeysUnavailable,
             CoreError::InvalidMedia => Self::InvalidMedia,
+            CoreError::AttachmentRemovedByStoragePolicy => Self::AttachmentRemovedByStoragePolicy,
             CoreError::Storage => Self::Storage,
             CoreError::SnapshotMismatch => Self::Conflict,
             CoreError::MmsAcquisitionLimit => Self::MmsAcquisitionLimit,
@@ -1059,6 +1126,53 @@ fn cipher_view(object: CipherObject) -> NativeCipherObject {
         ciphertext_bytes: object.ciphertext_bytes,
         ciphertext_sha256: object.ciphertext_sha256,
         remote_object_id: object.remote_object_id,
+    }
+}
+
+fn attachment_use_kind(value: NativeAttachmentUseKind) -> AttachmentUseKind {
+    match value {
+        NativeAttachmentUseKind::MessageHistory => AttachmentUseKind::MessageHistory,
+        NativeAttachmentUseKind::PendingSend => AttachmentUseKind::PendingSend,
+        NativeAttachmentUseKind::ContactPhoto => AttachmentUseKind::ContactPhoto,
+        NativeAttachmentUseKind::RestoreCritical => AttachmentUseKind::RestoreCritical,
+    }
+}
+
+fn attachment_use_kind_view(value: AttachmentUseKind) -> NativeAttachmentUseKind {
+    match value {
+        AttachmentUseKind::MessageHistory => NativeAttachmentUseKind::MessageHistory,
+        AttachmentUseKind::PendingSend => NativeAttachmentUseKind::PendingSend,
+        AttachmentUseKind::ContactPhoto => NativeAttachmentUseKind::ContactPhoto,
+        AttachmentUseKind::RestoreCritical => NativeAttachmentUseKind::RestoreCritical,
+    }
+}
+
+fn retention_operation_view(
+    value: peppy_client_core::PendingAttachmentUseOperation,
+) -> NativePendingAttachmentRetentionOperation {
+    NativePendingAttachmentRetentionOperation {
+        operation: match value.operation {
+            AttachmentUseOperationKind::Register => NativeAttachmentUseOperationKind::Register,
+            AttachmentUseOperationKind::Release => NativeAttachmentUseOperationKind::Release,
+        },
+        use_id: value.use_id.to_string(),
+        attachment_id: value.attachment_id.to_string(),
+        device_id: value.device_id.to_string(),
+        kind: attachment_use_kind_view(value.kind),
+    }
+}
+
+fn retention_state_view(value: AttachmentRetentionState) -> NativeAttachmentRetentionState {
+    NativeAttachmentRetentionState {
+        remote: match value.remote {
+            peppy_client_core::RemoteAttachmentState::Available => {
+                NativeRemoteAttachmentState::Available
+            }
+            peppy_client_core::RemoteAttachmentState::RemovedByStoragePolicy => {
+                NativeRemoteAttachmentState::RemovedByStoragePolicy
+            }
+        },
+        local_available: value.local_available,
     }
 }
 
@@ -1581,6 +1695,155 @@ impl NativeClient {
             return Err(MobileBindingsError::Closed);
         }
         Ok(())
+    }
+
+    pub fn configure_attachment_retention_protocol(
+        &self,
+        enabled: bool,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.configure_attachment_retention_protocol(enabled)
+        })
+    }
+
+    pub fn attachment_retention_protocol_enabled(&self) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, Client::attachment_retention_protocol_enabled)
+    }
+
+    pub fn attachment_upload_retention(
+        &self,
+        attachment_id: String,
+    ) -> Result<NativeAttachmentUploadRetention, MobileBindingsError> {
+        let attachment_id = parse_id(&attachment_id)?;
+        with_client(&self.client, |client| {
+            client.attachment_upload_retention(attachment_id)
+        })
+        .map(|value| NativeAttachmentUploadRetention {
+            retention_class: match value.retention_class {
+                AttachmentRetentionClass::Protected => NativeAttachmentRetentionClass::Protected,
+                AttachmentRetentionClass::MessageMedia => {
+                    NativeAttachmentRetentionClass::MessageMedia
+                }
+            },
+            reference_tracking: value.reference_tracking,
+        })
+    }
+
+    /// Persists a protected use before the host publishes dependent attachment work.
+    pub fn begin_attachment_retention_use(
+        &self,
+        attachment_id: String,
+        kind: NativeAttachmentUseKind,
+    ) -> Result<NativePendingAttachmentRetentionOperation, MobileBindingsError> {
+        let attachment_id = parse_id(&attachment_id)?;
+        with_client(&self.client, |client| {
+            client.begin_attachment_retention_use(attachment_id, attachment_use_kind(kind))
+        })
+        .map(retention_operation_view)
+    }
+
+    /// Durably prepares bounded register/release work. Hosts checkpoint before HTTP and must
+    /// discard responses from an older open/restore generation before applying them.
+    pub fn prepare_attachment_retention_operations(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<NativePendingAttachmentRetentionOperation>, MobileBindingsError> {
+        let limit = usize::try_from(limit).map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.prepare_attachment_retention_operations(limit)
+        })
+        .map(|items| items.into_iter().map(retention_operation_view).collect())
+    }
+
+    pub fn attachment_retention_preparation_pending(&self) -> Result<bool, MobileBindingsError> {
+        with_client(
+            &self.client,
+            Client::attachment_retention_preparation_pending,
+        )
+    }
+
+    pub fn pending_attachment_retention_operations(
+        &self,
+    ) -> Result<Vec<NativePendingAttachmentRetentionOperation>, MobileBindingsError> {
+        with_client(
+            &self.client,
+            Client::pending_attachment_retention_operations,
+        )
+        .map(|items| items.into_iter().map(retention_operation_view).collect())
+    }
+
+    pub fn request_attachment_retention_release(
+        &self,
+        use_id: String,
+    ) -> Result<NativePendingAttachmentRetentionOperation, MobileBindingsError> {
+        let use_id =
+            uuid::Uuid::parse_str(&use_id).map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.request_attachment_retention_release(use_id)
+        })
+        .map(retention_operation_view)
+    }
+
+    /// Stores a canonical transport response only when all immutable identity fields match.
+    pub fn apply_attachment_retention_response(
+        &self,
+        response: NativeAttachmentUseResponse,
+    ) -> Result<(), MobileBindingsError> {
+        let response = AttachmentUseResponse {
+            use_id: uuid::Uuid::parse_str(&response.use_id)
+                .map_err(|_| MobileBindingsError::InvalidRequest)?,
+            attachment_id: parse_id(&response.attachment_id)?,
+            device_id: DeviceId(
+                uuid::Uuid::parse_str(&response.device_id)
+                    .map_err(|_| MobileBindingsError::InvalidRequest)?,
+            ),
+            kind: attachment_use_kind(response.kind),
+            state: match response.state {
+                NativeAttachmentUseState::Registered => AttachmentUseState::Registered,
+                NativeAttachmentUseState::Released => AttachmentUseState::Released,
+            },
+        };
+        with_client(&self.client, |client| {
+            client.apply_attachment_retention_response(&response)
+        })
+    }
+
+    pub fn report_attachment_removed_by_storage_policy(
+        &self,
+        attachment_id: String,
+    ) -> Result<(), MobileBindingsError> {
+        let attachment_id = parse_id(&attachment_id)?;
+        with_client(&self.client, |client| {
+            client.report_attachment_removed_by_storage_policy(attachment_id)
+        })
+    }
+
+    pub fn attachment_retention_state(
+        &self,
+        attachment_id: String,
+    ) -> Result<NativeAttachmentRetentionState, MobileBindingsError> {
+        let attachment_id = parse_id(&attachment_id)?;
+        with_client(&self.client, |client| {
+            client.attachment_retention_state(attachment_id)
+        })
+        .map(retention_state_view)
+    }
+
+    pub fn mark_attachment_retention_reconciled(&self) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, Client::mark_attachment_retention_reconciled)
+    }
+
+    pub fn invalidate_attachment_retention_reconciliation(
+        &self,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(
+            &self.client,
+            Client::invalidate_attachment_retention_reconciliation,
+        )
+    }
+
+    pub fn attachment_retention_ready(&self) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, Client::attachment_retention_ready)
     }
 
     pub fn unlock(
@@ -3367,6 +3630,73 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn native_retention_response_validates_full_identity() {
+        let path = TempDatabase::new(format!(
+            "peppy-mobile-retention-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let client = open_native_client(NativeOpenConfig {
+            database_path: path.to_string_lossy().into_owned(),
+            vault_id: uuid::Uuid::new_v4().to_string(),
+            device_id: device_id.clone(),
+            database_key: vec![6; 32],
+        })
+        .unwrap();
+        assert!(!client.attachment_retention_protocol_enabled().unwrap());
+        client
+            .configure_attachment_retention_protocol(true)
+            .unwrap();
+        assert!(client.attachment_retention_protocol_enabled().unwrap());
+        assert!(!client.attachment_retention_preparation_pending().unwrap());
+        let pending = client
+            .begin_attachment_retention_use(
+                uuid::Uuid::new_v4().to_string(),
+                NativeAttachmentUseKind::PendingSend,
+            )
+            .unwrap();
+        assert_eq!(pending.device_id, device_id);
+        assert!(client.attachment_retention_preparation_pending().unwrap());
+        assert_eq!(
+            client.prepare_attachment_retention_operations(10).unwrap(),
+            vec![pending.clone()]
+        );
+        assert!(
+            client
+                .apply_attachment_retention_response(NativeAttachmentUseResponse {
+                    use_id: pending.use_id.clone(),
+                    attachment_id: pending.attachment_id.clone(),
+                    device_id: uuid::Uuid::new_v4().to_string(),
+                    kind: pending.kind,
+                    state: NativeAttachmentUseState::Registered,
+                })
+                .is_err()
+        );
+        client
+            .apply_attachment_retention_response(NativeAttachmentUseResponse {
+                use_id: pending.use_id,
+                attachment_id: pending.attachment_id,
+                device_id,
+                kind: pending.kind,
+                state: NativeAttachmentUseState::Registered,
+            })
+            .unwrap();
+        assert!(
+            client
+                .pending_attachment_retention_operations()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            client
+                .prepare_attachment_retention_operations(10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!client.attachment_retention_preparation_pending().unwrap());
     }
 
     #[test]

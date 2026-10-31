@@ -27,6 +27,77 @@ class SecureImportTest : GatewayTestBase() {
         assertFalse(NativeGateway.status(context).enrolled)
     }
 
+
+    @Test
+    fun producerAccessRequiresNegotiationForEachOpenGeneration() {
+        enrollAndUnlock()
+        val session = checkNotNull(NativeGateway.session(context))
+
+        assertNull(NativeGateway.producerClient(context))
+        assertTrue(NativeGateway.markProducerReady(context, session))
+        assertTrue(NativeGateway.producerClient(context) === session.client)
+
+        NativeGateway.closeForTest()
+        assertNull(NativeGateway.producerClient(context))
+    }
+
+    @Test
+    fun failedOpenDoesNotInvalidateCapturedCredential() {
+        assertEquals(ImportResult.IMPORTED, enroll())
+        val captured = checkNotNull(NativeGateway.accountCredential(context))
+        secure().edit().putString("db-key.v1", "invalid-sealed-value").commit()
+
+        assertNull(NativeGateway.open(context))
+
+        assertTrue(NativeGateway.isCurrentAccountCredential(context, captured))
+    }
+
+    @Test
+    fun tokenFreeAccountIdentitySelectsFreshCredentialAndRejectsRotation() {
+        assertEquals(ImportResult.IMPORTED, enroll())
+        val captured = checkNotNull(NativeGateway.accountIdentity(context))
+        assertFalse(captured.toString().contains(TEST_TOKEN))
+        assertEquals(TEST_TOKEN, NativeGateway.currentAccountCredential(context, captured)?.bearerToken)
+
+        assertEquals(
+            ImportResult.UPDATED,
+            NativeGateway.persistVerified(context, parsed(token = "cd".repeat(48)), vaultMaterial()),
+        )
+
+        assertFalse(NativeGateway.isCurrentAccountIdentity(context, captured))
+        assertNull(NativeGateway.currentAccountCredential(context, captured))
+    }
+
+    @Test
+    fun tokenRotationInvalidatesCapturedCredential() {
+        assertEquals(ImportResult.IMPORTED, enroll())
+        val captured = checkNotNull(NativeGateway.accountCredential(context))
+
+        assertEquals(
+            ImportResult.UPDATED,
+            NativeGateway.persistVerified(context, parsed(token = "ef".repeat(48)), vaultMaterial()),
+        )
+
+        assertFalse(NativeGateway.isCurrentAccountCredential(context, captured))
+        assertNull(NativeGateway.currentAccountCredential(context, captured))
+        assertTrue(NativeGateway.isCurrentAccountCredential(context, checkNotNull(NativeGateway.accountCredential(context))))
+    }
+
+    @Test
+    fun profileRotationInvalidatesCapturedCredential() {
+        assertEquals(ImportResult.IMPORTED, enroll())
+        val captured = checkNotNull(NativeGateway.accountCredential(context))
+        val rotated = uniffi.peppy_mobile_bindings.createVaultMaterial(vaultId, TEST_PASSPHRASE)
+
+        assertEquals(
+            ImportResult.UPDATED,
+            NativeGateway.persistVerified(context, parsed(), VaultMaterial(rotated.profileJson, rotated.headerJson)),
+        )
+
+        assertFalse(NativeGateway.isCurrentAccountCredential(context, captured))
+        assertNull(NativeGateway.currentAccountCredential(context, captured))
+    }
+
     @Test
     fun databaseOpenIsDistinctFromSharedKeyUnlock() {
         assertEquals(ImportResult.IMPORTED, enroll())

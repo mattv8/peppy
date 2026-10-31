@@ -252,6 +252,14 @@ actor RereadDriftProvider: ContactsProvider {
 @Suite(.serialized) struct ContactsMediaHTTPTests {
     let passphrase = "io synthetic vault passphrase"
 
+    private static func cleanupReady(_ request: HTTPRequest) -> Bool? {
+        guard request.url.path == "/v1/devices/self/retention-capability",
+              let body = request.body,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        else { return nil }
+        return object["cleanup_ready"] as? Bool
+    }
+
     func session(_ server: FakeServer, deviceId: String = UUID().uuidString.lowercased(), store: InMemorySecureStore = InMemorySecureStore(),
                  directory: URL = temporaryDirectory()) async throws -> NativeSession {
         let session = NativeSession(
@@ -265,6 +273,161 @@ actor RereadDriftProvider: ContactsProvider {
 
     func sync(_ client: NativeClient, _ server: FakeServer) async throws {
         _ = try await ForegroundSync(client: client, server: serverClient(server), vaultId: server.vaultId).run()
+    }
+
+    @Test(arguments: [404, 405])
+    func legacyRetentionServerStillUploadsAndPublishesContactPhotos(_ capabilityStatus: Int) async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        server.mutate { fake in
+            fake.override = { request in
+                if request.url.path == "/v1/devices/self/retention-capability" {
+                    return HTTPResponse(status: capabilityStatus, url: request.url, body: Data())
+                }
+                if request.url.path == "/v1/attachments/reserve",
+                   let body = request.body,
+                   let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                   json["retention_class"] != nil {
+                    return fake.reply(request, 400, ["code": "unknown_field"])
+                }
+                return nil
+            }
+        }
+        let owner = try await session(server)
+        let provider = WritableFakeProvider()
+        await provider.configure { $0.book = sampleContacts(1); $0.photos = ["os-c0": syntheticImage()!] }
+        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+
+        let report = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false }
+        )
+
+        #expect(report.media.uploaded == 1 && report.media.registered >= 1)
+        let paths = server.paths
+        let reserve = try #require(paths.firstIndex(of: "POST /v1/attachments/reserve"))
+        let publish = try #require(paths.lastIndex(of: "POST /v1/events"))
+        #expect(reserve < publish)
+        #expect(paths.filter { $0 == "PUT /v1/devices/self/retention-capability" }.count == 1)
+        await owner.close()
+    }
+
+    @Test func retentionAuthenticationFailureStopsNativeSessionBeforeReplay() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let owner = try await session(server)
+        server.mutate { fake in
+            fake.override = { request in
+                request.url.path == "/v1/devices/self/retention-capability"
+                    ? fake.reply(request, 401, ["code": "unauthorized"]) : nil
+            }
+        }
+        let before = server.paths.count
+
+        await #expect(throws: ClientError.unauthorized) {
+            _ = try await owner.contactsPass(
+                reason: .foreground, provider: WritableFakeProvider(),
+                preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: false)),
+                isCancelled: { false }
+            )
+        }
+        #expect(!Array(server.paths.dropFirst(before)).contains("GET /v1/events"))
+        await owner.close()
+    }
+
+    @Test func cancelledNativeSessionPassSendsNoRetentionRequest() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let owner = try await session(server)
+        let before = server.paths.count
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await owner.contactsPass(
+                reason: .foreground, provider: WritableFakeProvider(),
+                preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: true)),
+                isCancelled: { Task.isCancelled }
+            )
+        }
+
+        await #expect(throws: (any Error).self) { try await task.value }
+        #expect(server.paths.count == before)
+        await owner.close()
+    }
+
+    @Test func transientRetentionFailureDoesNotStarveSafeReplay() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        _ = try producer.captureIncoming(sms: NativeIncomingSms(
+            conversationId: nil, senderAddress: "+15550001111", body: "safe replay",
+            providerMessageId: UUID().uuidString, imported: false
+        ))
+        try await sync(producer, server)
+        let owner = try await session(server)
+        server.mutate { fake in
+            fake.override = { request in
+                request.url.path == "/v1/devices/self/retention-capability"
+                    ? fake.reply(request, 503, ["code": "temporarily_unavailable"]) : nil
+            }
+        }
+        let before = server.paths.count
+
+        let report = try await owner.contactsPass(
+            reason: .foreground, provider: WritableFakeProvider(),
+            preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: false)),
+            isCancelled: { false }
+        )
+
+        let paths = Array(server.paths.dropFirst(before))
+        #expect(report.outcome == .disabled)
+        #expect(paths.contains("GET /v1/events"))
+        await owner.close()
+        try producer.dispose()
+    }
+
+    @Test func largeRetentionBacklogSharesOneMaintenanceBudgetAndDefersUploads() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let owner = try await session(server)
+        let provider = WritableFakeProvider()
+        let contacts = sampleContacts(10)
+        let image = try #require(syntheticImage())
+        await provider.configure {
+            $0.book = contacts
+            $0.photos = Dictionary(uniqueKeysWithValues: contacts.map { ($0.id, image) })
+        }
+        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        var budget = SyncBudget()
+        budget.maxRequests = 8
+        let before = server.paths.count
+
+        let report = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences,
+            budget: budget, isCancelled: { false }
+        )
+
+        let paths = Array(server.paths.dropFirst(before))
+        let retentionRequests = paths.filter {
+            $0 == "PUT /v1/devices/self/retention-capability" || $0.contains("/retention-uses")
+        }
+        #expect(retentionRequests.count <= 8, "all pre/post retention drains share one maintenance allowance")
+        #expect(paths.contains("GET /v1/events"), "retention pressure does not starve safe replay")
+        #expect(!paths.contains("GET /v1/attachments/storage/status"), "sync never polls settings status")
+        #expect(!paths.contains("POST /v1/attachments/reserve"), "quota-dependent uploads wait for resolved retention")
+        #expect(report.media.uploaded == 0)
+
+        let retentionAfterFirst = retentionRequests.count
+        let second = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences,
+            budget: budget, isCancelled: { false }
+        )
+        let afterSecond = Array(server.paths.dropFirst(before))
+        #expect(afterSecond.filter { $0.contains("/retention-uses") }.count > retentionAfterFirst)
+        #expect(second.media.uploaded > 0, "a later pass re-drains and resumes deferred producers")
+        let readyAdvertisements = server.lock.withLock { server.requests.compactMap(Self.cleanupReady).filter { $0 } }
+        #expect(readyAdvertisements.count == 1)
+
+        _ = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences,
+            budget: budget, isCancelled: { false }
+        )
+        let readyAfterThird = server.lock.withLock { server.requests.compactMap(Self.cleanupReady).filter { $0 } }
+        #expect(readyAfterThird.count == 1, "ready capability is not repeated")
+        await owner.close()
     }
 
     @Test func ownerPhotoUploadsAndRegistersBeforeItsEventPublishesAndAPeerDownloadsIt() async throws {
@@ -285,6 +448,8 @@ actor RereadDriftProvider: ContactsProvider {
         let finalize = try #require(paths.firstIndex { $0.hasSuffix("/finalize") })
         let references = try #require(paths.firstIndex { $0.hasSuffix("/references") })
         let lastEvent = try #require(paths.lastIndex(of: "POST /v1/events"))
+        let retentionUse = try #require(paths.firstIndex { $0.hasSuffix("/retention-uses") })
+        #expect(retentionUse < reserve)
         #expect(reserve < upload && upload < finalize && finalize < references && references < lastEvent)
         let stored = try #require(server.attachments.values.first)
         #expect(stored.finalized && !stored.references.isEmpty)
@@ -351,7 +516,7 @@ actor RereadDriftProvider: ContactsProvider {
         await owner.close()
     }
 
-    @Test func aMissingRemotePhotoIsNotRetriedHot() async throws {
+    @Test func aGenericMissingRemotePhotoRemainsRetryable() async throws {
         let server = try FakeServer(passphrase: passphrase)
         let ownerDevice = UUID().uuidString.lowercased()
         let owner = try await session(server, deviceId: ownerDevice)
@@ -379,12 +544,175 @@ actor RereadDriftProvider: ContactsProvider {
         server.mutate { $0.attachments.removeAll() } // released remotely before the owner fetched it
 
         let first = try await owner.contactsPass(reason: .foreground, provider: provider, preferences: preferences, isCancelled: { false })
-        #expect(first.waitingMedia == 1 && first.media.unavailable == 1 && first.applied == 0)
+        #expect(first.waitingMedia == 1 && first.media.failed == 1 && first.applied == 0)
         let gets = server.paths.filter { $0.hasPrefix("GET /v1/attachments/") }.count
         let second = try await owner.contactsPass(reason: .foreground, provider: provider, preferences: preferences, isCancelled: { false })
         #expect(second.waitingMedia == 1)
-        #expect(server.paths.filter { $0.hasPrefix("GET /v1/attachments/") }.count == gets, "a 404 is not fetched again within a day")
+        #expect(server.paths.filter { $0.hasPrefix("GET /v1/attachments/") }.count == gets + 1, "a generic 404 remains retryable")
         #expect(await provider.saves.isEmpty)
+        await owner.close()
+    }
+
+    @Test(arguments: ["reserve", "upload", "finalize", "references"])
+    func exactStoragePolicy410StopsEveryContactMediaMutation(_ stage: String) async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let owner = try await session(server)
+        let provider = WritableFakeProvider()
+        await provider.configure { $0.book = sampleContacts(1); $0.photos = ["os-c0": syntheticImage()!] }
+        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        let matches: @Sendable (HTTPRequest) -> Bool = { request in
+            switch stage {
+            case "reserve": request.method == "POST" && request.url.path == "/v1/attachments/reserve"
+            case "upload": request.method == "PUT" && request.url.path.hasSuffix("/upload")
+            case "finalize": request.method == "POST" && request.url.path.hasSuffix("/finalize")
+            default: request.method == "POST" && request.url.path.hasSuffix("/references")
+            }
+        }
+        server.mutate { fake in
+            fake.override = { request in
+                matches(request) ? fake.reply(request, 410, ["code": "attachment_removed_by_storage_policy"]) : nil
+            }
+        }
+
+        let first = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false }
+        )
+        let attempts = server.paths.filter { path in
+            switch stage {
+            case "reserve": path == "POST /v1/attachments/reserve"
+            case "upload": path.hasPrefix("PUT /v1/attachments/") && path.hasSuffix("/upload")
+            case "finalize": path.hasSuffix("/finalize")
+            default: path.hasSuffix("/references")
+            }
+        }.count
+        #expect(first.media.failed + first.media.removedByStoragePolicy >= 1)
+
+        _ = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false }
+        )
+        let retried = server.paths.filter { path in
+            switch stage {
+            case "reserve": path == "POST /v1/attachments/reserve"
+            case "upload": path.hasPrefix("PUT /v1/attachments/") && path.hasSuffix("/upload")
+            case "finalize": path.hasSuffix("/finalize")
+            default: path.hasSuffix("/references")
+            }
+        }.count
+        #expect(retried == attempts, "typed removal is durable and not retried automatically")
+        await owner.close()
+    }
+
+    @Test(arguments: ["html", "invalid-utf8", "oversized"])
+    func malformedGeneric410RemainsRetryable(_ bodyKind: String) async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let owner = try await session(server)
+        let provider = WritableFakeProvider()
+        await provider.configure { $0.book = sampleContacts(1); $0.photos = ["os-c0": syntheticImage()!] }
+        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        let body: Data = switch bodyKind {
+        case "invalid-utf8": Data([0xff])
+        case "oversized": Data(repeating: 0x20, count: Int(attachmentRetentionResponseMaxBytes()) + 1)
+        default: Data("<html>gone</html>".utf8)
+        }
+        server.mutate { fake in
+            fake.override = { request in
+                request.url.path == "/v1/attachments/reserve"
+                    ? HTTPResponse(status: 410, url: request.url, body: body) : nil
+            }
+        }
+
+        let first = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false }
+        )
+        let attempts = server.paths.filter { $0 == "POST /v1/attachments/reserve" }.count
+        let second = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false }
+        )
+
+        #expect(first.media.failed >= 1)
+        #expect(second.media.removedByStoragePolicy == 0)
+        #expect(server.paths.filter { $0 == "POST /v1/attachments/reserve" }.count == attempts + 1)
+        await owner.close()
+    }
+
+    @Test func referenceRemovalReportsLocalAttachmentWhenRemoteIsAliased() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let owner = try await session(server)
+        let provider = WritableFakeProvider()
+        await provider.configure { $0.book = sampleContacts(1); $0.photos = ["os-c0": syntheticImage()!] }
+        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        let remote = UUID().uuidString.lowercased()
+        server.mutate { fake in
+            fake.override = { request in
+                if request.url.path == "/v1/attachments/reserve",
+                   let body = request.body,
+                   let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                   let local = json["attachment_id"] as? String,
+                   let bytes = json["declared_ciphertext_bytes"] as? Int,
+                   let sha = json["declared_ciphertext_sha256"] as? String {
+                    fake.attachments[remote] = (bytes, sha, nil, false, [])
+                    #expect(local != remote)
+                    return fake.reply(request, 200, ["attachment_id": remote, "expires_in_seconds": 3600])
+                }
+                if request.method == "POST" && request.url.path == "/v1/attachments/\(remote)/references" {
+                    return fake.reply(request, 410, ["code": "attachment_removed_by_storage_policy"])
+                }
+                return nil
+            }
+        }
+
+        let first = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false }
+        )
+        let attempts = server.paths.filter { $0.hasSuffix("/references") }.count
+        _ = try await owner.contactsPass(
+            reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false }
+        )
+
+        #expect(first.media.removedByStoragePolicy == 1)
+        #expect(server.paths.filter { $0.hasSuffix("/references") }.count == attempts)
+        await owner.close()
+    }
+
+    @Test func exactStoragePolicy410StopsAutomaticRetry() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let ownerDevice = UUID().uuidString.lowercased()
+        let owner = try await session(server, deviceId: ownerDevice)
+        let provider = WritableFakeProvider()
+        await provider.configure { $0.book = sampleContacts(1) }
+        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        let bookId = try #require(try await owner.contactsPass(reason: .foreground, provider: provider, preferences: preferences, isCancelled: { false }).bookId)
+        let requester = try openUnlockedClient(server, passphrase: passphrase)
+        try await sync(requester, server)
+        let view = try NativeContactsCoordinator.object(requester.contactBookView(inputJson: NativeContactsCoordinator.json(["book_id": bookId])))
+        let target = try #require((view["contacts"] as? [[String: Any]])?.first)
+        let file = temporaryDirectory().appendingPathComponent("photo.png")
+        try #require(syntheticImage()).write(to: file)
+        let prepared = try requester.preparePhotoForTest(file)
+        _ = try requester.requestContactEdit(inputJson: NativeContactsCoordinator.json([
+            "schema_version": 1, "request_id": UUID().uuidString.lowercased(), "target_owner": ownerDevice, "book_id": bookId,
+            "kind": "update", "contact_id": target["id"]!, "base_revision": target["revision"]!,
+            "photo_op": ["op": "set", "attachment_id": prepared],
+        ]))
+        var meter = RequestMeter(limit: 20)
+        var media = ContactMediaReport()
+        try await ContactMediaTransfer(client: requester, server: try serverClient(server), scratch: temporaryDirectory())
+            .uploadAndRegister(meter: &meter, report: &media)
+        try await sync(requester, server)
+        server.mutate { fake in
+            fake.override = { request in
+                request.method == "GET" && request.url.path.hasPrefix("/v1/attachments/")
+                    ? fake.reply(request, 410, ["code": "attachment_removed_by_storage_policy"]) : nil
+            }
+        }
+
+        let first = try await owner.contactsPass(reason: .foreground, provider: provider, preferences: preferences, isCancelled: { false })
+        #expect(first.waitingMedia == 1 && first.media.removedByStoragePolicy == 1 && first.applied == 0)
+        let gets = server.paths.filter { $0.hasPrefix("GET /v1/attachments/") }.count
+        let second = try await owner.contactsPass(reason: .foreground, provider: provider, preferences: preferences, isCancelled: { false })
+        #expect(second.waitingMedia == 1)
+        #expect(server.paths.filter { $0.hasPrefix("GET /v1/attachments/") }.count == gets)
+        #expect(await provider.saves.isEmpty, "typed remote removal preserves message metadata and does not invent an OS write")
         await owner.close()
     }
 

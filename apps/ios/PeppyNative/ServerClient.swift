@@ -52,6 +52,40 @@ final class ServerReachability: @unchecked Sendable {
     }
 }
 
+/// Session-scoped protocol header learned only from a generated canonical retention request.
+final class AttachmentRetentionHTTPState: @unchecked Sendable {
+    enum Negotiation { case unknown, supported, legacy }
+    private let lock = NSLock()
+    private var header: (name: String, value: String)?
+    private var negotiation: Negotiation = .unknown
+    private var readyAdvertised = false
+    private var openGeneration: UInt64 = 0
+
+    func remember(name: String, value: String) { lock.withLock { header = (name, value) } }
+
+    func apply(to headers: inout [String: String], method: String) {
+        guard method != "GET", let value = lock.withLock({ header }) else { return }
+        headers[value.name] = value.value
+    }
+
+    func negotiationState() -> Negotiation { lock.withLock { negotiation } }
+    func markSupported() { lock.withLock { negotiation = .supported } }
+    func markLegacy() { lock.withLock { negotiation = .legacy } }
+    func shouldAdvertiseReady() -> Bool { lock.withLock { !readyAdvertised } }
+    func markReadyAdvertised() { lock.withLock { readyAdvertised = true } }
+    func invalidateReadyAdvertisement() { lock.withLock { readyAdvertised = false } }
+    func generation() -> UInt64 { lock.withLock { openGeneration } }
+    func isCurrent(generation: UInt64) -> Bool { lock.withLock { openGeneration == generation } }
+    func reset() {
+        lock.withLock {
+            header = nil
+            negotiation = .unknown
+            readyAdvertised = false
+            openGeneration &+= 1
+        }
+    }
+}
+
 /// Gives foreground retry loops stable ownership so a cancelled predecessor cannot clear a replacement.
 final class ForegroundReachabilityLoopOwnership {
     private var nextToken = 0
@@ -114,17 +148,20 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
     let token: String
     let transport: any HTTPTransport
     let observeResponse: (@Sendable (ServerReachabilityState) -> Void)?
+    let attachmentRetention: AttachmentRetentionHTTPState?
 
     init(
         origin: ServerOrigin,
         token: String,
         transport: any HTTPTransport,
-        observeResponse: (@Sendable (ServerReachabilityState) -> Void)? = nil
+        observeResponse: (@Sendable (ServerReachabilityState) -> Void)? = nil,
+        attachmentRetention: AttachmentRetentionHTTPState? = nil
     ) {
         self.origin = origin
         self.token = token
         self.transport = transport
         self.observeResponse = observeResponse
+        self.attachmentRetention = attachmentRetention
     }
 
     var description: String { "ServerClient(\(origin), token <redacted>)" }
@@ -155,7 +192,7 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
         try Task.checkCancellation()
         try meter.spend()
         let response = try await send(HTTPRequest(
-            method: "POST", url: origin.url(path), headers: ["Authorization": "Bearer \(token)", "Accept": "application/json"],
+            method: "POST", url: origin.url(path), headers: mutationHeaders(),
             body: nil, maxResponseBytes: Self.maxSmallBytes
         ))
         guard origin.contains(response.url) else { throw ClientError.originMismatch }
@@ -173,15 +210,23 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
         }
     }
 
+    private func mutationHeaders() -> [String: String] {
+        var headers = ["Authorization": "Bearer \(token)", "Accept": "application/json"]
+        attachmentRetention?.apply(to: &headers, method: "POST")
+        return headers
+    }
+
     /// Authenticated request whose status the caller interprets (attachment transfer). Spends one
     /// request; 401/403 and origin violations still throw.
     func exchange(
-        _ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil, contentType: String? = nil, limit: Int, meter: inout RequestMeter
+        _ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil, contentType: String? = nil, extraHeaders: [String: String] = [:], limit: Int, meter: inout RequestMeter
     ) async throws -> HTTPResponse {
         try Task.checkCancellation()
         try meter.spend()
         var headers = ["Authorization": "Bearer \(token)", "Accept": "application/json"]
         if let contentType { headers["Content-Type"] = contentType }
+        attachmentRetention?.apply(to: &headers, method: method)
+        headers.merge(extraHeaders, uniquingKeysWith: { _, supplied in supplied })
         let response = try await send(HTTPRequest(
             method: method, url: origin.url(path, query: query), headers: headers, body: body, maxResponseBytes: limit
         ))
@@ -201,6 +246,7 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
         try meter.spend()
         var headers = ["Authorization": "Bearer \(token)", "Accept": "application/json"]
         if body != nil { headers["Content-Type"] = "application/json" }
+        attachmentRetention?.apply(to: &headers, method: method)
         let response = try await send(HTTPRequest(
             method: method, url: origin.url(path, query: query), headers: headers, body: body, maxResponseBytes: limit
         ))

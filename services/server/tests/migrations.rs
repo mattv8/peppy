@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 18] = [
+const UP: [&str; 19] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -22,9 +22,10 @@ const UP: [&str; 18] = [
     include_str!("../migrations/0016_multi_vault.sql"),
     include_str!("../migrations/0017_device_presence.sql"),
     include_str!("../migrations/0018_computer_enrollment.sql"),
+    include_str!("../migrations/0019_attachment_retention.sql"),
 ];
 
-const DOWN: [&str; 18] = [
+const DOWN: [&str; 19] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -43,6 +44,7 @@ const DOWN: [&str; 18] = [
     include_str!("../migrations/down/0016_multi_vault.down.sql"),
     include_str!("../migrations/down/0017_device_presence.down.sql"),
     include_str!("../migrations/down/0018_computer_enrollment.down.sql"),
+    include_str!("../migrations/down/0019_attachment_retention.down.sql"),
 ];
 
 #[tokio::test]
@@ -75,6 +77,19 @@ async fn migrations_round_trip_in_an_isolated_schema() {
     }
     assert_latest_schema(&mut database).await;
     let latest_schema = schema_fingerprint(&mut database, &schema).await;
+
+    run(&mut database, "BEGIN").await;
+    run(&mut database, "INSERT INTO attachment_removals(vault_id,attachment_id,object_key,ciphertext_bytes) VALUES ('00000000-0000-0000-0000-000000000020','00000000-0000-0000-0000-000000000099','private/unsafe',1)").await;
+    assert!(
+        run_result(&mut database, DOWN.last().unwrap())
+            .await
+            .is_err()
+    );
+    run(&mut database, "ROLLBACK").await;
+    assert_eq!(
+        schema_fingerprint(&mut database, &schema).await,
+        latest_schema
+    );
 
     run(&mut database, "BEGIN").await;
     for migration in DOWN.iter().rev() {
@@ -136,6 +151,10 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(table_exists(database, "computer_enrollments").await);
     assert!(table_exists(database, "device_presence").await);
     assert!(table_exists(database, "device_sockets").await);
+    assert!(table_exists(database, "attachment_retention_uses").await);
+    assert!(table_exists(database, "attachment_retention_devices").await);
+    assert!(table_exists(database, "attachment_removals").await);
+    assert!(column_exists(database, "attachment_removals", "policy_version").await);
     assert!(index_exists(database, "device_sockets_active_by_device").await);
     assert!(index_exists(database, "device_sockets_responsive_by_device").await);
     assert!(index_exists(database, "device_wake_jobs_lease_due").await);
@@ -248,6 +267,15 @@ async fn relation_exists(database: &mut PgConnection, kind: &str, name: &str) ->
     .fetch_one(database)
     .await
     .unwrap()
+}
+
+async fn column_exists(database: &mut PgConnection, table: &str, column: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2)")
+        .bind(table)
+        .bind(column)
+        .fetch_one(database)
+        .await
+        .unwrap()
 }
 
 async fn constraint_exists(database: &mut PgConnection, constraint: &str) -> bool {

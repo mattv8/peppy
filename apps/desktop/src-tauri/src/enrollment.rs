@@ -1017,6 +1017,15 @@ fn device_request(
         ));
     }
     let mut request = request.bearer_auth(session.api.bearer());
+    if session
+        .attachment_retention_supported
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        request = request.header(
+            peppy_hosted_api::attachments::ATTACHMENT_RETENTION_PROTOCOL_HEADER,
+            peppy_hosted_api::attachments::ATTACHMENT_RETENTION_PROTOCOL_VERSION,
+        );
+    }
     if let Some(account_session) = account_session {
         request = request.header("Peppy-Account-Session", account_session);
     }
@@ -7173,5 +7182,70 @@ mod owner_retry_tests {
 
         controller.has_gateway = known_gateway_presence((vec![], true));
         assert_eq!(controller.view().has_gateway, Some(false));
+    }
+
+    #[tokio::test]
+    async fn device_request_binds_origin_and_sends_retention_header_only_when_supported() {
+        let origin = "http://127.0.0.1:9";
+        let fixture = crate::tests::fixture_at(origin);
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+        let header = peppy_hosted_api::attachments::ATTACHMENT_RETENTION_PROTOCOL_HEADER;
+        let build = |session: &crate::session::Session| {
+            device_request(
+                session,
+                origin,
+                http(origin)
+                    .unwrap()
+                    .post(format!("{origin}/v1/attachments/probe")),
+                Some("account-session"),
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+        };
+
+        let unsupported = build(&session);
+        assert!(unsupported.headers().get(header).is_none());
+        session
+            .attachment_retention_supported
+            .store(true, Ordering::Release);
+        let supported = build(&session);
+        assert_eq!(
+            supported.headers().get(header).unwrap().to_str().unwrap(),
+            peppy_hosted_api::attachments::ATTACHMENT_RETENTION_PROTOCOL_VERSION
+        );
+        for request in [&unsupported, &supported] {
+            assert_eq!(request.url().origin().ascii_serialization(), origin);
+            assert_eq!(
+                request
+                    .headers()
+                    .get(reqwest::header::AUTHORIZATION)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                format!("Bearer {}", crate::credentials::tests::TOKEN)
+            );
+            assert_eq!(
+                request
+                    .headers()
+                    .get("Peppy-Account-Session")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                "account-session"
+            );
+        }
+
+        let rejected = device_request(
+            &session,
+            "http://127.0.0.1:10",
+            http(origin)
+                .unwrap()
+                .post("http://127.0.0.1:10/v1/attachments/probe"),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(rejected.code, "origin-binding");
     }
 }

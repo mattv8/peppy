@@ -73,6 +73,16 @@ class GatewayWorkTest {
         assertFalse(GatewayWork.beginPass(context))
     }
 
+    @Test fun deferredProducerPassRestoresConsumedCaptureHint() {
+        val context = testContext()
+        GatewayWork.enqueue(context)
+        assertTrue(GatewayWork.beginPass(context))
+
+        GatewayWork.restoreCaptureHint(context)
+
+        assertTrue(GatewayWork.beginPass(context))
+    }
+
     @Test fun missingCaptureHintConservativelyRequestsCapture() {
         val context = testContext()
 

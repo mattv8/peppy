@@ -37,6 +37,7 @@ export { ToneOverridesProvider, incomingToneSeed, toneIndex, toneStyle, useToneO
 export { OmniSearch, type OmniSearchProps } from "./OmniSearch";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
 export { SyncProgress, type SyncProgressProps } from "./SyncProgress";
+export { AttachmentStorageSettings, attachmentStorageRemovalText, type AttachmentStorageCopy, type AttachmentStorageSettingsProps } from "./AttachmentStorageSettings";
 export { Modal, type ModalProps } from "./Modal";
 export { installOverlayScrollbars, OVERLAY_SCROLL_HIDE_DELAY } from "./overlayScroll";
 export {

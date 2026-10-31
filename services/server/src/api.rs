@@ -32,11 +32,61 @@ pub struct AccessPrincipal {
     pub role: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceAttachmentRetentionError {
+    Unsupported,
+    Forbidden,
+    InvalidPolicyVersion,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttachmentStoragePolicy {
+    pub allow_upload: bool,
+    pub limit_bytes: i64,
+    pub cleanup_authorized: bool,
+    pub policy_version: Option<String>,
+}
+
 pub trait AccessPolicy: Send + Sync {
     fn authorize(&self, principal: AccessPrincipal, operation: Operation)
     -> PolicyFuture<'_, bool>;
     fn attachment_quota_bytes(&self, _principal: AccessPrincipal) -> PolicyFuture<'_, Option<i64>> {
         Box::pin(async { None })
+    }
+    fn attachment_storage_policy_in_transaction<'a>(
+        &'a self,
+        _principal: AccessPrincipal,
+        configured_limit_bytes: i64,
+        _connection: &'a mut sqlx::PgConnection,
+    ) -> PolicyFuture<'a, Result<AttachmentStoragePolicy, sqlx::Error>> {
+        Box::pin(async move {
+            Ok(AttachmentStoragePolicy {
+                allow_upload: true,
+                limit_bytes: configured_limit_bytes,
+                cleanup_authorized: false,
+                policy_version: None,
+            })
+        })
+    }
+    fn device_attachment_storage_status(
+        &self,
+        _principal: AccessPrincipal,
+    ) -> PolicyFuture<
+        '_,
+        Result<
+            peppy_hosted_api::attachments::AttachmentStorageStatusResponse,
+            DeviceAttachmentRetentionError,
+        >,
+    > {
+        Box::pin(async { Err(DeviceAttachmentRetentionError::Unsupported) })
+    }
+    fn acknowledge_device_attachment_retention(
+        &self,
+        _principal: AccessPrincipal,
+        _request: peppy_hosted_api::attachments::AcknowledgeRetentionNoticeRequest,
+    ) -> PolicyFuture<'_, Result<(), DeviceAttachmentRetentionError>> {
+        Box::pin(async { Err(DeviceAttachmentRetentionError::Unsupported) })
     }
 }
 
@@ -480,6 +530,10 @@ pub(crate) fn build_router(
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
         .route("/v1/devices/self/push-config", get(push_config))
         .route(
+            "/v1/devices/self/retention-capability",
+            put(attachments::set_retention_capability),
+        )
+        .route(
             "/v1/devices/self/wake-route",
             put(register_wake_route).delete(revoke_wake_route),
         )
@@ -514,12 +568,28 @@ pub(crate) fn build_router(
         )
         .route("/v1/attachments/usage", get(attachments::attachment_usage))
         .route(
+            peppy_hosted_api::attachments::routes::DEVICE_ATTACHMENT_STORAGE_STATUS,
+            get(attachments::device_attachment_storage_status),
+        )
+        .route(
+            peppy_hosted_api::attachments::routes::DEVICE_RETENTION_NOTICE_ACKNOWLEDGEMENT,
+            post(attachments::acknowledge_device_attachment_retention),
+        )
+        .route(
             "/v1/attachments/{attachment_id}/upload",
             put(attachments::upload_attachment),
         )
         .route(
             "/v1/attachments/{attachment_id}/finalize",
             post(attachments::finalize_attachment),
+        )
+        .route(
+            "/v1/attachments/{attachment_id}/retention-uses",
+            post(attachments::register_retention_use),
+        )
+        .route(
+            "/v1/attachments/{attachment_id}/retention-uses/{use_id}/release",
+            post(attachments::release_retention_use),
         )
         .route(
             "/v1/attachments/{attachment_id}",
@@ -1816,6 +1886,7 @@ async fn revoke_device(
         .await
         .map_err(|error| database_unavailable(&error, "revoke_vault_lock"))?;
     let caller_role = revalidate_principal(&mut tx, &p).await?;
+    withdraw_legacy_retention_mutation(&mut tx, &h, p.vault, p.device).await?;
     if device_id != p.device && caller_role != "owner" {
         return Err(ApiError(StatusCode::FORBIDDEN, "owner_required"));
     }
@@ -1951,7 +2022,7 @@ pub async fn delete_vault_in_transaction(
         .bind(vault_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("INSERT INTO storage_deletions(object_key,vault_id,reason) SELECT object_key,$1,'vault_deleted' FROM (SELECT object_key FROM upload_reservations WHERE vault_id=$1 UNION SELECT object_key FROM attachments WHERE vault_id=$1 UNION SELECT object_key FROM public_attachment_copies WHERE vault_id=$1) keys ON CONFLICT(object_key) DO UPDATE SET reason='vault_deleted',not_before=GREATEST(storage_deletions.not_before,now())")
+    sqlx::query("INSERT INTO storage_deletions(object_key,vault_id,reason) SELECT object_key,$1,'vault_deleted' FROM (SELECT object_key FROM upload_reservations WHERE vault_id=$1 UNION SELECT object_key FROM attachments WHERE vault_id=$1 UNION SELECT object_key FROM attachment_removals WHERE vault_id=$1 UNION SELECT object_key FROM public_attachment_copies WHERE vault_id=$1) keys ON CONFLICT(object_key) DO UPDATE SET reason='vault_deleted',not_before=GREATEST(storage_deletions.not_before,now())")
         .bind(vault_id).execute(&mut **tx).await?;
     sqlx::query("SET LOCAL peppy.compaction = 'on'")
         .execute(&mut **tx)
@@ -1967,6 +2038,9 @@ pub async fn delete_vault_in_transaction(
         "device_cursors",
         "device_capabilities",
         "attachment_record_references",
+        "attachment_retention_uses",
+        "attachment_retention_devices",
+        "attachment_removals",
         "record_supersessions",
         "record_compaction",
         "compacted_records",
@@ -2122,6 +2196,19 @@ async fn register_compaction_capability(
         .map_err(|error| database_unavailable(&error, "compaction_capability_commit"))?;
     Ok(StatusCode::NO_CONTENT)
 }
+pub(crate) async fn withdraw_legacy_retention_mutation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    headers: &HeaderMap,
+    vault_id: Uuid,
+    device_id: Uuid,
+) -> ApiResult<()> {
+    crate::attachment_retention::withdraw_legacy_retention_readiness_on_connection(
+        tx, headers, vault_id, device_id,
+    )
+    .await
+    .map_err(|error| database_unavailable(&error, "retention_readiness_withdraw"))
+}
+
 async fn ingest(
     State(s): State<ApiState>,
     h: HeaderMap,
@@ -2163,6 +2250,7 @@ async fn ingest(
     .await
     .map_err(|error| database_unavailable(&error, "ingest_vault_lock"))?;
     revalidate_principal(&mut tx, &p).await?;
+    withdraw_legacy_retention_mutation(&mut tx, &h, p.vault, p.device).await?;
     // Identity lives in the immutable records, which outlive transport-log
     // pruning. A retry stays observable after a key epoch or route changes.
     let compacted=sqlx::query("SELECT original_cursor,cipher_digest FROM compacted_records WHERE vault_id=$1 AND producer_device_id=$2 AND (producer_sequence=$3 OR envelope_id=$4 OR (command_id IS NOT NULL AND command_id=$5)) LIMIT 1").bind(p.vault).bind(p.device).bind(e.producer_sequence.0 as i64).bind(e.envelope_id.0).bind(e.command_id.map(|v|v.0)).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "ingest_compacted_duplicate_lookup"))?;
@@ -2842,5 +2930,13 @@ mod tests {
         let profile = json!({"crypto_suite":1,"salt":salt,"vault_id":vault,"key_epoch":3});
         assert_eq!(validate_profile(&profile, &fingerprint, 3), Ok(vault));
         assert!(validate_profile(&profile, &fingerprint, 2).is_err());
+    }
+
+    #[test]
+    fn community_policy_keeps_the_transaction_policy_extension_object_safe() {
+        fn accepts_trait_object(_: &dyn AccessPolicy) {}
+
+        accepts_trait_object(&CommunityAccessPolicy);
+        let _ = <CommunityAccessPolicy as AccessPolicy>::attachment_storage_policy_in_transaction;
     }
 }

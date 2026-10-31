@@ -83,13 +83,28 @@ public struct EnrollmentHost: Sendable {
     private let transport: any HTTPTransport
     private let accountSession: String?
     private let instanceSession: String?
+    private let attachmentRetention: AttachmentRetentionHTTPState?
 
-    public init(origin: ServerOrigin, transport: any HTTPTransport, accountSession: String? = nil, instanceSession: String? = nil) {
+    public init(
+        origin: ServerOrigin, transport: any HTTPTransport, accountSession: String? = nil,
+        instanceSession: String? = nil
+    ) {
+        self.init(
+            origin: origin, transport: transport, accountSession: accountSession,
+            instanceSession: instanceSession, attachmentRetention: nil
+        )
+    }
+
+    init(
+        origin: ServerOrigin, transport: any HTTPTransport, accountSession: String? = nil,
+        instanceSession: String? = nil, attachmentRetention: AttachmentRetentionHTTPState?
+    ) {
         precondition(accountSession == nil || origin.serialized == "https://peppy.pro")
         self.origin = origin
         self.transport = transport
         self.accountSession = accountSession
         self.instanceSession = instanceSession
+        self.attachmentRetention = attachmentRetention
     }
 
     public func discoverInstance() async throws -> String {
@@ -196,6 +211,7 @@ public struct EnrollmentHost: Sendable {
         var requestHeaders = headers
         requestHeaders["Accept"] = "application/json"
         if body != nil { requestHeaders["Content-Type"] = "application/json" }
+        attachmentRetention?.apply(to: &requestHeaders, method: method)
         let response = try await transport.send(HTTPRequest(
             method: method,
             url: origin.url(path, query: query),

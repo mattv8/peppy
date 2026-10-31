@@ -2,8 +2,38 @@ import { describe, expect, it } from "vitest";
 import { BrowserScheduler } from "./scheduler.js";
 import { transferMedia } from "./scheduler-media.js";
 import { CoreRejectedError } from "./core.js";
+import { TransportError } from "./transport.js";
 
 describe("BrowserScheduler", () => {
+  it("negotiates before producer work and advertises readiness only after replay", async () => {
+    const calls: string[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        calls.push(`query:${command}`);
+        if (command === "pending_uploads" || command === "pending_downloads") return [];
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "sync_work_status") return {};
+        return [];
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    const transport = {
+      json: async (path: string) => { calls.push(`http:${path}`); return { events: [] }; },
+      upload: async () => undefined, download: async () => new Uint8Array(),
+    };
+    const retention = {
+      prepareRound: async () => { calls.push("retention:negotiate"); return { negotiationResolved: true, protocolEnabled: true, dueExhausted: true }; },
+      reconcile: async () => { calls.push("retention:reconcile"); return true; },
+    };
+
+    await new BrowserScheduler(session, transport, { retention: retention as never }).poll();
+
+    expect(calls.indexOf("retention:negotiate")).toBeLessThan(calls.indexOf("query:pending_outbox"));
+    expect(calls.indexOf("retention:reconcile")).toBeGreaterThan(calls.indexOf("http:/v1/events?after=0&limit=100"));
+  });
+
   it("acknowledges an outbox envelope only after its byte-identical upload succeeds", async () => {
     const calls: string[] = [];
     const envelope = { envelope_id: "envelope-1", purpose: "event", body: { ciphertext: "AQI=" } };
@@ -63,6 +93,7 @@ describe("BrowserScheduler", () => {
       hydrate: async () => undefined,
       query: async (command: string) => {
         if (command === "pending_uploads") return [{ id: "a", ciphertextBytes: 3 }];
+        if (command === "_worker_attachment_retention_upload_classification") return { retentionClass: "protected", referenceTracking: false };
         if (command === "cipher_file") return { file: "client.db.media/cipher/a.ppss", ciphertextSha256: "abc" };
         if (command === "contact_photo_transfer_state") return { uploads: [] };
         return [];
@@ -117,8 +148,7 @@ describe("BrowserScheduler", () => {
       },
       mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
     };
-    const { TransportError } = await import("./transport.js");
-    const scheduler = new BrowserScheduler(session, {
+      const scheduler = new BrowserScheduler(session, {
       json: async (path: string) => {
         if (path.startsWith("/v1/events")) throw new TransportError("status", 503, "busy");
         return {};
@@ -239,8 +269,7 @@ describe("BrowserScheduler", () => {
       query: async (command: string) => command === "pending_outbox" ? { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] } : command === "receive_cursor" ? { cursor: "0" } : { uploads: [] },
       mutate: async (command: string) => { mutations.push(command); return { applied: 0, quarantined: 0, drained: 0 }; },
     };
-    const { TransportError } = await import("./transport.js");
-    const scheduler = new BrowserScheduler(session, {
+      const scheduler = new BrowserScheduler(session, {
       json: async (path: string) => {
         if (path === "/v1/events") throw new TransportError("revoked");
         return {};
@@ -259,8 +288,7 @@ describe("BrowserScheduler", () => {
       query: async (command: string) => command === "pending_outbox" ? { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] } : command === "receive_cursor" ? { cursor: "0" } : { uploads: [] },
       mutate: async (command: string) => { mutations.push(command); return { applied: 0, quarantined: 0, drained: 0 }; },
     };
-    const { TransportError } = await import("./transport.js");
-    const result = await new BrowserScheduler(session, {
+      const result = await new BrowserScheduler(session, {
       json: async (path: string) => {
         if (path === "/v1/events") throw new TransportError("status", status);
         return {};
@@ -285,8 +313,7 @@ describe("BrowserScheduler", () => {
       },
       mutate: async (command: string, args: Record<string, unknown>) => { mutations.push([command, args]); return { applied: 0, quarantined: 0, drained: 0 }; },
     };
-    const { TransportError } = await import("./transport.js");
-    const result = await new BrowserScheduler(session, {
+      const result = await new BrowserScheduler(session, {
       json: async (path: string) => {
         if (path === "/v1/events") throw new TransportError("status", status, "blocked");
         if (path.startsWith("/v1/events?")) return { events, next_after: null };
@@ -318,8 +345,7 @@ describe("BrowserScheduler", () => {
         return { applied: 0, quarantined: 0, drained: 0 };
       },
     };
-    const { TransportError } = await import("./transport.js");
-    const scheduler = new BrowserScheduler(session, {
+      const scheduler = new BrowserScheduler(session, {
       json: async (path: string, request: { method: string }) => {
         if (path === "/v1/events" && request.method === "POST" && refusing) throw new TransportError("status", 403, "blocked");
         if (path === "/v1/events" && request.method === "POST") return {};
@@ -348,8 +374,7 @@ describe("BrowserScheduler", () => {
       },
       mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
     };
-    const { TransportError } = await import("./transport.js");
-    const result = await new BrowserScheduler(session, {
+      const result = await new BrowserScheduler(session, {
       json: async (path: string) => {
         if (path === "/v1/events") throw new TransportError("status", 403);
         if (path.startsWith("/v1/events?")) return { events: [], next_after: null };
@@ -373,8 +398,7 @@ describe("BrowserScheduler", () => {
       },
       mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
     };
-    const { TransportError } = await import("./transport.js");
-    const result = await new BrowserScheduler(session, {
+      const result = await new BrowserScheduler(session, {
       json: async (path: string) => {
         if (path === "/v1/events") throw new TransportError("revoked");
         return {};
@@ -409,6 +433,7 @@ describe("BrowserScheduler", () => {
       hydrate: async () => undefined,
       query: async (command: string, args: Record<string, unknown>) => {
         if (command === "pending_uploads") return [{ id: "bad", ciphertextBytes: 1 }, { id: "good", ciphertextBytes: 1 }];
+        if (command === "_worker_attachment_retention_upload_classification") return { retentionClass: "protected", referenceTracking: false };
         if (command === "contact_photo_transfer_state") return { uploads: [] };
         if (command === "cipher_file") return { file: String(args.id), ciphertextSha256: "hash" };
         return [];
@@ -433,7 +458,7 @@ describe("BrowserScheduler", () => {
     const mutations: unknown[] = [];
     const session = {
       hydrate: async () => undefined,
-      query: async (command: string) => command === "pending_uploads" ? [{ id: "a", ciphertextBytes: 1 }] : command === "pending_downloads" ? [] : command === "contact_photo_transfer_state" ? { uploads: [] } : { file: "a", ciphertextSha256: "hash" },
+      query: async (command: string) => command === "pending_uploads" ? [{ id: "a", ciphertextBytes: 1 }] : command === "pending_downloads" ? [] : command === "contact_photo_transfer_state" ? { uploads: [] } : command === "_worker_attachment_retention_upload_classification" ? { retentionClass: "protected", referenceTracking: false } : { file: "a", ciphertextSha256: "hash" },
       mutate: async (command: string, args: Record<string, unknown>) => { mutations.push([command, args]); return {}; },
     };
     const paths: string[] = [];
@@ -452,7 +477,7 @@ describe("BrowserScheduler", () => {
     const mutations: string[] = [];
     const session = {
       hydrate: async () => undefined,
-      query: async (command: string) => command === "pending_uploads" ? [{ id: "a", ciphertextBytes: 1 }] : command === "pending_downloads" ? [] : command === "contact_photo_transfer_state" ? { uploads: [] } : { file: "a", ciphertextSha256: "hash" },
+      query: async (command: string) => command === "pending_uploads" ? [{ id: "a", ciphertextBytes: 1 }] : command === "pending_downloads" ? [] : command === "contact_photo_transfer_state" ? { uploads: [] } : command === "_worker_attachment_retention_upload_classification" ? { retentionClass: "protected", referenceTracking: false } : { file: "a", ciphertextSha256: "hash" },
       mutate: async (command: string) => { mutations.push(command); return {}; },
     };
     const result = await transferMedia(session, {
@@ -494,6 +519,7 @@ describe("BrowserScheduler", () => {
       query: async (command: string) => {
         if (command === "pending_outbox") return { envelopes: [] };
         if (command === "pending_uploads") return uploaded ? [] : [{ id: "a", ciphertextBytes: 1 }];
+        if (command === "_worker_attachment_retention_upload_classification") return { retentionClass: "protected", referenceTracking: false };
         if (command === "pending_downloads") return [];
         if (command === "contact_photo_transfer_state") return { uploads: [] };
         if (command === "cipher_file") return { file: "a", ciphertextSha256: "hash" };
@@ -1098,4 +1124,234 @@ it("starts one contact repair and drains its remaining apply work across later p
 
   expect(snapshotStarts).toBe(1);
   expect(remainingApply).toBe(0);
+});
+
+it("uses core upload classification in reservation instead of a host default", async () => {
+    let reservedBody: unknown;
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_uploads") return [{ id: "a", ciphertextBytes: 3 }];
+        if (command === "cipher_file") return { file: "cipher", ciphertextSha256: "hash" };
+        if (command === "contact_photo_transfer_state") return { uploads: [] };
+        if (command === "_worker_attachment_retention_upload_classification") return { retentionClass: "message_media", referenceTracking: true };
+        if (command === "pending_downloads") return [];
+        throw new Error(command);
+      },
+      mutate: async () => ({}),
+    };
+    await transferMedia(session, {
+      json: async (path: string, request: { body?: unknown }) => { if (path.endsWith("reserve")) { reservedBody = request.body; return { attachment_id: "a" }; } return { attachment_id: "a" }; },
+      upload: async () => undefined, download: async () => new Uint8Array(),
+    }, { readCiphertext: async () => new Uint8Array([1, 2, 3]), stageDownload: async () => "unused" }, new AbortController().signal);
+
+    expect(reservedBody).toMatchObject({ retention_class: "message_media", reference_tracking: true });
+  });
+
+it("checkpoints exact download removal while preserving local storage and ignores generic 410", async () => {
+    const mutations: unknown[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_uploads") return [];
+        if (command === "pending_downloads") return [{ id: "a", ciphertextBytes: 3, remoteObjectId: "remote" }];
+        if (command === "contact_photo_transfer_state") return { uploads: [] };
+        throw new Error(command);
+      },
+      mutate: async (command: string, args: unknown) => { mutations.push([command, args]); return {}; },
+    };
+    const policyRemoved = new (await import("./transport.js")).TransportError("status", 410, "attachment_removed_by_storage_policy");
+    await transferMedia(session, {
+      json: async () => ({}), upload: async () => undefined, download: async () => { throw policyRemoved; },
+    }, { readCiphertext: async () => new Uint8Array(), stageDownload: async () => "must-not-stage" }, new AbortController().signal);
+
+    expect(mutations).toContainEqual(["_worker_attachment_retention_report_removed", { attachmentId: "a" }]);
+    expect(mutations.some(value => Array.isArray(value) && value[0] === "install_downloaded_attachment")).toBe(false);
+  });
+
+it("checkpoints exact policy removal from reserve upload and finalize while generic 404 and 410 remain retryable", async () => {
+  const run = async (stage: "reserve" | "upload" | "finalize", error: TransportError) => {
+    const mutations: unknown[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_uploads") return [{ id: "a", ciphertextBytes: 1 }];
+        if (command === "pending_downloads") return [];
+        if (command === "_worker_attachment_retention_upload_classification") return { retentionClass: "message_media", referenceTracking: false };
+        if (command === "cipher_file") return { file: "cipher", ciphertextSha256: "hash" };
+        throw new Error(command);
+      },
+      mutate: async (command: string, args: unknown) => { mutations.push([command, args]); return {}; },
+    };
+    const result = await transferMedia(session, {
+      json: async (path: string) => {
+        if (stage === "reserve" && path.endsWith("reserve") || stage === "finalize" && path.endsWith("finalize")) throw error;
+        return { attachment_id: "a" };
+      },
+      upload: async () => { if (stage === "upload") throw error; },
+      download: async () => new Uint8Array(),
+    }, { readCiphertext: async () => new Uint8Array([1]), stageDownload: async () => "unused" }, new AbortController().signal);
+    return { mutations, result };
+  };
+
+  for (const stage of ["reserve", "upload", "finalize"] as const) {
+    const exact = await run(stage, new TransportError("status", 410, "attachment_removed_by_storage_policy"));
+    expect(exact.mutations).toContainEqual(["_worker_attachment_retention_report_removed", { attachmentId: "a" }]);
+    expect(exact.result.failedIds).toEqual([]);
+  }
+  for (const error of [new TransportError("status", 404), new TransportError("status", 410, "gone")]) {
+    const generic = await run("reserve", error);
+    expect(generic.mutations).not.toContainEqual(["_worker_attachment_retention_report_removed", { attachmentId: "a" }]);
+    expect(generic.result.failedIds).toEqual(["a"]);
+  }
+});
+
+it("defers producers on transient negotiation then registers before reserve after the next successful poll", async () => {
+  const calls: string[] = [];
+  let attempt = 0;
+  let uploaded = false;
+  const session = {
+    hydrate: async () => undefined,
+    query: async (command: string) => {
+      calls.push(`query:${command}`);
+      if (command === "pending_uploads") return uploaded ? [] : [{ id: "a", ciphertextBytes: 1 }];
+      if (command === "pending_downloads") return [];
+      if (command === "_worker_attachment_retention_upload_classification") return { retentionClass: "message_media", referenceTracking: false };
+      if (command === "cipher_file") return { file: "cipher", ciphertextSha256: "hash" };
+      if (command === "pending_outbox") return { envelopes: [] };
+      if (command === "receive_cursor") return { cursor: "0" };
+      if (command === "sync_work_status") return {};
+      return [];
+    },
+    mutate: async (command: string) => { if (command === "mark_attachment_uploaded") uploaded = true; if (command === "ingest_batch") calls.push("incoming-media-use"); return { applied: 0, quarantined: 0, drained: 0 }; },
+  };
+  const transport = {
+    json: async (path: string) => { calls.push(`http:${path}`); if (path.endsWith("reserve") || path.endsWith("finalize")) return { attachment_id: "a" }; return path.startsWith("/v1/events") && attempt > 1 ? { events: [{ cursor: "1", envelope: {} }], next_after: null } : { events: [] }; },
+    upload: async () => undefined,
+    download: async () => new Uint8Array(),
+  };
+  const retention = {
+    prepareRound: async () => { attempt += 1; if (attempt === 1) return { negotiationResolved: false, protocolEnabled: false, dueExhausted: false }; calls.push("retention:registered"); return { negotiationResolved: true, protocolEnabled: true, dueExhausted: true }; },
+    reconcile: async () => { calls.push("retention:post-replay-use-drained"); return true; },
+  };
+  const scheduler = new BrowserScheduler(session, transport, {
+    retention: retention as never,
+    media: { readCiphertext: async () => new Uint8Array([1]), stageDownload: async () => "unused" },
+  });
+
+  await scheduler.poll();
+  expect(calls).not.toContain("query:pending_uploads");
+  expect(calls).not.toContain("http:/v1/events?after=0&limit=100");
+  await scheduler.poll();
+  expect(calls.indexOf("retention:registered")).toBeLessThan(calls.indexOf("http:/v1/attachments/reserve"));
+  expect(calls).toContain("incoming-media-use");
+  expect(calls.indexOf("incoming-media-use")).toBeLessThan(calls.indexOf("retention:post-replay-use-drained"));
+});
+
+it("seals and sends text through the real protocol while retention backlog defers uploads", async () => {
+  const calls: string[] = [];
+  const sent: unknown[] = [];
+  const envelope = { envelope_id: "text-envelope", purpose: "event", body: { ciphertext: "text-only" } };
+  let sealed = false;
+  let acknowledged = false;
+  const session = {
+    hydrate: async () => undefined,
+    query: async (command: string) => {
+      calls.push(`query:${command}`);
+      if (command === "_worker_identity_metadata") return { vaultId: "vault", deviceId: "device" };
+      if (command === "key_status") return { activeEpoch: "1", unlockedEpochs: ["1"] };
+      if (command === "compaction_status") return { server_supported: false, server_active: false, backfill_complete: true };
+      if (command === "contact_photo_transfer_state") return { uploads: [{ attachment_id: "photo" }], registrations: [], reclaims: [] };
+      if (command === "sync_work_status") return { pendingSeal: !sealed, pendingApply: false, pendingSnapshot: false };
+      if (command === "contact_repair_status") return { repairRequired: false };
+      if (command === "pending_uploads") return [{ id: "photo", ciphertextBytes: 1 }];
+      if (command === "pending_downloads") return [];
+      if (command === "pending_outbox") return { envelopes: sealed && !acknowledged ? [envelope] : [] };
+      if (command === "receive_cursor") return { cursor: "0" };
+      return {};
+    },
+    mutate: async (command: string) => {
+      calls.push(`mutate:${command}`);
+      if (command === "seal_pending") {
+        if (sealed) return { sealed: 0 };
+        sealed = true;
+        return { sealed: 1 };
+      }
+      if (command === "ack_outbox") acknowledged = true;
+      return { applied: 0, quarantined: 0, drained: 0 };
+    },
+  };
+  const transport = {
+    discard: async () => undefined,
+    json: async (path: string, request: { method: string; body?: unknown }) => {
+      if (path === "/v1/vault") return { vault_id: "vault", device_id: "device", key_epoch: 1, profile_fingerprint: "fingerprint" };
+      if (path === "/v1/snapshot") return { compaction_supported: false };
+      if (path.startsWith("/v1/events") && request.method === "GET") return { events: [] };
+      if (request.method === "POST" && request.body) sent.push(request.body);
+      return {};
+    },
+    upload: async () => { calls.push("upload"); },
+    download: async () => new Uint8Array(),
+  };
+  const retention = {
+    prepareRound: async () => ({ negotiationResolved: true, protocolEnabled: true, dueExhausted: false }),
+    reconcile: async () => false,
+  };
+
+  await new BrowserScheduler(session, transport, { retention: retention as never }).poll();
+
+  expect(calls).toContain("mutate:seal_pending");
+  expect(sent).toContainEqual(envelope);
+  expect(calls).not.toContain("upload");
+});
+
+it("retention backlog blocks quota upload only while unrelated outbox and GET downloads continue", async () => {
+  const calls: string[] = [];
+  const session = {
+    hydrate: async () => undefined,
+    query: async (command: string) => {
+      if (command === "pending_uploads") return [{ id: "upload", ciphertextBytes: 1 }];
+      if (command === "pending_downloads") return [{ id: "download", ciphertextBytes: 1, remoteObjectId: "remote" }];
+      if (command === "pending_outbox") return calls.includes("outbox") ? { envelopes: [] } : { envelopes: [{ envelope_id: "e", purpose: "event" }] };
+      if (command === "receive_cursor") return { cursor: "0" };
+      if (command === "sync_work_status") return {};
+      return [];
+    },
+    mutate: async (command: string) => { calls.push(command === "ack_outbox" ? "outbox" : command); return { applied: 0, quarantined: 0, drained: 0 }; },
+  };
+  const transport = {
+    json: async (path: string) => { calls.push(path); return path.startsWith("/v1/events") ? { events: [] } : {}; },
+    upload: async () => { calls.push("upload"); },
+    download: async () => { calls.push("download"); return new Uint8Array([1]); },
+  };
+  const retention = {
+    prepareRound: async () => ({ negotiationResolved: true, protocolEnabled: true, dueExhausted: false }),
+    reconcile: async () => false,
+  };
+
+  await new BrowserScheduler(session, transport, {
+    retention: retention as never,
+    media: { readCiphertext: async () => new Uint8Array([1]), stageDownload: async () => "stage" },
+  }).poll();
+
+  expect(calls.some(call => call.startsWith("/v1/events"))).toBe(true);
+  expect(calls).toContain("download");
+  expect(calls).toContain("outbox");
+  expect(calls).not.toContain("upload");
+});
+
+it("generic download 404 and non-policy 410 remain retryable without tombstones", async () => {
+  for (const error of [new TransportError("status", 404), new TransportError("status", 410, "gone")]) {
+    const mutations: unknown[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => command === "pending_uploads" ? [] : command === "pending_downloads" ? [{ id: "a", ciphertextBytes: 1, remoteObjectId: "remote" }] : [],
+      mutate: async (command: string, args: unknown) => { mutations.push([command, args]); return {}; },
+    };
+    const result = await transferMedia(session, {
+      json: async () => ({}), upload: async () => undefined, download: async () => { throw error; },
+    }, { readCiphertext: async () => new Uint8Array(), stageDownload: async () => "unused" }, new AbortController().signal);
+    expect(result.failedIds).toEqual(["a"]);
+    expect(mutations).not.toContainEqual(["_worker_attachment_retention_report_removed", { attachmentId: "a" }]);
+  }
 });

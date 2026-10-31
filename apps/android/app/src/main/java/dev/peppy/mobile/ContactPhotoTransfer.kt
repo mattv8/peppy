@@ -2,6 +2,8 @@ package dev.peppy.mobile
 
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.NativeClientInterface
+import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionErrorClassification
+import uniffi.peppy_mobile_bindings.classifyAttachmentRetentionError
 import java.util.UUID
 
 /**
@@ -69,6 +71,7 @@ class ContactPhotoTransfer(private val client: NativeClientInterface, private va
         )
         val response = http.postJson("/v1/attachments/$remote/references", body.toString())
         when {
+            reportRemoval(response, row.getString("attachment_id")) -> Unit
             response.ok -> client.acknowledgeContactPhotoReferenceJson(
                 JSONObject().put("schema_version", 1).put("envelope_id", row.getString("envelope_id")).put("attachment_id", remote).toString(),
             )
@@ -100,6 +103,7 @@ class ContactPhotoTransfer(private val client: NativeClientInterface, private va
         val remote = UUID.fromString(row.getString("remote_object_id")).toString()
         val body = JSONObject().put("compaction_generation", fence.generation).put("release_before_cursor", fence.replayFloor.toString())
         val response = http.deleteJson("/v1/attachments/$remote", body.toString())
+        if (reportRemoval(response, row.getString("attachment_id"))) return
         when (response.code) {
             204, 404, 409 -> client.acknowledgeContactPhotoReclaimJson(
                 JSONObject().put("schema_version", 1).put("attachment_id", row.getString("attachment_id")).put("http_status", response.code).toString(),
@@ -107,6 +111,18 @@ class ContactPhotoTransfer(private val client: NativeClientInterface, private va
             401, 403 -> throw GatewayAuthException()
             else -> throw GatewayTransportException("reclaim HTTP ${response.code}")
         }
+    }
+
+    private fun reportRemoval(response: HttpResult, attachmentId: String): Boolean {
+        if (response.code != 410 || response.body == null) return false
+        val removed = try {
+            classifyAttachmentRetentionError(410u, response.body!!) ==
+                NativeAttachmentRetentionErrorClassification.REMOVED_BY_STORAGE_POLICY
+        } catch (_: Exception) {
+            false
+        }
+        if (removed) client.reportAttachmentRemovedByStoragePolicy(attachmentId)
+        return removed
     }
 
     private companion object {

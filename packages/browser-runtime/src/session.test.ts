@@ -455,6 +455,7 @@ describe("BrowserSession", () => {
     const fs = new MemoryFs();
     const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
     const recovery = rememberedUnlock();
+    recovery.recover.mockResolvedValue(undefined);
     const session = await BrowserSession.boot({ ...sessionOptions(new TrustedCore(), fs, store), rememberedUnlock: recovery });
     fs.seedDatabase();
     await session.enroll({}, "device-token", "first-passphrase");
@@ -467,6 +468,7 @@ describe("BrowserSession", () => {
 
   it("never remembers enrollment paths", async () => {
     const recovery = rememberedUnlock();
+    recovery.recover.mockResolvedValue(undefined);
     const fs = new MemoryFs();
     const enrolled = await BrowserSession.boot({ ...sessionOptions(new TrustedCore(), fs, new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`)), rememberedUnlock: recovery });
     fs.seedDatabase();

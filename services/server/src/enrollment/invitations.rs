@@ -118,6 +118,7 @@ async fn create_invitation(
     .fetch_one(&mut *tx)
     .await
     .map_err(database)?;
+    withdraw_legacy_enrollment(&mut tx, &headers, &owner).await?;
     let active: i64 = sqlx::query_scalar("SELECT count(*) FROM phone_invitations WHERE vault_id=$1 AND owner_device_id=$2 AND state IN ('waiting','claimed','approved','confirmed') AND expires_at>now()")
         .bind(owner.vault_id).bind(owner.device_id).fetch_one(&mut *tx).await.map_err(database)?;
     if active >= 3 {
@@ -297,6 +298,7 @@ async fn approve_invitation(
         .map_err(database)?;
     revalidate_owner(&mut tx, &principal).await?;
     let row = invitation_for_owner(&mut tx, invitation_id, &principal).await?;
+    withdraw_legacy_enrollment(&mut tx, &headers, &principal).await?;
     if row.get::<String, _>("origin") != state.canonical_origin {
         return Err(InvitationError(StatusCode::FORBIDDEN, "origin_mismatch"));
     }
@@ -478,6 +480,7 @@ async fn cancel_invitation(
         .map_err(database)?;
     revalidate_owner(&mut tx, &principal).await?;
     let row = invitation_for_owner(&mut tx, invitation_id, &principal).await?;
+    withdraw_legacy_enrollment(&mut tx, &headers, &principal).await?;
     if row.get::<String, _>("state") == "consumed" {
         return Err(InvitationError(StatusCode::CONFLICT, "invitation_consumed"));
     }
@@ -526,6 +529,21 @@ async fn authorize_owner(
     }
     Ok(owner)
 }
+async fn withdraw_legacy_enrollment(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    headers: &HeaderMap,
+    owner: &Owner,
+) -> Result<(), InvitationError> {
+    crate::attachment_retention::withdraw_legacy_retention_readiness_on_connection(
+        tx,
+        headers,
+        owner.vault_id,
+        owner.device_id,
+    )
+    .await
+    .map_err(database)
+}
+
 async fn revalidate_owner(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     owner: &Owner,

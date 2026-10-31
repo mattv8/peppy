@@ -243,6 +243,11 @@ pub(crate) fn on_publish(
                 if records == 0 { "staging" } else { "draining" }
             ],
         )?;
+    } else {
+        crate::attachment_retention::record_nonprojected_restore_generation(
+            conn,
+            u64::try_from(generation).map_err(|_| Error::Database)?,
+        )?;
     }
     Ok(())
 }

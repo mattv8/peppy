@@ -124,6 +124,21 @@ pub struct Session {
     /// Wakes the live supervisor for an explicitly requested bounded inbound replay.
     pub replay_wake: Notify,
     pub cancel: CancellationToken,
+    /// Set only after this open session has completed the capability negotiation (including the
+    /// explicit legacy 404/405 fallback). Producer commands must not create unclassified uses
+    /// while negotiation is still retrying.
+    pub attachment_retention_negotiated: AtomicBool,
+    /// Capability result for this open session. Legacy fallback resolves negotiation without
+    /// starting retention transport against an older server.
+    pub attachment_retention_supported: AtomicBool,
+    /// True after this open session has successfully advertised post-replay readiness.
+    pub attachment_retention_ready_advertised: AtomicBool,
+    /// Set only after this session has completed a replay, authorizing post-replay reconciliation.
+    pub attachment_retention_replay_observed: AtomicBool,
+    /// Fences retention I/O started before a same-session snapshot promotion.
+    pub attachment_retention_epoch: std::sync::atomic::AtomicU64,
+    /// Serializes host maintenance triggered by the outbound and replay workers.
+    pub attachment_retention_maintenance: tokio::sync::Mutex<()>,
     /// Supervisor tasks are retained until an update restart has observed their completion.
     workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub notifier: Notifier,
@@ -363,6 +378,12 @@ pub fn open_session(
         reconnect_wake: Notify::new(),
         replay_wake: Notify::new(),
         cancel: CancellationToken::new(),
+        attachment_retention_negotiated: AtomicBool::new(false),
+        attachment_retention_supported: AtomicBool::new(false),
+        attachment_retention_ready_advertised: AtomicBool::new(false),
+        attachment_retention_replay_observed: AtomicBool::new(false),
+        attachment_retention_epoch: std::sync::atomic::AtomicU64::new(0),
+        attachment_retention_maintenance: tokio::sync::Mutex::new(()),
         workers: Mutex::new(Vec::new()),
         notifier,
         mismatch: AtomicBool::new(false),
@@ -379,6 +400,27 @@ pub fn open_session(
         history_replay_wakes: Mutex::new(HashMap::new()),
         deferred_follow_up: DeferredFollowUp::default(),
     })
+}
+
+impl Session {
+    /// Opaque snapshot invalidation hint; this is not an acknowledgement authority or credential.
+    pub(crate) fn attachment_retention_session_scope_id(&self) -> String {
+        format!(
+            "{}:{}",
+            self.generation,
+            self.attachment_retention_epoch.load(Ordering::Acquire)
+        )
+    }
+
+    /// Must run before a snapshot promotion can replace core retention state.
+    pub(crate) fn begin_attachment_retention_restore(&self) {
+        self.attachment_retention_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.attachment_retention_replay_observed
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.attachment_retention_ready_advertised
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 fn sanitize_cached_gateways(mut gateways: Vec<GatewayView>) -> Vec<GatewayView> {
@@ -831,7 +873,13 @@ impl Session {
         if let Some(preview) = preview.clone() {
             self.cache_preview(info.attachment_id, preview);
         }
-        Ok(dto::attachment_view(&info, None, preview))
+        let mut attachment = dto::attachment_view(&info, None, preview);
+        self.apply_attachment_retention_state(
+            &mut attachment,
+            info.attachment_id,
+            &mut HashMap::new(),
+        );
+        Ok(attachment)
     }
 
     /// Retries only a locally recorded transfer failure. It never changes message state or queues
@@ -1030,6 +1078,29 @@ impl Session {
         }
     }
 
+    /// Projects core-owned retention availability once per attachment ID. A query failure keeps
+    /// the optional fields absent so older/core-unavailable states retain normal download UX.
+    fn apply_attachment_retention_state(
+        &self,
+        attachment: &mut AttachmentView,
+        id: AttachmentId,
+        states: &mut HashMap<
+            AttachmentId,
+            Option<peppy_desktop_api::attachment_retention::AttachmentRetentionStateDto>,
+        >,
+    ) {
+        let state = states.entry(id).or_insert_with(|| {
+            self.client
+                .attachment_retention_state(id)
+                .ok()
+                .map(dto::attachment_retention_state_dto)
+        });
+        if let Some(state) = state {
+            attachment.remote_state = Some(state.remote);
+            attachment.local_available = Some(state.local_available);
+        }
+    }
+
     /// Hydrates one original attachment's local preview for a visible native tile. This never
     /// schedules a download and returns the original attachment view, not a thumbnail view.
     pub fn hydrate_media_preview(
@@ -1075,6 +1146,8 @@ impl Session {
                 .cloned(),
             self.client.deferred_media_status(original_id),
         );
+        let mut retention_states = HashMap::new();
+        self.apply_attachment_retention_state(&mut attachment, original_id, &mut retention_states);
         if let Some(metadata) = metadata.as_ref() {
             attachment.media_meta = Some(Box::new(dto::media_metadata_view(metadata.clone())));
         }
@@ -1107,6 +1180,10 @@ impl Session {
         budget: &mut usize,
         hydration: &mut DeferredHydration,
         eligible: Option<&HashSet<AttachmentId>>,
+        retention_states: &mut HashMap<
+            AttachmentId,
+            Option<peppy_desktop_api::attachment_retention::AttachmentRetentionStateDto>,
+        >,
     ) -> Vec<AttachmentView> {
         let errors = self
             .transfer_errors
@@ -1133,6 +1210,8 @@ impl Session {
                         retryable: None,
                         media_hold: None,
                         media_meta: None,
+                        remote_state: None,
+                        local_available: None,
                     };
                 };
                 let media_metadata = self
@@ -1145,6 +1224,7 @@ impl Session {
                     errors.get(&id).cloned(),
                     self.client.deferred_media_status(id),
                 );
+                self.apply_attachment_retention_state(&mut attachment, id, retention_states);
                 if let Some(metadata) = media_metadata {
                     attachment.media_meta =
                         Some(Box::new(dto::media_metadata_view(metadata.clone())));
@@ -1178,12 +1258,19 @@ impl Session {
         hydration: &mut DeferredHydration,
         eligible: Option<&HashSet<AttachmentId>>,
     ) -> Vec<dto::MessageView> {
+        let mut retention_states = HashMap::new();
         messages
             .iter()
             .map(|message| {
                 dto::message_view(
                     message,
-                    self.attachment_views(message, budget, hydration, eligible),
+                    self.attachment_views(
+                        message,
+                        budget,
+                        hydration,
+                        eligible,
+                        &mut retention_states,
+                    ),
                 )
             })
             .collect()
@@ -1221,10 +1308,17 @@ impl Session {
             .map_err(core_error)?;
         let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
         let mut hydration = DeferredHydration::default();
+        let mut retention_states = HashMap::new();
         Ok(peppy_desktop_api::message_window_view(window, |message| {
             dto::message_view(
                 &message,
-                self.attachment_views(&message, &mut budget, &mut hydration, None),
+                self.attachment_views(
+                    &message,
+                    &mut budget,
+                    &mut hydration,
+                    None,
+                    &mut retention_states,
+                ),
             )
         }))
     }
@@ -1247,6 +1341,7 @@ impl Session {
             .map_err(core_error)?;
         let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
         let mut hydration = DeferredHydration::default();
+        let mut retention_states = HashMap::new();
         let previews = page
             .items
             .iter()
@@ -1258,6 +1353,11 @@ impl Session {
                     self.client
                         .deferred_media_status(item.attachment.attachment_id)
                         .map_err(core_error)?,
+                );
+                self.apply_attachment_retention_state(
+                    &mut attachment,
+                    item.attachment.attachment_id,
+                    &mut retention_states,
                 );
                 if let Some(metadata) = item.media_meta.as_ref() {
                     attachment.media_meta =
@@ -1580,6 +1680,7 @@ impl Session {
         let snapshot = Snapshot {
             version: "1",
             mode: "native",
+            session_scope_id: Some(self.attachment_retention_session_scope_id()),
             connection,
             encryption,
             gateways: status.gateways.clone(),
@@ -2398,5 +2499,106 @@ mod tests {
             .unwrap();
 
         assert_eq!(hydration.hydrated, 1);
+    }
+
+    #[tokio::test]
+    async fn storage_policy_removal_projects_remote_removal_and_keeps_local_copy_available() {
+        use peppy_client_core::{Direction, MmsAcquisitionInput, MmsSource};
+        use peppy_desktop_api::attachment_retention::RemoteAttachmentStateDto;
+
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(
+            open_session(
+                fixture.dir.path(),
+                &fixture.store,
+                &fixture.binding,
+                &[],
+                Arc::new(|| {}),
+            )
+            .unwrap(),
+        );
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let removed_source = fixture.dir.path().join("policy-removed.png");
+        let kept_source = fixture.dir.path().join("policy-kept.png");
+        std::fs::write(&removed_source, sample_png(2, 2)).unwrap();
+        std::fs::write(&kept_source, sample_png(3, 3)).unwrap();
+        let removed = session.prepare_attachment(&removed_source).unwrap();
+        let kept = session.prepare_attachment(&kept_source).unwrap();
+        let removed_id: peppy_client_core::AttachmentId = removed.id.parse().unwrap();
+        let kept_id: peppy_client_core::AttachmentId = kept.id.parse().unwrap();
+
+        assert!(
+            crate::sync::record_storage_policy_removal(&session, removed_id)
+                .await
+                .is_ok()
+        );
+
+        let acquisition = session
+            .client
+            .begin_mms_acquisition(MmsAcquisitionInput {
+                source: MmsSource {
+                    source_generation: "desktop-native-test".into(),
+                    subscription_id: "sim-1".into(),
+                    provider_message_id: "policy-projection".into(),
+                    provider_thread_id: Some("policy-projection-thread".into()),
+                },
+                direction: Direction::Incoming,
+                sender_address: Some("+12025550123".into()),
+                recipients: vec![],
+                subject: None,
+                body: "storage policy projection".into(),
+                imported: false,
+                observed_at_ms: 1,
+                transaction_id: None,
+            })
+            .unwrap();
+        session
+            .client
+            .set_mms_acquisition_part(&acquisition.acquisition_id, "part-0", removed_id)
+            .unwrap();
+        session
+            .client
+            .set_mms_acquisition_part(&acquisition.acquisition_id, "part-1", kept_id)
+            .unwrap();
+        let conversation = session
+            .client
+            .complete_mms_acquisition(&acquisition.acquisition_id)
+            .unwrap()
+            .conversation_id;
+
+        let (snapshot, _) = session
+            .snapshot(
+                Some(&conversation.to_string()),
+                None,
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap();
+        let projected = |id: &str| {
+            snapshot
+                .conversations
+                .iter()
+                .flat_map(|row| &row.messages)
+                .flat_map(|message| &message.attachments)
+                .find(|attachment| attachment.id == id)
+                .unwrap()
+        };
+
+        let removed_view = projected(&removed.id);
+        assert_eq!(
+            removed_view.remote_state,
+            Some(RemoteAttachmentStateDto::RemovedByStoragePolicy)
+        );
+        assert_eq!(removed_view.local_available, Some(true));
+        let kept_view = projected(&kept.id);
+        assert_eq!(
+            kept_view.remote_state,
+            Some(RemoteAttachmentStateDto::Available)
+        );
+        assert_eq!(kept_view.local_available, Some(true));
     }
 }

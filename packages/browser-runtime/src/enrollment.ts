@@ -1,3 +1,4 @@
+import { ATTACHMENT_RETENTION_PROTOCOL_HEADER_NAME, ATTACHMENT_RETENTION_PROTOCOL_HEADER_VALUE } from "@peppy/generated/attachment-retention";
 import { CheckpointError, RuntimeCoreError } from "./checkpoint.js";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
 
@@ -750,6 +751,7 @@ export class BrowserEnrollment {
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
           ...(this.csrf && method !== "GET" ? { [csrfHeader]: this.csrf } : {}),
+          ...(method === "GET" ? {} : { [ATTACHMENT_RETENTION_PROTOCOL_HEADER_NAME]: ATTACHMENT_RETENTION_PROTOCOL_HEADER_VALUE }),
           ...extraHeaders,
         },
         body: body === undefined ? undefined : JSON.stringify(body),

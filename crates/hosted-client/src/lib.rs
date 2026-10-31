@@ -20,6 +20,7 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+pub mod attachment_retention;
 pub mod device_credentials;
 pub mod newenrollment;
 

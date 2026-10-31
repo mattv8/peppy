@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Copy, Download, formatDateTime, ImageOff, Link, Loader2, Modal, RotateCw, X } from "@peppy/desktop-ui";
+import { attachmentStorageRemovalText, ChevronLeft, ChevronRight, Copy, Download, formatDateTime, ImageOff, Link, Loader2, Modal, RotateCw, X } from "@peppy/desktop-ui";
 import type { MediaPageItem } from "./MediaPanel";
 import { type MediaResult, useMediaActions } from "./MediaActionsContext";
 import { originalPending, previewUrl, usablePreview } from "./mediaState";
+import { peppyCopy } from "../generated/peppyCopy";
 import "./media-lightbox.css";
 
 export type MediaLightboxProps = {
@@ -46,15 +47,17 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
   const stageRef = useRef<HTMLDivElement>(null);
   const [stillWaiting, setStillWaiting] = useState(false);
   const item = items[index];
+  const removedRemoteOnly = item?.attachment.remoteState === "removed_by_storage_policy" && !item.attachment.localAvailable;
+  const removedWithLocalCopy = item?.attachment.remoteState === "removed_by_storage_policy" && item.attachment.localAvailable;
   const pending = pendingAttachmentId === item?.attachment.id;
   const url = loadedOriginal?.attachmentId === item?.attachment.id ? loadedOriginal.url : undefined;
   const request = async () => {
-  if (!item || originalPending(item.attachment)) return;
+    if (!item || originalPending(item.attachment)) return;
     const target = item.attachment.id; const version = ++requestVersion.current; requested.current = true; setLoadError(undefined);
     try { const result = await requestOriginal(target); if (version !== requestVersion.current) { if (result.state === "ready") releaseMedia?.(target, result.url); } else if (result.state === "ready") { setPendingAttachmentId(undefined); setLoadedOriginal({ attachmentId: target, url: result.url }); } else setPendingAttachmentId(target); } catch { if (version === requestVersion.current) setLoadError("Could not load media."); }
   };
   const check = async () => {
-  if (!item) return;
+    if (!item) return;
     const target = item.attachment.id; const version = ++requestVersion.current;
     try { const result = await checkOriginal(target); if (version !== requestVersion.current) { if (result.state === "ready") releaseMedia?.(target, result.url); } else if (result.state === "ready") { setPendingAttachmentId(undefined); setLoadedOriginal({ attachmentId: target, url: result.url }); } } catch { if (version === requestVersion.current) setLoadError("Could not load media."); }
   };
@@ -62,8 +65,8 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
   // Keyed only on the loaded pair: a new releaseMedia identity must not release the URL still on screen.
   useEffect(() => { if (loadedOriginal) return () => releaseMedia?.(loadedOriginal.attachmentId, loadedOriginal.url); }, [loadedOriginal]);
   useEffect(() => { requestVersion.current += 1; setLoadedOriginal(undefined); setPendingAttachmentId(undefined); setSavePending(false); setLoadError(undefined); setActionError(undefined); requested.current = false; }, [item?.attachment.id]);
-  useEffect(() => { if (item && !mediaState(item).startsWith("unsupported")) void request(); }, [item?.attachment.id]);
-  useEffect(() => { if (item && !url && (pending && requested.current || originalPending(item.attachment))) void check(); }, [retryKey]);
+  useEffect(() => { if (item && !removedRemoteOnly && !mediaState(item).startsWith("unsupported")) void request(); }, [item?.attachment.id, removedRemoteOnly]);
+  useEffect(() => { if (item && !removedRemoteOnly && !url && (pending && requested.current || originalPending(item.attachment))) void check(); }, [removedRemoteOnly, retryKey]);
   useEffect(() => { if (!pending) { setStillWaiting(false); return; } const timer = window.setTimeout(() => setStillWaiting(true), 15000); return () => window.clearTimeout(timer); }, [item?.attachment.id, pending]);
   const navigate = async (offset: -1 | 1) => {
     const nextIndex = index + offset;
@@ -91,10 +94,15 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
   useEffect(() => { const onKeyDown = (event: KeyboardEvent) => { if (event.target instanceof HTMLMediaElement) return; if (event.key === "ArrowLeft") void navigate(-1); if (event.key === "ArrowRight") void navigate(1); }; document.addEventListener("keydown", onKeyDown); return () => document.removeEventListener("keydown", onKeyDown); });
   const save = async () => { if (!item) return; setSaving(true); setActionError(undefined); try { await saveMedia(item.attachment.id); setSavePending(false); } catch (saveError) { if (isMediaPending(saveError)) setSavePending(true); else setActionError("Could not save media."); } finally { setSaving(false); } };
   useEffect(() => { if (savePending && !saving) void save(); }, [retryKey]);
-  const failed = item?.attachment.state === "failed" || (!url && Boolean(loadError));
+  const failed = !removedRemoteOnly && (item?.attachment.state === "failed" || (!url && Boolean(loadError)));
   useEffect(() => { if (!failed) return; const focused = document.activeElement; if (focused === closeButtonRef.current || focused === stageRef.current) retryButtonRef.current?.focus(); }, [failed]);
   useEffect(() => { closeButtonRef.current?.focus(); }, []);
   if (!item) return null;
+  if (removedRemoteOnly) {
+    const placeholder = <div data-attachment-storage-removed role="status"><ImageOff size={28} aria-hidden="true" /><span>{attachmentStorageRemovalText(false, peppyCopy).body}</span></div>;
+    if (chrome === "window") return <main id="media-viewer-window" data-lightbox data-chrome="window" aria-labelledby="media-viewer-window-title"><h1 id="media-viewer-window-title" className="visually-hidden">Media viewer</h1>{placeholder}<button ref={closeButtonRef} id="lightbox-close-btn" type="button" aria-label="Close media viewer" title="Close" onClick={onDismiss}><X size={18} aria-hidden="true" /></button></main>;
+    return <Modal id="media-lightbox" title="Media viewer" onDismiss={onDismiss} className="media-lightbox" actions={null} windowDragOutside><div data-lightbox>{placeholder}</div></Modal>;
+  }
   const state = mediaState(item, url, pending); const imagePreviewUrl = previewUrl(item.attachment);
   const positionLabel = !previousExhausted || !nextExhausted ? `Image ${index + 1} of at least ${items.length} loaded` : `Image ${index + 1} of ${items.length}`;
   const saveLabel = savePending ? "Downloading image" : saving ? "Saving image" : "Save image";
@@ -108,7 +116,7 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
     {chrome === "modal" && <div data-lightbox-backdrop aria-hidden="true" onClick={onDismiss} />}
     <div id="lightbox-toolbar" data-lightbox-toolbar {...drag}><span id="lightbox-position-label" className="visually-hidden" aria-live="polite">{positionLabel}</span><span data-lightbox-counter aria-hidden="true">{index + 1} / {items.length}</span><div data-lightbox-actions {...drag}><button id="lightbox-save-btn" type="button" aria-label={saveLabel} title={saveLabel} disabled={saving || savePending} aria-disabled={saving || savePending || undefined} aria-busy={saving || savePending || undefined} onClick={() => void save()}>{saving || savePending ? <Loader2 className="lightbox-spinner" size={18} aria-hidden="true" /> : <Download size={18} aria-hidden="true" />}</button>{actions?.canShareLink && <button id="lightbox-link-btn" type="button" aria-label={linkLabel} title={linkLabel} onClick={() => actions.shareLink(item.attachment)}><Link size={18} aria-hidden="true" /></button>}{canCopyImage && <button id="lightbox-copy-btn" type="button" aria-label="Copy image" title="Copy image" onClick={() => actions.copyImage(item.attachment)}><Copy size={18} aria-hidden="true" /></button>}<button ref={closeButtonRef} id="lightbox-close-btn" type="button" aria-label="Close media viewer" title="Close" onClick={onDismiss}><X size={18} aria-hidden="true" /></button></div></div>
     <div ref={stageRef} data-lightbox-stage tabIndex={-1}><button id="lightbox-prev-btn" type="button" data-lightbox-nav="prev" aria-label="Newer image" title="Newer image" disabled={previousDisabled} aria-busy={paging || undefined} onClick={() => void navigate(-1)}><ChevronLeft size={22} aria-hidden="true" /></button><div data-lightbox-media data-lightbox-state={failed ? "failed" : state}>{url && state === "ready-image" && <img src={url} alt={item.attachment.name || "Image"} />}{url && state === "ready-video" && <video controls preload="none" src={url} aria-label={item.attachment.name || "Video"} />}{url && state === "ready-audio" && <audio controls preload="none" src={url} aria-label={item.attachment.name || "Audio"} />}{showPending && <>{imagePreviewUrl && <img className="lightbox-backdrop" src={imagePreviewUrl} alt="" aria-hidden="true" />}<div data-lightbox-pending data-has-backdrop={imagePreviewUrl ? true : undefined} role="status"><Loader2 className="lightbox-spinner" size={28} aria-hidden="true" /><span>Downloading from phone…</span>{stillWaiting && <small>Still waiting — make sure your phone is online.</small>}</div></>}{showLoading && <div data-lightbox-loading><Loader2 className="lightbox-spinner" size={28} aria-label="Loading image" /></div>}{failed && <div data-lightbox-failure><ImageOff size={28} aria-hidden="true" /><span>Couldn't load this image</span><button ref={retryButtonRef} id="lightbox-retry-btn" type="button" onClick={() => void request()}><RotateCw size={14} aria-hidden="true" />Retry</button></div>}{(state === "unsupported" || state === "preview-unavailable") && <p role="status">Preview unavailable. Save the original to view it in another app.</p>}</div><button id="lightbox-next-btn" type="button" data-lightbox-nav="next" aria-label="Older image" title="Older image" disabled={nextDisabled} aria-busy={paging || undefined} onClick={() => void navigate(1)}><ChevronRight size={22} aria-hidden="true" /></button></div>
-    {actionError && <p role="alert">{actionError}</p>}<div id="lightbox-meta" {...drag}>{formatDateTime(item.message.timestamp)}</div>
+    {actionError && <p role="alert">{actionError}</p>}{removedWithLocalCopy && <p data-attachment-storage-local-copy role="status">{attachmentStorageRemovalText(true, peppyCopy).body}</p>}<div id="lightbox-meta" {...drag}>{formatDateTime(item.message.timestamp)}</div>
   </>;
   if (chrome === "window") return <main id="media-viewer-window" data-lightbox data-chrome="window" aria-labelledby="media-viewer-window-title"><h1 id="media-viewer-window-title" className="visually-hidden">Media viewer</h1>{content}</main>;
   return <Modal id="media-lightbox" title="Media viewer" onDismiss={onDismiss} className="media-lightbox" actions={null} windowDragOutside><div data-lightbox>{content}</div></Modal>;

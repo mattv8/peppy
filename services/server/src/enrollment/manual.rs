@@ -123,11 +123,12 @@ async fn create_challenge(
         })
         .await;
 
-    let (vault_id, role, authenticated) = match authorization {
+    let (vault_id, role, authenticated, authorization_device) = match authorization {
         Ok(context) => (
             context.vault_id,
             role_from_authorization(&context.role, request.device.kind)?,
             true,
+            context.device_id,
         ),
         Err(_) if state.hosted => {
             return Err(ManualError(
@@ -147,6 +148,7 @@ async fn create_challenge(
             .await?,
             public_role(request.device.kind),
             false,
+            None,
         ),
     };
     let origin = community_origin.unwrap_or_else(|| state.canonical_origin.clone());
@@ -190,6 +192,16 @@ async fn create_challenge(
     .await
     .map_err(database_error)?
     .ok_or(ManualError(StatusCode::NOT_FOUND, "vault_not_found"))?;
+    if let Some(device_id) = authorization_device {
+        crate::attachment_retention::withdraw_legacy_retention_readiness_on_connection(
+            &mut transaction,
+            &headers,
+            vault_id,
+            device_id,
+        )
+        .await
+        .map_err(database_error)?;
+    }
     let fingerprint = parse_fingerprint(vault.get("profile_fingerprint"))?;
     let key_epoch = vault.get::<i32, _>("key_epoch") as u32;
     let admission_key = sqlx::query_scalar::<_, Vec<u8>>(
@@ -390,19 +402,25 @@ async fn complete_challenge(
     let device_signature = decode_base64url::<64>(&request.device_signature)
         .map_err(|_| ManualError(StatusCode::UNAUTHORIZED, "invalid_device_proof"))?;
 
-    let vault_id = if state.hosted {
-        state
-            .authorization
-            .authorize_enrollment(EnrollmentAuthorizationRequest {
-                headers,
-                method: Method::POST,
-                operation: EnrollmentOperation::ManualComplete,
-                // Resolve the account-bound tenant before any RLS-scoped read.
-                vault_id: None,
-            })
-            .await
-            .map_err(|_| ManualError(StatusCode::UNAUTHORIZED, "enrollment_unauthorized"))?
-            .vault_id
+    let hosted_context = if state.hosted {
+        Some(
+            state
+                .authorization
+                .authorize_enrollment(EnrollmentAuthorizationRequest {
+                    headers: headers.clone(),
+                    method: Method::POST,
+                    operation: EnrollmentOperation::ManualComplete,
+                    // Resolve the account-bound tenant before any RLS-scoped read.
+                    vault_id: None,
+                })
+                .await
+                .map_err(|_| ManualError(StatusCode::UNAUTHORIZED, "enrollment_unauthorized"))?,
+        )
+    } else {
+        None
+    };
+    let vault_id = if let Some(context) = hosted_context.as_ref() {
+        context.vault_id
     } else {
         sqlx::query_scalar::<_, Uuid>("SELECT vault_id FROM device_admissions WHERE id = $1")
             .bind(enrollment_id)
@@ -434,6 +452,19 @@ async fn complete_challenge(
     .await
     .map_err(database_error)?
     .ok_or(ManualError(StatusCode::UNAUTHORIZED, "challenge_invalid"))?;
+    if let Some(device_id) = hosted_context
+        .as_ref()
+        .and_then(|context| context.device_id)
+    {
+        crate::attachment_retention::withdraw_legacy_retention_readiness_on_connection(
+            &mut transaction,
+            &headers,
+            vault_id,
+            device_id,
+        )
+        .await
+        .map_err(database_error)?;
+    }
     if row.get::<String, _>("origin") != origin
         || row.get::<i32, _>("failed_attempts") >= MAX_FAILED_PROOFS
         || row.get::<Vec<u8>, _>("credential_digest").as_slice() != credential_digest

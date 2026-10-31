@@ -108,12 +108,27 @@ class MmsTransferTest {
         file.delete()
     }
 
+    @Test fun reserveConflictNeverClaimsAlreadyUploadedSuccess() {
+        val file = Files.createTempFile("cipher", ".bin").toFile().apply { writeText("cipher") }
+        val client = fakeClient(listOf(cipher()))
+        var requests = 0
+        LoopbackHttpServer { requests++; LoopbackHttpServer.Response(409, """{"code":"attachment_reservation_conflict"}""") }.use { server ->
+            val result = MmsMediaTransfer(client.client, GatewayHttp(server.origin, "token"), file.parentFile).run()
+            assertEquals("permanent", result.failures.single().reason)
+            assertTrue(client.marked.isEmpty())
+            assertEquals(2, requests)
+        }
+        file.delete()
+    }
+
     @Test fun reserveConflictAcceptsMatchingDuplicateFinalizeProof() {
         val file = Files.createTempFile("cipher", ".bin").toFile().apply { writeText("cipher") }
         val client = fakeClient(listOf(cipher()))
+        val requests = mutableListOf<String>()
         LoopbackHttpServer { request ->
+            requests += request.target
             if (request.target.endsWith("reserve")) {
-                LoopbackHttpServer.Response(409)
+                LoopbackHttpServer.Response(409, """{"code":"attachment_reservation_conflict"}""")
             } else {
                 LoopbackHttpServer.Response(200, """{"attachment_id":"$id","duplicate":true}""")
             }
@@ -121,6 +136,7 @@ class MmsTransferTest {
             val result = MmsMediaTransfer(client.client, GatewayHttp(server.origin, "token"), file.parentFile).run()
             assertEquals(1, result.uploaded)
             assertEquals(listOf(id to id), client.marked)
+            assertEquals(listOf("/v1/attachments/reserve", "/v1/attachments/$id/finalize"), requests)
         }
         file.delete()
     }
@@ -159,6 +175,24 @@ class MmsTransferTest {
             }
         }
         file.delete()
+    }
+
+    @Test fun onlyExactTyped410StopsRemoteRetryAndPreservesLocalSource() {
+        val downloadId = "22222222-2222-2222-2222-222222222222"
+        for ((body, expectedReason, expectedReports) in listOf(
+            Triple("""{"code":"attachment_removed_by_storage_policy"}""", "removed", 1),
+            Triple("""{"code":"gone"}""", "permanent", 0),
+        )) {
+            val client = fakeClient(downloads = listOf(cipher(downloadId, downloadId)))
+            LoopbackHttpServer { LoopbackHttpServer.Response(410, body) }.use { server ->
+                val result = MmsMediaTransfer(client.client, GatewayHttp(server.origin, "token"), client.file.parentFile).run()
+                assertEquals(expectedReason, result.failures.single().reason)
+                assertEquals(expectedReports, client.removed.size)
+                assertTrue(client.file.exists())
+                assertTrue(client.installed.isEmpty())
+            }
+            client.file.delete()
+        }
     }
 
     @Test fun givesDownloadsShareAndDoesNotClaimMoreForExactBudget() {
@@ -290,6 +324,7 @@ class MmsTransferTest {
     private fun cipher(attachment: String = id, remote: String? = null) = NativeCipherObject(attachment, 6u, sha, remote)
     private class Fake(val uploads: List<NativeCipherObject>, val downloads: List<NativeCipherObject>, val file: File, var remotePaused: Boolean) {
         val marked = mutableListOf<Pair<String, String>>(); val installed = mutableListOf<String>()
+        val removed = mutableListOf<String>()
         val remoteCapacity = mutableListOf<Boolean>()
         val client = Proxy.newProxyInstance(javaClass.classLoader, arrayOf(NativeClientInterface::class.java)) { _, method, args ->
             when (method.name) {
@@ -298,6 +333,7 @@ class MmsTransferTest {
                 "nativeCipherFileForUpload" -> file.path
                 "markAttachmentUploaded" -> { marked += args!![0] as String to args[1] as String; Unit }
                 "installDownloadedAttachment" -> { installed += args!![1] as String; Unit }
+                "reportAttachmentRemovedByStoragePolicy" -> { removed += args!![0] as String; Unit }
                 "mmsBackfillStatus" -> NativeMmsBackfillStatus(false, null, false, if (remotePaused) NativeMmsBackfillPause.REMOTE_STORAGE else null, 0u, 0u, null)
                 "reportMmsBackfillRemoteCapacity" -> { remoteCapacity += args!![2] as Boolean; remotePaused = !(args[2] as Boolean); Unit }
                 "toString" -> "fake-client"

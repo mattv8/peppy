@@ -556,6 +556,17 @@ class MmsCaptureOrchestrationTest {
         assertFalse(MmsCaptureHints.consumeProviderChange(context))
     }
 
+    @Test fun deferredBarrierPreservesManualAndProviderIntentWithoutHotContinuation() {
+        val context = hintContext()
+
+        MmsCaptureWork.deferUntilProducerReady(context, manualRecheck = true, providerChanged = false)
+        MmsCaptureWork.deferUntilProducerReady(context, manualRecheck = false, providerChanged = true)
+        val deferred = MmsCaptureWork.consumeDeferredCapture(context)
+
+        assertEquals(MmsCaptureWork.DeferredCapture(manualRecheck = true, providerChanged = true), deferred)
+        assertEquals(null, MmsCaptureWork.consumeDeferredCapture(context))
+    }
+
     @Test fun cancellationRestoresConsumedHintAndPropagates() {
         val context = hintContext()
         MmsCaptureHints.record(context)

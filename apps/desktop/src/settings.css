@@ -138,3 +138,11 @@
     outline: 2px solid Highlight;
   }
 }
+/* Shared hosted-storage subsection within the account card. */
+#attachment-storage.settings-card { padding: 0; border: 0; background: transparent; box-shadow: none; }
+#attachment-storage-usage { display: grid; gap: 0.35rem; margin: 0.75rem 0; }
+#attachment-storage-usage > div { display: flex; justify-content: space-between; gap: 1rem; }
+#attachment-storage-usage dd { margin: 0; font-weight: 600; }
+#attachment-storage-notice { display: grid; gap: 0.4rem; }
+#attachment-storage-notice p { margin: 0; }
+#attachment-storage-activation, #attachment-storage-policy-state { margin: 0.65rem 0 0; font-weight: 600; }

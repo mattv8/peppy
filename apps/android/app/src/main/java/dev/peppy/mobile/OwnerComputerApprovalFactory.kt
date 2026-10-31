@@ -9,8 +9,8 @@ internal fun createOwnerComputerApprovalHost(context: Context): OwnerComputerApp
     val account = GatewayAccountHost.load(context) ?: return null
     if (account.self.role != "owner" || account.self.revoked) return null
     val material = NativeGateway.ownerEnrollmentMaterial(context) ?: return null
-    val credential = NativeGateway.accountCredential(context) ?: return null
-    if (credential.origin != material.origin || credential.vaultId != material.vaultId || credential.deviceId != material.deviceId) return null
+    val accountIdentity = NativeGateway.accountIdentity(context) ?: return null
+    if (accountIdentity.origin != material.origin || accountIdentity.vaultId != material.vaultId || accountIdentity.deviceId != material.deviceId) return null
     val client = try {
         NativeOwnerComputerClient(newNativeExistingOwnerEnrollmentClient(material.origin, NativeEnrollmentClientKind.ANDROID, "Android phone", material.profileJson, material.headerJson)).also {
             it.configureOwnerDevice(material.deviceId)
@@ -20,11 +20,20 @@ internal fun createOwnerComputerApprovalHost(context: Context): OwnerComputerApp
         HostedAccountClient(AndroidHostedSecureStore(context)).enrollmentSessionHeader()
     }
     return OwnerComputerApprovalHost(
-        client, OwnerPhoneTransport { method, path, body, session -> ownerComputerRequest(credential, method, path, body, session) },
+        client, OwnerPhoneTransport { method, path, body, session ->
+            val credential = NativeGateway.currentAccountCredential(context, accountIdentity) ?: return@OwnerPhoneTransport null
+            ownerComputerRequest(credential, method, path, body, session, material.retentionProtocolHeader)
+        },
         VaultSecretStore(AndroidHostedSecureStore(context)), material.vaultId, material.deviceId,
         { NativeGateway.open(context) }, material.origin, material.origin == HostedAccountClient.ORIGIN, accountSession,
     )
 }
 
-private fun ownerComputerRequest(credential: GatewayAccountCredential, method: String, path: String, body: String?, accountSession: String?) =
-    ownerPhoneRequest(credential, method, path, body, accountSession)
+private fun ownerComputerRequest(
+    credential: GatewayAccountCredential,
+    method: String,
+    path: String,
+    body: String?,
+    accountSession: String?,
+    retentionHeader: uniffi.peppy_mobile_bindings.NativeAttachmentRetentionProtocolHeader?,
+) = ownerPhoneRequest(credential, method, path, body, accountSession, retentionHeader)

@@ -8,7 +8,12 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import okhttp3.Request
+import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionProtocolHeader
+import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionRequest
+import uniffi.peppy_mobile_bindings.attachmentRetentionProtocolHeader
 
 /** One HTTP response. For non-2xx, [body] is the bounded error body (if any). */
 class HttpResult(val code: Int, val body: String?) {
@@ -38,11 +43,48 @@ class GatewayHttp(
     private val bearerToken: String,
     private val observeResponse: ((HttpResult) -> Unit)? = null,
 ) {
+    @Volatile private var retentionHeader: NativeAttachmentRetentionProtocolHeader? = null
+    @Volatile private var attachmentProducerReady = true
     fun get(path: String): HttpResult = request("GET", path, null)
 
     fun postJson(path: String, body: String): HttpResult = request("POST", path, body)
 
     fun deleteJson(path: String, body: String): HttpResult = request("DELETE", path, body)
+
+    fun retentionEnabled(): Boolean = retentionHeader != null
+    fun attachmentProducerReady(): Boolean = attachmentProducerReady
+    fun setAttachmentProducerReady(ready: Boolean) { attachmentProducerReady = ready }
+
+    /** Initializes mutation headers from the core negotiated state, not observed request traffic. */
+    fun initializeRetentionProtocol(enabled: Boolean) {
+        retentionHeader = if (enabled) attachmentRetentionProtocolHeader() else null
+    }
+
+    /** Executes a canonical retention request without widening its generated response budget. */
+    fun retentionRequest(request: NativeAttachmentRetentionRequest, readLimitBytes: ULong): HttpResult {
+        require(request.method in setOf("GET", "POST", "PUT", "DELETE"))
+        requireV1JsonPath(request.relativePath)
+        require(readLimitBytes > 0uL && readLimitBytes <= MAX_RESPONSE_BYTES.toULong())
+        val connection = URL(origin + request.relativePath).openConnection() as HttpURLConnection
+        try {
+            configureConnection(connection, request.method)
+            request.protocolHeader?.let { header -> connection.setRequestProperty(header.name, header.value) }
+            request.jsonBody?.let { body ->
+                val bytes = body.toByteArray(Charsets.UTF_8)
+                connection.doOutput = true
+                connection.setFixedLengthStreamingMode(bytes.size)
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(bytes) }
+            }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val body = stream?.use { readStrictBounded(it, readLimitBytes.toInt()) }
+            if (code == 204 && !body.isNullOrEmpty()) throw GatewayTransportException("retention 204 body")
+            return HttpResult(code, body)
+        } finally {
+            connection.disconnect()
+        }
+    }
 
     /** The websocket uses the same credential origin and never accepts a caller-supplied URL. */
     fun webSocketRequest(): Request {
@@ -110,6 +152,7 @@ class GatewayHttp(
         val connection = URL(origin + path).openConnection() as HttpURLConnection
         try {
             configureConnection(connection, method)
+            applyRetentionHeader(connection, method)
             if (body != null) {
                 val bytes = body.toByteArray(Charsets.UTF_8)
                 connection.doOutput = true
@@ -143,6 +186,7 @@ class GatewayHttp(
         val connection = URL(origin + path).openConnection() as HttpURLConnection
         try {
             configureConnection(connection, method)
+            applyRetentionHeader(connection, method)
             if (method == "PUT") {
                 connection.setRequestProperty("Content-Type", "application/octet-stream")
                 transfer(connection)
@@ -179,6 +223,10 @@ class GatewayHttp(
         connection.readTimeout = TIMEOUT_MS
         connection.setRequestProperty("Authorization", "Bearer $bearerToken")
         connection.setRequestProperty("Accept", "application/json")
+    }
+
+    private fun applyRetentionHeader(connection: HttpURLConnection, method: String) {
+        if (method != "GET") retentionHeader?.let { connection.setRequestProperty(it.name, it.value) }
     }
 
     private fun result(connection: HttpURLConnection, code: Int): Pair<HttpResult, Long> {
@@ -231,6 +279,26 @@ class GatewayHttp(
 
         internal fun readBounded(input: InputStream, limit: Int = MAX_RESPONSE_BYTES): String {
             return readBoundedWithCount(input, limit).body
+        }
+
+        private fun readStrictBounded(input: InputStream, limit: Int): String {
+            val bytes = ByteArrayOutputStream()
+            val buffer = ByteArray(4096)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (bytes.size() + read > limit) throw GatewayTransportException("response exceeds budget")
+                bytes.write(buffer, 0, read)
+            }
+            return try {
+                Charsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes.toByteArray()))
+                    .toString()
+            } catch (_: java.nio.charset.CharacterCodingException) {
+                throw GatewayTransportException("invalid UTF-8 response")
+            }
         }
 
         private fun readBoundedWithCount(input: InputStream, limit: Int = MAX_RESPONSE_BYTES): BoundedBody {

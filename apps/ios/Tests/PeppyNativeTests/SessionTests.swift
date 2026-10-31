@@ -16,6 +16,14 @@ import Testing
         )
     }
 
+    private static func cleanupReady(_ request: HTTPRequest) -> Bool? {
+        guard request.url.path == "/v1/devices/self/retention-capability",
+              let body = request.body,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        else { return nil }
+        return object["cleanup_ready"] as? Bool
+    }
+
     @Test func importVerifiesIdentityUnlocksWithSharedPassphraseAndRestoresKeysWithoutIt() async throws {
         let server = try FakeServer(passphrase: passphrase)
         let store = InMemorySecureStore()
@@ -108,11 +116,44 @@ import Testing
         let session = session(server, store: store, deviceId: deviceId, directory: temporaryDirectory())
         _ = try await session.importCredential(server.credential(deviceId: deviceId))
         _ = try await session.unlock(passphrase: passphrase)
+        let before = server.paths.count
         let report = try await session.syncOnce()
         #expect(report.complete && report.uploaded == 0 && report.receiveCursor == "0")
-        #expect(server.paths.last == "GET /v1/events")
+        let paths = Array(server.paths.dropFirst(before))
+        let replay = try #require(paths.firstIndex(of: "GET /v1/events"))
+        let capabilities = paths.indices.filter { paths[$0] == "PUT /v1/devices/self/retention-capability" }
+        #expect(capabilities.count == 2)
+        #expect(capabilities[0] < replay && replay < capabilities[1])
         await session.close()
         await #expect(throws: ClientError.notEnrolled) { try await session.syncOnce() }
+    }
+
+    @Test func delayedOldReadinessResponseCannotMarkSameIdentityReopenReady() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let store = InMemorySecureStore()
+        let deviceId = UUID().uuidString.lowercased()
+        let gate = ReadinessResponseGate()
+        let transport = DelayedReadinessTransport(
+            inner: DeviceScopedTransport(server: server, deviceId: deviceId), gate: gate
+        )
+        let native = NativeSession(
+            secureStore: store, transport: transport, databaseDirectory: temporaryDirectory(),
+            allowLoopbackHTTP: false
+        )
+        _ = try await native.importCredential(server.credential(deviceId: deviceId))
+        _ = try await native.unlock(passphrase: passphrase)
+        let oldPass = Task { try await native.syncOnce() }
+        await gate.waitUntilDelayed()
+
+        await native.close()
+        _ = try await native.open()
+        await gate.resume()
+        await #expect(throws: ClientError.canceled) { try await oldPass.value }
+        _ = try await native.syncOnce()
+
+        let readiness = server.lock.withLock { server.requests.compactMap(Self.cleanupReady) }
+        #expect(readiness.suffix(4) == [false, true, false, true])
+        await native.close()
     }
 
     @Test func wrongUnlockDoesNotBindAndVerifiedUnlockNeverOverwrites() async throws {
@@ -261,6 +302,109 @@ import Testing
         #expect(unreadable.store.value(unreadable.pendingAccount) == Data(passphrase.utf8))
         #expect(unreadable.store.value(unreadable.checkpointAccount) == unreadable.checkpoint)
     }
+
+    @Test func storageStatusRejectsMalformedUTF8AndOversizedBodies() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let deviceId = UUID().uuidString.lowercased()
+        let scoped = session(server, store: InMemorySecureStore(), deviceId: deviceId, directory: temporaryDirectory())
+        _ = try await scoped.importCredential(server.credential(deviceId: deviceId))
+
+        server.mutate { fake in
+            fake.override = { request in
+                request.url.path == "/v1/attachments/storage/status"
+                    ? HTTPResponse(status: 200, url: request.url, body: Data([0xff])) : nil
+            }
+        }
+        await #expect(throws: ClientError.invalidResponse("retention status")) {
+            _ = try await scoped.attachmentStorageStatus()
+        }
+
+        server.mutate { fake in
+            fake.override = { request in
+                request.url.path == "/v1/attachments/storage/status"
+                    ? HTTPResponse(
+                        status: 200, url: request.url,
+                        body: Data(repeating: 0x20, count: Int(attachmentRetentionResponseReadLimitBytes()) + 1)
+                    ) : nil
+            }
+        }
+        await #expect(throws: (any Error).self) { _ = try await scoped.attachmentStorageStatus() }
+        await scoped.close()
+    }
+
+    @Test func eligibleStorageNoticeIsNeverAcknowledged() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let deviceId = UUID().uuidString.lowercased()
+        let scoped = session(server, store: InMemorySecureStore(), deviceId: deviceId, directory: temporaryDirectory())
+        _ = try await scoped.importCredential(server.credential(deviceId: deviceId))
+        server.mutate { fake in
+            fake.override = { request in
+                guard request.url.path == "/v1/attachments/storage/status" else { return nil }
+                return fake.reply(request, 200, [
+                    "used_bytes": 1, "limit_bytes": 2, "base_bytes": 2, "pack_bytes": 0,
+                    "protected_bytes": 1, "removed_bytes": 0, "cleanup_state": "available",
+                    "notice": [
+                        "state": "eligible",
+                        "policy_version": attachmentRetentionSupportedNoticePolicyVersion(),
+                        "presented_at": 1, "acknowledged_at": 1, "activation_at": 2,
+                    ],
+                ])
+            }
+        }
+        guard case .available(let scopeId, let status) = try await scoped.attachmentStorageStatus() else { return }
+        let before = server.paths.count
+
+        await #expect(throws: ClientError.identityMismatch) {
+            try await scoped.acknowledgeAttachmentStorageNotice(scopeId: scopeId, policyVersion: status.notice.policyVersion)
+        }
+        #expect(server.paths.count == before)
+        await scoped.close()
+    }
+
+    @Test func noticeAcknowledgementRequiresAnEmpty204() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let deviceId = UUID().uuidString.lowercased()
+        let scoped = session(server, store: InMemorySecureStore(), deviceId: deviceId, directory: temporaryDirectory())
+        _ = try await scoped.importCredential(server.credential(deviceId: deviceId))
+        guard case .available(let scopeId, let status) = try await scoped.attachmentStorageStatus() else {
+            Issue.record("expected available storage status")
+            return
+        }
+        server.mutate { fake in
+            fake.override = { request in
+                request.url.path.hasSuffix("/notice/acknowledgement")
+                    ? HTTPResponse(status: 204, url: request.url, body: Data("{}".utf8)) : nil
+            }
+        }
+
+        await #expect(throws: ClientError.server(status: 204, code: nil)) {
+            try await scoped.acknowledgeAttachmentStorageNotice(scopeId: scopeId, policyVersion: status.notice.policyVersion)
+        }
+        await scoped.close()
+    }
+
+    @Test func noticeAcknowledgementRequiresKnownCopyAndCurrentScope() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let deviceId = UUID().uuidString.lowercased()
+        let scoped = session(server, store: InMemorySecureStore(), deviceId: deviceId, directory: temporaryDirectory())
+        _ = try await scoped.importCredential(server.credential(deviceId: deviceId))
+        let result = try await scoped.attachmentStorageStatus()
+        guard case .available(let scopeId, let status) = result else { Issue.record("expected available storage status"); return }
+        let before = server.paths.count
+        await #expect(throws: ClientError.identityMismatch) {
+            try await scoped.acknowledgeAttachmentStorageNotice(scopeId: scopeId, policyVersion: "future_policy_v9")
+        }
+        #expect(server.paths.count == before)
+        try await scoped.acknowledgeAttachmentStorageNotice(scopeId: scopeId, policyVersion: status.notice.policyVersion)
+        #expect(server.paths.last == "POST /v1/attachments/storage/notice/acknowledgement")
+        await scoped.close()
+        _ = try await scoped.open()
+        let ackCount = server.paths.filter { $0.hasSuffix("/notice/acknowledgement") }.count
+        await #expect(throws: ClientError.identityMismatch) {
+            try await scoped.acknowledgeAttachmentStorageNotice(scopeId: scopeId, policyVersion: attachmentRetentionSupportedNoticePolicyVersion())
+        }
+        #expect(server.paths.filter { $0.hasSuffix("/notice/acknowledgement") }.count == ackCount)
+    }
 }
 
 private struct RecoverySessionFixture {
@@ -350,5 +494,57 @@ private final class RecoverySecureStore: SecureStore, @unchecked Sendable {
     func delete(_ account: String) throws(ClientError) {
         if failingDelete == account { throw recoveryStoreFailure }
         try backing.delete(account)
+    }
+}
+
+private actor ReadinessResponseGate {
+    private var delayed = false
+    private var delayWaiter: CheckedContinuation<Void, Never>?
+    private var resumeWaiter: CheckedContinuation<Void, Never>?
+
+    func delay() async {
+        delayed = true
+        delayWaiter?.resume()
+        await withCheckedContinuation { resumeWaiter = $0 }
+    }
+
+    func waitUntilDelayed() async {
+        guard !delayed else { return }
+        await withCheckedContinuation { delayWaiter = $0 }
+    }
+
+    func resume() {
+        resumeWaiter?.resume()
+        resumeWaiter = nil
+    }
+}
+
+private final class DelayedReadinessTransport: HTTPTransport, @unchecked Sendable {
+    private let inner: any HTTPTransport
+    private let gate: ReadinessResponseGate
+    private let lock = NSLock()
+    private var didDelay = false
+
+    init(inner: any HTTPTransport, gate: ReadinessResponseGate) {
+        self.inner = inner
+        self.gate = gate
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let response = try await inner.send(request)
+        guard Self.cleanupReady(request) == true, lock.withLock({
+            guard !didDelay else { return false }
+            didDelay = true
+            return true
+        }) else { return response }
+        await gate.delay()
+        return response
+    }
+
+    private static func cleanupReady(_ request: HTTPRequest) -> Bool? {
+        guard let body = request.body,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        else { return nil }
+        return object["cleanup_ready"] as? Bool
     }
 }

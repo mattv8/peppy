@@ -4321,6 +4321,326 @@
         }
       }
     },
+    "peppy.attachment_storage_section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hosted attachment storage"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_allowance": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Standard plans include 50 GB of hosted attachment storage."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_notice": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When automatic cleanup is enabled and a new upload needs space, Peppy Hosted may remove the oldest eligible hosted message attachments. Message history remains."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_protected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Attachments stored before this policy, and other protected attachments, are not removed automatically."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_device_copies": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cleanup does not actively delete downloaded copies on your devices or original SMS and MMS on your phone. Normal device cache limits still apply."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_grace": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatic cleanup will not begin until at least 30 days after this notice is first shown."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_grace_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatic cleanup is paused during the notice period."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_grace_full": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hosted storage is full. New uploads are paused. You can add storage; cleanup remains subject to the notice period and other requirements."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_readiness": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cleanup also requires compatible devices and service readiness."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_purchase": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More storage can reduce future removals. It cannot restore files already removed."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_activation_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cleanup will not begin before"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_billing_handoff": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You may need to sign in to the same Peppy account on the website."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_disabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatic cleanup is not enabled. New uploads pause when storage is full."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_read_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your subscription is read-only. Existing vault data is retained, and automatic cleanup is paused."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Storage policy status is unavailable. Refresh to check."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_reload_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_manage_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage storage on the website"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_cleanup_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Storage cleanup is pending."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_removed_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hosted media removed"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_removed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This attachment was removed from hosted storage to make room. The message remains."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_removed_local_copy": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hosted copy removed. Available on this device."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_notice_save_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The notice could not be recorded. Refresh to try again."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_stale_usage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last known storage usage"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_usage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Storage used"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Storage limit"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_base_included": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Included storage"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_billing_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your storage change is still processing. Your current allowance applies until it is confirmed."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_billing_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billing status could not be verified. Automatic cleanup is paused."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_device_update_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatic cleanup is waiting for compatible, ready devices."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking hosted attachment storage…"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_billing_open_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The account and billing page could not be opened. Try again."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_privacy_open_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The Privacy Policy could not be opened. Try again."
+          }
+        }
+      }
+    },
     "peppy.permissions_headline": {
       "localizations": {
         "en": {

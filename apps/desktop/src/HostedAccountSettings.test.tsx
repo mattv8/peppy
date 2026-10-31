@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HostedAccountSettings } from "./HostedAccountSettings";
+import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./HostedAccountSettings";
 import { bridge, type HostedAccountView } from "./bridge";
 
 vi.mock("./bridge", { spy: true });
@@ -182,4 +182,153 @@ describe("HostedAccountSettings", () => {
     expect(action).toHaveAttribute("aria-busy", "true");
     expect(bridge.hosted_sign_in).toHaveBeenCalledWith("google");
   });
+});
+
+
+describe("AttachmentStorageSettingsHost", () => {
+  afterEach(cleanup);
+  beforeEach(() => {
+    vi.mocked(bridge.attachment_retention_status!).mockReset();
+    vi.mocked(bridge.attachment_retention_status!).mockResolvedValue({ kind: "unsupported" });
+    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockReset();
+    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockResolvedValue("unsupported");
+  });
+
+  const status = (): import("./bridge").AttachmentRetentionStatusResult => ({
+    kind: "available",
+    scopeId: "scope-one",
+    status: {
+      usedBytes: 20_000_000_000,
+      limitBytes: 75_000_000_000,
+      baseBytes: 50_000_000_000,
+      packBytes: 25_000_000_000,
+      protectedBytes: 0,
+      removedBytes: 0,
+      cleanupState: "disabled",
+      cleanupUnavailableReason: "cleanup_disabled",
+      notice: { state: "grace_period", policyVersion: "hosted_attachment_retention_v1", presentedAtSeconds: 1, acknowledgedAtSeconds: 2, activationAtSeconds: 1_800_000_000 },
+    },
+  });
+
+  it("preserves known usage as stale when an explicit refresh is temporarily unavailable", async () => {
+    vi.mocked(bridge.attachment_retention_status!)
+      .mockResolvedValueOnce(status())
+      .mockResolvedValueOnce({ kind: "temporarily_unavailable" });
+    render(<AttachmentStorageSettingsHost />);
+    await screen.findByText("20 GB");
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(await screen.findByText("Last known storage usage")).toBeInTheDocument();
+    expect(screen.getByText("20 GB")).toBeInTheDocument();
+  });
+
+  it("keeps the disclosure visible and reports a failed notice record", async () => {
+    const notPresented = status();
+    if (notPresented.kind === "available") notPresented.status.notice.state = "not_presented";
+    vi.mocked(bridge.attachment_retention_status!).mockResolvedValue(notPresented);
+    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockResolvedValue("temporarily_unavailable");
+    render(<AttachmentStorageSettingsHost />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The notice could not be recorded");
+    expect(screen.getByText(/When automatic cleanup is enabled/)).toBeInTheDocument();
+  });
+
+  it("retries a failed acknowledgement on explicit Refresh and reloads after success", async () => {
+    const notPresented = status();
+    if (notPresented.kind === "available") notPresented.status.notice.state = "not_presented";
+    const acknowledged = status();
+    if (acknowledged.kind === "available") acknowledged.status.notice.state = "grace_period";
+    vi.mocked(bridge.attachment_retention_status!)
+      .mockResolvedValueOnce(notPresented)
+      .mockResolvedValueOnce(notPresented)
+      .mockResolvedValueOnce(acknowledged);
+    vi.mocked(bridge.acknowledge_attachment_retention_notice!)
+      .mockResolvedValueOnce("temporarily_unavailable")
+      .mockResolvedValueOnce("acknowledged");
+
+    render(<AttachmentStorageSettingsHost />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("The notice could not be recorded");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(3));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("ignores an old device scope acknowledgement and hides its usage immediately", async () => {
+    const firstStatus = deferred<import("./bridge").AttachmentRetentionStatusResult>();
+    const acknowledgement = deferred<"acknowledged" | "stale_scope" | "temporarily_unavailable" | "unsupported">();
+    const unacknowledged = status();
+    if (unacknowledged.kind === "available") unacknowledged.status.notice.state = "not_presented";
+    vi.mocked(bridge.attachment_retention_status!).mockReturnValueOnce(firstStatus.promise).mockResolvedValueOnce(status());
+    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockReturnValueOnce(acknowledgement.promise);
+    const { rerender } = render(<AttachmentStorageSettingsHost sessionScopeId="device-a" />);
+
+    await act(async () => firstStatus.resolve(unacknowledged));
+    await waitFor(() => expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledOnce());
+    rerender(<AttachmentStorageSettingsHost sessionScopeId="device-b" />);
+    expect(screen.queryByText("20 GB")).not.toBeInTheDocument();
+
+    await act(async () => acknowledgement.resolve("acknowledged"));
+    await waitFor(() => expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(2));
+    expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers a stale scope once until a fresh Refresh re-arms acknowledgement", async () => {
+    const unacknowledged = status();
+    if (unacknowledged.kind === "available") unacknowledged.status.notice.state = "not_presented";
+    vi.mocked(bridge.attachment_retention_status!).mockResolvedValue(unacknowledged);
+    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockResolvedValue("stale_scope");
+    render(<AttachmentStorageSettingsHost />);
+
+    await waitFor(() => expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(2));
+    expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps the billing handoff after an unsupported retention response", async () => {
+    vi.mocked(bridge.attachment_retention_status!).mockResolvedValue({ kind: "unsupported" });
+    render(<AttachmentStorageSettingsHost onManageStorage={vi.fn()} />);
+
+    await waitFor(() => expect(document.getElementById("attachment-storage-loading")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Manage storage on the website" })).toBeInTheDocument();
+    expect(screen.queryByText("When automatic cleanup is enabled")).not.toBeInTheDocument();
+
+    cleanup();
+    render(<AttachmentStorageSettingsHost hostKind="browser" manageStorageUrl="https://account.example.test/billing" />);
+    await waitFor(() => expect(document.getElementById("attachment-storage-loading")).not.toBeInTheDocument());
+    expect(screen.getByRole("link", { name: /manage storage on the website/i })).toHaveAttribute("href", "https://account.example.test/billing");
+  });
+
+  it("does not announce an unavailable status while the initial storage read is pending", () => {
+    vi.mocked(bridge.attachment_retention_status!).mockReturnValue(new Promise(() => undefined));
+    render(<AttachmentStorageSettingsHost />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("Checking hosted attachment storage");
+    expect(screen.queryByText("Storage policy status is unavailable")).not.toBeInTheDocument();
+  });
+
+  it("renders the activation date only after acknowledgement reloads it", async () => {
+    const notPresented = status();
+    const acknowledged = status();
+    if (notPresented.kind === "available") {
+      notPresented.status.notice = { ...notPresented.status.notice, state: "not_presented", activationAtSeconds: null };
+    }
+    if (acknowledged.kind === "available") {
+      acknowledged.status.notice = { ...acknowledged.status.notice, state: "grace_period", activationAtSeconds: 1_800_000_000 };
+    }
+    const acknowledgement = deferred<"acknowledged" | "stale_scope" | "temporarily_unavailable" | "unsupported">();
+    vi.mocked(bridge.attachment_retention_status!).mockResolvedValueOnce(notPresented).mockResolvedValueOnce(acknowledged);
+    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockReturnValueOnce(acknowledgement.promise);
+    render(<AttachmentStorageSettingsHost />);
+
+    await waitFor(() => expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/Cleanup will not begin before January/)).not.toBeInTheDocument();
+    await act(async () => acknowledgement.resolve("acknowledged"));
+    expect(await screen.findByText(/Cleanup will not begin before January/)).toBeInTheDocument();
+  });
+
 });

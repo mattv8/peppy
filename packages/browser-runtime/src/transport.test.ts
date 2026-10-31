@@ -289,4 +289,36 @@ describe("OriginTransport", () => {
     expect(response.body?.locked).toBe(false);
   });
 
+
+  it("preserves canonical retention JSON bytes and rejects overflow, invalid UTF-8, and nonempty 204", async () => {
+    const duplicateJson = '{"use_id":"first","use_id":"second"}';
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(duplicateJson, { status: 200 }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([0xff]), { status: 200 }))
+      .mockResolvedValueOnce(new Response("x".repeat(16_385), { status: 200 }))
+      .mockResolvedValueOnce(Object.defineProperty(new Response("not-empty", { status: 200 }), "status", { value: 204 }));
+    const transport = new OriginTransport({ origin: "https://api.example.test", deviceToken: () => token, fetch: fetcher });
+    const responseRequest = { method: "POST", relativePath: "/v1/attachments/a/uses", jsonBody: "{\"raw\":1}", protocolHeader: { name: "Peppy-Attachment-Retention-Protocol", value: "1" }, expectedSuccessStatus: 200 };
+
+    await expect(transport.retention(responseRequest, new AbortController().signal)).resolves.toBe(duplicateJson);
+    await expect(transport.retention(responseRequest, new AbortController().signal)).rejects.toMatchObject({ kind: "invalid" });
+    await expect(transport.retention(responseRequest, new AbortController().signal)).rejects.toMatchObject({ kind: "too-large" });
+    await expect(transport.retention({ ...responseRequest, method: "PUT", relativePath: "/v1/devices/self/retention-capability", protocolHeader: null, expectedSuccessStatus: 204 }, new AbortController().signal)).rejects.toMatchObject({ kind: "invalid" });
+    expect(fetcher.mock.calls[0][1]?.body).toBe('{"raw":1}');
+  });
+
+  it("adds the generated protocol header to every ordinary mutation carrier but not GET", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => new Response("{}", { status: 200 }));
+    const transport = new OriginTransport({ origin: "https://api.example.test", deviceToken: () => token, fetch: fetcher });
+
+    await transport.json("/v1/attachments/reserve", { method: "POST", body: {} });
+    await transport.upload("/v1/attachments/a/upload", new Uint8Array([1]));
+    await transport.postPublicCopy("/v1/attachments/a/public-copies", new Uint8Array([1]), { fileName: "a.png" });
+    await transport.json("/v1/events?after=0", { method: "GET" });
+
+    const headers = fetcher.mock.calls.map(call => call[1]?.headers as Headers);
+    expect(headers.slice(0, 3).map(value => value.get("Peppy-Attachment-Retention-Protocol"))).toEqual(["1", "1", "1"]);
+    expect(headers[3].get("Peppy-Attachment-Retention-Protocol")).toBeNull();
+  });
+
 });

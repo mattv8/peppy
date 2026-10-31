@@ -1,4 +1,5 @@
 import Foundation
+import PeppyBindings
 import Testing
 @testable import PeppyNative
 
@@ -15,6 +16,44 @@ import Testing
         #expect(request.url.path == "/v1/instance/claim")
         #expect(request.headers["Content-Type"] == "application/json")
         #expect(request.body == Data("{\"operation_id\":\"request-owned-by-rust\"}".utf8))
+    }
+
+    @Test func negotiatedRetentionHeaderCoversOwnerEnrollmentMutationsOnly() async throws {
+        let transport = EnrollmentTransport()
+        let origin = try ServerOrigin(canonical: "https://enroll.example.test", allowLoopbackHTTP: false)
+        let state = AttachmentRetentionHTTPState()
+        let header = attachmentRetentionProtocolHeader()
+        state.remember(name: header.name, value: header.value)
+        let host = EnrollmentHost(origin: origin, transport: transport, attachmentRetention: state)
+        let id = "4a440c5f-8cae-4e4b-aae2-7472c64a08a1"
+
+        _ = try await host.requestManualChallenge("{}")
+        _ = try await host.completeManualChallenge(id: id, request: "{}")
+        _ = try await host.createPhoneInvitation("{}", credential: "owner")
+        _ = try await host.approvePhoneInvitation(id: id, request: "{}", credential: "owner")
+        try await host.cancelPhoneInvitation(id: id, credential: "owner")
+        _ = try await host.createComputerEnrollment("{}", credential: "owner")
+        _ = try await host.approveComputerEnrollment(id: id, request: "{}", credential: "owner")
+        try await host.cancelComputerEnrollment(id: id, credential: "owner")
+        _ = try await host.phoneInvitationStatus(id: id, credential: "owner")
+
+        let requests = transport.requests
+        #expect(requests.count == 9)
+        #expect(requests.dropLast().allSatisfy { $0.headers[header.name] == header.value })
+        #expect(requests.last?.method == "GET" && requests.last?.headers[header.name] == nil)
+    }
+
+    @Test func legacyRetentionNegotiationLeavesOwnerEnrollmentMutationsHeaderless() async throws {
+        let transport = EnrollmentTransport()
+        let origin = try ServerOrigin(canonical: "https://enroll.example.test", allowLoopbackHTTP: false)
+        let state = AttachmentRetentionHTTPState()
+        state.markLegacy()
+        let host = EnrollmentHost(origin: origin, transport: transport, attachmentRetention: state)
+
+        _ = try await host.requestManualChallenge("{}")
+
+        let header = attachmentRetentionProtocolHeader()
+        #expect(transport.request?.headers[header.name] == nil)
     }
 
     @Test func vaultRequestPollingUsesTheProtectedHeaderAndBoundedWait() async throws {
@@ -169,6 +208,7 @@ import Testing
 private final class EnrollmentTransport: HTTPTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var latest: HTTPRequest?
+    private var recorded: [HTTPRequest] = []
     private let body: Data
 
     init(body: String = "{}") {
@@ -176,9 +216,10 @@ private final class EnrollmentTransport: HTTPTransport, @unchecked Sendable {
     }
 
     var request: HTTPRequest? { lock.withLock { latest } }
+    var requests: [HTTPRequest] { lock.withLock { recorded } }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-        lock.withLock { latest = request }
+        lock.withLock { latest = request; recorded.append(request) }
         return HTTPResponse(status: 200, url: request.url, body: body)
     }
 }

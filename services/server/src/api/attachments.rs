@@ -16,12 +16,18 @@ use std::{fs::File, path::PathBuf, time::Duration};
 use axum::{
     Json,
     body::Body,
-    extract::{Path, State},
+    extract::{FromRequest, Path, Request, State},
     http::{HeaderMap, StatusCode},
     response::Response,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
+use peppy_hosted_api::attachments::{
+    AcknowledgeRetentionNoticeRequest, AttachmentRetentionClass, AttachmentStorageStatusResponse,
+    AttachmentUseKind, AttachmentUseResponse, AttachmentUseState, RegisterAttachmentUseRequest,
+    ReleaseAttachmentUseRequest, ReserveAttachmentRequest, ReservedAttachmentResponse,
+    RetentionCapabilityRequest, error_codes,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -31,9 +37,11 @@ use uuid::Uuid;
 
 use super::sync::parse_cursor;
 use super::{
-    ApiError, ApiResult, ApiState, Operation, attachment_quota, auth_with_mode, authorize,
-    authorize_resolved, database_unavailable, insert_error, revalidate_principal,
+    AccessPrincipal, ApiError, ApiResult, ApiState, DeviceAttachmentRetentionError, Operation,
+    Principal, attachment_quota, auth_with_mode, authorize, authorize_resolved,
+    database_unavailable, insert_error, revalidate_principal, withdraw_legacy_retention_mutation,
 };
+use crate::attachment_retention::retention_storage_status_on_connection;
 use crate::scope;
 use crate::storage::{ObjectRange, Storage, StorageError};
 
@@ -48,6 +56,83 @@ const MAX_DELETE_BACKOFF_SECONDS: i64 = 3_600;
 const RESERVATION_TTL_SECONDS: u16 = 3_600;
 /// Maximum number of attachment references per registration request.
 const MAX_REFERENCES_PER_REQUEST: usize = 128;
+
+fn device_retention_error(error: DeviceAttachmentRetentionError, route: &'static str) -> ApiError {
+    match error {
+        DeviceAttachmentRetentionError::Unsupported => {
+            ApiError(StatusCode::NOT_IMPLEMENTED, error_codes::UNSUPPORTED)
+        }
+        DeviceAttachmentRetentionError::Forbidden => {
+            ApiError(StatusCode::FORBIDDEN, error_codes::FORBIDDEN)
+        }
+        DeviceAttachmentRetentionError::InvalidPolicyVersion => {
+            ApiError(StatusCode::BAD_REQUEST, error_codes::INVALID_POLICY_VERSION)
+        }
+        DeviceAttachmentRetentionError::Unavailable => {
+            tracing::warn!(
+                route,
+                error_class = "device_retention_callback_unavailable",
+                "device attachment retention callback failed"
+            );
+            ApiError(StatusCode::SERVICE_UNAVAILABLE, error_codes::UNAVAILABLE)
+        }
+    }
+}
+
+pub(super) async fn device_attachment_storage_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<AttachmentStorageStatusResponse>> {
+    let principal = auth_with_mode(&state, &headers).await?;
+    authorize(&state, &principal, Operation::Read).await?;
+    state
+        .policy
+        .device_attachment_storage_status(AccessPrincipal {
+            vault_id: principal.vault,
+            device_id: principal.device,
+            role: principal.role,
+        })
+        .await
+        .map(Json)
+        .map_err(|error| {
+            device_retention_error(
+                error,
+                peppy_hosted_api::attachments::routes::DEVICE_ATTACHMENT_STORAGE_STATUS,
+            )
+        })
+}
+
+pub(super) async fn acknowledge_device_attachment_retention(
+    State(state): State<ApiState>,
+    request: Request,
+) -> ApiResult<StatusCode> {
+    let principal = auth_with_mode(&state, request.headers()).await?;
+    authorize(&state, &principal, Operation::Read).await?;
+    let Json(request) = Json::<AcknowledgeRetentionNoticeRequest>::from_request(request, &state)
+        .await
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, error_codes::INVALID_POLICY_VERSION))?;
+    request
+        .validate()
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, error_codes::INVALID_POLICY_VERSION))?;
+    state
+        .policy
+        .acknowledge_device_attachment_retention(
+            AccessPrincipal {
+                vault_id: principal.vault,
+                device_id: principal.device,
+                role: principal.role,
+            },
+            request,
+        )
+        .await
+        .map_err(|error| {
+            device_retention_error(
+                error,
+                peppy_hosted_api::attachments::routes::DEVICE_RETENTION_NOTICE_ACKNOWLEDGEMENT,
+            )
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
 async fn validate_private_spool(path: PathBuf) -> ApiResult<()> {
     let validation = tokio::task::spawn_blocking(move || {
@@ -189,7 +274,7 @@ impl Drop for Spool {
 /// Bytes counted against the vault quota: finalized attachments, live
 /// reservations and every public copy whose object is not yet purged.
 async fn quota_used(tx: &mut Transaction<'_, Postgres>, vault: Uuid) -> ApiResult<i64> {
-    sqlx::query_scalar("SELECT (COALESCE((SELECT SUM(ciphertext_bytes) FROM attachments WHERE vault_id=$1),0) + COALESCE((SELECT SUM(declared_bytes) FROM upload_reservations WHERE vault_id=$1 AND finalized_at IS NULL AND deleting_at IS NULL AND expires_at > now()),0) + COALESCE((SELECT SUM(byte_count) FROM public_attachment_copies WHERE vault_id=$1 AND purged_at IS NULL),0))::bigint")
+    sqlx::query_scalar("SELECT (COALESCE((SELECT SUM(ciphertext_bytes) FROM attachments WHERE vault_id=$1),0) + COALESCE((SELECT SUM(ciphertext_bytes) FROM attachment_removals WHERE vault_id=$1 AND purged_at IS NULL),0) + COALESCE((SELECT SUM(declared_bytes) FROM upload_reservations WHERE vault_id=$1 AND finalized_at IS NULL AND deleting_at IS NULL AND expires_at > now()),0) + COALESCE((SELECT SUM(byte_count) FROM public_attachment_copies WHERE vault_id=$1 AND purged_at IS NULL),0))::bigint")
         .bind(vault)
         .fetch_one(&mut **tx)
         .await
@@ -286,28 +371,109 @@ async fn claim_intent(tx: &mut Transaction<'_, Postgres>, key: &str) -> ApiResul
         .map_err(|error| database_unavailable(&error, "storage_intent_claim"))
 }
 
-#[derive(Deserialize)]
-pub(super) struct ReserveAttachment {
-    attachment_id: Option<Uuid>,
-    declared_ciphertext_bytes: i64,
-    declared_ciphertext_sha256: String,
-    #[serde(default)]
-    reference_tracking: bool,
+fn retention_class_name(class: AttachmentRetentionClass) -> &'static str {
+    match class {
+        AttachmentRetentionClass::Protected => "protected",
+        AttachmentRetentionClass::MessageMedia => "message_media",
+    }
 }
-#[derive(Serialize)]
-pub(super) struct ReservedAttachment {
+
+async fn removal_error(
+    tx: &mut Transaction<'_, Postgres>,
+    vault_id: Uuid,
     attachment_id: Uuid,
-    expires_in_seconds: u16,
+) -> ApiResult<()> {
+    let removed = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM attachment_removals WHERE vault_id=$1 AND attachment_id=$2)",
+    )
+    .bind(vault_id)
+    .bind(attachment_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "attachment_removal_lookup"))?;
+    if removed {
+        return Err(ApiError(
+            StatusCode::GONE,
+            "attachment_removed_by_storage_policy",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct RetentionVictims {
+    count: usize,
+    bytes: i64,
+}
+
+/// Tombstones just enough safe oldest message-media objects to satisfy an
+/// admission. The caller holds the vault row lock and has already established
+/// that hosted policy permits cleanup. This function performs no storage I/O.
+async fn mark_retention_victims(
+    tx: &mut Transaction<'_, Postgres>,
+    vault_id: Uuid,
+    required_bytes: i64,
+    policy_version: Option<&str>,
+) -> ApiResult<Option<RetentionVictims>> {
+    let candidates = sqlx::query(
+        "WITH ranked AS (SELECT a.attachment_id,row_number() OVER (ORDER BY a.finalized_at,a.attachment_id) AS position,sum(a.ciphertext_bytes) OVER (ORDER BY a.finalized_at,a.attachment_id) AS running_bytes FROM attachments a WHERE a.vault_id=$1 AND a.retention_class='message_media' AND EXISTS (SELECT 1 FROM attachment_retention_uses h WHERE h.vault_id=a.vault_id AND h.attachment_id=a.attachment_id AND h.kind='message_history') AND NOT EXISTS (SELECT 1 FROM attachment_retention_uses u WHERE u.vault_id=a.vault_id AND u.attachment_id=a.attachment_id AND u.kind <> 'message_history' AND u.released_at IS NULL)), cutoff AS (SELECT min(position) AS position FROM ranked WHERE running_bytes >= $2), chosen AS (SELECT r.attachment_id FROM ranked r CROSS JOIN cutoff c WHERE r.position <= c.position) SELECT a.attachment_id,a.object_key,a.ciphertext_bytes FROM attachments a JOIN chosen USING(attachment_id) WHERE a.vault_id=$1 ORDER BY a.finalized_at,a.attachment_id FOR UPDATE OF a",
+    )
+    .bind(vault_id)
+    .bind(required_bytes)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "retention_candidate_select"))?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut bytes = 0_i64;
+    for candidate in &candidates {
+        bytes = bytes
+            .checked_add(candidate.get::<i64, _>("ciphertext_bytes"))
+            .ok_or(ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "vault_quota_exceeded",
+            ))?;
+    }
+    for candidate in &candidates {
+        let attachment_id = candidate.get::<Uuid, _>("attachment_id");
+        let object_key = candidate.get::<String, _>("object_key");
+        let candidate_bytes = candidate.get::<i64, _>("ciphertext_bytes");
+        sqlx::query("INSERT INTO attachment_removals(vault_id,attachment_id,object_key,ciphertext_bytes,policy_version) VALUES($1,$2,$3,$4,$5)")
+            .bind(vault_id).bind(attachment_id).bind(&object_key).bind(candidate_bytes).bind(policy_version)
+            .execute(&mut **tx).await
+            .map_err(|error| insert_error(error, "retention_tombstone_insert"))?;
+        sqlx::query("DELETE FROM attachments WHERE vault_id=$1 AND attachment_id=$2")
+            .bind(vault_id)
+            .bind(attachment_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| database_unavailable(&error, "retention_attachment_remove"))?;
+        sqlx::query(QUEUE_NOW)
+            .bind(&object_key)
+            .bind(vault_id)
+            .bind("retention_cleanup")
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| database_unavailable(&error, "retention_enqueue"))?;
+    }
+    Ok(Some(RetentionVictims {
+        count: candidates.len(),
+        bytes,
+    }))
 }
 
 pub(super) async fn reserve_attachment(
     State(s): State<ApiState>,
     h: HeaderMap,
-    Json(request): Json<ReserveAttachment>,
-) -> ApiResult<Json<ReservedAttachment>> {
+    Json(request): Json<ReserveAttachmentRequest>,
+) -> ApiResult<Json<ReservedAttachmentResponse>> {
     let principal = auth_with_mode(&s, &h).await?;
     authorize(&s, &principal, Operation::Upload).await?;
     storage(&s)?;
+    request
+        .validate()
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_attachment_reservation"))?;
     let hash = sha256_hex(&request.declared_ciphertext_sha256).ok_or(ApiError(
         StatusCode::BAD_REQUEST,
         "invalid_ciphertext_sha256",
@@ -318,17 +484,11 @@ pub(super) async fn reserve_attachment(
             "attachment_too_large",
         ));
     }
-    // Policy callbacks may consult the runtime pool. Resolve them before taking
-    // a connection for the scoped admission transaction so a size-one pool is safe.
-    let quota = attachment_quota(&s, &principal)
+    // Resolve legacy quota overrides before checking out the transaction
+    // connection. The new callback receives this already-resolved fallback.
+    let legacy_resolved_limit = attachment_quota(&s, &principal)
         .await
         .unwrap_or(s.vault_attachment_quota_bytes);
-    if quota <= 0 {
-        return Err(ApiError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "vault_quota_exceeded",
-        ));
-    }
     // Cheap DB-only fencing so this vault's expired reservations stop counting
     // immediately; object deletion is left to the retrying worker.
     retire_expired_reservations_for_vault(&s.db, principal.vault, 64)
@@ -340,37 +500,109 @@ pub(super) async fn reserve_attachment(
     let mut tx = scope::begin(&s.db, principal.vault)
         .await
         .map_err(|error| database_unavailable(&error, "attachment_reserve_begin"))?;
-    // Serializing on the vault row makes aggregate quota admission race-free.
-    lock_vault(&mut tx, principal.vault).await?;
-    if let Some(existing) = sqlx::query("SELECT device_id,declared_bytes,declared_sha256,expires_at > now() AS live,deleting_at IS NULL AS available FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2")
-        .bind(principal.vault).bind(attachment_id).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "attachment_reserve_duplicate"))? {
-        let same = existing.get::<Uuid, _>("device_id") == principal.device
-            && existing.get::<i64, _>("declared_bytes") == request.declared_ciphertext_bytes
-            && existing.get::<Vec<u8>, _>("declared_sha256") == hash
-            && existing.get::<bool, _>("live") && existing.get::<bool, _>("available");
-        tx.commit().await.map_err(|error| database_unavailable(&error, "attachment_reserve_commit"))?;
-        if same { return Ok(Json(ReservedAttachment { attachment_id, expires_in_seconds: RESERVATION_TTL_SECONDS })); }
-        return Err(ApiError(StatusCode::CONFLICT, "attachment_reservation_conflict"));
-    }
-    let used = quota_used(&mut tx, principal.vault).await?;
-    if used
-        .checked_add(request.declared_ciphertext_bytes)
-        .is_none_or(|total| total > quota)
-    {
+    // Hosted policy uses this same transaction connection for account/binding
+    // locks; only after it returns may this server lock the vault.
+    let policy = s
+        .policy
+        .attachment_storage_policy_in_transaction(
+            AccessPrincipal {
+                vault_id: principal.vault,
+                device_id: principal.device,
+                role: principal.role.clone(),
+            },
+            legacy_resolved_limit,
+            &mut tx,
+        )
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_storage_policy"))?;
+    if !policy.allow_upload || policy.limit_bytes <= 0 {
         return Err(ApiError(
             StatusCode::PAYLOAD_TOO_LARGE,
             "vault_quota_exceeded",
         ));
     }
-    sqlx::query("INSERT INTO upload_reservations(vault_id,attachment_id,device_id,object_key,declared_bytes,declared_sha256,reference_tracked) VALUES($1,$2,$3,$4,$5,$6,$7)")
-        .bind(principal.vault).bind(attachment_id).bind(principal.device).bind(key).bind(request.declared_ciphertext_bytes).bind(hash).bind(request.reference_tracking)
+    if request.declared_ciphertext_bytes > policy.limit_bytes {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "vault_quota_exceeded",
+        ));
+    }
+    // Serializing on the vault row makes aggregate quota admission race-free.
+    lock_vault(&mut tx, principal.vault).await?;
+    withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
+    removal_error(&mut tx, principal.vault, attachment_id).await?;
+    if let Some(existing) = sqlx::query("SELECT device_id,declared_bytes,declared_sha256,retention_class,expires_at > now() AS live,deleting_at IS NULL AS available FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2")
+        .bind(principal.vault).bind(attachment_id).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "attachment_reserve_duplicate"))? {
+        let same = existing.get::<Uuid, _>("device_id") == principal.device
+            && existing.get::<i64, _>("declared_bytes") == request.declared_ciphertext_bytes
+            && existing.get::<Vec<u8>, _>("declared_sha256") == hash
+            && existing.get::<String, _>("retention_class")
+                == retention_class_name(request.retention_class)
+            && existing.get::<bool, _>("live") && existing.get::<bool, _>("available");
+        tx.commit().await.map_err(|error| database_unavailable(&error, "attachment_reserve_commit"))?;
+        if same { return Ok(Json(ReservedAttachmentResponse { attachment_id, expires_in_seconds: RESERVATION_TTL_SECONDS, retention_class: request.retention_class })); }
+        return Err(ApiError(StatusCode::CONFLICT, "attachment_reservation_conflict"));
+    }
+    let used = quota_used(&mut tx, principal.vault).await?;
+    let total = used
+        .checked_add(request.declared_ciphertext_bytes)
+        .ok_or(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "vault_quota_exceeded",
+        ))?;
+    if total > policy.limit_bytes {
+        if !policy.cleanup_authorized {
+            return Err(ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "vault_quota_exceeded",
+            ));
+        }
+        let facts = retention_storage_status_on_connection(&mut tx, principal.vault)
+            .await
+            .map_err(|error| database_unavailable(&error, "retention_storage_status"))?;
+        // Unpurged serving objects are still charged. Waiting for their queue
+        // completion avoids selecting further victims against phantom space.
+        if facts.cleanup_pending {
+            return Err(ApiError(StatusCode::CONFLICT, "storage_cleanup_pending"));
+        }
+        if !facts.all_devices_ready {
+            return Err(ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "vault_quota_exceeded",
+            ));
+        }
+        let deficit = total - policy.limit_bytes;
+        let Some(victims) = mark_retention_victims(
+            &mut tx,
+            principal.vault,
+            deficit,
+            policy.policy_version.as_deref(),
+        )
+        .await?
+        else {
+            return Err(ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "vault_quota_exceeded",
+            ));
+        };
+        // Victims remain quota debt until physical deletion. Commit the
+        // tombstones and queue before asking the caller to retry.
+        tx.commit()
+            .await
+            .map_err(|error| database_unavailable(&error, "retention_cleanup_commit"))?;
+        tracing::info!(vault_id=%principal.vault, victim_count=victims.count, victim_bytes=victims.bytes, policy_version=policy.policy_version.as_deref().unwrap_or("unknown"), cause="quota_admission", "attachment retention cleanup queued");
+        return Err(ApiError(StatusCode::CONFLICT, "storage_cleanup_pending"));
+    }
+    sqlx::query("INSERT INTO upload_reservations(vault_id,attachment_id,device_id,object_key,declared_bytes,declared_sha256,reference_tracked,retention_class) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(principal.vault).bind(attachment_id).bind(principal.device).bind(key).bind(request.declared_ciphertext_bytes).bind(hash).bind(request.reference_tracking).bind(retention_class_name(request.retention_class))
         .execute(&mut *tx).await.map_err(|error| insert_error(error, "attachment_reserve"))?;
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "attachment_reserve_commit"))?;
-    Ok(Json(ReservedAttachment {
+    Ok(Json(ReservedAttachmentResponse {
         attachment_id,
         expires_in_seconds: RESERVATION_TTL_SECONDS,
+        retention_class: request.retention_class,
     }))
 }
 
@@ -389,6 +621,7 @@ pub(super) async fn upload_attachment(
     let mut tx = scope::begin(&s.db, principal.vault)
         .await
         .map_err(|error| database_unavailable(&error, "attachment_upload_lookup_begin"))?;
+    removal_error(&mut tx, principal.vault, attachment_id).await?;
     let row = sqlx::query(&format!(
         "SELECT declared_bytes,declared_sha256 FROM upload_reservations WHERE {OPEN_RESERVATION}"
     ))
@@ -436,9 +669,9 @@ pub(super) async fn upload_attachment(
     drop(spool);
     match attach_upload(
         &s.db,
-        principal.vault,
-        principal.device,
+        &principal,
         attachment_id,
+        &h,
         &key,
         received,
         &actual,
@@ -458,16 +691,20 @@ pub(super) async fn upload_attachment(
 /// any) is queued for deletion in the same transaction.
 async fn attach_upload(
     db: &PgPool,
-    vault: Uuid,
-    device: Uuid,
+    principal: &Principal,
     attachment_id: Uuid,
+    headers: &HeaderMap,
     key: &str,
     bytes: i64,
     sha256: &[u8],
 ) -> ApiResult<()> {
+    let (vault, device) = (principal.vault, principal.device);
     let mut tx = scope::begin(db, vault)
         .await
         .map_err(|error| database_unavailable(&error, "attachment_upload_begin"))?;
+    lock_vault(&mut tx, vault).await?;
+    withdraw_legacy_retention_mutation(&mut tx, headers, vault, device).await?;
+    removal_error(&mut tx, vault, attachment_id).await?;
     let previous = sqlx::query(&format!("SELECT object_key,uploaded_at IS NOT NULL AS uploaded FROM upload_reservations WHERE {OPEN_RESERVATION} FOR UPDATE"))
         .bind(vault)
         .bind(attachment_id)
@@ -522,12 +759,19 @@ pub(super) async fn finalize_attachment(
         let mut lookup_tx = scope::begin(&s.db, principal.vault)
             .await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_lookup_begin"))?;
+        lock_vault(&mut lookup_tx, principal.vault).await?;
+        withdraw_legacy_retention_mutation(&mut lookup_tx, &h, principal.vault, principal.device)
+            .await?;
+        removal_error(&mut lookup_tx, principal.vault, attachment_id).await?;
         let row = sqlx::query("SELECT object_key,declared_bytes,finalized_at IS NOT NULL AS finalized,uploaded_at IS NOT NULL AS uploaded FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2 AND device_id=$3 AND deleting_at IS NULL AND (finalized_at IS NOT NULL OR expires_at > now())")
             .bind(principal.vault).bind(attachment_id).bind(principal.device)
             .fetch_optional(&mut *lookup_tx).await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_lookup"))?
             .ok_or(ApiError(StatusCode::NOT_FOUND, "upload_reservation_not_found"))?;
         if row.get::<bool, _>("finalized") {
+            lookup_tx.commit().await.map_err(|error| {
+                database_unavailable(&error, "attachment_finalize_lookup_commit")
+            })?;
             return Ok(Json(
                 json!({"attachment_id":attachment_id,"duplicate":true}),
             ));
@@ -537,7 +781,10 @@ pub(super) async fn finalize_attachment(
         }
         let key: String = row.get("object_key");
         let bytes: i64 = row.get("declared_bytes");
-        drop(lookup_tx);
+        lookup_tx
+            .commit()
+            .await
+            .map_err(|error| database_unavailable(&error, "attachment_finalize_lookup_commit"))?;
         // Bounded storage HEAD with no database lock held.
         let stored = store.head_bytes(&key).await.map_err(|error| {
             storage_failure(
@@ -552,7 +799,10 @@ pub(super) async fn finalize_attachment(
         let mut tx = scope::begin(&s.db, principal.vault)
             .await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_begin"))?;
-        let locked = sqlx::query("SELECT object_key,declared_sha256,finalized_at IS NOT NULL AS finalized FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2 AND device_id=$3 AND deleting_at IS NULL AND (finalized_at IS NOT NULL OR expires_at > now()) FOR UPDATE")
+        lock_vault(&mut tx, principal.vault).await?;
+        withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
+        removal_error(&mut tx, principal.vault, attachment_id).await?;
+        let locked = sqlx::query("SELECT object_key,declared_sha256,retention_class,finalized_at IS NOT NULL AS finalized FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2 AND device_id=$3 AND deleting_at IS NULL AND (finalized_at IS NOT NULL OR expires_at > now()) FOR UPDATE")
             .bind(principal.vault).bind(attachment_id).bind(principal.device)
             .fetch_optional(&mut *tx).await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_lock"))?
@@ -565,9 +815,9 @@ pub(super) async fn finalize_attachment(
         if locked.get::<String, _>("object_key") != key {
             continue;
         }
-        sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id) VALUES($1,$2,$3,$4,$5,$6)")
+        sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id,retention_class) VALUES($1,$2,$3,$4,$5,$6,$7)")
             .bind(principal.vault).bind(attachment_id).bind(&key).bind(bytes)
-            .bind(locked.get::<Vec<u8>, _>("declared_sha256")).bind(principal.device)
+            .bind(locked.get::<Vec<u8>, _>("declared_sha256")).bind(principal.device).bind(locked.get::<String, _>("retention_class"))
             .execute(&mut *tx).await
             .map_err(|error| insert_error(error, "attachment_finalize_insert"))?;
         sqlx::query("UPDATE upload_reservations SET finalized_at=now() WHERE vault_id=$1 AND attachment_id=$2")
@@ -587,6 +837,161 @@ pub(super) async fn finalize_attachment(
     ))
 }
 
+fn use_kind_name(kind: AttachmentUseKind) -> &'static str {
+    match kind {
+        AttachmentUseKind::MessageHistory => "message_history",
+        AttachmentUseKind::PendingSend => "pending_send",
+        AttachmentUseKind::ContactPhoto => "contact_photo",
+        AttachmentUseKind::RestoreCritical => "restore_critical",
+    }
+}
+
+fn use_kind_from_name(kind: &str) -> ApiResult<AttachmentUseKind> {
+    match kind {
+        "message_history" => Ok(AttachmentUseKind::MessageHistory),
+        "pending_send" => Ok(AttachmentUseKind::PendingSend),
+        "contact_photo" => Ok(AttachmentUseKind::ContactPhoto),
+        "restore_critical" => Ok(AttachmentUseKind::RestoreCritical),
+        _ => Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "attachment_use_corrupt",
+        )),
+    }
+}
+
+/// Registers an immutable protected use. A release is terminal: replaying the
+/// same registration returns the released state instead of re-protecting it.
+pub(super) async fn register_retention_use(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+    Path(attachment_id): Path<Uuid>,
+    Json(request): Json<RegisterAttachmentUseRequest>,
+) -> ApiResult<Json<AttachmentUseResponse>> {
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Upload).await?;
+    request
+        .validate()
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_attachment_use"))?;
+    if request.attachment_id != attachment_id || request.device_id != principal.device {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "attachment_use_principal_mismatch",
+        ));
+    }
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_use_begin"))?;
+    lock_vault(&mut tx, principal.vault).await?;
+    revalidate_principal(&mut tx, &principal).await?;
+    withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
+    removal_error(&mut tx, principal.vault, attachment_id).await?;
+    let requested_kind = use_kind_name(request.kind);
+    let existing = sqlx::query("SELECT attachment_id,device_id,kind,released_at IS NOT NULL AS released FROM attachment_retention_uses WHERE vault_id=$1 AND use_id=$2 FOR UPDATE")
+        .bind(principal.vault).bind(request.use_id).fetch_optional(&mut *tx).await
+        .map_err(|error| database_unavailable(&error, "attachment_use_duplicate"))?;
+    let state = if let Some(existing) = existing {
+        if existing.get::<Uuid, _>("attachment_id") != attachment_id
+            || existing.get::<Uuid, _>("device_id") != principal.device
+            || existing.get::<String, _>("kind") != requested_kind
+        {
+            return Err(ApiError(StatusCode::CONFLICT, "attachment_use_conflict"));
+        }
+        if existing.get("released") {
+            AttachmentUseState::Released
+        } else {
+            AttachmentUseState::Registered
+        }
+    } else {
+        sqlx::query("INSERT INTO attachment_retention_uses(vault_id,use_id,attachment_id,device_id,kind) VALUES($1,$2,$3,$4,$5)")
+            .bind(principal.vault).bind(request.use_id).bind(attachment_id).bind(principal.device).bind(requested_kind)
+            .execute(&mut *tx).await.map_err(|error| insert_error(error, "attachment_use_insert"))?;
+        AttachmentUseState::Registered
+    };
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_use_commit"))?;
+    Ok(Json(AttachmentUseResponse {
+        use_id: request.use_id,
+        attachment_id,
+        device_id: principal.device,
+        kind: request.kind,
+        state,
+    }))
+}
+
+/// Records the host's explicit post-reconciliation readiness signal.
+/// False withdraws readiness; true is accepted only through this dedicated
+/// current-protocol endpoint after host reconciliation has completed.
+pub(super) async fn set_retention_capability(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+    Json(request): Json<RetentionCapabilityRequest>,
+) -> ApiResult<StatusCode> {
+    let principal = auth_with_mode(&s, &h).await?;
+    request
+        .validate()
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "retention_protocol_required"))?;
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "retention_capability_begin"))?;
+    lock_vault(&mut tx, principal.vault).await?;
+    revalidate_principal(&mut tx, &principal).await?;
+    // A current protocol participant explicitly re-establishes readiness only
+    // through this endpoint after its host reconciliation completed. Missing
+    // protocol mutations still withdraw it below; no elapsed-time revival.
+    sqlx::query("INSERT INTO attachment_retention_devices(vault_id,device_id,cleanup_ready,reconciliation_needed) VALUES($1,$2,$3,FALSE) ON CONFLICT(vault_id,device_id) DO UPDATE SET cleanup_ready=EXCLUDED.cleanup_ready,reconciliation_needed=NOT EXCLUDED.cleanup_ready,updated_at=now()")
+        .bind(principal.vault).bind(principal.device).bind(request.cleanup_ready)
+        .execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "retention_capability_update"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "retention_capability_commit"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(super) async fn release_retention_use(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+    Path((attachment_id, use_id)): Path<(Uuid, Uuid)>,
+    Json(request): Json<ReleaseAttachmentUseRequest>,
+) -> ApiResult<Json<AttachmentUseResponse>> {
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Upload).await?;
+    request
+        .validate()
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_attachment_use"))?;
+    if request.use_id != use_id
+        || request.attachment_id != attachment_id
+        || request.device_id != principal.device
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "attachment_use_principal_mismatch",
+        ));
+    }
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_use_release_begin"))?;
+    lock_vault(&mut tx, principal.vault).await?;
+    revalidate_principal(&mut tx, &principal).await?;
+    withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
+    removal_error(&mut tx, principal.vault, attachment_id).await?;
+    let row = sqlx::query("UPDATE attachment_retention_uses SET released_at=COALESCE(released_at,now()) WHERE vault_id=$1 AND use_id=$2 AND attachment_id=$3 AND device_id=$4 RETURNING kind")
+        .bind(principal.vault).bind(use_id).bind(attachment_id).bind(principal.device).fetch_optional(&mut *tx).await
+        .map_err(|error| database_unavailable(&error, "attachment_use_release"))?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "attachment_use_not_found"))?;
+    let kind = use_kind_from_name(&row.get::<String, _>("kind"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_use_release_commit"))?;
+    Ok(Json(AttachmentUseResponse {
+        use_id,
+        attachment_id,
+        device_id: principal.device,
+        kind,
+        state: AttachmentUseState::Released,
+    }))
+}
+
 pub(super) async fn download_attachment(
     State(s): State<ApiState>,
     h: HeaderMap,
@@ -598,6 +1003,7 @@ pub(super) async fn download_attachment(
     let mut tx = scope::begin(&s.db, principal.vault)
         .await
         .map_err(|error| database_unavailable(&error, "attachment_download_lookup_begin"))?;
+    removal_error(&mut tx, principal.vault, attachment_id).await?;
     let row = sqlx::query(
         "SELECT object_key,ciphertext_bytes FROM attachments WHERE vault_id=$1 AND attachment_id=$2",
     )
@@ -793,6 +1199,9 @@ pub(super) async fn register_attachment_references(
     let mut tx = scope::begin(&s.db, principal.vault)
         .await
         .map_err(|error| database_unavailable(&error, "register_attachment_refs_begin"))?;
+    lock_vault(&mut tx, principal.vault).await?;
+    withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
+    removal_error(&mut tx, principal.vault, attachment_id).await?;
     // FOR SHARE on the live row blocks a concurrent release (which deletes it)
     // until this registration commits, and lets concurrent registrations proceed.
     let tracked: bool = sqlx::query_scalar("SELECT r.reference_tracked FROM attachments a JOIN upload_reservations r ON r.vault_id=a.vault_id AND r.attachment_id=a.attachment_id AND r.object_key=a.object_key AND r.finalized_at IS NOT NULL WHERE a.vault_id=$1 AND a.attachment_id=$2 FOR SHARE OF a")
@@ -861,6 +1270,7 @@ pub(super) async fn release_attachment(
     .await
     .map_err(|error| database_unavailable(&error, "attachment_release_vault_lock"))?;
     revalidate_principal(&mut tx, &principal).await?;
+    withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
     let attachment = sqlx::query("SELECT a.object_key,r.reference_tracked FROM attachments a JOIN upload_reservations r ON r.vault_id=a.vault_id AND r.attachment_id=a.attachment_id AND r.object_key=a.object_key AND r.finalized_at IS NOT NULL WHERE a.vault_id=$1 AND a.attachment_id=$2 FOR UPDATE OF a")
         .bind(principal.vault)
         .bind(attachment_id)
@@ -971,6 +1381,7 @@ pub(super) async fn create_public_copy(
     let mut lookup_tx = scope::begin(&s.db, principal.vault)
         .await
         .map_err(|error| database_unavailable(&error, "public_copy_attachment_lookup_begin"))?;
+    removal_error(&mut lookup_tx, principal.vault, attachment_id).await?;
     let readable: Option<i32> =
         sqlx::query_scalar("SELECT 1 FROM attachments WHERE vault_id=$1 AND attachment_id=$2")
             .bind(principal.vault)
@@ -1017,6 +1428,8 @@ pub(super) async fn create_public_copy(
         .await
         .map_err(|error| database_unavailable(&error, "public_copy_begin"))?;
     lock_vault(&mut tx, principal.vault).await?;
+    withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
+    removal_error(&mut tx, principal.vault, attachment_id).await?;
     let used = quota_used(&mut tx, principal.vault).await?;
     if used.checked_add(bytes).is_none_or(|total| total > quota) {
         return Err(ApiError(
@@ -1272,6 +1685,12 @@ pub(super) async fn process_storage_deletions(
                     .bind(&key)
                     .execute(&mut *tx)
                     .await?;
+                // Retention removal debt clears only after the object deletion
+                // and this durable completion update both succeed.
+                sqlx::query("UPDATE attachment_removals SET purged_at=now() WHERE object_key=$1 AND purged_at IS NULL")
+                    .bind(&key)
+                    .execute(&mut *tx)
+                    .await?;
                 stats.deleted += 1;
             }
             Err(error) => {
@@ -1298,6 +1717,10 @@ pub(super) async fn storage_maintenance(
 ) -> Result<DeletionStats, sqlx::Error> {
     retire_expired_reservations(db, None, limit).await?;
     retire_expired_public_copies(db, limit).await?;
+    // Recreate a lost queue reference without clearing debt. Object deletion is
+    // idempotent, so a crash after storage success but before SQL commit safely
+    // retries and only then records purged_at.
+    crate::attachment_retention::repair_retention_cleanup_queue(db, limit).await?;
     process_storage_deletions(db, store, limit).await
 }
 

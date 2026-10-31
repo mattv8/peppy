@@ -66,7 +66,7 @@ class RelayWakeStateTest {
         val legacy = FakeRouteStore(route)
         val state = RelayWakeStateStore(prefs, plainBox)
 
-        assertTrue(RelayWakeRuntime.migrateLegacyCustomRoute(prefs, GatewayAccountCredential("https://account.example", "vault", "device", "bearer"), "https://relay-a.example", legacy, state))
+        assertTrue(RelayWakeRuntime.migrateLegacyCustomRoute(prefs, GatewayAccountCredential("https://account.example", "vault", "device", "bearer", 1L), "https://relay-a.example", legacy, state))
 
         assertEquals("https://relay-a.example", state.cleanups().single().relayOrigin)
         assertTrue(legacy.cleared)
@@ -78,7 +78,7 @@ class RelayWakeStateTest {
         val legacy = FakeRouteStore(RelayRoute("00000000-0000-4000-8000-000000000010", "manage", "wake"))
         val brokenBox = object : SecretBox { override fun seal(purpose: String, plaintext: ByteArray): String = throw IllegalStateException(); override fun open(purpose: String, sealed: String) = null }
 
-        assertTrue(!RelayWakeRuntime.migrateLegacyCustomRoute(prefs, GatewayAccountCredential("https://account.example", "vault", "device", "bearer"), "https://relay-a.example", legacy, RelayWakeStateStore(prefs, brokenBox)))
+        assertTrue(!RelayWakeRuntime.migrateLegacyCustomRoute(prefs, GatewayAccountCredential("https://account.example", "vault", "device", "bearer", 1L), "https://relay-a.example", legacy, RelayWakeStateStore(prefs, brokenBox)))
 
         assertTrue(!legacy.cleared)
         assertEquals("00000000-0000-4000-8000-000000000010", legacy.route()!!.routeId)
@@ -92,7 +92,7 @@ class RelayWakeStateTest {
         val state = RelayWakeStateStore(prefs, plainBox)
 
         // initialize() passes the persisted origin on every normal startup, not only from setEnabled.
-        assertTrue(RelayWakeRuntime.migrateLegacyCustomRoute(prefs, GatewayAccountCredential("https://account.example", "vault", "device", "bearer"), prefs.getString("relay-origin.v1", null), legacy, state))
+        assertTrue(RelayWakeRuntime.migrateLegacyCustomRoute(prefs, GatewayAccountCredential("https://account.example", "vault", "device", "bearer", 1L), prefs.getString("relay-origin.v1", null), legacy, state))
 
         assertEquals("https://relay-a.example", state.cleanups().single().relayOrigin)
         assertTrue(legacy.cleared)
@@ -131,7 +131,7 @@ class RelayWakeStateTest {
         val state = RelayWakeStateStore(prefs, plainBox)
 
         // Baseline disable removed the origin but kept the v1 slot: the gate succeeds so setup proceeds.
-        assertTrue(RelayWakeRuntime.migrateLegacyCustomRoute(prefs, GatewayAccountCredential("https://account.example", "vault", "device", "bearer"), null, legacy, state))
+        assertTrue(RelayWakeRuntime.migrateLegacyCustomRoute(prefs, GatewayAccountCredential("https://account.example", "vault", "device", "bearer", 1L), null, legacy, state))
 
         assertFalse(legacy.cleared)
         assertTrue(state.cleanups().isEmpty())
@@ -144,7 +144,7 @@ class RelayWakeStateTest {
         prefs.edit().clear().commit()
         val legacy = FakeRouteStore(RelayRoute("00000000-0000-4000-8000-000000000032", "manage", "wake"))
         val state = RelayWakeStateStore(prefs, plainBox)
-        val credential = GatewayAccountCredential("https://account.example", "vault", "device", "bearer")
+        val credential = GatewayAccountCredential("https://account.example", "vault", "device", "bearer", 1L)
         assertTrue(RelayWakeRuntime.migrateLegacyCustomRoute(prefs, credential, null, legacy, state))
 
         // setEnabled(B): the new origin is written after the migration gate, then startup runs again.
@@ -171,7 +171,7 @@ class RelayWakeStateTest {
 
         // The user configures relay B, then a credential appears: cleanup still goes to A.
         prefs.edit().putString("relay-origin.v1", "https://relay-b.example").commit()
-        val credential = GatewayAccountCredential("https://account.example", "vault", "device", "bearer")
+        val credential = GatewayAccountCredential("https://account.example", "vault", "device", "bearer", 1L)
         assertTrue(RelayWakeRuntime.migrateLegacyCustomRoute(prefs, credential, prefs.getString("relay-origin.v1", null), legacy, state))
 
         assertEquals("https://relay-a.example", state.cleanups().single().relayOrigin)

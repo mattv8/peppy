@@ -41,6 +41,62 @@ public struct HostedWakeConfiguration: Equatable, Sendable {
     public let environment: String
 }
 
+/// Pure, host-owned mapping from the typed server status to portable copy keys.
+public struct AttachmentStoragePresentation: Equatable, Sendable {
+    public let showsThirtyDayDisclosure: Bool
+    public let shouldAcknowledgeVisibleCopy: Bool
+    public let stateMessageKeys: [String]
+
+    public init(status: NativeAttachmentStorageStatus) {
+        showsThirtyDayDisclosure = status.notice.state != .eligible
+        shouldAcknowledgeVisibleCopy = status.notice.state == .notPresented
+            && attachmentRetentionNoticeCopySupported(policyVersion: status.notice.policyVersion)
+
+        var messages: [String] = []
+        switch status.cleanupState {
+        case .disabled:
+            messages.append("peppy.attachment_storage_disabled")
+        case .pending:
+            messages.append("peppy.attachment_storage_cleanup_pending")
+        case .blocked, .available:
+            break
+        }
+
+        let cleanupDisabled = status.cleanupState == .disabled || status.cleanupUnavailableReason == .cleanupDisabled
+        if status.notice.state == .gracePeriod {
+            if status.usedBytes >= status.limitBytes {
+                messages.append("peppy.attachment_storage_grace_full")
+            } else if !cleanupDisabled {
+                messages.append("peppy.attachment_storage_grace_paused")
+            }
+        }
+
+        switch status.cleanupUnavailableReason {
+        case .deviceNotReady:
+            messages.append("peppy.attachment_storage_device_update_required")
+        case .readOnly:
+            messages.append("peppy.attachment_storage_read_only")
+        case .billingMutationPending:
+            messages.append("peppy.attachment_storage_billing_pending")
+        case .entitlementUnavailable, .providerReconciliationPending:
+            messages.append("peppy.attachment_storage_billing_unavailable")
+        case .cleanupDisabled:
+            if !messages.contains("peppy.attachment_storage_disabled") {
+                messages.append("peppy.attachment_storage_disabled")
+            }
+        case .noticeNotEligible, nil:
+            break
+        }
+        stateMessageKeys = messages
+    }
+}
+
+public enum AttachmentStorageStatusResult: Sendable {
+    case available(scopeId: String, status: NativeAttachmentStorageStatus)
+    case unsupported
+    case temporarilyUnavailable
+}
+
 /// Protected-only replay context for a retiring wake route. It is never presented to UI or
 /// defaults; its device credential is the exact value captured before enrollment changes.
 public struct RelayWakeCleanupContext: Codable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -89,8 +145,15 @@ public actor NativeSession {
     private var record: EnrollmentRecord?
     private var status = SessionStatus()
     private var reachability = ServerReachability()
+    private let attachmentRetentionHTTP = AttachmentRetentionHTTPState()
     private var syncing = false
     private var changingEnrollment = false
+    private struct AttachmentStorageScope: Equatable, Sendable {
+        let identity: EnrollmentIdentity
+        let policyVersion: String?
+        let noticeState: NativeRetentionNoticeState
+    }
+    private var attachmentStorageScopes: [String: AttachmentStorageScope] = [:]
     private struct PhoneClaimContext: Sendable {
         let origin: String
         let invitationID: String
@@ -175,7 +238,7 @@ public actor NativeSession {
             let secret = try secrets.candidatePendingSecret(origin: serverOrigin.serialized, entered: passphrase)
             try secrets.savePending(secret, origin: serverOrigin.serialized)
             let request = try producer.createOwnerRequest(setupToken: setupToken, username: username, adminPassword: adminPassword, passphrase: secret)
-            let response = try await EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin)).submitOwnerClaim(request)
+            let response = try await EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin), attachmentRetention: self.attachmentRetentionHTTP).submitOwnerClaim(request)
             let enrollment = try producer.finishOwnerAdmission(response, passphrase: secret)
             return try self.activateVerifiedEnrollment(enrollment, bindingSecret: secret)
         }
@@ -184,7 +247,7 @@ public actor NativeSession {
     /// Discovers self-hosted first-claim policy before accepting policy-dependent credentials.
     public func discoverSelfHostedInstance(origin: String) async throws -> SelfHostedInstanceDiscovery {
         let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
-        let response = try await EnrollmentHost(origin: serverOrigin, transport: transport).discoverInstance()
+        let response = try await EnrollmentHost(origin: serverOrigin, transport: transport, attachmentRetention: attachmentRetentionHTTP).discoverInstance()
         guard let instance = try? JSONDecoder().decode(InstanceDiscoveryResponse.self, from: Data(response.utf8)),
               instance.mode == "community" else {
             throw ClientError.invalidResponse("instance discovery")
@@ -203,7 +266,7 @@ public actor NativeSession {
             let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: self.allowLoopbackHTTP)
             let producer = try NativeEnrollmentRequestProducer(origin: serverOrigin.serialized, deviceName: deviceName)
             let session = self.instanceSession?.origin == serverOrigin.serialized ? self.instanceSession?.token : nil
-            let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin), instanceSession: session)
+            let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin), instanceSession: session, attachmentRetention: self.attachmentRetentionHTTP)
             let secret = try VaultSecretStore(secure: self.store.secure).sharedSecretForJoin(origin: serverOrigin.serialized, entered: passphrase)
             let request = try producer.manualChallengeRequest(vaultID: vaultID, vaultOwner: vaultOwner)
             let challenge = try await host.requestManualChallenge(request)
@@ -226,13 +289,13 @@ public actor NativeSession {
     /// Password login is scoped to one instance vault. It is kept in memory only and does not create a browser cookie.
     public func signIn(origin: String, username: String, password: String) async throws {
         let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
-        let host = EnrollmentHost(origin: serverOrigin, transport: transport)
+        let host = EnrollmentHost(origin: serverOrigin, transport: transport, attachmentRetention: attachmentRetentionHTTP)
         let response = try await host.signIn(username: username, password: password)
         guard let session = try JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: Any],
               let token = session["session_token"] as? String, !token.isEmpty else {
             throw ClientError.invalidResponse("instance login")
         }
-        let accountHost = EnrollmentHost(origin: serverOrigin, transport: transport, instanceSession: token)
+        let accountHost = EnrollmentHost(origin: serverOrigin, transport: transport, instanceSession: token, attachmentRetention: attachmentRetentionHTTP)
         let account = try await accountHost.instanceAccount()
         guard let value = try JSONSerialization.jsonObject(with: Data(account.utf8)) as? [String: Any],
               let vaultID = value["vault_id"] as? String else { throw ClientError.invalidResponse("instance account") }
@@ -251,7 +314,7 @@ public actor NativeSession {
             ?? NativeEnrollmentRequestProducer(origin: origin.serialized, deviceName: deviceName)
         let request = try producer.beginVaultRequest(origin: origin.serialized, inviteToken: invite.inviteToken, displayName: displayName)
         try saveVaultRequestCheckpoint(producer, origin: origin.serialized)
-        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: try await hostedSession(for: origin))
+        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: try await hostedSession(for: origin), attachmentRetention: attachmentRetentionHTTP)
         do {
             let response = try await host.submitVaultRequest(request)
             try producer.acceptVaultRequestCreated(response)
@@ -278,7 +341,7 @@ public actor NativeSession {
         let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
         guard let producer = try restoredVaultRequestProducer(for: serverOrigin.serialized),
               let pending = try producer.pendingVaultRequest() else { throw ClientError.notEnrolled }
-        let host = EnrollmentHost(origin: serverOrigin, transport: transport, accountSession: try await hostedSession(for: serverOrigin))
+        let host = EnrollmentHost(origin: serverOrigin, transport: transport, accountSession: try await hostedSession(for: serverOrigin), attachmentRetention: attachmentRetentionHTTP)
         if try !producer.vaultRequestAccepted() {
             let request = try producer.beginVaultRequest(origin: serverOrigin.serialized, inviteToken: "", displayName: "")
             try saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
@@ -321,7 +384,7 @@ public actor NativeSession {
             let request = try producer.createVaultRequest(username: username, adminPassword: adminPassword, passphrase: vaultSecret)
             try secrets.savePending(vaultSecret, origin: serverOrigin.serialized)
             try self.saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
-            let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin))
+            let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin), attachmentRetention: self.attachmentRetentionHTTP)
             let response = try await host.createVault(request)
             let enrollment = try producer.finishOwnerAdmission(response, passphrase: vaultSecret)
             let status = try self.activateVerifiedEnrollment(enrollment, bindingSecret: vaultSecret)
@@ -396,7 +459,7 @@ public actor NativeSession {
         let producer = try NativeEnrollmentRequestProducer(origin: origin.serialized, deviceName: deviceName)
         phoneProducer = producer
         do {
-            let host = EnrollmentHost(origin: origin, transport: transport, accountSession: try await hostedSession(for: origin))
+            let host = EnrollmentHost(origin: origin, transport: transport, accountSession: try await hostedSession(for: origin), attachmentRetention: attachmentRetentionHTTP)
             try Task.checkCancellation()
             guard phoneProducer === producer else { throw ClientError.canceled }
             let request = try producer.claimPhoneInvitationRequest(qr: qrPayload)
@@ -506,7 +569,7 @@ public actor NativeSession {
             headerJson: record.headerJson
         )
         let accountSession = try await hostedSession(for: origin)
-        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: accountSession)
+        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: accountSession, attachmentRetention: attachmentRetentionHTTP)
         return OwnerPhoneApprovalHost(
             producer: NativeOwnerPhoneProducer(client: client),
             transport: EnrollmentOwnerPhoneTransport(host: host),
@@ -551,7 +614,7 @@ public actor NativeSession {
         // owner proof to the protected active device identity before scanning any QR.
         try enrollmentClient.configureOwnerComputerDevice(deviceId: record.identity.deviceId)
         let accountSession = try await hostedSession(for: origin)
-        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: accountSession)
+        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: accountSession, attachmentRetention: attachmentRetentionHTTP)
         return OwnerComputerApprovalHost(
             producer: NativeOwnerComputerProducer(client: enrollmentClient, nativeClient: nativeClient),
             transport: EnrollmentOwnerComputerTransport(host: host),
@@ -1082,7 +1145,10 @@ public actor NativeSession {
         let identity = record.identity
         do {
             let server = try observedServer(identity)
+            var retentionMeter = RequestMeter(limit: min(8, budget.maxRequests))
+            _ = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: false)
             let report = try await ForegroundSync(client: client, server: server, vaultId: identity.vaultId, budget: budget).run()
+            _ = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: true)
             refreshCount()
             return report
         } catch {
@@ -1102,6 +1168,57 @@ public actor NativeSession {
     }
 
     public func serverReachability() -> ServerReachabilityState { reachability.state }
+
+    /// Settings-only device status request. It is deliberately not called by sync or background work.
+    public func attachmentStorageStatus() async throws -> AttachmentStorageStatusResult {
+        guard client != nil, let record else { throw ClientError.notEnrolled }
+        let identity = record.identity
+        let request = attachmentRetentionStatusRequest()
+        var meter = RequestMeter(limit: 1)
+        let response = try await authenticatedServer(identity).exchange(
+            request.method, request.relativePath,
+            body: request.jsonBody.map { Data($0.utf8) },
+            contentType: request.jsonBody == nil ? nil : "application/json",
+            limit: Int(attachmentRetentionResponseReadLimitBytes()), meter: &meter
+        )
+        guard self.record?.identity == identity, !Task.isCancelled else { throw ClientError.canceled }
+        guard let text = String(data: response.body, encoding: .utf8) else { throw ClientError.invalidResponse("retention status") }
+        switch classifyDeviceRetentionAvailability(status: UInt16(clamping: response.status), responseJson: text) {
+        case .unsupported: return .unsupported
+        case .temporarilyUnavailable: return .temporarilyUnavailable
+        case .other:
+            guard response.status == request.expectedSuccessStatus,
+                  response.body.count <= Int(attachmentRetentionResponseMaxBytes()) else {
+                throw ClientError.server(status: response.status, code: nil)
+            }
+            let status = try parseAttachmentRetentionStatus(responseJson: text)
+            let scopeId = UUID().uuidString.lowercased()
+            attachmentStorageScopes = [scopeId: AttachmentStorageScope(
+                identity: identity, policyVersion: status.notice.policyVersion, noticeState: status.notice.state
+            )]
+            return .available(scopeId: scopeId, status: status)
+        }
+    }
+
+    public func acknowledgeAttachmentStorageNotice(scopeId: String, policyVersion: String?) async throws {
+        guard attachmentRetentionNoticeCopySupported(policyVersion: policyVersion),
+              let policyVersion, let scope = attachmentStorageScopes[scopeId],
+              scope.noticeState == .notPresented, scope.policyVersion == policyVersion,
+              record?.identity == scope.identity else { throw ClientError.identityMismatch }
+        let identity = scope.identity
+        let request = try attachmentRetentionNoticeAcknowledgementRequest(policyVersion: policyVersion)
+        var meter = RequestMeter(limit: 1)
+        let response = try await authenticatedServer(identity).exchange(
+            request.method, request.relativePath, body: request.jsonBody.map { Data($0.utf8) },
+            contentType: "application/json", limit: Int(attachmentRetentionResponseReadLimitBytes()), meter: &meter
+        )
+        guard record?.identity == identity, attachmentStorageScopes[scopeId] == scope, !Task.isCancelled else {
+            throw ClientError.canceled
+        }
+        guard response.status == request.expectedSuccessStatus, response.body.isEmpty else {
+            throw ClientError.server(status: response.status, code: nil)
+        }
+    }
 
     // MARK: Contacts
 
@@ -1131,7 +1248,10 @@ public actor NativeSession {
         defer { syncing = false }
         let identity = record.identity
         do {
-            let sync = ForegroundSync(client: client, server: try observedServer(identity), vaultId: identity.vaultId, budget: budget)
+            let server = try observedServer(identity)
+            let sync = ForegroundSync(client: client, server: server, vaultId: identity.vaultId, budget: budget)
+            var retentionMeter = RequestMeter(limit: min(8, budget.maxRequests))
+            var retention = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: false)
             var syncError: ClientError?
             // Incoming records (requests, approvals, a repair snapshot) are applied before any permit.
             do {
@@ -1139,8 +1259,15 @@ public actor NativeSession {
                 if pulled.contactRepairRequired, pulled.repairUnavailable { syncError = .unexpected("contact repair needs a compaction-capable server") }
             } catch {
                 let wrapped = ClientError.wrap(error)
-                if wrapped == .canceled { throw wrapped }
+                if wrapped == .canceled || wrapped == .unauthorized || wrapped == .forbidden { throw wrapped }
                 syncError = wrapped // Offline is not fatal: capture stays local and uploads next time.
+            }
+            retention = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: true)
+            if retention == .unresolved, contactsEnabled {
+                var deferred = ContactsSyncReport(outcome: .partial)
+                deferred.photoWorkRemaining = true
+                deferred.syncError = syncError?.userMessage
+                return deferred
             }
             if !contactsEnabled {
                 let coordinator = NativeContactsCoordinator(
@@ -1167,8 +1294,9 @@ public actor NativeSession {
             coordinator.scratch = scratch
             coordinator.media = media
             var report = try await coordinator.run(reason: reason, isCancelled: isCancelled)
-            if let media, syncError == nil, !isCancelled(), !Task.isCancelled {
-                // Ciphertext first, then references, so photo-bearing envelopes may publish.
+            retention = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: false)
+            if let media, retention != .unresolved, syncError == nil, !isCancelled(), !Task.isCancelled {
+                // Core-created uses are registered before quota-bearing reserve and publication.
                 do {
                     try await media.transfer.uploadAndRegister(meter: &media.meter, report: &media.report)
                     try await media.transfer.reclaim(meter: &media.meter, report: &media.report)
@@ -1180,7 +1308,14 @@ public actor NativeSession {
                 report.media = media.report
             }
             if syncError == nil, !isCancelled(), !Task.isCancelled {
-                do { _ = try await sync.run() } catch { syncError = ClientError.wrap(error) }
+                do {
+                    _ = try await sync.run()
+                    _ = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: true)
+                } catch {
+                    let wrapped = ClientError.wrap(error)
+                    if wrapped == .canceled || wrapped == .unauthorized || wrapped == .forbidden { throw wrapped }
+                    syncError = wrapped
+                }
             }
             if let bookId = report.bookId {
                 report.remoteScanPending = (try? coordinator.hasPendingRemoteScan(bookId: bookId)) ?? report.remoteScanPending
@@ -1277,10 +1412,30 @@ public actor NativeSession {
         do { return try client.listConversations() } catch { throw ClientError.wrap(error) }
     }
 
+    private func retentionPass(
+        client: NativeClient, server: ServerClient, identity: EnrollmentIdentity,
+        meter: inout RequestMeter, allowReadyAdvertisement: Bool
+    ) async throws -> AttachmentRetentionPassResult {
+        let generation = attachmentRetentionHTTP.generation()
+        do {
+            return try await AttachmentRetentionDriver(
+                client: client, server: server, state: attachmentRetentionHTTP,
+                isActive: { [weak self, attachmentRetentionHTTP] in
+                    guard attachmentRetentionHTTP.isCurrent(generation: generation) else { return false }
+                    return await self?.record?.identity == identity
+                }
+            ).reconcile(meter: &meter, allowReadyAdvertisement: allowReadyAdvertisement)
+        } catch {
+            let wrapped = ClientError.wrap(error)
+            if wrapped == .canceled || wrapped == .unauthorized || wrapped == .forbidden { throw wrapped }
+            return .unresolved
+        }
+    }
+
     private func authenticatedServer(_ identity: EnrollmentIdentity) throws -> ServerClient {
         try ServerClient(
             origin: ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: allowLoopbackHTTP),
-            token: store.token(identity), transport: transport
+            token: store.token(identity), transport: transport, attachmentRetention: attachmentRetentionHTTP
         )
     }
 
@@ -1293,7 +1448,7 @@ public actor NativeSession {
             token: try store.token(identity), transport: transport,
             observeResponse: { state in
                 reachability.record(state, binding: binding, generation: generation)
-            }
+            }, attachmentRetention: attachmentRetentionHTTP
         )
     }
 
@@ -1304,6 +1459,8 @@ public actor NativeSession {
         record = nil
         status = SessionStatus()
         reachability.bind(nil)
+        attachmentRetentionHTTP.reset()
+        attachmentStorageScopes.removeAll()
     }
 
     private func refreshCount() {

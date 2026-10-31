@@ -5,6 +5,9 @@ import android.content.Context
 import uniffi.peppy_mobile_bindings.NativeCipherObject
 import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeMmsBackfillPause
+import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionClass
+import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionErrorClassification
+import uniffi.peppy_mobile_bindings.classifyAttachmentRetentionError
 import java.io.File
 import java.util.UUID
 
@@ -58,21 +61,38 @@ class MmsMediaTransfer(
         val id = uuid(item.attachmentId); val file = File(client.nativeCipherFileForUpload(id))
         val bytes = item.ciphertextBytes.toLong()
         if (!file.isFile || bytes !in 1..GatewayHttp.MAX_MEDIA_BYTES || file.length() != bytes || !sha(item.ciphertextSha256)) return fail(failures, item.attachmentId, "upload", "invalid_media")
+        val retention = if (http.retentionEnabled()) client.attachmentUploadRetention(id) else null
         val reserve = JSONObject().put("attachment_id", id).put("declared_ciphertext_bytes", bytes).put("declared_ciphertext_sha256", item.ciphertextSha256)
-            .apply { if (referenceTracked(id)) put("reference_tracking", true) }.toString()
+            .apply {
+                retention?.let {
+                    put("retention_class", when (it.retentionClass) {
+                        NativeAttachmentRetentionClass.MESSAGE_MEDIA -> "message_media"
+                        NativeAttachmentRetentionClass.PROTECTED -> "protected"
+                    })
+                }
+                val tracksReferences = retention?.referenceTracking ?: referenceTracked(id)
+                if (tracksReferences) put("reference_tracking", true)
+            }.toString()
         val reservation = http.postJson("/v1/attachments/reserve", reserve)
-        if (!reservation.ok && reservation.code != 409) {
+        if (removedByStoragePolicy(reservation, id)) return fail(failures, id, "upload", "removed")
+        val reservationConflict = reservation.code == 409
+        if (!reservation.ok && !reservationConflict) {
             if (reservation.errorCode == "vault_quota_exceeded") onVaultQuotaExceeded()
             return fail(failures, id, "upload", reason(reservation))
         }
-        if (reservation.ok) { val remote = uuid(JSONObject(reservation.body ?: throw IllegalArgumentException()).getString("attachment_id")); if (remote != id) return fail(failures, id, "upload", "permanent") }
-        val put = if (reservation.ok) http.putFile("/v1/attachments/$id/upload", file, bytes) else null
-        if (put != null && !put.ok && put.code !in setOf(404,409)) return fail(failures, id, "upload", reason(put))
+        if (reservation.ok) {
+            val remote = uuid(JSONObject(reservation.body ?: throw IllegalArgumentException()).getString("attachment_id"))
+            if (remote != id) return fail(failures, id, "upload", "permanent")
+            val put = http.putFile("/v1/attachments/$id/upload", file, bytes)
+            if (removedByStoragePolicy(put, id)) return fail(failures, id, "upload", "removed")
+            if (!put.ok && put.code !in setOf(404,409)) return fail(failures, id, "upload", reason(put))
+        }
         val finalized = http.postJson("/v1/attachments/$id/finalize", "")
+        if (removedByStoragePolicy(finalized, id)) return fail(failures, id, "upload", "removed")
         if (!finalized.ok) return fail(failures, id, "upload", reason(finalized))
         val proof = JSONObject(finalized.body ?: throw IllegalArgumentException())
         val finalizedId = uuid(proof.getString("attachment_id"))
-        val validProof = finalizedId == id && (reservation.ok || proof.optBoolean("duplicate", false))
+        val validProof = finalizedId == id && (!reservationConflict || proof.optBoolean("duplicate", false))
         if (!validProof) return fail(failures, id, "upload", "permanent")
         client.markAttachmentUploaded(id, id)
         onUploadSucceeded()
@@ -91,6 +111,7 @@ class MmsMediaTransfer(
         cacheDirectory.mkdirs(); val temp = File.createTempFile("mms-cipher-", ".part", cacheDirectory)
         try {
             val response = http.getToFile("/v1/attachments/$remote", temp, bytes)
+            if (removedByStoragePolicy(response, item.attachmentId)) return fail(failures, item.attachmentId, "download", "removed")
             if (!response.ok) return fail(failures, item.attachmentId, "download", reason(response))
             if (temp.length() != bytes) return fail(failures, item.attachmentId, "download", "invalid_media")
             client.installDownloadedAttachment(item.attachmentId, temp.path); true
@@ -104,6 +125,16 @@ class MmsMediaTransfer(
     private fun fail(failures: MutableList<MmsTransferFailure>, id: String, operation: String, reason: String): Boolean { failures += MmsTransferFailure(id, operation, reason); return false }
     private fun uuid(value: String): String = UUID.fromString(value).toString()
     private fun sha(value: String) = value.matches(Regex("[0-9a-f]{64}"))
+    private fun removedByStoragePolicy(response: HttpResult, attachmentId: String): Boolean {
+        if (response.code != 410 || response.body == null) return false
+        return try {
+            val removed = classifyAttachmentRetentionError(410u, response.body!!) == NativeAttachmentRetentionErrorClassification.REMOVED_BY_STORAGE_POLICY
+            if (removed) client.reportAttachmentRemovedByStoragePolicy(attachmentId)
+            removed
+        } catch (_: Exception) {
+            false
+        }
+    }
     private fun reason(result: HttpResult): String = when {
         result.code == 401 || result.code == 403 -> "auth"
         result.errorCode == "vault_quota_exceeded" -> "quota"

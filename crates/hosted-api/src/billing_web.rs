@@ -35,6 +35,10 @@ pub mod routes {
     pub const RESUME: &str = "/hosted/v1/web/billing/resume";
     pub const INVOICES: &str = "/hosted/v1/web/billing/invoices";
     pub const STORAGE_PACK: &str = "/hosted/v1/web/billing/storage-pack";
+    pub const ATTACHMENT_STORAGE_STATUS: &str =
+        crate::attachments::routes::ATTACHMENT_STORAGE_STATUS;
+    pub const RETENTION_NOTICE_ACKNOWLEDGEMENT: &str =
+        crate::attachments::routes::RETENTION_NOTICE_ACKNOWLEDGEMENT;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

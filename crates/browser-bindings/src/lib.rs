@@ -27,6 +27,7 @@ pub mod local_identity;
 mod newenrollment;
 mod origin;
 
+mod attachment_retention;
 mod contacts;
 mod context;
 mod conversation;
@@ -153,6 +154,10 @@ pub(crate) fn core(error: CoreError) -> Failure {
         CoreError::InvalidMedia => Failure::new(
             "attachment-invalid",
             "The attachment could not be verified.",
+        ),
+        CoreError::AttachmentRemovedByStoragePolicy => Failure::new(
+            "attachment-removed-by-storage-policy",
+            "The hosted attachment is no longer available.",
         ),
         _ => Failure::new("core", "The local core rejected the operation."),
     }
@@ -311,6 +316,9 @@ impl BrowserCore {
             "mark_seen" => self.mark_seen(args_value(raw_args)?),
             "unread_message_batches" => self.unread_message_batches(args_value(raw_args)?),
             "mark_read_batch" => self.mark_read_batch(args_value(raw_args)?),
+            _ if attachment_retention::handles(command) => {
+                self.attachment_retention_command(command, args_value(raw_args)?)
+            }
             _ if search_history::handles(command) => {
                 self.search_history_command(command, args_value(raw_args)?)
             }
@@ -568,6 +576,7 @@ impl BrowserCore {
         serde_json::to_value(dto::Snapshot {
             version: "1",
             mode: "browser",
+            session_scope_id: None,
             connection: dto::Connection {
                 state: connection_state,
                 origin: self.context.origin.clone(),

@@ -328,6 +328,9 @@ async fn manual_challenge_rejects_wrong_psk_and_replay_and_expiry() {
     .await;
     app = next;
     assert_eq!(status, StatusCode::OK);
+    let retention_state: (bool, bool) = sqlx::query_as("SELECT cleanup_ready,reconciliation_needed FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault).bind(device_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(retention_state, (false, true));
     assert!(
         completed
             .get("material")

@@ -19,6 +19,7 @@
 //!   merged monotonically; commands learned from a snapshot are historical and never permitted.
 //!   A durable restore guard blocks all new carrier permits on a restored gateway; there is no
 //!   clear. Rolling a database back behind the application is not detectable.
+mod attachment_retention;
 mod compose_create;
 mod contact_media;
 mod contact_photos;
@@ -52,6 +53,14 @@ mod phone_read;
 mod sms_acquisition;
 mod sms_reconciliation;
 mod snapshot_projection;
+pub use attachment_retention::{
+    AttachmentRetentionClass, AttachmentRetentionState, AttachmentUploadRetention,
+    AttachmentUseKind, AttachmentUseOperationKind, AttachmentUseResponse, AttachmentUseState,
+    PendingAttachmentUseOperation, RemoteAttachmentState,
+};
+/// Maximum batch accepted by [`Client::prepare_attachment_retention_operations`].
+pub const MAX_PREPARED_ATTACHMENT_RETENTION_OPERATIONS: usize =
+    attachment_retention::MAX_PREPARED_OPERATIONS;
 pub use gateway_settings::{
     GatewayCapabilities, GatewayHostFacts, GatewayPlatform, GatewayPolicyDecision, GatewaySettings,
 };
@@ -109,7 +118,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 40;
+const SCHEMA_VERSION: i64 = 41;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -179,7 +188,7 @@ const BROWSER_LOCAL_IDENTITY_AAD_PREFIX: &[u8] = b"peppy-browser-local-identity-
 const BROWSER_LOCAL_IDENTITY_PLAINTEXT_BYTES: usize = 128;
 const MAX_BROWSER_LOCAL_IDENTITY_AAD_BYTES: usize = 64 * 1024;
 const NEXT_SOURCE_SEQUENCE_SQL: &str = "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')";
-const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND a.state='pending_upload' AND a.remote_object_id IS NULL) AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos p LEFT JOIN contact_photo_aliases alias ON alias.old_id=p.attachment_id JOIN attachments a ON a.attachment_id=COALESCE(alias.new_id,p.attachment_id) WHERE p.outbox_sequence=outbox.seq AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos other WHERE other.outbox_sequence=p.outbox_sequence AND other.attachment_id<>p.attachment_id) AND NOT EXISTS(SELECT 1 FROM contact_photo_unavailable unavailable WHERE unavailable.outbox_sequence=p.outbox_sequence) AND a.state='pending_upload' AND a.remote_object_id IS NULL AND a.media_type='image/jpeg' AND a.plaintext_bytes<=65536 AND NOT EXISTS(SELECT 1 FROM contact_photo_reclaims reclaim WHERE reclaim.attachment_id=a.attachment_id AND reclaim.state='completed')) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
+const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND NOT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.envelope_id=outbox.envelope_id AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1)))) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachment_remote_state rs ON rs.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND rs.removed_by_storage_policy=1) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND a.state='pending_upload' AND a.remote_object_id IS NULL) AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos p LEFT JOIN contact_photo_aliases alias ON alias.old_id=p.attachment_id JOIN attachments a ON a.attachment_id=COALESCE(alias.new_id,p.attachment_id) WHERE p.outbox_sequence=outbox.seq AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos other WHERE other.outbox_sequence=p.outbox_sequence AND other.attachment_id<>p.attachment_id) AND NOT EXISTS(SELECT 1 FROM contact_photo_unavailable unavailable WHERE unavailable.outbox_sequence=p.outbox_sequence) AND a.state='pending_upload' AND a.remote_object_id IS NULL AND a.media_type='image/jpeg' AND a.plaintext_bytes<=65536 AND NOT EXISTS(SELECT 1 FROM contact_photo_reclaims reclaim WHERE reclaim.attachment_id=a.attachment_id AND reclaim.state='completed')) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
 const BATTERY_LOOKUP_INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS sms_acquisitions_reserved_sequence ON sms_acquisitions(conversation_id,source_sequence) WHERE state!='complete';
 CREATE INDEX IF NOT EXISTS outbox_unsealed_priority ON outbox(priority,seq) WHERE state='unsealed';
@@ -264,6 +273,8 @@ pub enum Error {
     InvalidMedia,
     #[error("local media storage is unavailable")]
     Storage,
+    #[error("attachment was removed by hosted storage policy")]
+    AttachmentRemovedByStoragePolicy,
     #[error("snapshot import is inconsistent or no longer current; live state is unchanged")]
     SnapshotMismatch,
     #[error("MMS acquisition limit reached")]
@@ -1028,11 +1039,149 @@ impl Client {
             media_cache: media_cache::MediaCacheState::default(),
         };
         initialize(&mut store)?;
+        attachment_retention::configure_protocol(&store.conn, false)?;
+        attachment_retention::require_reconciliation(&store.conn)?;
         let store = Arc::new(Mutex::new(store));
         let client = Self(store);
         client.cleanup_terminal_mms_parts()?;
         registry.insert(path, Arc::downgrade(&client.0));
         Ok(client)
+    }
+
+    /// Enables automatic protected-use creation only after the host negotiated protocol v1 for
+    /// this open session. Every newly opened core starts disabled.
+    pub fn configure_attachment_retention_protocol(&self, enabled: bool) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let device_id = store.config.device_id;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        attachment_retention::configure_protocol(&tx, enabled)?;
+        if enabled {
+            attachment_retention::protect_pending_gateway_commands(&tx, device_id)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn attachment_retention_protocol_enabled(&self) -> Result<bool, Error> {
+        let store = self.lock()?;
+        attachment_retention::protocol_enabled(&store.conn)
+    }
+
+    /// Core-owned reserve classification; hosts must not infer this from MIME or snapshots.
+    pub fn attachment_upload_retention(
+        &self,
+        attachment_id: AttachmentId,
+    ) -> Result<AttachmentUploadRetention, Error> {
+        let store = self.lock()?;
+        if attachment_row(&store.conn, attachment_id)?.is_none() {
+            return Err(Error::NotFound);
+        }
+        attachment_retention::upload_retention(&store.conn, attachment_id)
+    }
+
+    /// Persists a protected use before a host may publish dependent work.
+    pub fn begin_attachment_retention_use(
+        &self,
+        attachment_id: AttachmentId,
+        kind: AttachmentUseKind,
+    ) -> Result<PendingAttachmentUseOperation, Error> {
+        let mut store = self.lock()?;
+        let device_id = store.config.device_id;
+        attachment_retention::begin_use(&mut store.conn, attachment_id, device_id, kind)
+    }
+
+    /// Durably derives a bounded transport batch. This queues only releases proven terminal by
+    /// Rust-owned lifecycle evidence and canonical re-observations required after open/restore.
+    /// Hosts checkpoint this mutation before HTTP and generation-fence older HTTP responses.
+    pub fn prepare_attachment_retention_operations(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingAttachmentUseOperation>, Error> {
+        let mut store = self.lock()?;
+        attachment_retention::prepare(&mut store.conn, limit)
+    }
+
+    /// Returns register/release work for the host transport. Results must be acknowledged below.
+    pub fn pending_attachment_retention_operations(
+        &self,
+    ) -> Result<Vec<PendingAttachmentUseOperation>, Error> {
+        let store = self.lock()?;
+        attachment_retention::pending(&store.conn)
+    }
+
+    /// Whether another bounded prepare call can make due durable progress. Future timer-only
+    /// contact expiry hints are excluded so hosts do not busy-loop.
+    pub fn attachment_retention_preparation_pending(&self) -> Result<bool, Error> {
+        let store = self.lock()?;
+        attachment_retention::preparation_pending(&store.conn)
+    }
+
+    /// Durably accepts a matching server response before dependent effects can proceed.
+    pub fn apply_attachment_retention_response(
+        &self,
+        response: &AttachmentUseResponse,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        attachment_retention::apply_response(&mut store.conn, response)?;
+        seal_with_store(&mut store)
+    }
+
+    /// Queues release only when the linked durable lifecycle contains terminal evidence.
+    pub fn request_attachment_retention_release(
+        &self,
+        use_id: uuid::Uuid,
+    ) -> Result<PendingAttachmentUseOperation, Error> {
+        let mut store = self.lock()?;
+        attachment_retention::request_release(&mut store.conn, use_id)
+    }
+
+    /// Records the typed hosted-removal response without touching local ciphertext or keys.
+    pub fn report_attachment_removed_by_storage_policy(
+        &self,
+        attachment_id: AttachmentId,
+    ) -> Result<(), Error> {
+        let store = self.lock()?;
+        attachment_retention::report_removed(&store.conn, attachment_id)
+    }
+
+    pub fn attachment_retention_state(
+        &self,
+        attachment_id: AttachmentId,
+    ) -> Result<AttachmentRetentionState, Error> {
+        let store = self.lock()?;
+        let local_available = attachment_row(&store.conn, attachment_id)?
+            .is_some_and(|row| row.state.is_local())
+            && !media_cache::gateway_mms_ciphertext_evicted(&store.conn, attachment_id)?;
+        attachment_retention::state(&store.conn, attachment_id, local_available)
+    }
+
+    /// Hosts call this only after restored pending retention work has been reconciled.
+    pub fn mark_attachment_retention_reconciled(&self) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        attachment_retention::mark_reconciled(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Invalidates the readiness handshake before a host restores an older encrypted checkpoint.
+    pub fn invalidate_attachment_retention_reconciliation(&self) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        attachment_retention::require_reconciliation(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn attachment_retention_ready(&self) -> Result<bool, Error> {
+        let store = self.lock()?;
+        attachment_retention::ready(&store.conn)
     }
 
     /// Rust-owned, versioned contact DTO entry points for native platform adapters.
@@ -2521,8 +2670,9 @@ impl Client {
         let store = self.lock()?;
         let count: i64 = store.conn.query_row(
             &format!(
-                "SELECT COUNT(*) FROM outbox WHERE state='queued' AND {}",
-                history_import::outbox_upload_eligible_predicate()
+                "SELECT COUNT(*) FROM outbox WHERE state='queued' AND {} AND NOT {} AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachment_remote_state rs ON rs.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND rs.removed_by_storage_policy=1)",
+                history_import::outbox_upload_eligible_predicate(),
+                attachment_retention::OUTBOX_BLOCKED_SQL
             ),
             [],
             |row| row.get(0),
@@ -2731,6 +2881,7 @@ impl Client {
         )?;
         report.waiting_for_keys = usize::try_from(waiting).map_err(|_| Error::Database)?;
         advance_processed_frontier(&tx)?;
+        attachment_retention::complete_processed_restores(&tx)?;
         tx.commit()?;
         Ok(report)
     }
@@ -2881,6 +3032,14 @@ impl Client {
         }
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
         if !media_ready {
+            return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
+        }
+        let retention_blocked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.command_id=?1 AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1))))",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if retention_blocked {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
         // The attempt time is the gateway's best evidence for the provider row the platform
@@ -3360,23 +3519,29 @@ impl Client {
         let aad = media::media_aad(vault_id, attachment_id);
         let encrypted = media::encrypt_into_store(&root, attachment_id, source, &key, &aad)?;
         let key_bytes = Zeroizing::new(key.with_encrypted_reference_bytes(|bytes| *bytes));
-        let inserted = self.lock().and_then(|s| {
-            s.conn
-                .execute(
-                    "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key,remote_object_id) VALUES(?,?,?,?,?,?,?,?,?,NULL)",
-                    params![
-                        attachment_id.to_string(),
-                        AttachmentState::PendingUpload.code(),
-                        media_type,
-                        display_name,
-                        to_i64(encrypted.plaintext_bytes)?,
-                        to_i64(encrypted.ciphertext_bytes)?,
-                        encrypted.ciphertext_sha256,
-                        STREAM_VERSION,
-                        key_bytes.as_slice()
-                    ],
-                )
-                .map_err(Error::from)
+        let inserted = self.lock().and_then(|mut s| {
+            let tx = s.conn.transaction()?;
+            tx.execute(
+                "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key,remote_object_id) VALUES(?,?,?,?,?,?,?,?,?,NULL)",
+                params![
+                    attachment_id.to_string(),
+                    AttachmentState::PendingUpload.code(),
+                    media_type,
+                    display_name,
+                    to_i64(encrypted.plaintext_bytes)?,
+                    to_i64(encrypted.ciphertext_bytes)?,
+                    encrypted.ciphertext_sha256,
+                    STREAM_VERSION,
+                    key_bytes.as_slice()
+                ],
+            )?;
+            attachment_retention::record_upload_retention(
+                &tx,
+                attachment_id,
+                AttachmentRetentionClass::MessageMedia,
+                true,
+            )?;
+            tx.commit().map_err(Error::from)
         });
         if let Err(error) = inserted {
             let _ = std::fs::remove_file(media::cipher_path(&root, attachment_id));
@@ -3430,6 +3595,12 @@ impl Client {
                 ],
             )?;
             contact_media::track_prepared(&tx, attachment_id)?;
+            attachment_retention::record_upload_retention(
+                &tx,
+                attachment_id,
+                AttachmentRetentionClass::Protected,
+                true,
+            )?;
             tx.commit().map_err(Error::from)
         });
         if let Err(error) = inserted {
@@ -3503,7 +3674,7 @@ impl Client {
     /// (see `contact_photo_transfer_state_json`).
     pub fn pending_uploads(&self) -> Result<Vec<CipherObject>, Error> {
         let sql = format!(
-            "WITH candidate(attachment_id,payload) AS (SELECT ma.attachment_id,m.payload FROM message_attachments ma JOIN messages m ON m.id=ma.message_id UNION ALL SELECT mm.thumbnail_attachment_id,m.payload FROM message_media_meta mm JOIN messages m ON m.id=mm.message_id UNION ALL SELECT attachment_id,NULL FROM ({}) contact_uploads) SELECT a.attachment_id FROM attachments a JOIN candidate c ON c.attachment_id=a.attachment_id WHERE a.state='pending_upload' GROUP BY a.attachment_id ORDER BY MIN(CASE WHEN c.payload IS NULL THEN 1 WHEN COALESCE(json_extract(c.payload,'$.imported'),0)=0 THEN 0 ELSE 2 END),MIN(a.rowid)",
+            "WITH candidate(attachment_id,payload) AS (SELECT ma.attachment_id,m.payload FROM message_attachments ma JOIN messages m ON m.id=ma.message_id UNION ALL SELECT mm.thumbnail_attachment_id,m.payload FROM message_media_meta mm JOIN messages m ON m.id=mm.message_id UNION ALL SELECT attachment_id,NULL FROM ({}) contact_uploads) SELECT a.attachment_id FROM attachments a JOIN candidate c ON c.attachment_id=a.attachment_id WHERE a.state='pending_upload' AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) GROUP BY a.attachment_id ORDER BY MIN(CASE WHEN c.payload IS NULL THEN 1 WHEN COALESCE(json_extract(c.payload,'$.imported'),0)=0 THEN 0 ELSE 2 END),MIN(a.rowid)",
             contact_media::UPLOAD_IDS_SQL
         );
         self.cipher_objects(&sql)
@@ -3612,7 +3783,7 @@ impl Client {
         let rows: Vec<(String, bool)> = store
             .conn
             .prepare(&format!(
-                "SELECT attachment_id,attachment_id IN (SELECT attachment_id FROM attachment_demand) FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
+                "SELECT attachment_id,attachment_id IN (SELECT attachment_id FROM attachment_demand) FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
                 contact_media::REJECTED_DOWNLOADS_SQL, EAGER_MEDIA_PLAINTEXT_BYTES
             ))?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -3659,6 +3830,7 @@ impl Client {
         if attachment_row(&guard.conn, attachment_id)?.is_none() {
             return Err(Error::NotFound);
         }
+        attachment_retention::ensure_remote_available(&guard.conn, attachment_id)?;
         if media_cache::request_gateway_mms_rehydration(&mut guard, attachment_id)? {
             return Ok(());
         }
@@ -3705,6 +3877,7 @@ impl Client {
             let (conn, ctx) = guard.parts();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let row = attachment_row(&tx, attachment_id)?.ok_or(Error::NotFound)?;
+            attachment_retention::ensure_remote_available(&tx, attachment_id)?;
             match (row.state, row.remote_object_id) {
                 (AttachmentState::PendingUpload, _) => {
                     tx.execute(
@@ -3737,6 +3910,7 @@ impl Client {
         let (root, vault_id, row, contact_photo) = {
             let s = self.lock()?;
             let row = attachment_row(&s.conn, attachment_id)?.ok_or(Error::NotFound)?;
+            attachment_retention::ensure_remote_available(&s.conn, attachment_id)?;
             let contact_photo = contact_media::is_received_photo(&s.conn, attachment_id)?;
             (s.media_dir.clone(), s.config.vault_id, row, contact_photo)
         };
@@ -3854,6 +4028,7 @@ impl Client {
         let mut guard = self.lock()?;
         if purpose == SnapshotPurpose::Restore {
             set_meta(&guard.conn, "restore_guard", "1")?;
+            attachment_retention::require_reconciliation(&guard.conn)?;
         }
         let high = i64::try_from(high_water.0).map_err(|_| Error::InvalidCursor)?;
         if record_count > MAX_SNAPSHOT_RECORDS || record_count > high_water.0 {
@@ -3892,6 +4067,9 @@ impl Client {
             "INSERT INTO snapshot_generations(generation,high_water,expected,received,received_bytes,overlap,last_cursor,state,server_compaction_generation) VALUES(?,?,?,0,0,0,0,'staging',?)",
             params![to_i64(generation)?, high, to_i64(record_count)?, server_compaction_generation.map(|v| v.to_string())],
         )?;
+        if purpose == SnapshotPurpose::Restore {
+            attachment_retention::bind_restore_generation(&tx, generation)?;
+        }
         collect_snapshot_garbage(&tx)?;
         tx.commit()?;
         Ok(SnapshotProgress {
@@ -3975,6 +4153,7 @@ impl Client {
                 "UPDATE snapshot_generations SET state='failed' WHERE generation=?",
                 params![current.number],
             )?;
+            attachment_retention::mark_restore_generation(&tx, generation, "failed")?;
             tx.commit()?;
             return Err(Error::SnapshotMismatch);
         }
@@ -3986,6 +4165,7 @@ impl Client {
             u64::try_from(current.high_water).map_err(|_| Error::Database)?,
         )?;
         if current.expected == 0 {
+            attachment_retention::mark_restore_generation(&tx, generation, "completed")?;
             tx.execute(
                 "DELETE FROM snapshot_generations WHERE generation=?",
                 params![current.number],
@@ -4089,6 +4269,7 @@ impl Client {
                 "UPDATE snapshot_generations SET state='failed' WHERE generation=?",
                 params![current.number],
             )?;
+            attachment_retention::mark_restore_generation(&tx, generation, "failed")?;
             tx.commit()?;
             return Err(Error::SnapshotMismatch);
         }
@@ -4127,6 +4308,7 @@ impl Client {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         phone_read::retire_all_phone_read_effects(&tx)?;
         set_meta(&tx, "restore_guard", "1")?;
+        attachment_retention::require_reconciliation(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -4660,6 +4842,11 @@ fn drain_snapshot(
         if projected {
             snapshot_projection::retain(conn, generation.number, cursor, &wire)?;
         }
+        attachment_retention::record_restore_cursor(
+            conn,
+            u64::try_from(generation.number).map_err(|_| Error::Database)?,
+            cursor,
+        )?;
         delete_record.execute(params![generation.number, cursor])?;
         drained += 1;
         report.drained += 1;
@@ -5310,7 +5497,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=39)) => {
+        Some(version @ (4..=40)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5419,6 +5606,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             if version <= 39 {
                 apply_migration_40(&tx)?;
             }
+            attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -5426,6 +5614,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
         Some(_) => return Err(Error::UnsupportedSchema),
     }
     mms_backfill::initialize(conn)?;
+    attachment_retention::initialize(conn)?;
     media_cache::initialize(conn)?;
     deferred_media::initialize(conn)?;
     initialize_battery_lookup_indexes(conn)?;
@@ -6061,6 +6250,12 @@ fn apply_record(
             {
                 return Ok(Some(Q::InvalidPayload));
             }
+            let mut new_attachment_ids = Vec::new();
+            for descriptor in &media {
+                if attachment_row(conn, descriptor.attachment_id)?.is_none() {
+                    new_attachment_ids.push(descriptor.attachment_id);
+                }
+            }
             if !store_remote_media(conn, &media)?
                 || insert_message(conn, &message)? == Inserted::Conflict
                 || !record_command(
@@ -6073,6 +6268,10 @@ fn apply_record(
                 return Ok(Some(Q::PayloadConflict));
             }
             if route.gateway_device_id == ctx.device_id {
+                let attachment_ids = media
+                    .iter()
+                    .map(|descriptor| descriptor.attachment_id)
+                    .collect::<Vec<_>>();
                 let encoded = json(&message)?;
                 // Retired-epoch commands are rejected immediately; they are never executable.
                 let retired = ctx
@@ -6095,6 +6294,24 @@ fn apply_record(
                     "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,retired,historical) VALUES(?,?,?,?,?,?) ON CONFLICT(command_id) DO NOTHING",
                     params![command_id.to_string(), envelope.key_epoch, route.subscription_id, encoded, retired, historical],
                 )?;
+                if !historical && !retired {
+                    for attachment_id in attachment_ids {
+                        if new_attachment_ids.contains(&attachment_id) {
+                            attachment_retention::record_upload_retention(
+                                conn,
+                                attachment_id,
+                                AttachmentRetentionClass::MessageMedia,
+                                true,
+                            )?;
+                        }
+                        attachment_retention::protect_gateway_command(
+                            conn,
+                            ctx.device_id,
+                            &command_id.to_string(),
+                            attachment_id,
+                        )?;
+                    }
+                }
                 // Historical (snapshot) commands get no receipt: the gateway never persisted them live.
                 if inserted == 1 && !historical {
                     let receipt = if retired {
@@ -6590,12 +6807,17 @@ fn enqueue_without_sealing(
         main.as_ref(),
         outbox_priority(purpose, payload),
     )?;
-    for attachment_id in payload_attachment_ids(payload) {
-        conn.execute(
-            "INSERT OR IGNORE INTO outbox_attachments(envelope_id,attachment_id) VALUES(?,?)",
-            params![envelope_id.to_string(), attachment_id.to_string()],
-        )?;
-    }
+    // Contact validation may re-prepare a reclaimed photo under a fresh alias. Do that before
+    // retention inventory so the fresh attachment's immutable provenance and use bind atomically
+    // to this producer rather than leaving the old opted-in ID as an unsatisfied requirement.
+    contact_media::on_enqueue(conn, ctx.vault_id, payload)?;
+    record_attachment_retention_effects(
+        conn,
+        ctx,
+        payload,
+        &envelope_id.to_string(),
+        command_id.map(|id| id.to_string()).as_deref(),
+    )?;
     contact_media::record_outbox_photos(conn, to_i64(sequence)?, payload)?;
     learn_compaction(
         conn,
@@ -6619,6 +6841,12 @@ fn enqueue_without_sealing(
                 checkpoint.as_ref(),
                 outbox_priority(purpose, payload),
             )?;
+            record_attachment_inventory(conn, payload, &checkpoint_id.to_string())?;
+            attachment_retention::clone_effects(
+                conn,
+                &envelope_id.to_string(),
+                &checkpoint_id.to_string(),
+            )?;
             contact_media::record_outbox_photos(conn, to_i64(checkpoint_sequence)?, payload)?;
             if let PrivatePayload::NotificationPosted { notification } = payload {
                 conn.execute(
@@ -6635,8 +6863,72 @@ fn enqueue_without_sealing(
             )?;
         }
     }
-    contact_media::on_enqueue(conn, ctx.vault_id, payload)?;
     Ok((envelope_id, sequence))
+}
+
+fn record_attachment_inventory(
+    conn: &Connection,
+    payload: &PrivatePayload,
+    envelope_id: &str,
+) -> Result<(), Error> {
+    let mut ids = payload_attachment_ids(payload);
+    ids.extend(contact_media::effective_payload_photo_ids(conn, payload)?);
+    ids.sort();
+    ids.dedup();
+    for attachment_id in ids {
+        conn.execute(
+            "INSERT OR IGNORE INTO outbox_attachments(envelope_id,attachment_id) VALUES(?,?)",
+            params![envelope_id, attachment_id.to_string()],
+        )?;
+    }
+    Ok(())
+}
+
+fn record_attachment_retention_effects(
+    conn: &Connection,
+    ctx: &Ctx,
+    payload: &PrivatePayload,
+    envelope_id: &str,
+    command_id: Option<&str>,
+) -> Result<(), Error> {
+    let media = payload_attachment_ids(payload);
+    let media_kind = match payload {
+        PrivatePayload::SendMmsCommand { .. } => Some(AttachmentUseKind::PendingSend),
+        PrivatePayload::MmsMessage { .. } => Some(AttachmentUseKind::MessageHistory),
+        PrivatePayload::MmsDeferredPreview { .. } | PrivatePayload::MmsMediaBinding { .. } => {
+            Some(AttachmentUseKind::MessageHistory)
+        }
+        _ => None,
+    };
+    if let Some(kind) = media_kind {
+        let kinds: &[AttachmentUseKind] = if kind == AttachmentUseKind::PendingSend {
+            &[
+                AttachmentUseKind::MessageHistory,
+                AttachmentUseKind::PendingSend,
+            ]
+        } else {
+            &[kind]
+        };
+        attachment_retention::ensure_producer_uses(conn, &media, ctx.device_id, kinds)?;
+        for kind in kinds {
+            attachment_retention::associate_effects(conn, &media, *kind, envelope_id, command_id)?;
+        }
+    }
+    let photos = contact_media::effective_payload_photo_ids(conn, payload)?;
+    attachment_retention::ensure_producer_uses(
+        conn,
+        &photos,
+        ctx.device_id,
+        &[AttachmentUseKind::ContactPhoto],
+    )?;
+    attachment_retention::associate_effects(
+        conn,
+        &photos,
+        AttachmentUseKind::ContactPhoto,
+        envelope_id,
+        command_id,
+    )?;
+    record_attachment_inventory(conn, payload, envelope_id)
 }
 
 fn payload_attachment_ids(payload: &PrivatePayload) -> Vec<AttachmentId> {
@@ -7586,8 +7878,9 @@ fn queued_outbox_sequence_sql() -> String {
 
 fn queued_outbox_sql() -> String {
     format!(
-        "SELECT wire FROM outbox WHERE state='queued' AND {} ORDER BY priority,seq LIMIT ?",
-        history_import::outbox_upload_eligible_predicate()
+        "SELECT wire FROM outbox WHERE state='queued' AND {} AND NOT {} AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachment_remote_state rs ON rs.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND rs.removed_by_storage_policy=1) ORDER BY priority,seq LIMIT ?",
+        history_import::outbox_upload_eligible_predicate(),
+        attachment_retention::OUTBOX_BLOCKED_SQL
     )
 }
 
