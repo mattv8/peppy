@@ -159,6 +159,8 @@ pub enum KeyPurpose {
     Compaction,
     /// Local credential wrapping only; never use this purpose for transport envelopes.
     LocalWrap,
+    /// Tester registry envelopes bound to an authenticated vault profile.
+    TesterRegistry,
 }
 impl KeyPurpose {
     fn id(self) -> u64 {
@@ -168,6 +170,7 @@ impl KeyPurpose {
             Self::Header => 3,
             Self::Compaction => 4,
             Self::LocalWrap => 5,
+            Self::TesterRegistry => 6,
         }
     }
 }

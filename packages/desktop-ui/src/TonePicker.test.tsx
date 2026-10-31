@@ -16,6 +16,15 @@ describe("TonePicker", () => {
     expect(onSelect).toHaveBeenCalledWith(15);
   });
 
+  it("moves six grid positions with ArrowDown and omits the help text", () => {
+    const onSelect = vi.fn();
+    render(<TonePicker id="tone" seed="contact" automaticIndex={9} value={60} onSelect={onSelect} />);
+    fireEvent.click(screen.getByRole("button", { name: "Change conversation color" }));
+    fireEvent.keyDown(screen.getByRole("radio", { name: "Red" }), { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getByRole("radio", { name: "Green" }));
+    expect(screen.queryByText(/on all your devices/)).toBeNull();
+  });
+
   it("resets to automatic and keeps the panel open when saving fails", () => {
     const onSelect = vi.fn();
     const { rerender } = render(<TonePicker id="tone" seed="contact" automaticIndex={9} value={60} error="Couldn't save the color. Try again." onSelect={onSelect} />);

@@ -14,6 +14,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.concurrent.CopyOnWriteArrayList
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -193,7 +194,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
                 session = 1L,
             ).workSpec.input
         }
-        val events = mutableListOf<String>()
+        val events = CopyOnWriteArrayList<String>()
 
         SyncDiagnostics.withTestConfiguration(true, { 100L }, { 1L }, events::add, sessionToken = 1L) {
             assertEquals(androidx.work.ListenableWorker.Result.success(), gatewayWorker(input).startWork().get())
@@ -220,7 +221,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
                 session = SyncDiagnostics.currentSessionToken(),
             ).workSpec.input
         }
-        val events = mutableListOf<String>()
+        val events = CopyOnWriteArrayList<String>()
         SyncDiagnostics.withTestConfiguration(true, { 100L }, { 1L }, events::add, sessionToken = 2L) {
             assertEquals(androidx.work.ListenableWorker.Result.success(), gatewayWorker(mismatched).startWork().get())
             assertEquals(androidx.work.ListenableWorker.Result.success(), gatewayWorker(Data.EMPTY).startWork().get())

@@ -39,7 +39,7 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
   const openableInitialItems = initialItems.filter((item) => !originalPending(item.attachment) || (item.attachment.id === initialAttachmentId && (!initialMessageId || item.message.id === initialMessageId)));
   const [items, setItems] = useState(openableInitialItems);
   const [index, setIndex] = useState(() => Math.max(0, openableInitialItems.findIndex(item => item.attachment.id === initialAttachmentId && (!initialMessageId || item.message.id === initialMessageId))));
-  const [url, setUrl] = useState<string>(); const [pendingAttachmentId, setPendingAttachmentId] = useState<string>(); const [loadError, setLoadError] = useState<string>(); const [actionError, setActionError] = useState<string>(); const [saving, setSaving] = useState(false); const [savePending, setSavePending] = useState(false); const [paging, setPaging] = useState(false); const [previousExhausted, setPreviousExhausted] = useState(!hasPreviousPage); const [nextExhausted, setNextExhausted] = useState(!hasNextPage);
+  const [loadedOriginal, setLoadedOriginal] = useState<{ attachmentId: string; url: string }>(); const [pendingAttachmentId, setPendingAttachmentId] = useState<string>(); const [loadError, setLoadError] = useState<string>(); const [actionError, setActionError] = useState<string>(); const [saving, setSaving] = useState(false); const [savePending, setSavePending] = useState(false); const [paging, setPaging] = useState(false); const [previousExhausted, setPreviousExhausted] = useState(!hasPreviousPage); const [nextExhausted, setNextExhausted] = useState(!hasNextPage);
   const requestVersion = useRef(0); const requested = useRef(false); const itemsRef = useRef(items); itemsRef.current = items;
   const actions = useMediaActions();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -50,18 +50,21 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
   const removedRemoteOnly = item?.attachment.remoteState === "removed_by_storage_policy" && !item.attachment.localAvailable;
   const removedWithLocalCopy = item?.attachment.remoteState === "removed_by_storage_policy" && item.attachment.localAvailable;
   const pending = pendingAttachmentId === item?.attachment.id;
+  const url = loadedOriginal?.attachmentId === item?.attachment.id ? loadedOriginal.url : undefined;
   const request = async () => {
-  if (!item || originalPending(item.attachment)) return;
+    if (!item || originalPending(item.attachment)) return;
     const target = item.attachment.id; const version = ++requestVersion.current; requested.current = true; setLoadError(undefined);
-    try { const result = await requestOriginal(target); if (version !== requestVersion.current) { if (result.state === "ready") releaseMedia?.(target, result.url); } else if (result.state === "ready") { setPendingAttachmentId(undefined); setUrl(result.url); } else setPendingAttachmentId(target); } catch { if (version === requestVersion.current) setLoadError("Could not load media."); }
+    try { const result = await requestOriginal(target); if (version !== requestVersion.current) { if (result.state === "ready") releaseMedia?.(target, result.url); } else if (result.state === "ready") { setPendingAttachmentId(undefined); setLoadedOriginal({ attachmentId: target, url: result.url }); } else setPendingAttachmentId(target); } catch { if (version === requestVersion.current) setLoadError("Could not load media."); }
   };
   const check = async () => {
-  if (!item) return;
+    if (!item) return;
     const target = item.attachment.id; const version = ++requestVersion.current;
-    try { const result = await checkOriginal(target); if (version !== requestVersion.current) { if (result.state === "ready") releaseMedia?.(target, result.url); } else if (result.state === "ready") { setPendingAttachmentId(undefined); setUrl(result.url); } } catch { if (version === requestVersion.current) setLoadError("Could not load media."); }
+    try { const result = await checkOriginal(target); if (version !== requestVersion.current) { if (result.state === "ready") releaseMedia?.(target, result.url); } else if (result.state === "ready") { setPendingAttachmentId(undefined); setLoadedOriginal({ attachmentId: target, url: result.url }); } } catch { if (version === requestVersion.current) setLoadError("Could not load media."); }
   };
-  useEffect(() => () => { requestVersion.current += 1; if (url && item) releaseMedia?.(item.attachment.id, url); }, [item?.attachment.id, releaseMedia, url]);
-  useEffect(() => { requestVersion.current += 1; setUrl(undefined); setPendingAttachmentId(undefined); setSavePending(false); setLoadError(undefined); setActionError(undefined); requested.current = false; }, [item?.attachment.id]);
+  useEffect(() => () => { requestVersion.current += 1; }, []);
+  // Keyed only on the loaded pair: a new releaseMedia identity must not release the URL still on screen.
+  useEffect(() => { if (loadedOriginal) return () => releaseMedia?.(loadedOriginal.attachmentId, loadedOriginal.url); }, [loadedOriginal]);
+  useEffect(() => { requestVersion.current += 1; setLoadedOriginal(undefined); setPendingAttachmentId(undefined); setSavePending(false); setLoadError(undefined); setActionError(undefined); requested.current = false; }, [item?.attachment.id]);
   useEffect(() => { if (item && !removedRemoteOnly && !mediaState(item).startsWith("unsupported")) void request(); }, [item?.attachment.id, removedRemoteOnly]);
   useEffect(() => { if (item && !removedRemoteOnly && !url && (pending && requested.current || originalPending(item.attachment))) void check(); }, [removedRemoteOnly, retryKey]);
   useEffect(() => { if (!pending) { setStillWaiting(false); return; } const timer = window.setTimeout(() => setStillWaiting(true), 15000); return () => window.clearTimeout(timer); }, [item?.attachment.id, pending]);

@@ -28,6 +28,26 @@
       ],
       "type": "object"
     },
+    "AddTesterRequestV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/VaultBindingV2"
+        },
+        "entry": {
+          "$ref": "#/$defs/TesterInputV2"
+        },
+        "expected_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "binding",
+        "entry"
+      ],
+      "type": "object"
+    },
     "AttachmentStorageStatusResponse": {
       "additionalProperties": false,
       "properties": {
@@ -196,12 +216,73 @@
       ],
       "type": "object"
     },
+    "CiphertextV2": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "xchacha20poly1305-ietf",
+          "type": "string"
+        },
+        "ciphertext": {
+          "type": "string"
+        },
+        "keyId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "version": {
+          "const": 2,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "algorithm",
+        "keyId",
+        "nonce",
+        "ciphertext"
+      ],
+      "type": "object"
+    },
     "DeletionState": {
       "enum": [
         "none",
         "pending"
       ],
       "type": "string"
+    },
+    "EncryptedEnvelopeV2": {
+      "additionalProperties": false,
+      "properties": {
+        "ciphertext": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "nonce": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 24,
+          "minItems": 24,
+          "type": "array"
+        }
+      },
+      "required": [
+        "nonce",
+        "ciphertext"
+      ],
+      "type": "object"
     },
     "IdentityProvider": {
       "description": "Identity provider for authentication.",
@@ -250,6 +331,53 @@
         "expected_revision",
         "kdf",
         "check",
+        "entries",
+        "legacy_mappings",
+        "retire_legacy_accounts",
+        "confirm_legacy_retirement"
+      ],
+      "type": "object"
+    },
+    "InitializeTestersRequestV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/VaultBindingV2"
+        },
+        "confirm_legacy_retirement": {
+          "type": "boolean"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/TesterInputV2"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "type": "string"
+        },
+        "key_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "legacy_mappings": {
+          "items": {
+            "$ref": "#/$defs/LegacyTesterMapping"
+          },
+          "type": "array"
+        },
+        "retire_legacy_accounts": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "binding",
+        "key_id",
         "entries",
         "legacy_mappings",
         "retire_legacy_accounts",
@@ -329,6 +457,45 @@
       ],
       "type": "object"
     },
+    "KeyProfileV2": {
+      "additionalProperties": false,
+      "description": "Schema-capable public representation of `peppy_crypto::KeyProfile`.",
+      "properties": {
+        "crypto_suite": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key_epoch": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "salt": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 16,
+          "minItems": 16,
+          "type": "array"
+        },
+        "vault_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "crypto_suite",
+        "salt",
+        "vault_id",
+        "key_epoch"
+      ],
+      "type": "object"
+    },
     "LegacyTesterMapping": {
       "additionalProperties": false,
       "properties": {
@@ -344,6 +511,34 @@
       "required": [
         "account_id",
         "entry_id"
+      ],
+      "type": "object"
+    },
+    "MigrateTestersRequestV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/VaultBindingV2"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/ReencryptedTesterEntryV2"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "type": "string"
+        },
+        "key_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "binding",
+        "key_id",
+        "entries"
       ],
       "type": "object"
     },
@@ -442,6 +637,23 @@
       ],
       "type": "object"
     },
+    "ReencryptedTesterEntryV2": {
+      "additionalProperties": false,
+      "properties": {
+        "ciphertext": {
+          "$ref": "#/$defs/CiphertextV2"
+        },
+        "entry_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry_id",
+        "ciphertext"
+      ],
+      "type": "object"
+    },
     "RekeyTestersRequest": {
       "additionalProperties": false,
       "properties": {
@@ -469,6 +681,34 @@
       ],
       "type": "object"
     },
+    "RekeyTestersRequestV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/VaultBindingV2"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/ReencryptedTesterEntryV2"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "type": "string"
+        },
+        "key_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "binding",
+        "key_id",
+        "entries"
+      ],
+      "type": "object"
+    },
     "RemoveTesterRequest": {
       "additionalProperties": false,
       "properties": {
@@ -478,6 +718,22 @@
       },
       "required": [
         "expected_revision"
+      ],
+      "type": "object"
+    },
+    "RemoveTesterRequestV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/VaultBindingV2"
+        },
+        "expected_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "binding"
       ],
       "type": "object"
     },
@@ -791,6 +1047,27 @@
       ],
       "type": "object"
     },
+    "TesterEntryV2": {
+      "additionalProperties": false,
+      "properties": {
+        "ciphertext": {
+          "$ref": "#/$defs/CiphertextV2"
+        },
+        "entry_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TesterStatus"
+        }
+      },
+      "required": [
+        "entry_id",
+        "ciphertext",
+        "status"
+      ],
+      "type": "object"
+    },
     "TesterErrorResponse": {
       "additionalProperties": false,
       "properties": {
@@ -828,6 +1105,27 @@
       ],
       "type": "object"
     },
+    "TesterInputV2": {
+      "additionalProperties": false,
+      "properties": {
+        "ciphertext": {
+          "$ref": "#/$defs/CiphertextV2"
+        },
+        "email": {
+          "type": "string"
+        },
+        "entry_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry_id",
+        "email",
+        "ciphertext"
+      ],
+      "type": "object"
+    },
     "TesterMutationResponse": {
       "additionalProperties": false,
       "properties": {
@@ -835,6 +1133,28 @@
           "anyOf": [
             {
               "$ref": "#/$defs/TesterEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "type": "object"
+    },
+    "TesterMutationResponseV2": {
+      "additionalProperties": false,
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TesterEntryV2"
             },
             {
               "type": "null"
@@ -906,6 +1226,80 @@
       ],
       "type": "object"
     },
+    "TesterRegistryResponseV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VaultBindingV2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "encryption_version": {
+          "description": "0 is absent, 1 requires a legacy registry fetch, 2 is vault-bound.",
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "type": "integer"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/TesterEntryV2"
+          },
+          "type": "array"
+        },
+        "initialized": {
+          "type": "boolean"
+        },
+        "key_id": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legacy_accounts": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "registry_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "vault_check_header": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VaultCheckHeaderV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Historical server-verified header recorded with the binding, if v2 initialized."
+        }
+      },
+      "required": [
+        "registry_id",
+        "revision",
+        "initialized",
+        "encryption_version",
+        "entries",
+        "legacy_accounts"
+      ],
+      "type": "object"
+    },
     "TesterStatus": {
       "enum": [
         "pending_verification",
@@ -914,6 +1308,75 @@
         "revoked"
       ],
       "type": "string"
+    },
+    "TesterUnlockContextResponseV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/VaultBindingV2"
+        },
+        "registry_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "vault_check_header": {
+          "$ref": "#/$defs/VaultCheckHeaderV2"
+        }
+      },
+      "required": [
+        "registry_id",
+        "binding",
+        "vault_check_header"
+      ],
+      "type": "object"
+    },
+    "VaultBindingV2": {
+      "additionalProperties": false,
+      "properties": {
+        "account_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "key_epoch": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "profile": {
+          "$ref": "#/$defs/KeyProfileV2"
+        },
+        "profile_fingerprint": {
+          "type": "string"
+        },
+        "vault_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "vault_id",
+        "profile",
+        "profile_fingerprint",
+        "key_epoch"
+      ],
+      "type": "object"
+    },
+    "VaultCheckHeaderV2": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/EncryptedEnvelopeV2"
+        },
+        "profile": {
+          "$ref": "#/$defs/KeyProfileV2"
+        }
+      },
+      "required": [
+        "profile",
+        "check"
+      ],
+      "type": "object"
     },
     "WebAccountResponse": {
       "additionalProperties": false,
@@ -1078,26 +1541,50 @@
     "tester_add": {
       "$ref": "#/$defs/AddTesterRequest"
     },
+    "tester_add_v2": {
+      "$ref": "#/$defs/AddTesterRequestV2"
+    },
     "tester_error": {
       "$ref": "#/$defs/TesterErrorResponse"
     },
     "tester_initialize": {
       "$ref": "#/$defs/InitializeTestersRequest"
     },
+    "tester_initialize_v2": {
+      "$ref": "#/$defs/InitializeTestersRequestV2"
+    },
+    "tester_migrate_v2": {
+      "$ref": "#/$defs/MigrateTestersRequestV2"
+    },
     "tester_mutation": {
       "$ref": "#/$defs/TesterMutationResponse"
+    },
+    "tester_mutation_v2": {
+      "$ref": "#/$defs/TesterMutationResponseV2"
     },
     "tester_registry": {
       "$ref": "#/$defs/TesterRegistryResponse"
     },
+    "tester_registry_v2": {
+      "$ref": "#/$defs/TesterRegistryResponseV2"
+    },
     "tester_rekey": {
       "$ref": "#/$defs/RekeyTestersRequest"
+    },
+    "tester_rekey_v2": {
+      "$ref": "#/$defs/RekeyTestersRequestV2"
     },
     "tester_remove": {
       "$ref": "#/$defs/RemoveTesterRequest"
     },
+    "tester_remove_v2": {
+      "$ref": "#/$defs/RemoveTesterRequestV2"
+    },
     "tester_reset": {
       "$ref": "#/$defs/ResetTestersRequest"
+    },
+    "tester_unlock_context_v2": {
+      "$ref": "#/$defs/TesterUnlockContextResponseV2"
     }
   },
   "required": [
@@ -1111,6 +1598,14 @@
     "tester_reset",
     "tester_mutation",
     "tester_error",
+    "tester_registry_v2",
+    "tester_unlock_context_v2",
+    "tester_initialize_v2",
+    "tester_add_v2",
+    "tester_remove_v2",
+    "tester_rekey_v2",
+    "tester_migrate_v2",
+    "tester_mutation_v2",
     "session",
     "session_renewal",
     "config",
@@ -1152,10 +1647,17 @@
     "subscribe": "/hosted/v1/web/billing/subscribe",
     "testerCapabilities": "/hosted/v1/web/capabilities",
     "testerEntries": "/hosted/v1/web/admin/testers/entries",
+    "testerEntriesV2": "/hosted/v2/web/admin/testers/entries",
     "testerInitialize": "/hosted/v1/web/admin/testers/initialize",
+    "testerInitializeV2": "/hosted/v2/web/admin/testers/initialize",
+    "testerMigrateV2": "/hosted/v2/web/admin/testers/migrate",
     "testerRegistry": "/hosted/v1/web/admin/testers",
+    "testerRegistryV2": "/hosted/v2/web/admin/testers",
     "testerRekey": "/hosted/v1/web/admin/testers/rekey",
+    "testerRekeyV2": "/hosted/v2/web/admin/testers/rekey",
     "testerRemove": "/hosted/v1/web/admin/testers/entries/{entry_id}",
-    "testerReset": "/hosted/v1/web/admin/testers/reset"
+    "testerRemoveV2": "/hosted/v2/web/admin/testers/entries/{entry_id}",
+    "testerReset": "/hosted/v1/web/admin/testers/reset",
+    "testerUnlockContextV2": "/hosted/v2/web/admin/testers/unlock-context"
   }
 }

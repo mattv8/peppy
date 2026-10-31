@@ -2033,6 +2033,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "hex",
+ "peppy-crypto",
  "schemars",
  "serde",
  "serde_json",
@@ -2168,6 +2169,20 @@ dependencies = [
  "peppy-domain",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "peppy-tester-crypto"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "peppy-crypto",
+ "peppy-hosted-api",
+ "serde",
+ "serde_json",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

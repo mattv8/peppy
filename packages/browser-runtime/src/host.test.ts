@@ -46,7 +46,7 @@ class FakeSession implements HostSession {
     return command === "snapshot" ? this.snapshot : { command };
   }
   public async mutate(command: string, args: Record<string, unknown>): Promise<import("./core.js").CoreResult> { this.calls.push({ command, args, mutation: true }); this.generation += 1; return { command }; }
-  public async unlock(_passphrase: string) { this.phase = "ready"; }
+  public async unlock(_passphrase: string, _signal?: AbortSignal, _options?: { remember?: boolean }) { this.phase = "ready"; }
   public async enroll(_metadata: unknown, _deviceToken: string, _passphrase: string) { this.phase = "ready"; }
   public shutdown() { this.phase = "closed"; }
 }
@@ -168,17 +168,70 @@ describe("browser host RPC", () => {
     const session = new FakeSession();
     session.phase = "locked";
     session.unlock = async () => { session.phase = "ready"; };
+    const clearRememberedUnlock = vi.fn(async () => undefined);
+    session.clearRememberedUnlock = clearRememberedUnlock;
     const stop = vi.fn(async () => undefined);
     const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start: async () => { throw new TransportError("revoked"); }, stop } as unknown as import("./host.js").BrowserNetwork });
     const attached = port();
     await host.attach(attached);
 
-    attached.emit({ id: 1, command: "unlock", args: { passphrase: "secret" } });
+    attached.emit({ id: 1, command: "unlock", args: { passphrase: "secret", remember: true } });
     await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
 
     expect(attached.messages).toContainEqual({ id: 1, ok: false, error: expect.objectContaining({ code: "unavailable" }) });
     await eventually(() => attached.closed);
     expect(stop).toHaveBeenCalledTimes(1);
+    expect(clearRememberedUnlock).toHaveBeenCalledOnce();
+  });
+
+  it("forgets remembered recovery when a ready enrollment activation is revoked", async () => {
+    const session = new FakeSession();
+    const clearRememberedUnlock = vi.fn(async () => undefined);
+    session.clearRememberedUnlock = clearRememberedUnlock;
+    const start = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new TransportError("revoked"));
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: {
+        start,
+        stop: async () => undefined,
+        enrollmentCreateOwner: async () => ({ mode: "community" as const, stage: "ready" as const }),
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_create_owner", args: { passphrase: "phrase" } });
+
+    await eventually(() => attached.closed);
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: expect.objectContaining({ code: "unavailable" }) });
+    expect(clearRememberedUnlock).toHaveBeenCalledOnce();
+  });
+
+  it("clears recovery and releases a recovered owner when initial networking is revoked", async () => {
+    const ownerLocks = locks();
+    const session = new FakeSession();
+    const clearRememberedUnlock = vi.fn(async () => undefined);
+    session.clearRememberedUnlock = clearRememberedUnlock;
+    const failedPort = port();
+    const failed = new BrowserWorkerHost({
+      locks: ownerLocks,
+      boot: async () => session,
+      network: { start: async () => { throw new TransportError("revoked"); }, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork,
+    });
+
+    await failed.attach(failedPort);
+
+    expect(clearRememberedUnlock).toHaveBeenCalledOnce();
+    expect(session.phase).toBe("closed");
+    expect(failedPort.messages).toContainEqual({ id: -1, ok: false, error: expect.objectContaining({ code: "unavailable" }) });
+
+    const retryPort = port();
+    const retry = new BrowserWorkerHost({ locks: ownerLocks, boot: async () => new FakeSession(), network: { start: async () => undefined, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
+    await retry.attach(retryPort);
+    expect(retryPort.messages).toContainEqual({ event: "ready", version: 1 });
   });
 
   it("does not forward private worker commands", async () => {
@@ -205,6 +258,19 @@ describe("browser host RPC", () => {
 
     expect(attached.messages).toContainEqual({ id: 1, ok: false, error: expect.objectContaining({ code: "invalid-request" }) });
     expect(acknowledge).not.toHaveBeenCalled();
+  });
+
+  it("passes remembered unlock only for an explicit true RPC argument", async () => {
+    const session = new FakeSession();
+    const unlock = vi.spyOn(session, "unlock");
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "unlock", args: { passphrase: "phrase" } })).resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "unlock", args: { passphrase: "phrase", remember: "true" } })).resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(session, { id: 3, command: "unlock", args: { passphrase: "phrase", remember: true } })).resolves.toMatchObject({ ok: true });
+
+    expect(unlock).toHaveBeenNthCalledWith(1, "phrase", undefined, { remember: false });
+    expect(unlock).toHaveBeenNthCalledWith(2, "phrase", undefined, { remember: false });
+    expect(unlock).toHaveBeenNthCalledWith(3, "phrase", undefined, { remember: true });
   });
 
   it("keeps notification settings links native-only", async () => {
@@ -1335,12 +1401,35 @@ describe("browser host RPC", () => {
     const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
     const attached = port();
     await host.attach(attached);
+    const otherTab = port();
+    await host.attach(otherTab);
 
     attached.emit({ id: 1, command: "lock_sync", args: {} });
 
     await eventually(() => attached.closed);
     expect(attached.messages).toContainEqual({ id: 1, ok: false, error: { code: "recovery-clear-failed", message: "Browser recovery could not be forgotten." } });
+    expect(attached.messages).toContainEqual({ event: "stopped", reason: "locked-recovery-clear-failed" });
+    expect(otherTab.messages).toContainEqual({ event: "stopped", reason: "locked-recovery-clear-failed" });
     expect(session.phase).toBe("closed");
+  });
+
+  it("forgets recovery when a core operation reports this device revoked", async () => {
+    const session = new FakeSession();
+    const clearRememberedUnlock = vi.fn(async () => undefined);
+    session.clearRememberedUnlock = clearRememberedUnlock;
+    const query = session.query.bind(session);
+    session.query = async (command, args) => {
+      if (command === "snapshot") throw { code: "device-revoked" };
+      return query(command, args);
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "load_state", args: {} });
+
+    await eventually(() => attached.messages.some(message => (message as { id?: number }).id === 1));
+    expect(clearRememberedUnlock).toHaveBeenCalledOnce();
   });
 
   it("does not report hosted sign-out success when remembered recovery cannot clear", async () => {
@@ -1563,7 +1652,12 @@ describe("browser host RPC", () => {
     await eventually(() => revokeDevice.mock.calls.length === 1);
     expect(listDevices).toHaveBeenCalledOnce();
     expect(revokeDevice).toHaveBeenCalledWith("00000000-0000-0000-0000-000000000002");
-    expect(session.calls.filter(call => call.command !== "search_local")).toEqual([{ command: "_worker_identity_metadata", args: {}, mutation: false }]);
+    expect(session.calls.filter(call => call.command === "_worker_identity_metadata")).toEqual([
+      { command: "_worker_identity_metadata", args: {}, mutation: false },
+      { command: "_worker_identity_metadata", args: {}, mutation: false },
+    ]);
+    expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "list_devices" }));
+    expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "revoke_device" }));
   });
 
   it("forwards optional raw roster presence without requiring older servers to provide it", async () => {
@@ -1609,6 +1703,27 @@ describe("browser host RPC", () => {
     session.query = async () => { throw new TransportError("revoked"); };
     const response = await dispatchBrowserRpc(session, { id: 2, command: "list_contact_books", args: {} });
     expect(response).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  });
+
+  it("forgets remembered unlock when this device's credential is rejected", async () => {
+    const session = new FakeSession();
+    const clearRememberedUnlock = vi.fn(async () => undefined);
+    session.clearRememberedUnlock = clearRememberedUnlock;
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        revokeDevice: async () => { throw new TransportError("status", undefined, "invalid_bearer"); },
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "revoke_device", args: { deviceId: "00000000-0000-0000-0000-000000000001" } });
+
+    await eventually(() => clearRememberedUnlock.mock.calls.length === 1);
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: false, error: expect.objectContaining({ code: "invalid_bearer" }) }));
   });
 
   it("fails closed when Web Locks are unavailable", async () => {

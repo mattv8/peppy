@@ -7,6 +7,7 @@ const MAX_PLAINTEXT_MEDIA_BYTES = 32 * 1024 * 1024;
 const MAX_CIPHERTEXT_MEDIA_BYTES = 33 * 1024 * 1024;
 const MAX_PREVIEW_URL_BYTES = 2 * 1024 * 1024;
 const CIPHER_FILE = /^client\.db\.media\/cipher\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.ppss$/;
+const REMEMBERED_UNLOCK_BOOT_TIMEOUT_MS = 3_000;
 
 export type BrowserSessionPhase = "unenrolled" | "locked" | "ready" | "closed";
 export type BrowserPublicIdentity = { role: "owner" | "device" | "gateway" };
@@ -106,7 +107,6 @@ export class BrowserSession {
   public publicIdentity(): BrowserPublicIdentity | undefined { return this.publicIdentityValue ? { ...this.publicIdentityValue } : undefined; }
 
   public async enroll(metadata: unknown, deviceToken: string, passphrase: string, signal?: AbortSignal): Promise<void> {
-    const rememberedUnlockGeneration = this.rememberedUnlockGeneration;
     return this.lifecycle("unenrolled", signal, async () => {
       const identity = await this.options.core.invoke({ command: "_worker_enroll_identity", args: { metadata, deviceToken, passphrase } });
       this.publicIdentityValue = publicIdentity(identity);
@@ -115,13 +115,11 @@ export class BrowserSession {
       await this.loadTransportToken();
       this.throwIfAborted(signal);
       this.phaseValue = "ready";
-      this.rememberUnlock(passphrase, rememberedUnlockGeneration);
     });
   }
 
   /** Completes a Rust-verified enrollment handoff without routing it through generic identity enrollment. */
   public async finishEnrollment(command: "_worker_enrollment_finish_owner" | "_worker_enrollment_finish_manual" | "_worker_enrollment_finish_hosted_owner", responseJson: string, passphrase: string, signal?: AbortSignal): Promise<void> {
-    const rememberedUnlockGeneration = this.rememberedUnlockGeneration;
     return this.lifecycle("unenrolled", signal, async () => {
       const identity = await this.options.core.invoke({ command, args: { responseJson, passphrase } });
       this.publicIdentityValue = publicIdentity(identity);
@@ -130,7 +128,6 @@ export class BrowserSession {
       await this.loadTransportToken();
       this.throwIfAborted(signal);
       this.phaseValue = "ready";
-      this.rememberUnlock(passphrase, rememberedUnlockGeneration);
     });
   }
 
@@ -146,8 +143,8 @@ export class BrowserSession {
     });
   }
 
-  public async unlock(passphrase: string, signal?: AbortSignal): Promise<void> {
-    return this.unlockWithPassphrase(passphrase, signal, true, this.rememberedUnlockGeneration);
+  public async unlock(passphrase: string, signal?: AbortSignal, options?: { remember?: boolean }): Promise<void> {
+    return this.unlockWithPassphrase(passphrase, signal, options?.remember === true, this.rememberedUnlockGeneration);
   }
 
   public async clearRememberedUnlock(): Promise<void> {
@@ -177,6 +174,7 @@ export class BrowserSession {
   public async rotate(profile: unknown, header: unknown, passphrase: string): Promise<void> {
     this.requireReady();
     const rememberedUnlockGeneration = this.rememberedUnlockGeneration;
+    const previousWrappedIdentity = this.wrappedIdentity;
     let checkpoint: CheckpointInput | undefined;
     try {
       const result = await this.runtime.mutate({
@@ -184,7 +182,7 @@ export class BrowserSession {
         capture: async generation => checkpoint = await this.capture(generation),
       });
       this.applyCheckpoint(checkpoint, result.generation);
-      this.rememberUnlock(passphrase, rememberedUnlockGeneration);
+      if (previousWrappedIdentity) this.rekeyRememberedUnlock(previousWrappedIdentity, passphrase, rememberedUnlockGeneration);
     } catch (error: unknown) {
       this.applyHandledCheckpoint(checkpoint, error);
       throw error;
@@ -429,12 +427,7 @@ export class BrowserSession {
     const wrappedIdentity = this.wrappedIdentity;
     if (!wrappedIdentity || !this.options.rememberedUnlock) return;
     const rememberedUnlockGeneration = this.rememberedUnlockGeneration;
-    let passphrase: string | undefined;
-    try {
-      passphrase = await this.options.rememberedUnlock.recover(wrappedIdentity);
-    } catch {
-      return;
-    }
+    const passphrase = await this.recoverRememberedPassphraseWithinBootDeadline(wrappedIdentity);
     if (!passphrase || rememberedUnlockGeneration !== this.rememberedUnlockGeneration || this.phaseValue !== "locked") return;
     try {
       await this.unlockWithPassphrase(passphrase, undefined, false, rememberedUnlockGeneration);
@@ -447,10 +440,44 @@ export class BrowserSession {
     }
   }
 
+  private async recoverRememberedPassphraseWithinBootDeadline(wrappedIdentity: string): Promise<string | undefined> {
+    const rememberedUnlock = this.options.rememberedUnlock;
+    if (!rememberedUnlock) return undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = Symbol("remembered-unlock-timeout");
+    try {
+      const passphrase = await Promise.race([
+        rememberedUnlock.recover(wrappedIdentity).catch(() => undefined),
+        new Promise<typeof timedOut>(resolve => {
+          timeout = setTimeout(() => {
+            resolve(timedOut);
+          }, REMEMBERED_UNLOCK_BOOT_TIMEOUT_MS);
+        }),
+      ]);
+      if (passphrase === timedOut) {
+        this.rememberedUnlockGeneration += 1;
+        return undefined;
+      }
+      return passphrase;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
   private rememberUnlock(passphrase: string, generation: number): void {
     const wrappedIdentity = this.wrappedIdentity;
     if (!wrappedIdentity || generation !== this.rememberedUnlockGeneration) return;
     void this.options.rememberedUnlock?.remember(wrappedIdentity, passphrase).catch(() => undefined);
+  }
+
+  private rekeyRememberedUnlock(previousWrappedIdentity: string, passphrase: string, generation: number): void {
+    const rememberedUnlock = this.options.rememberedUnlock;
+    if (!rememberedUnlock) return;
+    void rememberedUnlock.recover(previousWrappedIdentity)
+      .then(recoveredPassphrase => {
+        if (recoveredPassphrase) this.rememberUnlock(passphrase, generation);
+      })
+      .catch(() => undefined);
   }
 
   private async discardRememberedUnlock(): Promise<void> {

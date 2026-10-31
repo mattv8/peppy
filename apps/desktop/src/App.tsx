@@ -3667,7 +3667,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       await lock();
       await refresh();
     } catch (error) {
-      setNotice(`Could not lock sync: ${errorText(error)}`);
+      if (errorCode(error) === "recovery-clear-failed") {
+        setNotice("Sync is locked, but this browser may still remember your Vault key phrase.");
+        await refresh();
+      } else setNotice(`Could not lock sync: ${errorText(error)}`);
     }
   } : undefined;
 
@@ -4437,7 +4440,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         >
           <header id="thread-pane-header">
             {!settingsOpen && !notificationsOpen && !contactsOpen && activeDisplay && (
-              <TonePicker id="thread-tone-picker" seed={activeDisplay.avatar.seed} value={toneOverrides[activeDisplay.avatar.seed]} automaticIndex={paletteIndex(activeDisplay.avatar.seed)} scope={activeDisplay.avatar.kind === "group" ? "group" : "contact"} disabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pending={Boolean(pendingToneSeeds[activeDisplay.avatar.seed])} error={toneErrors[activeDisplay.avatar.seed]} onSelect={(index) => { void saveTone(activeDisplay.avatar.seed, index); }} renderTrigger={(props) => <button {...props} id="thread-contact-avatar" aria-label="Change conversation color"><ContactAvatar {...activeDisplay.avatar} toneOverrides={toneOverrides} size={36} /></button>} />
+              <TonePicker id="thread-tone-picker" seed={activeDisplay.avatar.seed} value={toneOverrides[activeDisplay.avatar.seed]} automaticIndex={paletteIndex(activeDisplay.avatar.seed)} disabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pending={Boolean(pendingToneSeeds[activeDisplay.avatar.seed])} error={toneErrors[activeDisplay.avatar.seed]} onSelect={(index) => { void saveTone(activeDisplay.avatar.seed, index); }} renderTrigger={(props) => <button {...props} id="thread-contact-avatar" aria-label="Change conversation color"><ContactAvatar {...activeDisplay.avatar} toneOverrides={toneOverrides} size={36} /></button>} />
             )}
             <div className="header-copy">
               {settingsOpen ? (

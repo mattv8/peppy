@@ -81,26 +81,35 @@ commits atomically; checkpoint failures terminate the session without automatic 
 
 ## Remembered browser unlock
 
-After a manual phrase unlock, the worker can remember an encrypted recovery record
-for the current checkpoint and a valid hosted app session. Its session check uses
+Selecting "Remember on this browser" during a manual phrase unlock opts this browser
+into remembering an encrypted recovery record for the current checkpoint and a valid
+hosted app session. Unlocking without that explicit choice never creates a record;
+enrollment also never creates one. Rotation re-keys an existing opted-in record but
+does not create one. Its session check uses
 the actual worker/app origin (where hosted cookies belong), while the wrapped
 identity retains the canonical API context. The record is bound to the origin,
 account, and wrapped identity. It stores no plaintext passphrase, root
 or database key, and no OAuth token; OAuth does not cryptographically encrypt the
-vault. Recovery is best effort, so unavailable or evicted browser storage falls
-back to the ordinary locked state.
+vault. Recovery discovery is best effort and is bounded to three seconds at boot,
+so unavailable or evicted browser storage falls back to the ordinary locked state.
+Once recovery returns a phrase before that deadline, Rust verification, checkpoint
+commit, and transport-token loading finish before boot reports the session ready.
+Records from the pre-opt-in cache format are deleted rather than migrated or used.
 
 This is a browser-profile trust choice, not cryptographic enforcement of app
 session policy. Anyone who can run same-origin code in, or access, that browser
 profile can bypass the app-session gate and decrypt the remembered record. Explicit
-Lock attempts to forget recovery before stopping the worker; if storage cleanup
-fails, the worker still locks and reports that forgetting was not durable. Sign-out
+Lock and sign-out attempt to forget recovery before stopping or completing. Device
+revocation clears it when this browser observes revocation, including a revoked poll
+or a rejected credential for this device; these are cleanup hygiene only. If storage
+cleanup fails, Lock still locks and reports that forgetting was not durable. Sign-out
 still reaches the server when cleanup fails, then reports that cleanup failure.
 Worker-side validation runs nonblocking after enrollment status, coalesced and no
 more than once per minute; a rejected record clears only remembered recovery. These
 actions do not erase the independent checkpoint or device token, and active device
-sync continues. Computer handoff has no phrase to cache, so a later manual unlock
-is required once before that browser can use remembered recovery.
+sync continues. None of these actions protect an offline or copied browser profile.
+Computer handoff has no phrase to cache, so a later manual unlock is required once
+before that browser can use remembered recovery.
 
 `BrowserScheduler` coordinates network activity, enrollment, and polling with
 backoff. Device tokens and network state remain worker-private.
