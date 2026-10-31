@@ -971,6 +971,7 @@ mod tests {
         );
     }
 }
+pub mod attachments;
 pub mod auth_web;
 pub mod billing_web;
 pub mod computer_enrollment;

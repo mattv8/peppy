@@ -4655,6 +4655,34 @@ describe("host state display", () => {
     expect(document.querySelector('[data-settings-section="updates"]')).not.toBeInTheDocument();
   });
 
+  it("loads browser attachment storage only when the account settings view opens", async () => {
+    const retentionBridge = bridge as typeof bridge & Required<Pick<typeof bridge, "attachment_retention_status">>;
+    const storageStatus = vi.spyOn(retentionBridge, "attachment_retention_status").mockResolvedValue({
+      kind: "available",
+      scopeId: "browser-scope",
+      status: {
+        usedBytes: 20_000_000_000,
+        limitBytes: 75_000_000_000,
+        baseBytes: 50_000_000_000,
+        packBytes: 25_000_000_000,
+        protectedBytes: 0,
+        removedBytes: 0,
+        cleanupState: "disabled",
+        cleanupUnavailableReason: "cleanup_disabled",
+        notice: { state: "grace_period", policyVersion: "hosted_attachment_retention_v1", presentedAtSeconds: 1, acknowledgedAtSeconds: 2, activationAtSeconds: 1_800_000_000 },
+      },
+    });
+    render(<App hostKind="browser" fixedOrigin="https://app.example.com" accountUrl="https://account.example.com/account" />);
+    await screen.findByText("Hello from Aurora");
+    expect(storageStatus).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByText("Storage used")).toBeInTheDocument();
+    expect(storageStatus).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Sign out of Peppy" })).not.toBeInTheDocument();
+  });
+
   it("preserves browser account links and native hosted account actions in settings order", async () => {
     const configure = vi.spyOn(bridge, "configure_server");
     render(<App hostKind="browser" fixedOrigin="https://app.example.com" accountUrl="https://account.example.com/account" />);
@@ -4662,7 +4690,7 @@ describe("host state display", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     const section = document.querySelector('[data-settings-section="account-billing"]');
-    const link = screen.getByRole("link", { name: /open account & billing/i });
+    const link = screen.getByRole("link", { name: /manage storage on the website/i });
     expect(section).toBeInTheDocument();
     expect(link).toHaveAttribute("href", "https://account.example.com/account");
     expect(link).toHaveAttribute("target", "_blank");
@@ -4675,7 +4703,7 @@ describe("host state display", () => {
     render(<App accountUrl="https://account.example.com/account" />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("button", { name: /open account & billing/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /manage storage on the website/i })).toBeInTheDocument();
   });
 
   it("uses the selected native mode to expose only its connection controls", async () => {
@@ -4686,7 +4714,7 @@ describe("host state display", () => {
     expect(document.getElementById("settings-connection-summary")).toHaveTextContent("Peppy Hosted · https://example.test");
 
     expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /open account & billing/i }));
+    fireEvent.click(screen.getByRole("button", { name: /manage storage on the website/i }));
     await waitFor(() => expect(openBilling).toHaveBeenCalledOnce());
 
     cleanup();
@@ -5065,6 +5093,45 @@ describe("host state display", () => {
     ).toHaveValue("https://example.test/file/mms-usercontent/token/photo.png");
     expect(screen.getByText("Expires in 2 h.")).toBeInTheDocument();
     expect(bridge.publish_attachment).toHaveBeenCalledWith("photo-1");
+  });
+
+  it("removes remote-only file-card actions and transfer state after storage policy removal", async () => {
+    host.conversations[0].messages[0].attachments = [{
+      id: "removed-file",
+      name: "archive.pdf",
+      mediaType: "application/pdf",
+      byteSize: 10,
+      state: "failed",
+      transfer: "download",
+      retryable: true,
+      remoteState: "removed_by_storage_policy",
+      localAvailable: false,
+    }];
+    render(<App />);
+
+    await screen.findByText("archive.pdf");
+    const card = document.querySelector<HTMLElement>('[data-attachment-id="removed-file"]')!;
+    expect(card).toHaveTextContent("This attachment was removed from hosted storage to make room. The message remains.");
+    expect(card).not.toHaveTextContent("Failed");
+    expect(within(card).queryByRole("button", { name: /save|public link|retry/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps a verified local policy-removed file-card save action", async () => {
+    host.conversations[0].messages[0].attachments = [{
+      id: "local-file",
+      name: "archive.pdf",
+      mediaType: "application/pdf",
+      byteSize: 10,
+      state: "ready",
+      remoteState: "removed_by_storage_policy",
+      localAvailable: true,
+    }];
+    render(<App />);
+
+    await screen.findByText("archive.pdf");
+    const card = document.querySelector<HTMLElement>('[data-attachment-id="local-file"]')!;
+    expect(card).toHaveTextContent("Hosted copy removed. Available on this device.");
+    expect(within(card).getByRole("button", { name: "Save archive.pdf" })).toBeInTheDocument();
   });
 
   it("shows the native connection error code", async () => {

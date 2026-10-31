@@ -1031,6 +1031,9 @@ async fn transient_media_errors_are_retried_and_not_cached() {
         .client
         .unlock(&f.profile, &f.header, PHRASE)
         .unwrap();
+    crate::attachment_retention::negotiate(&session)
+        .await
+        .unwrap();
     let gateway_id = uuid::Uuid::new_v4().to_string();
     session.set_status(|s| {
         s.gateways = vec![gateway(&gateway_id, true, true)];

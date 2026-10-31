@@ -7,8 +7,7 @@ public struct ContactMediaReport: Sendable, Equatable {
     public var uploaded = 0
     public var registered = 0
     public var downloaded = 0
-    /// Remote objects that answered 404 (released or never finalized); not retried hot.
-    public var unavailable = 0
+    public var removedByStoragePolicy = 0
     public var reclaimed = 0
     /// Reclaim candidates not yet provable by the server's replay floor, or 409 (backoff in core).
     public var reclaimDeferred = 0
@@ -57,17 +56,19 @@ struct ContactMediaTransfer: Sendable {
         let path = try client.nativeCipherFileForUpload(attachmentId: object.attachmentId)
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         guard UInt64(data.count) == object.ciphertextBytes else { return false }
+        let retention = try client.attachmentUploadRetention(attachmentId: object.attachmentId)
         // The local id doubles as the reservation id, so a retry after a crash is idempotent.
         let reserve = try JSONSerialization.data(withJSONObject: [
             "attachment_id": object.attachmentId,
             "declared_ciphertext_bytes": data.count,
             "declared_ciphertext_sha256": object.ciphertextSha256,
-            "reference_tracking": true,
+            "reference_tracking": retention.referenceTracking,
         ])
         let reserved = try await server.exchange(
             "POST", "/v1/attachments/reserve", body: reserve, contentType: "application/json",
             limit: ServerClient.maxSmallBytes, meter: &meter
         )
+        if try recordRemoval(reserved, attachmentId: object.attachmentId) { return false }
         guard (200..<300).contains(reserved.status),
               let remote = (try? JSONSerialization.jsonObject(with: reserved.body) as? [String: Any])?["attachment_id"] as? String
         else { return false }
@@ -75,10 +76,12 @@ struct ContactMediaTransfer: Sendable {
             "PUT", "/v1/attachments/\(remote)/upload", body: data, contentType: "application/octet-stream",
             limit: ServerClient.maxSmallBytes, meter: &meter
         )
+        if try recordRemoval(put, attachmentId: object.attachmentId) { return false }
         guard (200..<300).contains(put.status) else { return false }
         let finalized = try await server.exchange(
             "POST", "/v1/attachments/\(remote)/finalize", limit: ServerClient.maxSmallBytes, meter: &meter
         )
+        if try recordRemoval(finalized, attachmentId: object.attachmentId) { return false }
         guard (200..<300).contains(finalized.status) else { return false }
         try client.markAttachmentUploaded(attachmentId: object.attachmentId, remoteObjectId: remote)
         return true
@@ -87,8 +90,11 @@ struct ContactMediaTransfer: Sendable {
     func register(meter: inout RequestMeter, report: inout ContactMediaReport) async throws {
         let state = try Self.object(client.contactPhotoTransferStateJson())
         for row in state["registrations"] as? [[String: Any]] ?? [] {
-            guard let envelope = row["envelope_id"] as? String, let remote = row["attachment_id"] as? String,
-                  let producer = row["producer_device_id"] as? String, let sequence = row["producer_sequence"] as? String
+            guard let envelope = row["envelope_id"] as? String,
+                  let local = row["local_attachment_id"] as? String,
+                  let remote = row["attachment_id"] as? String,
+                  let producer = row["producer_device_id"] as? String,
+                  let sequence = row["producer_sequence"] as? String
             else { continue }
             let body = try JSONSerialization.data(withJSONObject: [
                 "references": [["producer_device_id": producer, "producer_sequence": sequence]],
@@ -97,6 +103,7 @@ struct ContactMediaTransfer: Sendable {
                 "POST", "/v1/attachments/\(remote)/references", body: body, contentType: "application/json",
                 limit: ServerClient.maxSmallBytes, meter: &meter
             )
+            if try recordRemoval(response, attachmentId: local) { report.removedByStoragePolicy += 1; continue }
             // Only a 2xx proves the server holds the reference; anything else keeps the envelope withheld.
             guard (200..<300).contains(response.status) else { report.failed += 1; continue }
             _ = try client.acknowledgeContactPhotoReferenceJson(inputJson: Self.json([
@@ -115,7 +122,7 @@ struct ContactMediaTransfer: Sendable {
         for object in try client.pendingDownloads() where only?.contains(object.attachmentId) ?? true {
             guard let remote = object.remoteObjectId, object.ciphertextBytes <= Self.maxCipherBytes else { continue }
             let response = try await server.exchange(
-                "GET", "/v1/attachments/\(remote)", limit: Int(object.ciphertextBytes), meter: &meter
+                "GET", "/v1/attachments/\(remote)", limit: max(Int(object.ciphertextBytes), Int(attachmentRetentionResponseReadLimitBytes())), meter: &meter
             )
             switch response.status {
             case 200:
@@ -126,9 +133,10 @@ struct ContactMediaTransfer: Sendable {
                 // The core verifies size and SHA-256 before installing.
                 try client.installDownloadedAttachment(attachmentId: object.attachmentId, downloadedPath: file.path)
                 report.downloaded += 1
-            case 404:
+            case 410 where isExactRemoval(response):
+                try client.reportAttachmentRemovedByStoragePolicy(attachmentId: object.attachmentId)
                 gone.insert(object.attachmentId)
-                report.unavailable += 1
+                report.removedByStoragePolicy += 1
             default:
                 report.failed += 1
             }
@@ -171,6 +179,19 @@ struct ContactMediaTransfer: Sendable {
             ])))
             if ack["status"] as? String == "completed" { report.reclaimed += 1 } else { report.reclaimDeferred += 1 }
         }
+    }
+
+    private func recordRemoval(_ response: HTTPResponse, attachmentId: String) throws -> Bool {
+        guard isExactRemoval(response) else { return false }
+        try client.reportAttachmentRemovedByStoragePolicy(attachmentId: attachmentId)
+        return true
+    }
+
+    private func isExactRemoval(_ response: HTTPResponse) -> Bool {
+        guard response.status == 410 else { return false }
+        guard response.body.count <= Int(attachmentRetentionResponseMaxBytes()),
+              let json = String(data: response.body, encoding: .utf8) else { return false }
+        return classifyAttachmentRetentionError(status: 410, responseJson: json) == .removedByStoragePolicy
     }
 
     static func json(_ value: [String: Any]) throws -> String {

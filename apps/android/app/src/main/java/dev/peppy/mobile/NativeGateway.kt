@@ -10,6 +10,8 @@ import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeOpenConfig
 import uniffi.peppy_mobile_bindings.openNativeClient
 import uniffi.peppy_mobile_bindings.NativeEnrollmentIdentity
+import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionProtocolHeader
+import uniffi.peppy_mobile_bindings.attachmentRetentionProtocolHeader
 import uniffi.peppy_mobile_bindings.NativeEnrollmentClientKind
 import uniffi.peppy_mobile_bindings.newNativeExistingOwnerEnrollmentClient
 import uniffi.peppy_mobile_bindings.restoreHostedProvisioningForIdentity
@@ -61,7 +63,13 @@ data class GatewayStatus(
 )
 
 /** Only produced when the database is open and the shared vault purpose keys are installed. */
-class GatewaySession(val client: NativeClient, val origin: String, val deviceId: String, internal val bearerToken: String)
+class GatewaySession(
+    val client: NativeClient,
+    val origin: String,
+    val deviceId: String,
+    internal val bearerToken: String,
+    internal val generation: Long,
+)
 /** Credential-only binding used for authenticated reachability checks while vault keys are locked. */
 internal class GatewayReachabilityBinding(
     val origin: String,
@@ -72,8 +80,16 @@ internal class GatewayReachabilityBinding(
 ) {
     override fun toString() = "GatewayReachabilityBinding(redacted)"
 }
+/** Token-free identity safe to retain in UI state across suspension. */
+internal data class GatewayAccountIdentity(
+    val origin: String,
+    val vaultId: String,
+    val deviceId: String,
+    val generation: Long,
+)
+
 /** Bearer credentials must not gain a generated `toString`, `copy`, or component API. */
-internal class GatewayAccountCredential(val origin: String, val vaultId: String, val deviceId: String, val bearerToken: String) {
+internal class GatewayAccountCredential(val origin: String, val vaultId: String, val deviceId: String, val bearerToken: String, val generation: Long) {
     override fun toString() = "GatewayAccountCredential(redacted)"
 }
 internal class OwnerEnrollmentMaterial(
@@ -82,6 +98,7 @@ internal class OwnerEnrollmentMaterial(
     val deviceId: String,
     val profileJson: String,
     val headerJson: String,
+    val retentionProtocolHeader: NativeAttachmentRetentionProtocolHeader?,
 )
 
 /**
@@ -117,6 +134,7 @@ object NativeGateway {
     private var sharedKeysReady = false
     /** Incremented whenever the open client or its vault material is replaced. */
     private var generation = 0L
+    private var producerReadyGeneration = -1L
 
     private data class Identity(val origin: String, val vaultId: String, val deviceId: String) {
         fun encode() = "$origin\n$vaultId\n$deviceId"
@@ -140,7 +158,6 @@ object NativeGateway {
 
     private fun openUnchecked(context: Context): NativeClient? = synchronized(lock) {
         client?.let { return it }
-        generation++
         val prefs = prefs(context)
         val identity = identity(prefs) ?: return null
         // SQLCipher would silently create an empty database at a missing path. That is only
@@ -195,8 +212,28 @@ object NativeGateway {
             val prefs = prefs(context)
             val identity = identity(prefs) ?: return null
             val token = prefs.getString(P_TOKEN, null)?.let { secretBox.open(P_TOKEN, it) } ?: return null
-            GatewaySession(opened, identity.origin, identity.deviceId, String(token, Charsets.UTF_8))
+            GatewaySession(opened, identity.origin, identity.deviceId, String(token, Charsets.UTF_8), generation)
         }
+    }
+
+    /** Opens producer access only after this exact client generation completed retention negotiation. */
+    internal fun markProducerReady(context: Context, session: GatewaySession): Boolean = synchronized(lock) {
+        if (!isCurrent(context, session)) return false
+        producerReadyGeneration = session.generation
+        true
+    }
+
+    /** Capture workers defer without touching the core until their open generation is negotiated. */
+    internal fun producerClient(context: Context): NativeClient? = synchronized(lock) {
+        val opened = open(context) ?: return null
+        if (producerReadyGeneration == generation) opened else null
+    }
+
+    /** Prevents a response authenticated for a replaced vault/device binding from mutating its successor. */
+    internal fun isCurrent(context: Context, session: GatewaySession): Boolean = synchronized(lock) {
+        client === session.client && generation == session.generation && identity(prefs(context))?.let {
+            it.origin == session.origin && it.deviceId == session.deviceId
+        } == true
     }
 
     /**
@@ -214,12 +251,80 @@ object NativeGateway {
         }
     }
 
+    /** Captures only non-secret binding identity for UI request scopes. */
+    internal fun accountIdentity(context: Context): GatewayAccountIdentity? = synchronized(lock) {
+        val prefs = prefs(context)
+        val identity = identity(prefs) ?: return null
+        val token = prefs.getString(P_TOKEN, null)?.let { secretBox.open(P_TOKEN, it) } ?: return null
+        token.fill(0)
+        GatewayAccountIdentity(identity.origin, identity.vaultId, identity.deviceId, generation)
+    }
+
     /** Account HTTP may run while keys are locked; it never opens or exports vault key material. */
     internal fun accountCredential(context: Context): GatewayAccountCredential? = synchronized(lock) {
         val prefs = prefs(context); val identity = identity(prefs) ?: return null
         val token = prefs.getString(P_TOKEN, null)?.let { secretBox.open(P_TOKEN, it) } ?: return null
-        try { GatewayAccountCredential(identity.origin, identity.vaultId, identity.deviceId, String(token, Charsets.UTF_8)) }
+        try { GatewayAccountCredential(identity.origin, identity.vaultId, identity.deviceId, String(token, Charsets.UTF_8), generation) }
         finally { token.fill(0) }
+    }
+
+    internal fun isCurrentAccountIdentity(context: Context, captured: GatewayAccountIdentity): Boolean = synchronized(lock) {
+        generation == captured.generation && identity(prefs(context))?.let {
+            it.origin == captured.origin && it.vaultId == captured.vaultId && it.deviceId == captured.deviceId
+        } == true
+    }
+
+    /** Selects a freshly decrypted credential only after the token-free identity fence succeeds. */
+    internal fun currentAccountCredential(
+        context: Context,
+        captured: GatewayAccountIdentity,
+    ): GatewayAccountCredential? = synchronized(lock) {
+        if (!isCurrentAccountIdentity(context, captured)) return null
+        accountCredential(context)
+    }
+
+    /**
+     * Re-selects the current bearer only when [captured] still identifies the active binding.
+     * Call immediately before authenticated account HTTP; a null result means the captured UI scope
+     * was invalidated and no credential from it may be reused.
+     */
+    internal fun currentAccountCredential(
+        context: Context,
+        captured: GatewayAccountCredential,
+    ): GatewayAccountCredential? = synchronized(lock) {
+        if (!isCurrentAccountCredential(context, captured)) return null
+        accountCredential(context)
+    }
+
+    /** Builds a fresh current account transport from a token-free captured identity. */
+    internal fun currentAccountHttp(
+        context: Context,
+        captured: GatewayAccountIdentity,
+    ): GatewayHttp? = synchronized(lock) {
+        val credential = currentAccountCredential(context, captured) ?: return null
+        val opened = open(context) ?: return null
+        GatewayHttp(credential.origin, credential.bearerToken).also {
+            it.initializeRetentionProtocol(opened.attachmentRetentionProtocolEnabled())
+        }
+    }
+
+    /** Builds a fresh current account transport initialized from the core's negotiated protocol state. */
+    internal fun currentAccountHttp(
+        context: Context,
+        captured: GatewayAccountCredential,
+    ): GatewayHttp? = synchronized(lock) {
+        val credential = currentAccountCredential(context, captured) ?: return null
+        val opened = open(context) ?: return null
+        GatewayHttp(credential.origin, credential.bearerToken).also {
+            it.initializeRetentionProtocol(opened.attachmentRetentionProtocolEnabled())
+        }
+    }
+
+    /** Fences account-only requests without opening a client or taking the core mutex on the UI thread. */
+    internal fun isCurrentAccountCredential(context: Context, credential: GatewayAccountCredential): Boolean = synchronized(lock) {
+        generation == credential.generation && identity(prefs(context))?.let {
+            it.origin == credential.origin && it.vaultId == credential.vaultId && it.deviceId == credential.deviceId
+        } == true
     }
 
     internal fun ownerEnrollmentMaterial(context: Context): OwnerEnrollmentMaterial? = synchronized(lock) {
@@ -228,7 +333,8 @@ object NativeGateway {
         val identity = identity(prefs) ?: return null
         val profile = openString(prefs, P_PROFILE) ?: return null
         val header = openString(prefs, P_HEADER) ?: return null
-        OwnerEnrollmentMaterial(identity.origin, identity.vaultId, identity.deviceId, profile, header)
+        val protocolHeader = if (client?.attachmentRetentionProtocolEnabled() == true) attachmentRetentionProtocolHeader() else null
+        OwnerEnrollmentMaterial(identity.origin, identity.vaultId, identity.deviceId, profile, header, protocolHeader)
     }
 
     /**
@@ -377,6 +483,8 @@ object NativeGateway {
             val requested = Identity(credential.origin, credential.vaultId, credential.deviceId)
             val existing = identity(prefs)
             val editor = prefs.edit()
+            var invalidateClient = false
+            var bindingChanged = existing == null
             val result = try {
                 if (existing != null) {
                     if (existing != requested) return ImportResult.IDENTITY_MISMATCH
@@ -386,13 +494,12 @@ object NativeGateway {
                     key.fill(0)
                     val profileChanged = openString(prefs, P_PROFILE) != material.profileJson ||
                         openString(prefs, P_HEADER) != material.headerJson
+                    val tokenChanged = openString(prefs, P_TOKEN) != credential.deviceToken
+                    bindingChanged = profileChanged || tokenChanged
                     if (profileChanged) {
                         // New vault material may mean a new epoch: require a fresh passphrase unlock.
                         editor.remove(P_KEY_CACHE)
-                        client?.dispose()
-                        client = null
-                        sharedKeysReady = false
-                        generation++
+                        invalidateClient = true
                     }
                     ImportResult.UPDATED
                 } else {
@@ -422,6 +529,12 @@ object NativeGateway {
                 return ImportResult.STORAGE_ERROR
             }
             if (!editor.commit()) return ImportResult.STORAGE_ERROR
+            if (bindingChanged) generation++
+            if (invalidateClient) {
+                client?.dispose()
+                client = null
+                sharedKeysReady = false
+            }
             RelayWakeRuntime.enrollmentChanged(context)
             // A new database always bootstraps from a snapshot before any live replay or effect.
             if (result == ImportResult.IMPORTED) GatewayStateStore(context).startBootstrap()

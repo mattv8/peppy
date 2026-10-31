@@ -405,10 +405,6 @@ struct ContactsSection: View {
                 Text("\(report.photoFailures) contact photo(s) could not be prepared.")
                     .accessibilityIdentifier("contacts-photo-failures")
             }
-            if report.media.unavailable > 0 {
-                Text("\(report.media.unavailable) contact photo(s) are unavailable on the server and will not be retried immediately.")
-                    .accessibilityIdentifier("contacts-photo-unavailable")
-            }
             if report.media.failed > 0 {
                 Text("\(report.media.failed) contact photo transfer(s) failed; they will be retried later.")
                     .accessibilityIdentifier("contacts-photo-transfer-failures")

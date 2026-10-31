@@ -1513,6 +1513,94 @@ async fn deletion_queue_never_deletes_referenced_objects_and_retries_failures() 
     })
     .await;
 
+    // Retention purge debt survives delete failure.
+    let failed_removal = Uuid::new_v4();
+    sqlx::query("INSERT INTO attachment_removals(vault_id,attachment_id,object_key,ciphertext_bytes) VALUES($1,$2,$3,1)")
+        .bind(server.vault).bind(failed_removal).bind(&invalid).execute(&server.pool).await.unwrap();
+    sqlx::query("UPDATE storage_deletions SET reason='retention_cleanup',not_before=now() WHERE object_key=$1")
+        .bind(&invalid).execute(&server.pool).await.unwrap();
+    wait_until(10, "failed retention deletion to retain debt", || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT purged_at IS NULL FROM attachment_removals WHERE attachment_id=$1",
+        )
+        .bind(failed_removal)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap()
+    })
+    .await;
+
+    // Successful deletion clears debt only with durable SQL completion.
+    let purged_attachment = server.finalized_attachment(b"retention purge").await;
+    let purged_key = server.object_key(purged_attachment).await;
+    let purged_bytes: i64 = sqlx::query_scalar(
+        "SELECT ciphertext_bytes FROM attachments WHERE vault_id=$1 AND attachment_id=$2",
+    )
+    .bind(server.vault)
+    .bind(purged_attachment)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    let mut tx = server.pool.begin().await.unwrap();
+    sqlx::query("DELETE FROM attachments WHERE vault_id=$1 AND attachment_id=$2")
+        .bind(server.vault)
+        .bind(purged_attachment)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO attachment_removals(vault_id,attachment_id,object_key,ciphertext_bytes) VALUES($1,$2,$3,$4)").bind(server.vault).bind(purged_attachment).bind(&purged_key).bind(purged_bytes).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO storage_deletions(object_key,vault_id,reason) VALUES($1,$2,'retention_cleanup')").bind(&purged_key).bind(server.vault).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    wait_until(10, "retention deletion debt to clear", || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT purged_at IS NOT NULL FROM attachment_removals WHERE attachment_id=$1",
+        )
+        .bind(purged_attachment)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap()
+    })
+    .await;
+    assert!(matches!(
+        server.storage.head_bytes(&purged_key).await,
+        Err(StorageError::NotFound)
+    ));
+
+    // A missing queue reference is reconstructed and completed.
+    let repaired_attachment = server.finalized_attachment(b"retention queue repair").await;
+    let repaired_key = server.object_key(repaired_attachment).await;
+    let repaired_bytes: i64 = sqlx::query_scalar(
+        "SELECT ciphertext_bytes FROM attachments WHERE vault_id=$1 AND attachment_id=$2",
+    )
+    .bind(server.vault)
+    .bind(repaired_attachment)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    let mut tx = server.pool.begin().await.unwrap();
+    sqlx::query("DELETE FROM attachments WHERE vault_id=$1 AND attachment_id=$2")
+        .bind(server.vault)
+        .bind(repaired_attachment)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO attachment_removals(vault_id,attachment_id,object_key,ciphertext_bytes) VALUES($1,$2,$3,$4)").bind(server.vault).bind(repaired_attachment).bind(&repaired_key).bind(repaired_bytes).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    wait_until(
+        10,
+        "missing retention queue to repair and complete",
+        || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT purged_at IS NOT NULL FROM attachment_removals WHERE attachment_id=$1",
+            )
+            .bind(repaired_attachment)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap()
+        },
+    )
+    .await;
+
     // Expired uploaded reservations are cleaned by the background worker even
     // when no new reservation is made.
     let bytes = ciphertext(b"expired background cleanup");

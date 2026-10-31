@@ -679,6 +679,36 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_open_native_client(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_capability_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_acknowledgement_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_copy_supported(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_prepare_limit_max(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_protocol_header(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_register_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_release_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_response_max_bytes(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_response_read_limit_bytes(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_status_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_supported_notice_policy_version(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_classify_attachment_retention_error(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_classify_device_retention_availability(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_attachment_retention_response(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_attachment_retention_status(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_generate_hosted_passphrase(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_login_request(
@@ -731,11 +761,25 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_raw_page(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_attachment_retention_response(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_pending(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_phone_reads(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_info(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_preparation_pending(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_protocol_enabled(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_ready(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_state(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_upload_retention(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_attachment_retention_use(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_contact_scan(
     ): Int
@@ -778,6 +822,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_reconciliation(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compose_drafts(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_configure_attachment_retention_protocol(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_consume_phone_read_effects(
     ): Int
@@ -841,6 +887,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_install_downloaded_attachment(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_invalidate_attachment_retention_reconciliation(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_contact_books_json(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_contact_requests_json(
@@ -848,6 +896,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_conversations(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_restorable_contacts_json(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_attachment_retention_reconciled(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_attachment_uploaded(
     ): Int
@@ -895,6 +945,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_attachment_retention_operations(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_command_attachment_count(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_commands(
@@ -931,6 +983,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment_retention_operations(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_contact_photo(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source(
@@ -949,6 +1003,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_attachment_removed_by_storage_policy(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_contact_sync_blocked(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_mms_backfill_remote_capacity(
@@ -956,6 +1012,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_mms_backfill_vault_quota_exceeded(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_attachment_download(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_attachment_retention_release(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_edit(
     ): Int
@@ -1169,11 +1227,25 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_append_snapshot_raw_page(`ptr`: Long,`generation`: Long,`records`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_attachment_retention_response(`ptr`: Long,`response`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_pending(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_phone_reads(`ptr`: Long,`candidates`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_info(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_preparation_pending(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_protocol_enabled(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_ready(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_state(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_upload_retention(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_attachment_retention_use(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_contact_scan(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1217,6 +1289,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_compose_drafts(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_configure_attachment_retention_protocol(`ptr`: Long,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_consume_phone_read_effects(`ptr`: Long,`messageIds`: RustBuffer.ByValue,`rows`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_apply_evidence_json(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1279,6 +1353,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_install_downloaded_attachment(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,`downloadedPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_invalidate_attachment_retention_reconciliation(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_list_contact_books_json(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_list_contact_requests_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1287,6 +1363,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_list_restorable_contacts_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_attachment_retention_reconciled(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_attachment_uploaded(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,`remoteObjectId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_notifications_seen(`ptr`: Long,`targets`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1333,6 +1411,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pause_mms_backfill_for_local_capacity(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_attachment_retention_operations(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_command_attachment_count(`ptr`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_commands(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1369,6 +1449,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_attachment(`ptr`: Long,`sourcePath`: RustBuffer.ByValue,`mediaType`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_attachment_retention_operations(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_contact_photo(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_message_history_capture_source(`ptr`: Long,`facts`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1387,6 +1469,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification(`ptr`: Long,`notificationKey`: RustBuffer.ByValue,`instance`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_attachment_removed_by_storage_policy(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_contact_sync_blocked(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_mms_backfill_remote_capacity(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`hasCapacity`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -1395,6 +1479,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_attachment_download(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_attachment_retention_release(`ptr`: Long,`useId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_edit(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_repair(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1597,6 +1683,36 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_open_native_client(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_capability_request(`cleanupReady`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_acknowledgement_request(`policyVersion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_copy_supported(`policyVersion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_prepare_limit_max(uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_protocol_header(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_register_request(`operation`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_release_request(`operation`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_response_max_bytes(uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_response_read_limit_bytes(uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_status_request(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_supported_notice_policy_version(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_classify_attachment_retention_error(`status`: Short,`responseJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_classify_device_retention_availability(`status`: Short,`responseJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_attachment_retention_response(`responseJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_attachment_retention_status(`responseJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_generate_hosted_passphrase(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_hosted_login_request(`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1760,6 +1876,51 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_open_native_client() and 0xFFFF) != 13839) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_capability_request() and 0xFFFF) != 23970) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_acknowledgement_request() and 0xFFFF) != 22360) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_copy_supported() and 0xFFFF) != 6598) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_prepare_limit_max() and 0xFFFF) != 51910) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_protocol_header() and 0xFFFF) != 62707) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_register_request() and 0xFFFF) != 59154) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_release_request() and 0xFFFF) != 63955) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_response_max_bytes() and 0xFFFF) != 19422) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_response_read_limit_bytes() and 0xFFFF) != 62109) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_status_request() and 0xFFFF) != 16652) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_supported_notice_policy_version() and 0xFFFF) != 57264) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_classify_attachment_retention_error() and 0xFFFF) != 9883) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_classify_device_retention_availability() and 0xFFFF) != 32113) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_attachment_retention_response() and 0xFFFF) != 15381) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_attachment_retention_status() and 0xFFFF) != 57765) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_generate_hosted_passphrase() and 0xFFFF) != 10342) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1838,6 +1999,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_raw_page() and 0xFFFF) != 34355) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_attachment_retention_response() and 0xFFFF) != 41715) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_pending() and 0xFFFF) != 53530) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1845,6 +2009,24 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_info() and 0xFFFF) != 19943) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_preparation_pending() and 0xFFFF) != 30293) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_protocol_enabled() and 0xFFFF) != 31798) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_ready() and 0xFFFF) != 31396) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_state() and 0xFFFF) != 22988) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_upload_retention() and 0xFFFF) != 31099) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_attachment_retention_use() and 0xFFFF) != 13621) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_contact_scan() and 0xFFFF) != 53985) {
@@ -1908,6 +2090,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compose_drafts() and 0xFFFF) != 45000) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_configure_attachment_retention_protocol() and 0xFFFF) != 5014) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_consume_phone_read_effects() and 0xFFFF) != 12647) {
@@ -2003,6 +2188,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_install_downloaded_attachment() and 0xFFFF) != 42975) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_invalidate_attachment_retention_reconciliation() and 0xFFFF) != 16848) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_contact_books_json() and 0xFFFF) != 47867) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2013,6 +2201,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_restorable_contacts_json() and 0xFFFF) != 20207) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_attachment_retention_reconciled() and 0xFFFF) != 315) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_attachment_uploaded() and 0xFFFF) != 29397) {
@@ -2084,6 +2275,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity() and 0xFFFF) != 20629) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_attachment_retention_operations() and 0xFFFF) != 65527) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_command_attachment_count() and 0xFFFF) != 13128) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2138,6 +2332,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment() and 0xFFFF) != 2885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment_retention_operations() and 0xFFFF) != 3832) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_contact_photo() and 0xFFFF) != 6113) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2165,6 +2362,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification() and 0xFFFF) != 35619) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_attachment_removed_by_storage_policy() and 0xFFFF) != 55290) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_contact_sync_blocked() and 0xFFFF) != 17812) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2175,6 +2375,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_attachment_download() and 0xFFFF) != 39338) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_attachment_retention_release() and 0xFFFF) != 18267) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_edit() and 0xFFFF) != 41512) {
@@ -2598,6 +2801,33 @@ private class JavaLangRefCleanable(
 /**
  * @suppress
  */
+public object FfiConverterUShort: FfiConverter<UShort, Short> {
+    override fun lift(value: Short): UShort {
+        return value.toUShort()
+    }
+
+    fun lift(value: Int): UShort {
+        return value.toUShort()
+    }
+
+    override fun read(buf: ByteBuffer): UShort {
+        return lift(buf.getShort())
+    }
+
+    override fun lower(value: UShort): Short {
+        return value.toShort()
+    }
+
+    override fun allocationSize(value: UShort) = 2UL
+
+    override fun write(value: UShort, buf: ByteBuffer) {
+        buf.putShort(value.toShort())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterUInt: FfiConverter<UInt, Int> {
     override fun lift(value: Int): UInt {
         return value.toUInt()
@@ -2882,11 +3112,31 @@ public interface NativeClientInterface {
     
     fun `appendSnapshotRawPage`(`generation`: kotlin.ULong, `records`: List<NativeRawSnapshotRecord>): NativeSnapshotProgress
     
+    /**
+     * Stores a canonical transport response only when all immutable identity fields match.
+     */
+    fun `applyAttachmentRetentionResponse`(`response`: NativeAttachmentUseResponse)
+    
     fun `applyPending`(`limit`: kotlin.ULong): NativeApplyReport
     
     fun `applyPhoneReads`(`candidates`: List<NativePhoneReadCandidate>): kotlin.UInt
     
     fun `attachmentInfo`(`attachmentId`: kotlin.String): NativeAttachmentInfo
+    
+    fun `attachmentRetentionPreparationPending`(): kotlin.Boolean
+    
+    fun `attachmentRetentionProtocolEnabled`(): kotlin.Boolean
+    
+    fun `attachmentRetentionReady`(): kotlin.Boolean
+    
+    fun `attachmentRetentionState`(`attachmentId`: kotlin.String): NativeAttachmentRetentionState
+    
+    fun `attachmentUploadRetention`(`attachmentId`: kotlin.String): NativeAttachmentUploadRetention
+    
+    /**
+     * Persists a protected use before the host publishes dependent attachment work.
+     */
+    fun `beginAttachmentRetentionUse`(`attachmentId`: kotlin.String, `kind`: NativeAttachmentUseKind): NativePendingAttachmentRetentionOperation
     
     fun `beginContactScan`(`inputJson`: kotlin.String): kotlin.String
     
@@ -2947,6 +3197,8 @@ public interface NativeClientInterface {
     fun `completeSmsReconciliation`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `upperBound`: kotlin.String, `cursor`: kotlin.String?, `exhausted`: kotlin.Boolean)
     
     fun `composeDrafts`(): List<NativeComposeDraft>
+    
+    fun `configureAttachmentRetentionProtocol`(`enabled`: kotlin.Boolean)
     
     fun `consumePhoneReadEffects`(`messageIds`: List<kotlin.String>, `rows`: List<NativeProviderRowRef>, `nowMs`: kotlin.Long): kotlin.UInt
     
@@ -3052,6 +3304,8 @@ public interface NativeClientInterface {
     
     fun `installDownloadedAttachment`(`attachmentId`: kotlin.String, `downloadedPath`: kotlin.String)
     
+    fun `invalidateAttachmentRetentionReconciliation`()
+    
     fun `listContactBooksJson`(): kotlin.String
     
     fun `listContactRequestsJson`(`input`: kotlin.String): kotlin.String
@@ -3059,6 +3313,8 @@ public interface NativeClientInterface {
     fun `listConversations`(): List<NativeConversation>
     
     fun `listRestorableContactsJson`(`input`: kotlin.String): kotlin.String
+    
+    fun `markAttachmentRetentionReconciled`()
     
     fun `markAttachmentUploaded`(`attachmentId`: kotlin.String, `remoteObjectId`: kotlin.String)
     
@@ -3108,6 +3364,8 @@ public interface NativeClientInterface {
     fun `openNativePlaintextFile`(`attachmentId`: kotlin.String): NativePlaintextHandle
     
     fun `pauseMmsBackfillForLocalCapacity`(`generation`: kotlin.String, `scope`: kotlin.String)
+    
+    fun `pendingAttachmentRetentionOperations`(): List<NativePendingAttachmentRetentionOperation>
     
     /**
      * Lets an SMS-only adapter reject an immutable pending MMS command before
@@ -3170,6 +3428,12 @@ public interface NativeClientInterface {
     
     fun `prepareAttachment`(`sourcePath`: kotlin.String, `mediaType`: kotlin.String, `displayName`: kotlin.String): NativeAttachmentInfo
     
+    /**
+     * Durably prepares bounded register/release work. Hosts checkpoint before HTTP and must
+     * discard responses from an older open/restore generation before applying them.
+     */
+    fun `prepareAttachmentRetentionOperations`(`limit`: kotlin.ULong): List<NativePendingAttachmentRetentionOperation>
+    
     fun `prepareContactPhoto`(`path`: kotlin.String): NativeAttachmentInfo
     
     /**
@@ -3192,6 +3456,8 @@ public interface NativeClientInterface {
     
     fun `removeNotification`(`notificationKey`: kotlin.String, `instance`: kotlin.String)
     
+    fun `reportAttachmentRemovedByStoragePolicy`(`attachmentId`: kotlin.String)
+    
     fun `reportContactSyncBlocked`(`inputJson`: kotlin.String): kotlin.String
     
     fun `reportMmsBackfillRemoteCapacity`(`generation`: kotlin.String, `scope`: kotlin.String, `hasCapacity`: kotlin.Boolean)
@@ -3199,6 +3465,8 @@ public interface NativeClientInterface {
     fun `reportMmsBackfillVaultQuotaExceeded`(`generation`: kotlin.String, `scope`: kotlin.String)
     
     fun `requestAttachmentDownload`(`attachmentId`: kotlin.String)
+    
+    fun `requestAttachmentRetentionRelease`(`useId`: kotlin.String): NativePendingAttachmentRetentionOperation
     
     fun `requestContactEdit`(`inputJson`: kotlin.String): kotlin.String
     
@@ -3492,6 +3760,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    /**
+     * Stores a canonical transport response only when all immutable identity fields match.
+     */
+    @Throws(MobileBindingsException::class)override fun `applyAttachmentRetentionResponse`(`response`: NativeAttachmentUseResponse)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_attachment_retention_response(
+        it,
+        
+        FfiConverterTypeNativeAttachmentUseResponse.lower(`response`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `applyPending`(`limit`: kotlin.ULong): NativeApplyReport {
             return FfiConverterTypeNativeApplyReport.lift(
     callWithHandle {
@@ -3530,6 +3815,97 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`attachmentId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `attachmentRetentionPreparationPending`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_preparation_pending(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `attachmentRetentionProtocolEnabled`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_protocol_enabled(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `attachmentRetentionReady`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_ready(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `attachmentRetentionState`(`attachmentId`: kotlin.String): NativeAttachmentRetentionState {
+            return FfiConverterTypeNativeAttachmentRetentionState.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_state(
+        it,
+        
+        FfiConverterString.lower(`attachmentId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `attachmentUploadRetention`(`attachmentId`: kotlin.String): NativeAttachmentUploadRetention {
+            return FfiConverterTypeNativeAttachmentUploadRetention.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_upload_retention(
+        it,
+        
+        FfiConverterString.lower(`attachmentId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Persists a protected use before the host publishes dependent attachment work.
+     */
+    @Throws(MobileBindingsException::class)override fun `beginAttachmentRetentionUse`(`attachmentId`: kotlin.String, `kind`: NativeAttachmentUseKind): NativePendingAttachmentRetentionOperation {
+            return FfiConverterTypeNativePendingAttachmentRetentionOperation.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_attachment_retention_use(
+        it,
+        
+        FfiConverterString.lower(`attachmentId`),
+        FfiConverterTypeNativeAttachmentUseKind.lower(`kind`),_status)
 }
     }
     )
@@ -3875,6 +4251,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     }
     )
     }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `configureAttachmentRetentionProtocol`(`enabled`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_configure_attachment_retention_protocol(
+        it,
+        
+        FfiConverterBoolean.lower(`enabled`),_status)
+}
+    }
+    
     
 
     
@@ -4385,6 +4775,19 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `invalidateAttachmentRetentionReconciliation`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_invalidate_attachment_retention_reconciliation(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `listContactBooksJson`(): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -4440,6 +4843,19 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     }
     )
     }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `markAttachmentRetentionReconciled`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_attachment_retention_reconciled(
+        it,
+        _status)
+}
+    }
+    
     
 
     
@@ -4793,6 +5209,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `pendingAttachmentRetentionOperations`(): List<NativePendingAttachmentRetentionOperation> {
+            return FfiConverterSequenceTypeNativePendingAttachmentRetentionOperation.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_attachment_retention_operations(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
     /**
      * Lets an SMS-only adapter reject an immutable pending MMS command before
      * requesting a carrier permit. It exposes no attachment metadata or keys.
@@ -5098,6 +5528,25 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    /**
+     * Durably prepares bounded register/release work. Hosts checkpoint before HTTP and must
+     * discard responses from an older open/restore generation before applying them.
+     */
+    @Throws(MobileBindingsException::class)override fun `prepareAttachmentRetentionOperations`(`limit`: kotlin.ULong): List<NativePendingAttachmentRetentionOperation> {
+            return FfiConverterSequenceTypeNativePendingAttachmentRetentionOperation.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_attachment_retention_operations(
+        it,
+        
+        FfiConverterULong.lower(`limit`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `prepareContactPhoto`(`path`: kotlin.String): NativeAttachmentInfo {
             return FfiConverterTypeNativeAttachmentInfo.lift(
     callWithHandle {
@@ -5240,6 +5689,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `reportAttachmentRemovedByStoragePolicy`(`attachmentId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_attachment_removed_by_storage_policy(
+        it,
+        
+        FfiConverterString.lower(`attachmentId`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `reportContactSyncBlocked`(`inputJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -5297,6 +5760,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
 }
     }
     
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `requestAttachmentRetentionRelease`(`useId`: kotlin.String): NativePendingAttachmentRetentionOperation {
+            return FfiConverterTypeNativePendingAttachmentRetentionOperation.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_attachment_retention_release(
+        it,
+        
+        FfiConverterString.lower(`useId`),_status)
+}
+    }
+    )
+    }
     
 
     
@@ -8529,6 +9007,302 @@ public object FfiConverterTypeNativeAttachmentInfo: FfiConverterRustBuffer<Nativ
 
 
 
+data class NativeAttachmentRetentionProtocolHeader (
+    var `name`: kotlin.String
+    , 
+    var `value`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentRetentionProtocolHeader: FfiConverterRustBuffer<NativeAttachmentRetentionProtocolHeader> {
+    override fun read(buf: ByteBuffer): NativeAttachmentRetentionProtocolHeader {
+        return NativeAttachmentRetentionProtocolHeader(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeAttachmentRetentionProtocolHeader) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`value`)
+    )
+
+    override fun write(value: NativeAttachmentRetentionProtocolHeader, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`value`, buf)
+    }
+}
+
+
+
+data class NativeAttachmentRetentionRequest (
+    var `method`: kotlin.String
+    , 
+    var `relativePath`: kotlin.String
+    , 
+    var `jsonBody`: kotlin.String?
+    , 
+    var `protocolHeader`: NativeAttachmentRetentionProtocolHeader?
+    , 
+    var `expectedSuccessStatus`: kotlin.UShort
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentRetentionRequest: FfiConverterRustBuffer<NativeAttachmentRetentionRequest> {
+    override fun read(buf: ByteBuffer): NativeAttachmentRetentionRequest {
+        return NativeAttachmentRetentionRequest(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeNativeAttachmentRetentionProtocolHeader.read(buf),
+            FfiConverterUShort.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeAttachmentRetentionRequest) = (
+            FfiConverterString.allocationSize(value.`method`) +
+            FfiConverterString.allocationSize(value.`relativePath`) +
+            FfiConverterOptionalString.allocationSize(value.`jsonBody`) +
+            FfiConverterOptionalTypeNativeAttachmentRetentionProtocolHeader.allocationSize(value.`protocolHeader`) +
+            FfiConverterUShort.allocationSize(value.`expectedSuccessStatus`)
+    )
+
+    override fun write(value: NativeAttachmentRetentionRequest, buf: ByteBuffer) {
+            FfiConverterString.write(value.`method`, buf)
+            FfiConverterString.write(value.`relativePath`, buf)
+            FfiConverterOptionalString.write(value.`jsonBody`, buf)
+            FfiConverterOptionalTypeNativeAttachmentRetentionProtocolHeader.write(value.`protocolHeader`, buf)
+            FfiConverterUShort.write(value.`expectedSuccessStatus`, buf)
+    }
+}
+
+
+
+data class NativeAttachmentRetentionState (
+    var `remote`: NativeRemoteAttachmentState
+    , 
+    var `localAvailable`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentRetentionState: FfiConverterRustBuffer<NativeAttachmentRetentionState> {
+    override fun read(buf: ByteBuffer): NativeAttachmentRetentionState {
+        return NativeAttachmentRetentionState(
+            FfiConverterTypeNativeRemoteAttachmentState.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeAttachmentRetentionState) = (
+            FfiConverterTypeNativeRemoteAttachmentState.allocationSize(value.`remote`) +
+            FfiConverterBoolean.allocationSize(value.`localAvailable`)
+    )
+
+    override fun write(value: NativeAttachmentRetentionState, buf: ByteBuffer) {
+            FfiConverterTypeNativeRemoteAttachmentState.write(value.`remote`, buf)
+            FfiConverterBoolean.write(value.`localAvailable`, buf)
+    }
+}
+
+
+
+data class NativeAttachmentStorageStatus (
+    /**
+     * All size fields are bytes.
+     */
+    var `usedBytes`: kotlin.Long
+    , 
+    var `limitBytes`: kotlin.Long
+    , 
+    var `baseBytes`: kotlin.Long
+    , 
+    var `packBytes`: kotlin.Long
+    , 
+    var `protectedBytes`: kotlin.Long
+    , 
+    var `removedBytes`: kotlin.Long
+    , 
+    var `cleanupState`: NativeStorageCleanupState
+    , 
+    var `cleanupUnavailableReason`: NativeStorageCleanupUnavailableReason?
+    , 
+    var `notice`: NativeRetentionNotice
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentStorageStatus: FfiConverterRustBuffer<NativeAttachmentStorageStatus> {
+    override fun read(buf: ByteBuffer): NativeAttachmentStorageStatus {
+        return NativeAttachmentStorageStatus(
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterTypeNativeStorageCleanupState.read(buf),
+            FfiConverterOptionalTypeNativeStorageCleanupUnavailableReason.read(buf),
+            FfiConverterTypeNativeRetentionNotice.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeAttachmentStorageStatus) = (
+            FfiConverterLong.allocationSize(value.`usedBytes`) +
+            FfiConverterLong.allocationSize(value.`limitBytes`) +
+            FfiConverterLong.allocationSize(value.`baseBytes`) +
+            FfiConverterLong.allocationSize(value.`packBytes`) +
+            FfiConverterLong.allocationSize(value.`protectedBytes`) +
+            FfiConverterLong.allocationSize(value.`removedBytes`) +
+            FfiConverterTypeNativeStorageCleanupState.allocationSize(value.`cleanupState`) +
+            FfiConverterOptionalTypeNativeStorageCleanupUnavailableReason.allocationSize(value.`cleanupUnavailableReason`) +
+            FfiConverterTypeNativeRetentionNotice.allocationSize(value.`notice`)
+    )
+
+    override fun write(value: NativeAttachmentStorageStatus, buf: ByteBuffer) {
+            FfiConverterLong.write(value.`usedBytes`, buf)
+            FfiConverterLong.write(value.`limitBytes`, buf)
+            FfiConverterLong.write(value.`baseBytes`, buf)
+            FfiConverterLong.write(value.`packBytes`, buf)
+            FfiConverterLong.write(value.`protectedBytes`, buf)
+            FfiConverterLong.write(value.`removedBytes`, buf)
+            FfiConverterTypeNativeStorageCleanupState.write(value.`cleanupState`, buf)
+            FfiConverterOptionalTypeNativeStorageCleanupUnavailableReason.write(value.`cleanupUnavailableReason`, buf)
+            FfiConverterTypeNativeRetentionNotice.write(value.`notice`, buf)
+    }
+}
+
+
+
+data class NativeAttachmentUploadRetention (
+    var `retentionClass`: NativeAttachmentRetentionClass
+    , 
+    var `referenceTracking`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentUploadRetention: FfiConverterRustBuffer<NativeAttachmentUploadRetention> {
+    override fun read(buf: ByteBuffer): NativeAttachmentUploadRetention {
+        return NativeAttachmentUploadRetention(
+            FfiConverterTypeNativeAttachmentRetentionClass.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeAttachmentUploadRetention) = (
+            FfiConverterTypeNativeAttachmentRetentionClass.allocationSize(value.`retentionClass`) +
+            FfiConverterBoolean.allocationSize(value.`referenceTracking`)
+    )
+
+    override fun write(value: NativeAttachmentUploadRetention, buf: ByteBuffer) {
+            FfiConverterTypeNativeAttachmentRetentionClass.write(value.`retentionClass`, buf)
+            FfiConverterBoolean.write(value.`referenceTracking`, buf)
+    }
+}
+
+
+
+data class NativeAttachmentUseResponse (
+    var `useId`: kotlin.String
+    , 
+    var `attachmentId`: kotlin.String
+    , 
+    var `deviceId`: kotlin.String
+    , 
+    var `kind`: NativeAttachmentUseKind
+    , 
+    var `state`: NativeAttachmentUseState
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentUseResponse: FfiConverterRustBuffer<NativeAttachmentUseResponse> {
+    override fun read(buf: ByteBuffer): NativeAttachmentUseResponse {
+        return NativeAttachmentUseResponse(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeNativeAttachmentUseKind.read(buf),
+            FfiConverterTypeNativeAttachmentUseState.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeAttachmentUseResponse) = (
+            FfiConverterString.allocationSize(value.`useId`) +
+            FfiConverterString.allocationSize(value.`attachmentId`) +
+            FfiConverterString.allocationSize(value.`deviceId`) +
+            FfiConverterTypeNativeAttachmentUseKind.allocationSize(value.`kind`) +
+            FfiConverterTypeNativeAttachmentUseState.allocationSize(value.`state`)
+    )
+
+    override fun write(value: NativeAttachmentUseResponse, buf: ByteBuffer) {
+            FfiConverterString.write(value.`useId`, buf)
+            FfiConverterString.write(value.`attachmentId`, buf)
+            FfiConverterString.write(value.`deviceId`, buf)
+            FfiConverterTypeNativeAttachmentUseKind.write(value.`kind`, buf)
+            FfiConverterTypeNativeAttachmentUseState.write(value.`state`, buf)
+    }
+}
+
+
+
 data class NativeCaptured (
     var `messageId`: kotlin.String
     , 
@@ -10729,6 +11503,59 @@ public object FfiConverterTypeNativeOwnerPhoneStatus: FfiConverterRustBuffer<Nat
 
 
 
+data class NativePendingAttachmentRetentionOperation (
+    var `operation`: NativeAttachmentUseOperationKind
+    , 
+    var `useId`: kotlin.String
+    , 
+    var `attachmentId`: kotlin.String
+    , 
+    var `deviceId`: kotlin.String
+    , 
+    var `kind`: NativeAttachmentUseKind
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePendingAttachmentRetentionOperation: FfiConverterRustBuffer<NativePendingAttachmentRetentionOperation> {
+    override fun read(buf: ByteBuffer): NativePendingAttachmentRetentionOperation {
+        return NativePendingAttachmentRetentionOperation(
+            FfiConverterTypeNativeAttachmentUseOperationKind.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeNativeAttachmentUseKind.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativePendingAttachmentRetentionOperation) = (
+            FfiConverterTypeNativeAttachmentUseOperationKind.allocationSize(value.`operation`) +
+            FfiConverterString.allocationSize(value.`useId`) +
+            FfiConverterString.allocationSize(value.`attachmentId`) +
+            FfiConverterString.allocationSize(value.`deviceId`) +
+            FfiConverterTypeNativeAttachmentUseKind.allocationSize(value.`kind`)
+    )
+
+    override fun write(value: NativePendingAttachmentRetentionOperation, buf: ByteBuffer) {
+            FfiConverterTypeNativeAttachmentUseOperationKind.write(value.`operation`, buf)
+            FfiConverterString.write(value.`useId`, buf)
+            FfiConverterString.write(value.`attachmentId`, buf)
+            FfiConverterString.write(value.`deviceId`, buf)
+            FfiConverterTypeNativeAttachmentUseKind.write(value.`kind`, buf)
+    }
+}
+
+
+
 data class NativePendingVaultRequest (
     var `origin`: kotlin.String
     , 
@@ -11090,6 +11917,68 @@ public object FfiConverterTypeNativeRawSnapshotRecord: FfiConverterRustBuffer<Na
     override fun write(value: NativeRawSnapshotRecord, buf: ByteBuffer) {
             FfiConverterString.write(value.`cursor`, buf)
             FfiConverterByteArray.write(value.`envelopeJson`, buf)
+    }
+}
+
+
+
+data class NativeRetentionNotice (
+    var `state`: NativeRetentionNoticeState
+    , 
+    var `policyVersion`: kotlin.String?
+    , 
+    /**
+     * Unix seconds supplied by the server.
+     */
+    var `presentedAtSeconds`: kotlin.Long?
+    , 
+    /**
+     * Unix seconds supplied by the server.
+     */
+    var `acknowledgedAtSeconds`: kotlin.Long?
+    , 
+    /**
+     * Unix seconds supplied by the server.
+     */
+    var `activationAtSeconds`: kotlin.Long?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRetentionNotice: FfiConverterRustBuffer<NativeRetentionNotice> {
+    override fun read(buf: ByteBuffer): NativeRetentionNotice {
+        return NativeRetentionNotice(
+            FfiConverterTypeNativeRetentionNoticeState.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRetentionNotice) = (
+            FfiConverterTypeNativeRetentionNoticeState.allocationSize(value.`state`) +
+            FfiConverterOptionalString.allocationSize(value.`policyVersion`) +
+            FfiConverterOptionalLong.allocationSize(value.`presentedAtSeconds`) +
+            FfiConverterOptionalLong.allocationSize(value.`acknowledgedAtSeconds`) +
+            FfiConverterOptionalLong.allocationSize(value.`activationAtSeconds`)
+    )
+
+    override fun write(value: NativeRetentionNotice, buf: ByteBuffer) {
+            FfiConverterTypeNativeRetentionNoticeState.write(value.`state`, buf)
+            FfiConverterOptionalString.write(value.`policyVersion`, buf)
+            FfiConverterOptionalLong.write(value.`presentedAtSeconds`, buf)
+            FfiConverterOptionalLong.write(value.`acknowledgedAtSeconds`, buf)
+            FfiConverterOptionalLong.write(value.`activationAtSeconds`, buf)
     }
 }
 
@@ -11934,6 +12823,12 @@ sealed class MobileBindingsException: kotlin.Exception() {
             get() = ""
     }
     
+    class AttachmentRemovedByStoragePolicy(
+        ) : MobileBindingsException() {
+        override val message
+            get() = ""
+    }
+    
     class Storage(
         ) : MobileBindingsException() {
         override val message
@@ -11993,10 +12888,11 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
             14 -> MobileBindingsException.InvalidKeyCache()
             15 -> MobileBindingsException.KeysUnavailable()
             16 -> MobileBindingsException.InvalidMedia()
-            17 -> MobileBindingsException.Storage()
-            18 -> MobileBindingsException.MmsAcquisitionLimit()
-            19 -> MobileBindingsException.MmsMediaQuota()
-            20 -> MobileBindingsException.SmsCapacity()
+            17 -> MobileBindingsException.AttachmentRemovedByStoragePolicy()
+            18 -> MobileBindingsException.Storage()
+            19 -> MobileBindingsException.MmsAcquisitionLimit()
+            20 -> MobileBindingsException.MmsMediaQuota()
+            21 -> MobileBindingsException.SmsCapacity()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -12064,6 +12960,10 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
                 4UL
             )
             is MobileBindingsException.InvalidMedia -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is MobileBindingsException.AttachmentRemovedByStoragePolicy -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -12152,26 +13052,98 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
                 buf.putInt(16)
                 Unit
             }
-            is MobileBindingsException.Storage -> {
+            is MobileBindingsException.AttachmentRemovedByStoragePolicy -> {
                 buf.putInt(17)
                 Unit
             }
-            is MobileBindingsException.MmsAcquisitionLimit -> {
+            is MobileBindingsException.Storage -> {
                 buf.putInt(18)
                 Unit
             }
-            is MobileBindingsException.MmsMediaQuota -> {
+            is MobileBindingsException.MmsAcquisitionLimit -> {
                 buf.putInt(19)
                 Unit
             }
-            is MobileBindingsException.SmsCapacity -> {
+            is MobileBindingsException.MmsMediaQuota -> {
                 buf.putInt(20)
+                Unit
+            }
+            is MobileBindingsException.SmsCapacity -> {
+                buf.putInt(21)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
 }
+
+
+
+
+enum class NativeAttachmentRetentionClass {
+    
+    PROTECTED,
+    MESSAGE_MEDIA;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentRetentionClass: FfiConverterRustBuffer<NativeAttachmentRetentionClass> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeAttachmentRetentionClass.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeAttachmentRetentionClass) = 4UL
+
+    override fun write(value: NativeAttachmentRetentionClass, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeAttachmentRetentionErrorClassification {
+    
+    REMOVED_BY_STORAGE_POLICY,
+    OTHER;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentRetentionErrorClassification: FfiConverterRustBuffer<NativeAttachmentRetentionErrorClassification> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeAttachmentRetentionErrorClassification.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeAttachmentRetentionErrorClassification) = 4UL
+
+    override fun write(value: NativeAttachmentRetentionErrorClassification, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -12203,6 +13175,145 @@ public object FfiConverterTypeNativeAttachmentState: FfiConverterRustBuffer<Nati
     override fun allocationSize(value: NativeAttachmentState) = 4UL
 
     override fun write(value: NativeAttachmentState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeAttachmentUseKind {
+    
+    MESSAGE_HISTORY,
+    PENDING_SEND,
+    CONTACT_PHOTO,
+    RESTORE_CRITICAL;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentUseKind: FfiConverterRustBuffer<NativeAttachmentUseKind> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeAttachmentUseKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeAttachmentUseKind) = 4UL
+
+    override fun write(value: NativeAttachmentUseKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeAttachmentUseOperationKind {
+    
+    REGISTER,
+    RELEASE;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentUseOperationKind: FfiConverterRustBuffer<NativeAttachmentUseOperationKind> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeAttachmentUseOperationKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeAttachmentUseOperationKind) = 4UL
+
+    override fun write(value: NativeAttachmentUseOperationKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeAttachmentUseState {
+    
+    REGISTERED,
+    RELEASED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAttachmentUseState: FfiConverterRustBuffer<NativeAttachmentUseState> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeAttachmentUseState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeAttachmentUseState) = 4UL
+
+    override fun write(value: NativeAttachmentUseState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeDeviceRetentionAvailability {
+    
+    UNSUPPORTED,
+    TEMPORARILY_UNAVAILABLE,
+    OTHER;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeDeviceRetentionAvailability: FfiConverterRustBuffer<NativeDeviceRetentionAvailability> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeDeviceRetentionAvailability.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeDeviceRetentionAvailability) = 4UL
+
+    override fun write(value: NativeDeviceRetentionAvailability, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -12834,6 +13945,75 @@ public object FfiConverterTypeNativePhoneReadTransport: FfiConverterRustBuffer<N
 
 
 
+enum class NativeRemoteAttachmentState {
+    
+    AVAILABLE,
+    REMOVED_BY_STORAGE_POLICY;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRemoteAttachmentState: FfiConverterRustBuffer<NativeRemoteAttachmentState> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeRemoteAttachmentState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeRemoteAttachmentState) = 4UL
+
+    override fun write(value: NativeRemoteAttachmentState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeRetentionNoticeState {
+    
+    NOT_PRESENTED,
+    GRACE_PERIOD,
+    ELIGIBLE;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRetentionNoticeState: FfiConverterRustBuffer<NativeRetentionNoticeState> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeRetentionNoticeState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeRetentionNoticeState) = 4UL
+
+    override fun write(value: NativeRetentionNoticeState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class NativeSendResult {
     
     SUBMITTED,
@@ -12974,6 +14154,81 @@ public object FfiConverterTypeNativeSnapshotPurpose: FfiConverterRustBuffer<Nati
     override fun allocationSize(value: NativeSnapshotPurpose) = 4UL
 
     override fun write(value: NativeSnapshotPurpose, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeStorageCleanupState {
+    
+    DISABLED,
+    BLOCKED,
+    PENDING,
+    AVAILABLE;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeStorageCleanupState: FfiConverterRustBuffer<NativeStorageCleanupState> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeStorageCleanupState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeStorageCleanupState) = 4UL
+
+    override fun write(value: NativeStorageCleanupState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeStorageCleanupUnavailableReason {
+    
+    NOTICE_NOT_ELIGIBLE,
+    DEVICE_NOT_READY,
+    READ_ONLY,
+    ENTITLEMENT_UNAVAILABLE,
+    PROVIDER_RECONCILIATION_PENDING,
+    BILLING_MUTATION_PENDING,
+    CLEANUP_DISABLED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeStorageCleanupUnavailableReason: FfiConverterRustBuffer<NativeStorageCleanupUnavailableReason> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeStorageCleanupUnavailableReason.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeStorageCleanupUnavailableReason) = 4UL
+
+    override fun write(value: NativeStorageCleanupUnavailableReason, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -13170,6 +14425,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeAttachmentRetentionProtocolHeader: FfiConverterRustBuffer<NativeAttachmentRetentionProtocolHeader?> {
+    override fun read(buf: ByteBuffer): NativeAttachmentRetentionProtocolHeader? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeAttachmentRetentionProtocolHeader.read(buf)
+    }
+
+    override fun allocationSize(value: NativeAttachmentRetentionProtocolHeader?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeAttachmentRetentionProtocolHeader.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeAttachmentRetentionProtocolHeader?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeAttachmentRetentionProtocolHeader.write(value, buf)
         }
     }
 }
@@ -13394,6 +14681,38 @@ public object FfiConverterOptionalTypeNativeMmsBackfillPause: FfiConverterRustBu
         } else {
             buf.put(1)
             FfiConverterTypeNativeMmsBackfillPause.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeStorageCleanupUnavailableReason: FfiConverterRustBuffer<NativeStorageCleanupUnavailableReason?> {
+    override fun read(buf: ByteBuffer): NativeStorageCleanupUnavailableReason? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeStorageCleanupUnavailableReason.read(buf)
+    }
+
+    override fun allocationSize(value: NativeStorageCleanupUnavailableReason?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeStorageCleanupUnavailableReason.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeStorageCleanupUnavailableReason?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeStorageCleanupUnavailableReason.write(value, buf)
         }
     }
 }
@@ -13824,6 +15143,34 @@ public object FfiConverterSequenceTypeNativeNotificationTarget: FfiConverterRust
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeNativePendingAttachmentRetentionOperation: FfiConverterRustBuffer<List<NativePendingAttachmentRetentionOperation>> {
+    override fun read(buf: ByteBuffer): List<NativePendingAttachmentRetentionOperation> {
+        val len = buf.getInt()
+        return List<NativePendingAttachmentRetentionOperation>(len) {
+            FfiConverterTypeNativePendingAttachmentRetentionOperation.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativePendingAttachmentRetentionOperation>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativePendingAttachmentRetentionOperation.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativePendingAttachmentRetentionOperation>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativePendingAttachmentRetentionOperation.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeNativePhoneReadCandidate: FfiConverterRustBuffer<List<NativePhoneReadCandidate>> {
     override fun read(buf: ByteBuffer): List<NativePhoneReadCandidate> {
         val len = buf.getInt()
@@ -14009,6 +15356,173 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
     
         
         FfiConverterTypeNativeOpenConfig.lower(`config`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `attachmentRetentionCapabilityRequest`(`cleanupReady`: kotlin.Boolean): NativeAttachmentRetentionRequest {
+            return FfiConverterTypeNativeAttachmentRetentionRequest.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_capability_request(
+    
+        
+        FfiConverterBoolean.lower(`cleanupReady`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `attachmentRetentionNoticeAcknowledgementRequest`(`policyVersion`: kotlin.String): NativeAttachmentRetentionRequest {
+            return FfiConverterTypeNativeAttachmentRetentionRequest.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_acknowledgement_request(
+    
+        
+        FfiConverterString.lower(`policyVersion`),_status)
+}
+    )
+    }
+    
+ fun `attachmentRetentionNoticeCopySupported`(`policyVersion`: kotlin.String?): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_copy_supported(
+    
+        
+        FfiConverterOptionalString.lower(`policyVersion`),_status)
+}
+    )
+    }
+    
+ fun `attachmentRetentionPrepareLimitMax`(): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_prepare_limit_max(
+    
+        _status)
+}
+    )
+    }
+    
+ fun `attachmentRetentionProtocolHeader`(): NativeAttachmentRetentionProtocolHeader {
+            return FfiConverterTypeNativeAttachmentRetentionProtocolHeader.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_protocol_header(
+    
+        _status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `attachmentRetentionRegisterRequest`(`operation`: NativePendingAttachmentRetentionOperation): NativeAttachmentRetentionRequest {
+            return FfiConverterTypeNativeAttachmentRetentionRequest.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_register_request(
+    
+        
+        FfiConverterTypeNativePendingAttachmentRetentionOperation.lower(`operation`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `attachmentRetentionReleaseRequest`(`operation`: NativePendingAttachmentRetentionOperation): NativeAttachmentRetentionRequest {
+            return FfiConverterTypeNativeAttachmentRetentionRequest.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_release_request(
+    
+        
+        FfiConverterTypeNativePendingAttachmentRetentionOperation.lower(`operation`),_status)
+}
+    )
+    }
+    
+ fun `attachmentRetentionResponseMaxBytes`(): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_response_max_bytes(
+    
+        _status)
+}
+    )
+    }
+    
+ fun `attachmentRetentionResponseReadLimitBytes`(): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_response_read_limit_bytes(
+    
+        _status)
+}
+    )
+    }
+    
+ fun `attachmentRetentionStatusRequest`(): NativeAttachmentRetentionRequest {
+            return FfiConverterTypeNativeAttachmentRetentionRequest.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_status_request(
+    
+        _status)
+}
+    )
+    }
+    
+ fun `attachmentRetentionSupportedNoticePolicyVersion`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_supported_notice_policy_version(
+    
+        _status)
+}
+    )
+    }
+    
+ fun `classifyAttachmentRetentionError`(`status`: kotlin.UShort, `responseJson`: kotlin.String): NativeAttachmentRetentionErrorClassification {
+            return FfiConverterTypeNativeAttachmentRetentionErrorClassification.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_classify_attachment_retention_error(
+    
+        
+        FfiConverterUShort.lower(`status`),
+        FfiConverterString.lower(`responseJson`),_status)
+}
+    )
+    }
+    
+ fun `classifyDeviceRetentionAvailability`(`status`: kotlin.UShort, `responseJson`: kotlin.String): NativeDeviceRetentionAvailability {
+            return FfiConverterTypeNativeDeviceRetentionAvailability.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_classify_device_retention_availability(
+    
+        
+        FfiConverterUShort.lower(`status`),
+        FfiConverterString.lower(`responseJson`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `parseAttachmentRetentionResponse`(`responseJson`: kotlin.String): NativeAttachmentUseResponse {
+            return FfiConverterTypeNativeAttachmentUseResponse.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_attachment_retention_response(
+    
+        
+        FfiConverterString.lower(`responseJson`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `parseAttachmentRetentionStatus`(`responseJson`: kotlin.String): NativeAttachmentStorageStatus {
+            return FfiConverterTypeNativeAttachmentStorageStatus.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_attachment_retention_status(
+    
+        
+        FfiConverterString.lower(`responseJson`),_status)
 }
     )
     }

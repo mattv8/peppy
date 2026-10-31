@@ -120,8 +120,8 @@ impl Client {
             return self.pending_uploads();
         }
         self.cipher_objects("WITH eligible(id,priority) AS (
-            SELECT d.attachment_id,0 FROM mms_deferred_originals d JOIN attachments a ON a.attachment_id=d.attachment_id WHERE d.requested=1 AND a.state='pending_upload'
-            UNION ALL SELECT mm.thumbnail_attachment_id,1 FROM message_media_meta mm JOIN messages m ON m.id=mm.message_id JOIN attachments a ON a.attachment_id=mm.thumbnail_attachment_id WHERE a.state='pending_upload' AND COALESCE(json_extract(m.payload,'$.imported'),0)=0)
+            SELECT d.attachment_id,0 FROM mms_deferred_originals d JOIN attachments a ON a.attachment_id=d.attachment_id WHERE d.requested=1 AND a.state='pending_upload' AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1)
+            UNION ALL SELECT mm.thumbnail_attachment_id,1 FROM message_media_meta mm JOIN messages m ON m.id=mm.message_id JOIN attachments a ON a.attachment_id=mm.thumbnail_attachment_id WHERE a.state='pending_upload' AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) AND COALESCE(json_extract(m.payload,'$.imported'),0)=0)
             SELECT e.id FROM eligible e JOIN attachments a ON a.attachment_id=e.id GROUP BY e.id ORDER BY MIN(e.priority),MIN(a.rowid)")
     }
 
@@ -212,6 +212,7 @@ impl Client {
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
         {
+            attachment_retention::ensure_remote_available(&tx, id)?;
             let (message,source,requested):(String,String,bool)=tx.query_row("SELECT message_id,source_device_id,requested FROM mms_deferred_originals WHERE attachment_id=?",[id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(Error::InvalidRequest("unknown deferred media"))?;
             if (requested && retry_reason(&tx, id, now)?.is_none())
                 || attachment_row(&tx, id)?.is_some_and(|r| r.remote_object_id.is_some())

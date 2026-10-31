@@ -77,6 +77,16 @@ final class FakeServer: HTTPTransport, @unchecked Sendable {
                 .map { ($0.name, $0.value ?? "") }
         )
         let high = log.last?.cursor ?? 0
+        if request.url.path == "/v1/devices/self/retention-capability" {
+            guard request.method == "PUT",
+                  request.headers["Content-Type"] == "application/json",
+                  let body = request.body,
+                  let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  json["protocol_version"] as? Int == 1,
+                  json["cleanup_ready"] is Bool
+            else { return reply(request, 400, ["code": "invalid_retention_capability"]) }
+            return HTTPResponse(status: 204, url: request.url, body: Data())
+        }
         if request.url.path.hasPrefix("/v1/attachments") { return attachment(request) }
         switch (request.method, request.url.path) {
         case ("GET", "/v1/vault"):
@@ -128,6 +138,35 @@ final class FakeServer: HTTPTransport, @unchecked Sendable {
         let parts = request.url.path.split(separator: "/").map(String.init) // v1, attachments, id?, action?
         let json = (request.body.flatMap { try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] ?? [:]
         switch (request.method, parts.count, parts.last) {
+        case ("GET", 4, "status"):
+            return reply(request, 200, [
+                "used_bytes": 1, "limit_bytes": 2, "base_bytes": 2, "pack_bytes": 0,
+                "protected_bytes": 1, "removed_bytes": 0, "cleanup_state": "blocked",
+                "cleanup_unavailable_reason": "device_not_ready",
+                "notice": ["state": "not_presented", "policy_version": attachmentRetentionSupportedNoticePolicyVersion(),
+                           "presented_at": 1, "acknowledged_at": NSNull(), "activation_at": 2],
+            ])
+        case ("POST", 5, "acknowledgement"):
+            guard request.headers["Content-Type"] == "application/json",
+                  json["policy_version"] as? String == attachmentRetentionSupportedNoticePolicyVersion()
+            else { return reply(request, 400, ["code": "invalid_notice_acknowledgement"]) }
+            return HTTPResponse(status: 204, url: request.url, body: Data())
+        case ("POST", 4, "retention-uses"):
+            guard let use = json["use_id"] as? String, let attachment = json["attachment_id"] as? String,
+                  let device = json["device_id"] as? String, let kind = json["kind"] as? String
+            else { return reply(request, 400, ["code": "invalid_retention_use"]) }
+            return reply(request, 200, [
+                "use_id": use, "attachment_id": attachment, "device_id": device,
+                "kind": kind, "state": "registered",
+            ])
+        case ("POST", 6, "release"):
+            guard let use = json["use_id"] as? String, let attachment = json["attachment_id"] as? String,
+                  let device = json["device_id"] as? String
+            else { return reply(request, 400, ["code": "invalid_retention_release"]) }
+            return reply(request, 200, [
+                "use_id": use, "attachment_id": attachment, "device_id": device,
+                "kind": "contact_photo", "state": "released",
+            ])
         case ("POST", 3, "reserve"):
             guard json["reference_tracking"] as? Bool == true, // contact photos are always reference-tracked
                   let bytes = json["declared_ciphertext_bytes"] as? Int, let sha = json["declared_ciphertext_sha256"] as? String

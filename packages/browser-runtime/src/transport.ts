@@ -1,3 +1,4 @@
+import { ATTACHMENT_RETENTION_PROTOCOL_HEADER_NAME, ATTACHMENT_RETENTION_PROTOCOL_HEADER_VALUE, ATTACHMENT_RETENTION_RESPONSE_READ_LIMIT_BYTES, MAX_ATTACHMENT_RETENTION_RESPONSE_JSON_BYTES, type AttachmentRetentionRequestDto } from "@peppy/generated/attachment-retention";
 const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_SNAPSHOT_PAGE_BYTES = 8 * 1024 * 1024;
 const MAX_ATTACHMENT_CIPHERTEXT_BYTES = 33 * 1024 * 1024;
@@ -11,7 +12,7 @@ const ENCODED_BACKSLASH = /%5c/i;
 const CREDENTIAL_QUERY_PARAMETER = /^(?:access_?token|authorization|bearer|device_?token|token)$/i;
 
 export type TransportErrorKind = "offline" | "revoked" | "status" | "too-large" | "invalid" | "cancelled";
-export type JsonMethod = "GET" | "POST" | "DELETE";
+export type JsonMethod = "GET" | "POST" | "PUT" | "DELETE";
 
 export class TransportError extends Error {
   public constructor(
@@ -21,6 +22,10 @@ export class TransportError extends Error {
   ) {
     super("Transport request failed");
   }
+}
+
+export function isAttachmentRemovedByStoragePolicy(error: unknown): boolean {
+  return error instanceof TransportError && error.kind === "status" && error.status === 410 && error.code === "attachment_removed_by_storage_policy";
 }
 
 export interface OriginTransportOptions {
@@ -34,6 +39,8 @@ export interface JsonRequest {
   body?: unknown;
   signal?: AbortSignal;
   limit?: number;
+  headers?: Record<string, string>;
+  expectedSuccessStatus?: number;
 }
 
 export interface TransferRequest {
@@ -71,9 +78,9 @@ export class OriginTransport {
     if (body !== undefined && new TextEncoder().encode(body).byteLength > MAX_SNAPSHOT_PAGE_BYTES) {
       throw new TransportError("too-large");
     }
-    const call = await this.request(path, request.method, body, request.signal, JSON_DEADLINE_MS, body === undefined ? undefined : "application/json");
+    const call = await this.request(path, request.method, body, request.signal, JSON_DEADLINE_MS, body === undefined ? undefined : "application/json", request.headers);
     return completeResponse(call, async () => {
-      await assertSuccess(call.response, call.signal);
+      await assertSuccess(call.response, call.signal, request.expectedSuccessStatus);
       const bytes = await readBounded(call.response, limit, call.signal, request.signal);
       try {
         return JSON.parse(new TextDecoder().decode(bytes)) as T;
@@ -92,10 +99,32 @@ export class OriginTransport {
       throw new TransportError("invalid");
     }
     if (body === undefined && request.body !== undefined) throw new TransportError("invalid");
-    const call = await this.request(path, request.method, body, request.signal, JSON_DEADLINE_MS, body === undefined ? undefined : "application/json");
+    const call = await this.request(path, request.method, body, request.signal, JSON_DEADLINE_MS, body === undefined ? undefined : "application/json", request.headers);
     await completeResponse(call, async () => {
-      await assertSuccess(call.response, call.signal);
+      await assertSuccess(call.response, call.signal, request.expectedSuccessStatus);
       await readBounded(call.response, MAX_ERROR_BODY_BYTES, call.signal, request.signal);
+    });
+  }
+
+  public async retention(request: AttachmentRetentionRequestDto, signal: AbortSignal): Promise<string> {
+    const method = attachmentRetentionMethod(request.method);
+    const headers = request.protocolHeader === null ? undefined : retentionHeader(request.protocolHeader);
+    const body = request.jsonBody === null ? undefined : request.jsonBody;
+    if (body !== undefined && new TextEncoder().encode(body).byteLength > MAX_ATTACHMENT_RETENTION_RESPONSE_JSON_BYTES) throw new TransportError("too-large");
+    const call = await this.request(request.relativePath, method, body, signal, JSON_DEADLINE_MS, body === undefined ? undefined : "application/json", headers, false);
+    return completeResponse(call, async () => {
+      await assertSuccess(call.response, call.signal, request.expectedSuccessStatus);
+      const bytes = await readBounded(call.response, ATTACHMENT_RETENTION_RESPONSE_READ_LIMIT_BYTES, call.signal, signal);
+      if (request.expectedSuccessStatus === 204) {
+        if (bytes.byteLength !== 0) throw new TransportError("invalid");
+        return "";
+      }
+      if (bytes.byteLength > MAX_ATTACHMENT_RETENTION_RESPONSE_JSON_BYTES) throw new TransportError("too-large");
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw new TransportError("invalid");
+      }
     });
   }
 
@@ -128,7 +157,7 @@ export class OriginTransport {
     });
   }
 
-  private async request(path: string, method: string, body: BodyInit | undefined, signal: AbortSignal | undefined, deadline: number, contentType?: string, extraHeaders?: Record<string, string>): Promise<ActiveRequest> {
+  private async request(path: string, method: string, body: BodyInit | undefined, signal: AbortSignal | undefined, deadline: number, contentType?: string, extraHeaders?: Record<string, string>, includeMutationProtocolHeader = true): Promise<ActiveRequest> {
     if (signal?.aborted) throw new TransportError("cancelled");
     const url = requestUrl(this.origin, path);
     let token: string | undefined;
@@ -150,6 +179,7 @@ export class OriginTransport {
     try {
       const headers = new Headers({ Authorization: `Bearer ${token}` });
       if (contentType !== undefined) headers.set("Content-Type", contentType);
+      if (includeMutationProtocolHeader && method !== "GET") headers.set(ATTACHMENT_RETENTION_PROTOCOL_HEADER_NAME, ATTACHMENT_RETENTION_PROTOCOL_HEADER_VALUE);
       for (const [name, value] of Object.entries(extraHeaders ?? {})) headers.set(name, value);
       const response = await this.fetcher(url, {
         method,
@@ -202,6 +232,16 @@ function cancelBody(response: Response): void {
   }
 }
 
+export function attachmentRetentionMethod(value: string): JsonMethod {
+  if (value !== "GET" && value !== "POST" && value !== "PUT" && value !== "DELETE") throw new TransportError("invalid");
+  return value;
+}
+
+function retentionHeader(value: { name: string; value: string }): Record<string, string> {
+  if (value.name !== ATTACHMENT_RETENTION_PROTOCOL_HEADER_NAME || value.value !== ATTACHMENT_RETENTION_PROTOCOL_HEADER_VALUE) throw new TransportError("invalid");
+  return { [value.name]: value.value };
+}
+
 function trustedOrigin(value: string): URL {
   let origin: URL;
   try { origin = new URL(value); } catch { throw new TransportError("invalid"); }
@@ -237,8 +277,8 @@ function boundedLimit(limit: number | undefined, fallback: number, maximum: numb
   return value;
 }
 
-async function assertSuccess(response: Response, deadlineSignal: AbortSignal): Promise<void> {
-  if (response.ok) return;
+async function assertSuccess(response: Response, deadlineSignal: AbortSignal, expectedStatus?: number): Promise<void> {
+  if (response.ok && (expectedStatus === undefined || response.status === expectedStatus)) return;
   if (response.status === 401) throw new TransportError("revoked");
   const code = await readBounded(response, MAX_ERROR_BODY_BYTES, deadlineSignal)
     .then(serverCode)

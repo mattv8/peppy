@@ -1,6 +1,7 @@
 //! Private MMS envelopes remain out of the normal outbox until their media is uploaded.
 mod common;
 use common::*;
+use peppy_client_core::{AttachmentUseKind, AttachmentUseResponse, AttachmentUseState};
 use std::fs;
 use tempfile::TempDir;
 
@@ -18,6 +19,9 @@ fn private_media_holds_only_its_envelope_until_upload_across_reopen() {
     fs::write(&source, b"private MMS bytes").unwrap();
     let attachment = client
         .prepare_attachment(&source, "image/png", "private.png")
+        .unwrap();
+    let registration = client
+        .begin_attachment_retention_use(attachment.attachment_id, AttachmentUseKind::PendingSend)
         .unwrap();
     let draft = client.create_compose_draft(None).unwrap();
     client
@@ -62,6 +66,25 @@ fn private_media_holds_only_its_envelope_until_upload_across_reopen() {
 
     client
         .mark_attachment_uploaded(attachment.attachment_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    assert_eq!(
+        client
+            .pending_outbox_batch(10)
+            .unwrap()
+            .iter()
+            .map(|envelope| envelope.envelope_id)
+            .collect::<Vec<_>>(),
+        vec![text.envelope_id],
+        "upload alone cannot release an explicitly retained effect"
+    );
+    client
+        .apply_attachment_retention_response(&AttachmentUseResponse {
+            use_id: registration.use_id,
+            attachment_id: registration.attachment_id,
+            device_id: registration.device_id,
+            kind: registration.kind,
+            state: AttachmentUseState::Registered,
+        })
         .unwrap();
     assert_eq!(
         client

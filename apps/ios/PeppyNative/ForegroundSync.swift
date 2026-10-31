@@ -327,3 +327,100 @@ struct ForegroundSync: Sendable {
         pass.report.complete = false
     }
 }
+
+/// Core owns durable operation state; the host only performs bounded, fenced HTTP work.
+enum AttachmentRetentionPassResult: Sendable, Equatable { case ready, legacy, unresolved }
+
+struct AttachmentRetentionDriver: Sendable {
+    let client: NativeClient
+    let server: ServerClient
+    let state: AttachmentRetentionHTTPState
+    let isActive: @Sendable () async -> Bool
+
+    func reconcile(
+        meter: inout RequestMeter, allowReadyAdvertisement: Bool
+    ) async throws -> AttachmentRetentionPassResult {
+        switch state.negotiationState() {
+        case .unknown:
+            let capability = try attachmentRetentionCapabilityRequest(cleanupReady: false)
+            let response = try await send(capability, meter: &meter)
+            try await requireActive()
+            if response.status == 404 || response.status == 405 {
+                state.markLegacy()
+                return .legacy
+            }
+            guard response.status == capability.expectedSuccessStatus else { return .unresolved }
+            try client.configureAttachmentRetentionProtocol(enabled: true)
+            state.markSupported()
+        case .legacy:
+            return .legacy
+        case .supported:
+            if try !client.attachmentRetentionProtocolEnabled() {
+                try client.configureAttachmentRetentionProtocol(enabled: true)
+                state.invalidateReadyAdvertisement()
+            }
+        }
+        let header = attachmentRetentionProtocolHeader()
+        state.remember(name: header.name, value: header.value)
+        for _ in 0..<4 {
+            let operations = try client.prepareAttachmentRetentionOperations(limit: attachmentRetentionPrepareLimitMax())
+            if operations.isEmpty {
+                if try !client.attachmentRetentionPreparationPending() { break }
+                continue
+            }
+            for operation in operations {
+                try Task.checkCancellation()
+                let request = try operation.operation == .register
+                    ? attachmentRetentionRegisterRequest(operation: operation)
+                    : attachmentRetentionReleaseRequest(operation: operation)
+                let response = try await send(request, meter: &meter)
+                try await requireActive()
+                guard response.status == request.expectedSuccessStatus else {
+                    if try exactRemoval(response) {
+                        try client.reportAttachmentRemovedByStoragePolicy(attachmentId: operation.attachmentId)
+                    }
+                    return .unresolved
+                }
+                let body = try strictResponse(response.body)
+                try client.applyAttachmentRetentionResponse(response: try parseAttachmentRetentionResponse(responseJson: body))
+            }
+        }
+        guard try !client.attachmentRetentionPreparationPending() else { return .unresolved }
+        try client.markAttachmentRetentionReconciled()
+        guard try client.attachmentRetentionReady() else { state.invalidateReadyAdvertisement(); return .unresolved }
+        guard allowReadyAdvertisement, state.shouldAdvertiseReady() else { return .ready }
+        let request = try attachmentRetentionCapabilityRequest(cleanupReady: true)
+        let response = try await send(request, meter: &meter)
+        try await requireActive()
+        guard response.status == request.expectedSuccessStatus else { return .unresolved }
+        state.markReadyAdvertised()
+        return .ready
+    }
+
+    private func requireActive() async throws {
+        try Task.checkCancellation()
+        guard await isActive() else { throw ClientError.canceled }
+    }
+
+    private func exactRemoval(_ response: HTTPResponse) throws -> Bool {
+        guard response.status == 410 else { return false }
+        return classifyAttachmentRetentionError(status: 410, responseJson: try strictResponse(response.body)) == .removedByStoragePolicy
+    }
+
+    private func strictResponse(_ data: Data) throws -> String {
+        guard data.count <= Int(attachmentRetentionResponseMaxBytes()), let value = String(data: data, encoding: .utf8) else {
+            throw ClientError.invalidResponse("retention response")
+        }
+        return value
+    }
+
+    private func send(_ request: NativeAttachmentRetentionRequest, meter: inout RequestMeter) async throws -> HTTPResponse {
+        guard let limit = Int(exactly: attachmentRetentionResponseReadLimitBytes()) else { throw ClientError.responseTooLarge(limit: Int.max) }
+        let body = request.jsonBody.map { Data($0.utf8) }
+        var headers: [String: String] = [:]
+        if let header = request.protocolHeader { headers[header.name] = header.value }
+        let response = try await server.exchange(request.method, request.relativePath, body: body, contentType: body == nil ? nil : "application/json", extraHeaders: headers, limit: limit, meter: &meter)
+        if response.status == request.expectedSuccessStatus, request.expectedSuccessStatus == 204, !response.body.isEmpty { throw ClientError.invalidResponse("retention empty response") }
+        return response
+    }
+}

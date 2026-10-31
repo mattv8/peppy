@@ -1,4 +1,4 @@
-import { TransportError } from "./transport.js";
+import { isAttachmentRemovedByStoragePolicy, TransportError } from "./transport.js";
 
 const MAX_MEDIA_PER_ROUND = 4;
 
@@ -27,11 +27,12 @@ export async function transferMedia(
   bridge: WorkerMediaBridge | undefined,
   signal: AbortSignal,
   deferredIds: ReadonlySet<string> = new Set(),
+  allowUploads = true,
 ): Promise<MediaTransferResult> {
   const result: MediaTransferResult = { failedIds: [], completedIds: [] };
   throwIfAborted(signal);
   if (!bridge) return result;
-  await transferUploads(session, transport, bridge, signal, deferredIds, result);
+  if (allowUploads) await transferUploads(session, transport, bridge, signal, deferredIds, result);
   await transferDownloads(session, transport, bridge, signal, deferredIds, result);
   return result;
 }
@@ -54,23 +55,24 @@ export async function transferContactPhotoUploads(
 
 async function transferUploads(session: SchedulerMediaSession, transport: Pick<MediaTransport, "json" | "upload">, bridge: WorkerMediaBridge, signal: AbortSignal, deferredIds: ReadonlySet<string>, result: MediaTransferResult, permittedIds?: ReadonlySet<string>): Promise<void> {
   const pending = array(await session.query("pending_uploads", {}));
-  const referenceTrackedIds = await referenceTrackedUploadIds(session);
   for (const item of pending.filter(item => isEligibleAttachment(item, deferredIds) && (permittedIds === undefined || permittedIds.has(optionalAttachmentId(item) ?? ""))).slice(0, MAX_MEDIA_PER_ROUND)) {
     throwIfAborted(signal);
     try {
       const attachment = attachmentItem(item);
-      await uploadAttachment(session, transport, bridge, attachment, referenceTrackedIds.has(attachment.id), signal);
+      await uploadAttachment(session, transport, bridge, attachment, signal);
       result.completedIds.push(attachment.id);
     } catch (error) {
       throwIfFatalTransferError(error, signal);
       const id = optionalAttachmentId(item);
-      if (id) result.failedIds.push(id);
+      if (id && isAttachmentRemovedByStoragePolicy(error)) await session.mutate("_worker_attachment_retention_report_removed", { attachmentId: id });
+      else if (id) result.failedIds.push(id);
     }
   }
 }
 
-async function uploadAttachment(session: SchedulerMediaSession, transport: Pick<MediaTransport, "json" | "upload">, bridge: WorkerMediaBridge, attachment: AttachmentItem, referenceTracking: boolean, signal: AbortSignal): Promise<void> {
+async function uploadAttachment(session: SchedulerMediaSession, transport: Pick<MediaTransport, "json" | "upload">, bridge: WorkerMediaBridge, attachment: AttachmentItem, signal: AbortSignal): Promise<void> {
   await session.hydrate(attachment.id);
+  const classification = uploadClassification(await session.query("_worker_attachment_retention_upload_classification", { attachmentId: attachment.id }));
   const cipher = object(await session.query("cipher_file", { id: attachment.id }));
   const ciphertext = await bridge.readCiphertext(requiredString(cipher.file), attachment.ciphertextBytes, signal);
   if (ciphertext.byteLength !== attachment.ciphertextBytes) throw new TransportError("invalid");
@@ -78,7 +80,7 @@ async function uploadAttachment(session: SchedulerMediaSession, transport: Pick<
   try {
     const reserved = object(await transport.json("/v1/attachments/reserve", {
       method: "POST",
-      body: { attachment_id: attachment.id, declared_ciphertext_bytes: attachment.ciphertextBytes, declared_ciphertext_sha256: requiredString(cipher.ciphertextSha256), reference_tracking: referenceTracking },
+      body: { attachment_id: attachment.id, declared_ciphertext_bytes: attachment.ciphertextBytes, declared_ciphertext_sha256: requiredString(cipher.ciphertextSha256), retention_class: classification.retentionClass, reference_tracking: classification.referenceTracking },
       signal,
     }));
     remoteObjectId = exactAttachmentId(reserved, attachment.id);
@@ -104,7 +106,8 @@ async function transferDownloads(session: SchedulerMediaSession, transport: Pick
     } catch (error) {
       throwIfFatalTransferError(error, signal);
       const id = optionalAttachmentId(item);
-      if (id) result.failedIds.push(id);
+      if (id && isAttachmentRemovedByStoragePolicy(error)) await session.mutate("_worker_attachment_retention_report_removed", { attachmentId: id });
+      else if (id) result.failedIds.push(id);
     }
   }
 }
@@ -125,14 +128,13 @@ async function finalizeAttachment(transport: Pick<MediaTransport, "json" | "uplo
   if (exactAttachmentId(finalized, id) !== id || (requireDuplicate && finalized.duplicate !== true)) throw new TransportError("invalid");
 }
 
-async function referenceTrackedUploadIds(session: SchedulerMediaSession): Promise<Set<string>> {
-  const state = object(await session.query("contact_photo_transfer_state", {}));
-  return new Set(array(state.uploads).map(item => {
-    const upload = object(item);
-    if (upload.reference_tracking !== true) throw new TransportError("invalid");
-    return requiredString(upload.attachment_id);
-  }));
+function uploadClassification(value: unknown): { retentionClass: "protected" | "message_media"; referenceTracking: boolean } {
+  const classification = object(value);
+  if ((classification.retentionClass !== "protected" && classification.retentionClass !== "message_media") || typeof classification.referenceTracking !== "boolean") throw new TransportError("invalid");
+  return { retentionClass: classification.retentionClass, referenceTracking: classification.referenceTracking };
 }
+
+
 
 interface AttachmentItem { id: string; ciphertextBytes: number; }
 function attachmentItem(value: unknown): AttachmentItem {

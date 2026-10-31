@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@peppy/generated": "workspace:*"
+  },
   "exports": {
     "./core": "./src/core.ts",
     "./checkpoint": "./src/checkpoint.ts",

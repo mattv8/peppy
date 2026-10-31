@@ -552,6 +552,27 @@ struct SettingsView: View {
                             .accessibilityIdentifier("relay-enable-button")
                     }.accessibilityIdentifier("relay-settings-section")
                 }
+                if model.status.identity?.origin == "https://peppy.pro" {
+                    switch model.attachmentStorage {
+                    case .unsupported?:
+                        EmptyView()
+                    default:
+                        Section("Account") {
+                            NavigationLink {
+                                AttachmentStorageDetailView(model: model)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("peppy.attachment_storage_section_title", tableName: "Peppy")
+                                    attachmentStorageSummary
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .accessibilityIdentifier("attachment-storage-settings-link")
+                        }
+                        .accessibilityIdentifier("attachment-storage-settings-section")
+                    }
+                }
                 Section("About") {
                     LabeledContent("App version", value: "0.1")
                     if let origin = model.status.identity?.origin { LabeledContent("Server", value: origin) }
@@ -606,6 +627,161 @@ struct SettingsView: View {
                     }
                 } }
             }
+    }
+
+    @ViewBuilder private var attachmentStorageSummary: some View {
+        if !model.attachmentStorageRefreshing {
+            switch model.attachmentStorage {
+            case .available(_, let status):
+                let presentation = AttachmentStoragePresentation(status: status)
+                if let stateKey = presentation.stateMessageKeys.first, !model.attachmentStorageIsStale {
+                    Text(localizedAttachmentStorage(stateKey))
+                } else {
+                    let label = String(localized: "peppy.attachment_storage_usage", table: "Peppy")
+                    let value = ByteCountFormatter.string(fromByteCount: status.usedBytes, countStyle: .decimal)
+                    Text("\(label): \(value)")
+                }
+            case .temporarilyUnavailable:
+                Text("peppy.attachment_storage_unavailable", tableName: "Peppy")
+            case .unsupported, nil:
+                EmptyView()
+            }
+        }
+    }
+
+    private func localizedAttachmentStorage(_ key: String) -> String {
+        String(localized: String.LocalizationValue(key), table: "Peppy")
+    }
+
+}
+
+private struct AttachmentStorageDetailView: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        Form {
+            Section { attachmentStorageRows }
+                .accessibilityIdentifier("attachment-storage-detail-section")
+        }
+        .formStyle(.grouped)
+        .navigationTitle(Text("peppy.attachment_storage_section_title", tableName: "Peppy"))
+        .task(id: model.status.identity) { await model.refreshAttachmentStorage() }
+    }
+
+    @ViewBuilder private var attachmentStorageRows: some View {
+        if model.attachmentStorageRefreshing {
+            ProgressView(String(localized: "peppy.attachment_storage_section_title", table: "Peppy"))
+                .accessibilityIdentifier("attachment-storage-refreshing")
+        }
+        switch model.attachmentStorage {
+        case .available(let scopeId, let status):
+            let presentation = AttachmentStoragePresentation(status: status)
+            if model.attachmentStorageIsStale {
+                Text("peppy.attachment_storage_stale_usage", tableName: "Peppy")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Text("peppy.attachment_storage_unavailable", tableName: "Peppy")
+                    .accessibilityIdentifier("attachment-storage-stale-unavailable")
+            }
+            storageValues(status)
+            acknowledgementFeedback(scopeId: scopeId)
+            disclosure(scopeId: scopeId, status: status, presentation: presentation)
+            Link(destination: URL(string: "https://peppy.pro/account")!) {
+                Text("peppy.attachment_storage_manage_cta", tableName: "Peppy")
+            }
+            .accessibilityIdentifier("attachment-storage-manage-link")
+            Text("peppy.attachment_storage_billing_handoff", tableName: "Peppy")
+                .font(.footnote).foregroundStyle(.secondary)
+                .accessibilityIdentifier("attachment-storage-billing-handoff")
+            refreshButton
+        case .temporarilyUnavailable:
+            Text("peppy.attachment_storage_unavailable", tableName: "Peppy")
+                .accessibilityIdentifier("attachment-storage-unavailable")
+            refreshButton
+        case .unsupported:
+            EmptyView()
+        case nil:
+            if !model.attachmentStorageRefreshing {
+                ProgressView(String(localized: "peppy.attachment_storage_section_title", table: "Peppy"))
+                    .accessibilityIdentifier("attachment-storage-loading")
+            }
+        }
+    }
+
+    @ViewBuilder private func storageValues(_ status: NativeAttachmentStorageStatus) -> some View {
+        LabeledContent(
+            String(localized: "peppy.attachment_storage_usage", table: "Peppy"),
+            value: ByteCountFormatter.string(fromByteCount: status.usedBytes, countStyle: .decimal)
+        )
+        .accessibilityIdentifier("attachment-storage-used")
+        LabeledContent(
+            String(localized: "peppy.attachment_storage_limit", table: "Peppy"),
+            value: ByteCountFormatter.string(fromByteCount: status.limitBytes, countStyle: .decimal)
+        )
+        .accessibilityIdentifier("attachment-storage-limit")
+        LabeledContent(
+            String(localized: "peppy.attachment_storage_base_included", table: "Peppy"),
+            value: ByteCountFormatter.string(fromByteCount: status.baseBytes, countStyle: .decimal)
+        )
+        .accessibilityIdentifier("attachment-storage-base")
+    }
+
+    private func disclosure(
+        scopeId: String, status: NativeAttachmentStorageStatus, presentation: AttachmentStoragePresentation
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !model.attachmentStorageIsStale {
+                ForEach(presentation.stateMessageKeys, id: \.self) { key in
+                    Text(localized(key))
+                        .accessibilityIdentifier("attachment-storage-state-\(key)")
+                }
+            }
+            Text("peppy.attachment_storage_allowance", tableName: "Peppy")
+            Text("peppy.attachment_storage_notice", tableName: "Peppy")
+            Text("peppy.attachment_storage_protected", tableName: "Peppy")
+            Text("peppy.attachment_storage_device_copies", tableName: "Peppy")
+            if presentation.showsThirtyDayDisclosure {
+                Text("peppy.attachment_storage_grace", tableName: "Peppy")
+                if let activation = status.notice.activationAtSeconds {
+                    let label = String(localized: "peppy.attachment_storage_activation_label", table: "Peppy")
+                    Text("\(label) \(Date(timeIntervalSince1970: TimeInterval(activation)).formatted(date: .long, time: .omitted))")
+                        .accessibilityIdentifier("attachment-storage-activation-date")
+                }
+            }
+            Text("peppy.attachment_storage_purchase", tableName: "Peppy")
+            Link(destination: URL(string: "https://peppy.pro/privacy")!) {
+                Text("peppy.privacy_policy", tableName: "Peppy")
+            }
+            .accessibilityIdentifier("attachment-storage-privacy-link")
+        }
+        .accessibilityIdentifier("attachment-storage-disclosure")
+        .task(id: presentation.shouldAcknowledgeVisibleCopy && !model.attachmentStorageIsStale ? scopeId : nil) {
+            guard presentation.shouldAcknowledgeVisibleCopy, !model.attachmentStorageIsStale else { return }
+            await model.attachmentStorageNoticeRendered(scopeId: scopeId, status: status)
+        }
+    }
+
+    @ViewBuilder private func acknowledgementFeedback(scopeId: String) -> some View {
+        switch model.attachmentStorageAcknowledgement {
+        case .inFlight(let activeScope) where activeScope == scopeId:
+            ProgressView().accessibilityIdentifier("attachment-storage-ack-inflight")
+        case .failed(let activeScope) where activeScope == scopeId:
+            Text("peppy.attachment_storage_notice_save_failed", tableName: "Peppy")
+                .accessibilityIdentifier("attachment-storage-ack-failed")
+        default:
+            EmptyView()
+        }
+    }
+
+    private var refreshButton: some View {
+        Button(String(localized: "peppy.attachment_storage_reload_cta", table: "Peppy")) {
+            Task { await model.refreshAttachmentStorage() }
+        }
+        .disabled(model.attachmentStorageRefreshing)
+        .accessibilityIdentifier("attachment-storage-refresh-button")
+    }
+
+    private func localized(_ key: String) -> String {
+        String(localized: String.LocalizationValue(key), table: "Peppy")
     }
 }
 

@@ -295,6 +295,8 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.work:work-testing:2.10.0")
+    testImplementation(platform("androidx.compose:compose-bom:2025.10.01"))
+    testImplementation("androidx.compose.ui:ui-test-junit4")
     // Desktop JNA jar (with host jnidispatch) for the JVM-hosted Robolectric runtime.
     testImplementation("net.java.dev.jna:jna:5.14.0")
 

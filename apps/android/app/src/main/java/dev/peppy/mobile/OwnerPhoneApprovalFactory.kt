@@ -11,8 +11,8 @@ internal fun createOwnerPhoneApprovalHost(context: Context): OwnerPhoneApprovalH
     val account = GatewayAccountHost.load(context) ?: return null
     if (account.self.role != "owner" || account.self.revoked) return null
     val material = NativeGateway.ownerEnrollmentMaterial(context) ?: return null
-    val credential = NativeGateway.accountCredential(context) ?: return null
-    if (credential.origin != material.origin || credential.vaultId != material.vaultId || credential.deviceId != material.deviceId) return null
+    val accountIdentity = NativeGateway.accountIdentity(context) ?: return null
+    if (accountIdentity.origin != material.origin || accountIdentity.vaultId != material.vaultId || accountIdentity.deviceId != material.deviceId) return null
     val client = NativeOwnerPhoneClient(
         newNativeExistingOwnerEnrollmentClient(
             material.origin,
@@ -28,7 +28,8 @@ internal fun createOwnerPhoneApprovalHost(context: Context): OwnerPhoneApprovalH
     return OwnerPhoneApprovalHost(
         client = client,
         transport = OwnerPhoneTransport { method, path, body, session ->
-            ownerPhoneRequest(credential, method, path, body, session)
+            val credential = NativeGateway.currentAccountCredential(context, accountIdentity) ?: return@OwnerPhoneTransport null
+            ownerPhoneRequest(credential, method, path, body, session, material.retentionProtocolHeader)
         },
         secrets = VaultSecretStore(AndroidHostedSecureStore(context)),
         vaultId = material.vaultId,
@@ -49,6 +50,7 @@ internal fun ownerPhoneRequest(
     path: String,
     body: String?,
     accountSession: String?,
+    retentionHeader: uniffi.peppy_mobile_bindings.NativeAttachmentRetentionProtocolHeader? = null,
 ): EnrollmentHttpResponse? {
     if (!path.startsWith("/v1/enrollment/") || path.contains('#')) return null
     val connection = try { URL(credential.origin + path).openConnection() as HttpURLConnection } catch (_: Exception) { return null }
@@ -60,6 +62,7 @@ internal fun ownerPhoneRequest(
         connection.setRequestProperty("Accept", "application/json")
         connection.setRequestProperty("Authorization", "Bearer ${credential.bearerToken}")
         accountSession?.let { connection.setRequestProperty("Peppy-Account-Session", it) }
+        if (method != "GET") retentionHeader?.let { connection.setRequestProperty(it.name, it.value) }
         body?.let {
             val bytes = it.toByteArray(Charsets.UTF_8)
             connection.doOutput = true

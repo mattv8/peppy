@@ -699,3 +699,347 @@ fn released_photo_is_reprepared_and_never_reuses_its_dead_remote_object() {
     assert!(p.owner.pending_outbox().unwrap().is_empty());
     assert_eq!(state(&p.owner)["uploads"], json!([]));
 }
+
+#[test]
+fn reclaimed_photo_reprepare_atomically_tracks_fresh_alias_and_publishes() {
+    let mut p = pair();
+    p.owner
+        .configure_attachment_retention_protocol(true)
+        .unwrap();
+    let first = p
+        .owner
+        .prepare_contact_photo(&photo_file(p.dir.path(), "reprepare-retained.png", 83))
+        .unwrap()
+        .attachment_id;
+    call(capture(&p.owner, &p.owner_cfg, Some(first)));
+    let first_use = p
+        .owner
+        .pending_attachment_retention_operations()
+        .unwrap()
+        .into_iter()
+        .find(|operation| {
+            operation.attachment_id == first && operation.kind == AttachmentUseKind::ContactPhoto
+        })
+        .expect("initial contact photo must have automatic retention registration");
+    p.owner
+        .apply_attachment_retention_response(&AttachmentUseResponse {
+            use_id: first_use.use_id,
+            attachment_id: first_use.attachment_id,
+            device_id: first_use.device_id,
+            kind: first_use.kind,
+            state: AttachmentUseState::Registered,
+        })
+        .unwrap();
+    p.upload_and_register(&p.owner, first);
+    p.deliver(true);
+    call(capture(&p.owner, &p.owner_cfg, None));
+    for operation in p.owner.pending_attachment_retention_operations().unwrap() {
+        p.owner
+            .apply_attachment_retention_response(&AttachmentUseResponse {
+                use_id: operation.use_id,
+                attachment_id: operation.attachment_id,
+                device_id: operation.device_id,
+                kind: operation.kind,
+                state: AttachmentUseState::Registered,
+            })
+            .unwrap();
+    }
+    p.deliver(true);
+    for operation in p.owner.pending_attachment_retention_operations().unwrap() {
+        p.owner
+            .apply_attachment_retention_response(&AttachmentUseResponse {
+                use_id: operation.use_id,
+                attachment_id: operation.attachment_id,
+                device_id: operation.device_id,
+                kind: operation.kind,
+                state: AttachmentUseState::Registered,
+            })
+            .unwrap();
+    }
+    reclaim_completed(&p.owner, first);
+
+    assert!(p.owner.attachment_retention_protocol_enabled().unwrap());
+    call(capture(&p.owner, &p.owner_cfg, Some(first)));
+    let fresh: AttachmentId = state(&p.owner)["uploads"][0]["attachment_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(fresh, first);
+    assert_eq!(
+        p.owner.attachment_upload_retention(fresh).unwrap(),
+        AttachmentUploadRetention {
+            retention_class: AttachmentRetentionClass::Protected,
+            reference_tracking: true,
+        }
+    );
+    let fresh_use = p
+        .owner
+        .pending_attachment_retention_operations()
+        .unwrap()
+        .into_iter()
+        .find(|operation| {
+            operation.attachment_id == fresh && operation.kind == AttachmentUseKind::ContactPhoto
+        })
+        .expect("real reprepare must atomically create immutable tracking provenance");
+    p.owner
+        .apply_attachment_retention_response(&AttachmentUseResponse {
+            use_id: fresh_use.use_id,
+            attachment_id: fresh_use.attachment_id,
+            device_id: fresh_use.device_id,
+            kind: fresh_use.kind,
+            state: AttachmentUseState::Registered,
+        })
+        .unwrap();
+    let fresh_remote = p.upload_and_register(&p.owner, fresh);
+    p.deliver(true);
+    assert_eq!(
+        find(&p.peer, "c1").unwrap()["photo"]["attachment_id"],
+        fresh.to_string()
+    );
+    assert!(
+        p.peer
+            .pending_downloads()
+            .unwrap()
+            .iter()
+            .any(|download| download.attachment_id == fresh
+                && download.remote_object_id.as_deref() == Some(fresh_remote.as_str()))
+    );
+}
+
+#[test]
+fn contact_photo_tracking_provenance_survives_enable_and_fresh_reprepare() {
+    let p = pair();
+    let legacy = p
+        .owner
+        .prepare_contact_photo(&photo_file(p.dir.path(), "legacy-tracked.png", 32))
+        .unwrap();
+    assert_eq!(
+        p.owner
+            .attachment_upload_retention(legacy.attachment_id)
+            .unwrap(),
+        AttachmentUploadRetention {
+            retention_class: AttachmentRetentionClass::Protected,
+            reference_tracking: true,
+        },
+        "positive legacy contact metadata preserves the established tracking contract"
+    );
+
+    p.owner
+        .configure_attachment_retention_protocol(true)
+        .unwrap();
+    assert_eq!(
+        p.owner
+            .attachment_upload_retention(legacy.attachment_id)
+            .unwrap()
+            .reference_tracking,
+        true,
+        "enabling retention must not erase legacy contact tracking provenance"
+    );
+    let fresh = p
+        .owner
+        .prepare_contact_photo(&photo_file(p.dir.path(), "fresh-tracked.png", 64))
+        .unwrap();
+    assert_eq!(
+        p.owner
+            .attachment_upload_retention(fresh.attachment_id)
+            .unwrap(),
+        AttachmentUploadRetention {
+            retention_class: AttachmentRetentionClass::Protected,
+            reference_tracking: true,
+        },
+        "fresh reprepare atomically records protected contact tracking provenance"
+    );
+}
+
+#[test]
+fn retention_contact_use_gates_real_publication_until_ack_and_live_holder_termination() {
+    let mut p = pair();
+    let source = photo_file(p.dir.path(), "retained-contact.png", 33);
+    p.owner
+        .configure_attachment_retention_protocol(true)
+        .unwrap();
+    let id = p
+        .owner
+        .prepare_contact_photo(&source)
+        .unwrap()
+        .attachment_id;
+    call(capture(&p.owner, &p.owner_cfg, Some(id)));
+    let retention = p
+        .owner
+        .pending_attachment_retention_operations()
+        .unwrap()
+        .into_iter()
+        .find(|operation| operation.kind == AttachmentUseKind::ContactPhoto)
+        .expect("contact producer must atomically create protection");
+    p.owner.mark_attachment_uploaded(id, &remote_id()).unwrap();
+    p.register_all(&p.owner);
+    let before_retention_ack = p.owner.pending_outbox_count().unwrap();
+    p.owner
+        .apply_attachment_retention_response(&AttachmentUseResponse {
+            use_id: retention.use_id,
+            attachment_id: retention.attachment_id,
+            device_id: retention.device_id,
+            kind: retention.kind,
+            state: AttachmentUseState::Registered,
+        })
+        .unwrap();
+    p.register_all(&p.owner);
+    assert!(p.owner.pending_outbox_count().unwrap() > before_retention_ack);
+    p.deliver(true);
+    assert_eq!(
+        p.owner
+            .request_attachment_retention_release(retention.use_id),
+        Err(Error::Conflict),
+        "publication and reference acknowledgement are not holder termination"
+    );
+    assert!(
+        p.owner
+            .prepare_attachment_retention_operations(10)
+            .unwrap()
+            .iter()
+            .all(|operation| operation.use_id != retention.use_id
+                || operation.operation != AttachmentUseOperationKind::Release),
+        "a current contact holder must never auto-queue release"
+    );
+    call(capture(&p.owner, &p.owner_cfg, None));
+    p.owner = unlocked(&p.owner_cfg, &p.vault);
+    p.owner
+        .configure_attachment_retention_protocol(true)
+        .unwrap();
+    let releases = p.owner.prepare_attachment_retention_operations(10).unwrap();
+    assert_eq!(releases.len(), 1);
+    assert_eq!(releases[0].operation, AttachmentUseOperationKind::Release);
+    assert_eq!(releases[0].use_id, retention.use_id);
+}
+
+#[test]
+fn contact_photo_tombstone_suppresses_real_queued_photo_publication_across_reopen() {
+    let mut p = pair();
+    let source = photo_file(p.dir.path(), "removed-contact.png", 44);
+    let id = p
+        .owner
+        .prepare_contact_photo(&source)
+        .unwrap()
+        .attachment_id;
+    let retention = p
+        .owner
+        .begin_attachment_retention_use(id, AttachmentUseKind::ContactPhoto)
+        .unwrap();
+    call(capture(&p.owner, &p.owner_cfg, Some(id)));
+    p.owner.mark_attachment_uploaded(id, &remote_id()).unwrap();
+    p.owner
+        .apply_attachment_retention_response(&AttachmentUseResponse {
+            use_id: retention.use_id,
+            attachment_id: retention.attachment_id,
+            device_id: retention.device_id,
+            kind: retention.kind,
+            state: AttachmentUseState::Registered,
+        })
+        .unwrap();
+    p.register_all(&p.owner);
+    let before = p.owner.pending_outbox_count().unwrap();
+    assert!(before > 0);
+    p.owner
+        .report_attachment_removed_by_storage_policy(id)
+        .unwrap();
+    let after = p.owner.pending_outbox_count().unwrap();
+    assert!(
+        after < before,
+        "photo-bearing queued event must be suppressed"
+    );
+    p.owner = unlocked(&p.owner_cfg, &p.vault);
+    assert_eq!(p.owner.pending_outbox_count().unwrap(), after);
+    assert!(state(&p.owner)["uploads"].as_array().unwrap().is_empty());
+    assert!(
+        state(&p.owner)["registrations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn replacing_contact_photo_before_initial_publication_keeps_outbox_and_registration_holders() {
+    let p = pair();
+    p.owner
+        .configure_attachment_retention_protocol(true)
+        .unwrap();
+    let id = p
+        .owner
+        .prepare_contact_photo(&photo_file(p.dir.path(), "replace-before-publish.png", 71))
+        .unwrap()
+        .attachment_id;
+    call(capture(&p.owner, &p.owner_cfg, Some(id)));
+    let retention = p
+        .owner
+        .pending_attachment_retention_operations()
+        .unwrap()
+        .into_iter()
+        .find(|operation| operation.kind == AttachmentUseKind::ContactPhoto)
+        .unwrap();
+    p.owner
+        .apply_attachment_retention_response(&AttachmentUseResponse {
+            use_id: retention.use_id,
+            attachment_id: retention.attachment_id,
+            device_id: retention.device_id,
+            kind: retention.kind,
+            state: AttachmentUseState::Registered,
+        })
+        .unwrap();
+    call(capture(&p.owner, &p.owner_cfg, None));
+    assert_eq!(
+        p.owner
+            .request_attachment_retention_release(retention.use_id),
+        Err(Error::Conflict)
+    );
+}
+
+#[test]
+fn verified_received_contact_photo_can_publish_a_new_edit_reference() {
+    let mut p = pair();
+    let id = p
+        .owner
+        .prepare_contact_photo(&photo_file(p.dir.path(), "received-reference.png", 72))
+        .unwrap()
+        .attachment_id;
+    call(capture(&p.owner, &p.owner_cfg, Some(id)));
+    p.upload_and_register(&p.owner, id);
+    p.peer
+        .configure_attachment_retention_protocol(true)
+        .unwrap();
+    p.deliver(true);
+    let fetched = p.dir.path().join("received-reference.ppss");
+    std::fs::copy(p.owner.native_cipher_file(id).unwrap(), &fetched).unwrap();
+    p.peer.install_downloaded_attachment(id, &fetched).unwrap();
+
+    let revision = find(&p.peer, "c1").unwrap()["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let request = json!({
+        "schema_version": 1, "request_id": "received-reference-edit",
+        "target_owner": p.owner_cfg.device_id.to_string(), "book_id": BOOK,
+        "kind": "update", "contact_id": "c1", "base_revision": revision,
+        "photo_op": {"op": "set", "attachment_id": id.to_string()}
+    });
+    call(p.peer.request_contact_edit(&request.to_string()));
+    let operation = p
+        .peer
+        .pending_attachment_retention_operations()
+        .unwrap()
+        .into_iter()
+        .find(|operation| operation.kind == AttachmentUseKind::ContactPhoto)
+        .unwrap();
+    p.peer
+        .apply_attachment_retention_response(&AttachmentUseResponse {
+            use_id: operation.use_id,
+            attachment_id: operation.attachment_id,
+            device_id: operation.device_id,
+            kind: operation.kind,
+            state: AttachmentUseState::Registered,
+        })
+        .unwrap();
+    p.register_all(&p.peer);
+    assert!(!p.peer.pending_outbox().unwrap().is_empty());
+}

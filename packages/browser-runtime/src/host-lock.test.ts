@@ -64,8 +64,8 @@ function ownerSession() {
   const session = {
     phase: "ready" as "ready" | "closed",
     publicIdentity: () => ({ role: "owner" as const }),
-    tokenForTransport: () => "device-token",
-    query: async () => ({}),
+    tokenForTransport: () => "a".repeat(96),
+    query: async (command: string) => command === "_worker_attachment_retention_capability_request" ? { method: "PUT", relativePath: "/v1/devices/self/retention-capability", jsonBody: "{}", protocolHeader: null, expectedSuccessStatus: 204 } : {},
     mutate: async () => ({}),
     unlock: async () => undefined,
     enroll: async () => undefined,
@@ -90,6 +90,7 @@ describe("browser host enrollment lock", () => {
       if (url.pathname === "/web/config.json") return new Response(null, { status: 404 });
       if (url.pathname === "/hosted/v1/enrollment/config") return json({}, 404);
       if (url.pathname === "/v1/instance") return json({ mode: "community", claimed: true, setup_required: false, password_auth: true, qr_pairing: true, shared_secret_pairing: true });
+      if (url.pathname === "/v1/devices/self/retention-capability") return json({}, 404);
       if (url.pathname === "/v1/enrollment/invitations" && method === "POST") return json({ invitation_id: invitationId, expires_in_seconds: 300 });
       if (url.pathname === `/v1/enrollment/invitations/${invitationId}` && method === "GET") {
         statusSignal = init?.signal ?? undefined;
@@ -99,6 +100,7 @@ describe("browser host enrollment lock", () => {
       throw new Error(`unexpected ${method} ${url.pathname}`);
     });
     hoisted.invoke = async ({ command }) => {
+      if (command === "_worker_attachment_retention_capability_request") return { method: "PUT", relativePath: "/v1/devices/self/retention-capability", jsonBody: "{}", protocolHeader: null, expectedSuccessStatus: 204 };
       if (command === "_worker_enrollment_create_phone_invitation") return { request: JSON.stringify({ method: "transfer", transfer_public_key: "key", invitation_token_digest: "digest" }) };
       if (command === "_worker_enrollment_get_phone_qr") return { qr: "local-secret-qr" };
       if (command === "_worker_enrollment_pending_vault_request") return null;

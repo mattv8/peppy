@@ -75,6 +75,31 @@ object MmsCaptureWork {
         }
     }
 
+    internal data class DeferredCapture(val manualRecheck: Boolean, val providerChanged: Boolean)
+
+    internal fun deferUntilProducerReady(context: Context, manualRecheck: Boolean, providerChanged: Boolean) {
+        val prefs = context.getSharedPreferences(DEFERRED_CAPTURE, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putBoolean(DEFERRED_MANUAL, prefs.getBoolean(DEFERRED_MANUAL, false) || manualRecheck)
+            .putBoolean(DEFERRED_PROVIDER, prefs.getBoolean(DEFERRED_PROVIDER, false) || providerChanged)
+            .commit()
+    }
+
+    internal fun consumeDeferredCapture(context: Context): DeferredCapture? {
+        val prefs = context.getSharedPreferences(DEFERRED_CAPTURE, Context.MODE_PRIVATE)
+        val manual = prefs.getBoolean(DEFERRED_MANUAL, false)
+        val provider = prefs.getBoolean(DEFERRED_PROVIDER, false)
+        if (!manual && !provider && !prefs.contains(DEFERRED_MANUAL)) return null
+        if (!prefs.edit().clear().commit()) return null
+        return DeferredCapture(manual, provider)
+    }
+
+    internal fun resumeDeferred(context: Context) {
+        val deferred = consumeDeferredCapture(context) ?: return
+        if (deferred.providerChanged) MmsCaptureHints.record(context)
+        if (deferred.manualRecheck) refresh(context) else enqueue(context)
+    }
+
     internal fun handleResult(context: Context, result: MmsCaptureSummary) {
         if (result.captured > 0) GatewayWork.enqueueAfterCapture(context)
         hintScheduler.requestContinuation(result.more, scheduleSink(context))
@@ -110,6 +135,9 @@ object MmsCaptureWork {
         schedule(context, NAME, policy, delayed, manualRecheck, managedWork = true)
     }
 
+    private const val DEFERRED_CAPTURE = "peppy-mms-retention-deferred"
+    private const val DEFERRED_MANUAL = "manual"
+    private const val DEFERRED_PROVIDER = "provider"
     internal const val MANUAL_RECHECK = "manual-mms-recheck"
     internal const val MANAGED_WORK = "managed-mms-capture-work"
     internal val hintScheduler = MmsCaptureHintScheduler()
@@ -231,7 +259,11 @@ internal object MmsCapture {
             OwnNumberDetector.syncCurrentRoute(context)
         }
         if (!eligible) return MmsCaptureSummary(0, 0, 0, false)
-        val native = NativeGateway.open(context) ?: return MmsCaptureSummary(0, 0, 0, false)
+        val native = NativeGateway.producerClient(context) ?: run {
+            MmsCaptureWork.deferUntilProducerReady(context, manualRecheck, providerChanged)
+            GatewayWork.enqueue(context.applicationContext)
+            return MmsCaptureSummary(0, 0, 0, false)
+        }
         val route = SimRoutes.current().singleOrNull()
         val reader = MmsProviderReader(context)
         val provider = object : MmsCaptureProvider {

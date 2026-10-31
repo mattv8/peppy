@@ -161,6 +161,7 @@ jobs:
       # The integration job runs all workspace tests, including library tests.
       - run: cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
       - run: cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
+      - run: cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check
       - run: cargo run --locked -p peppy-hosted-api --bin export-web-schema -- --check
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny check licenses bans sources

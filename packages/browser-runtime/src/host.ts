@@ -9,11 +9,14 @@ import { OriginTransport, TransportError } from "./transport.js";
 import { BannerPresenter, BrowserNotificationAdapter, CoreNotificationSettings, DEFAULT_NOTIFICATION_PREFERENCES, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationPreferences, type NotificationSettings } from "./presentation.js";
 import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
+import { AttachmentRetentionDriver, AttachmentRetentionNoticeFacade } from "./attachment-retention.js";
+import type { AttachmentRetentionNoticeAcknowledgementInput, AttachmentRetentionNoticeAcknowledgementResult, AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
 
 const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
 const MAX_PREVIEWS_PER_SNAPSHOT = 32;
 const MAX_PREVIEWS_PER_HISTORY_PAGE = 12;
+const MAX_ATTACHMENT_RETENTION_STATES_PER_PROJECTION = 100;
 const MAX_INLINE_MEDIA_BYTES = 32 * 1024 * 1024;
 const MAX_MEDIA_SYNC_ATTACHMENTS = 32;
 const OWNER_NAME = "peppy-browser-v1";
@@ -26,6 +29,7 @@ const RECOVERY_CLEAR_ERROR: RpcError = { code: "recovery-clear-failed", message:
 export type RpcError = { code: string; message: string; conversationId?: string; currentRevision?: string; draftId?: string };
 export type RpcResponse = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: RpcError };
 export type RpcRequest = { id: number; command: string; args: Record<string, unknown> };
+export type BrowserDispatchContext = { sessionScopeId?: string };
 export type WorkerMessage = RpcRequest | { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason: string } | { event: "banner"; candidate: Record<string, unknown> };
 
 export interface BrowserPort {
@@ -58,7 +62,7 @@ export interface HostSession {
 }
 
 export interface BrowserNetwork {
-  start(): Promise<void>;
+  start(): Promise<boolean | void>;
   stop(): Promise<void>;
   enrollmentDiscover(origin?: string): Promise<EnrollmentView>;
   enrollmentCreateOwner(secrets: { setupToken?: string; adminPassword?: string; passphrase: string }, username?: string): Promise<EnrollmentView>;
@@ -98,6 +102,9 @@ export interface BrowserNetwork {
   unlockNewEpoch?(passphrase: string): Promise<void>;
   epochStatus?(): "epoch-mismatch" | "needs-unlock" | undefined;
   syncProgress?(): SchedulerSyncProgress | undefined;
+  producerReady?(): boolean;
+  attachmentRetentionStatus?(): Promise<AttachmentRetentionStatusResult>;
+  acknowledgeAttachmentRetentionNotice?(input: AttachmentRetentionNoticeAcknowledgementInput): Promise<AttachmentRetentionNoticeAcknowledgementResult>;
 }
 
 export interface BrowserHostDependencies {
@@ -310,12 +317,12 @@ type MediaLeases = {
   release(id: string): boolean;
 };
 
-export async function dispatchBrowserRpc(session: HostSession, request: unknown, legacySettings?: LegacyNotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases, syncProgress?: SchedulerSyncProgress): Promise<RpcResponse> {
+export async function dispatchBrowserRpc(session: HostSession, request: unknown, legacySettings?: LegacyNotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases, syncProgress?: SchedulerSyncProgress, context?: BrowserDispatchContext): Promise<RpcResponse> {
   if (!validRequest(request)) return { id: requestId(request), ok: false, error: { code: "invalid-request", message: "The request is invalid." } };
-  return dispatchValidatedBrowserRpc(session, request, legacySettings, publisher, mediaLeases, syncProgress);
+  return dispatchValidatedBrowserRpc(session, request, legacySettings, publisher, mediaLeases, syncProgress, context);
 }
 
-async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcRequest, legacySettings?: LegacyNotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases, syncProgress?: SchedulerSyncProgress): Promise<RpcResponse> {
+async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcRequest, legacySettings?: LegacyNotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases, syncProgress?: SchedulerSyncProgress, context?: BrowserDispatchContext): Promise<RpcResponse> {
   const { id, command, args } = request;
   try {
     if (command === "load_state" && session.phase !== "ready") return { id, ok: true, value: safeSnapshot(session.phase) };
@@ -328,10 +335,10 @@ async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcReq
       const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
       if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
       const enriched = metadataOnly ? snapshot as Record<string, unknown> : await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT);
-      return { id, ok: true, value: { ...enriched, ...contacts as Record<string, unknown>, ...(syncProgress ? { syncProgress } : {}) } };
+      return { id, ok: true, value: { ...enriched, ...contacts as Record<string, unknown>, ...(syncProgress ? { syncProgress } : {}), ...(context?.sessionScopeId ? { sessionScopeId: context.sessionScopeId } : {}) } };
     }
-    if (command === "load_history") {
-      const page = await session.query("load_history", args);
+    if (command === "load_history" || command === "load_message_window") {
+      const page = await session.query(command, args);
       if (typeof page !== "object" || page === null || Array.isArray(page)) throw { code: "invalid-request" };
       return { id, ok: true, value: await addHistoryPreviews(session, page as Record<string, unknown>) };
     }
@@ -342,6 +349,10 @@ async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcReq
       return { id, ok: true, value: undefined };
     }
     if (command === "prepare_attachment") return { id, ok: true, value: await addAttachmentPreview(session, await prepareAttachment(session, args)) };
+    if (command === "attachment_retention_state") {
+      const attachmentId = requiredId({ id: args.attachmentId });
+      return { id, ok: true, value: await session.query("attachment_retention_state", { attachmentId }) };
+    }
     if (command === "media_page") {
       const page = await session.query("media_page", mediaPageArgs(args));
       return { id, ok: true, value: await addMediaPagePreviews(session, page) };
@@ -492,7 +503,7 @@ function contactAddresses(snapshot: Record<string, unknown>): Array<{ address: s
 }
 
 async function addVisiblePreviews(session: HostSession, snapshot: Record<string, unknown>, budget: number): Promise<Record<string, unknown>> {
-  if (!session.previewAttachment || !Array.isArray(snapshot.conversations)) return snapshot;
+  if (!Array.isArray(snapshot.conversations)) return snapshot;
   const activeId = typeof snapshot.activeConversationId === "string" ? snapshot.activeConversationId : undefined;
   const conversation = snapshot.conversations.find(value => typeof value === "object" && value !== null && (value as Record<string, unknown>).id === activeId);
   if (!conversation || typeof conversation !== "object" || conversation === null) return snapshot;
@@ -509,24 +520,54 @@ async function addHistoryPreviews(session: HostSession, page: Record<string, unk
 
 async function addMessagePreviews(session: HostSession, messages: unknown[], budget: number): Promise<unknown[]> {
   let remainingPreviews = budget;
+  const enrichRetention = attachmentRetentionEnricher(session);
   const previewedMessages = await Promise.all(messages.map(async message => {
     if (typeof message !== "object" || message === null) return message;
     const messageView = message as Record<string, unknown>;
     if (!Array.isArray(messageView.attachments)) return message;
     const attachments = await Promise.all(messageView.attachments.map(async attachment => {
-      const view = attachment as Record<string, unknown>;
+      const view = objectOrUndefined(attachment);
+      if (!view) return attachment;
       const mediaMeta = objectOrUndefined(view.mediaMeta);
       const thumbnail = mediaMeta?.thumbnail;
       const previewTarget = previewableAttachment(thumbnail) ? thumbnail : attachment;
       const preview = remainingPreviews > 0 && previewableAttachment(previewTarget);
       if (preview) remainingPreviews -= 1;
-      if (!preview) return attachment;
-      if (previewTarget === attachment) return addAttachmentPreview(session, attachment);
-      return { ...view, mediaMeta: { ...mediaMeta, thumbnail: await addAttachmentPreview(session, thumbnail) } };
+      const enriched = await enrichRetention(attachment);
+      if (!preview) return enriched;
+      if (previewTarget === attachment) return addAttachmentPreview(session, enriched);
+      const enrichedView = objectOrUndefined(enriched) ?? view;
+      return { ...enrichedView, mediaMeta: { ...mediaMeta, thumbnail: await addAttachmentPreview(session, thumbnail) } };
     }));
     return { ...messageView, attachments };
   }));
   return previewedMessages;
+}
+
+function attachmentRetentionEnricher(session: HostSession): (attachment: unknown) => Promise<unknown> {
+  let remaining = MAX_ATTACHMENT_RETENTION_STATES_PER_PROJECTION;
+  const states = new Map<string, Promise<{ remoteState: "available" | "removed_by_storage_policy"; localAvailable: boolean } | undefined>>();
+  return async attachment => {
+    const view = objectOrUndefined(attachment);
+    if (!view || typeof view.id !== "string" || !/^[0-9a-f-]{36}$/.test(view.id)) return attachment;
+    let state = states.get(view.id);
+    if (!state) {
+      if (remaining === 0) return attachment;
+      remaining -= 1;
+      state = session.query("attachment_retention_state", { attachmentId: view.id })
+        .then(attachmentRetentionProjection)
+        .catch(() => undefined);
+      states.set(view.id, state);
+    }
+    const projection = await state;
+    return projection ? { ...view, ...projection } : attachment;
+  };
+}
+
+function attachmentRetentionProjection(value: unknown): { remoteState: "available" | "removed_by_storage_policy"; localAvailable: boolean } | undefined {
+  const state = objectOrUndefined(value);
+  if (!state || (state.remote !== "available" && state.remote !== "removed_by_storage_policy") || typeof state.localAvailable !== "boolean") return undefined;
+  return { remoteState: state.remote, localAvailable: state.localAvailable };
 }
 
 async function addAttachmentPreview(session: HostSession, attachment: unknown): Promise<unknown> {
@@ -569,13 +610,16 @@ async function addMediaPagePreviews(session: HostSession, value: CoreResult): Pr
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw { code: "invalid-request" };
   const page = value as Record<string, unknown>;
   if (!Array.isArray(page.items)) throw { code: "invalid-request" };
+  const enrichRetention = attachmentRetentionEnricher(session);
   const items = await Promise.all(page.items.map(async item => {
     if (typeof item !== "object" || item === null || Array.isArray(item)) return item;
     const view = item as Record<string, unknown>;
+    const attachment = await enrichRetention(view.attachment);
+    const attachmentField = Object.prototype.hasOwnProperty.call(view, "attachment") ? { attachment } : {};
     const meta = typeof view.mediaMeta === "object" && view.mediaMeta !== null && !Array.isArray(view.mediaMeta) ? view.mediaMeta as Record<string, unknown> : undefined;
     const thumbnail = meta?.thumbnail;
-    if (!thumbnail || !previewableAttachment(thumbnail)) return item;
-    return { ...view, mediaMeta: { ...meta, thumbnail: await addAttachmentPreview(session, thumbnail) } };
+    if (!thumbnail || !previewableAttachment(thumbnail)) return { ...view, ...attachmentField };
+    return { ...view, ...attachmentField, mediaMeta: { ...meta, thumbnail: await addAttachmentPreview(session, thumbnail) } };
   }));
   return { ...page, items };
 }
@@ -657,6 +701,21 @@ async function exportAttachment(session: HostSession, args: Record<string, unkno
   return { bytes: (await session.readWorkerOutput(outputId, output.length)).buffer, displayName: output.displayName, mediaType: output.type };
 }
 
+function producerCommand(request: RpcRequest): boolean {
+  if (request.command === "prepare_attachment" || request.command === "publish_attachment" || request.command === "restore_contact") return true;
+  const input = objectOrUndefined(request.args.input);
+  if (request.command === "send_draft") return Array.isArray(input?.attachmentIds) && input.attachmentIds.length > 0;
+  if (request.command === "submit_contact_edit") return objectOrUndefined(input?.photo)?.kind === "set";
+  return false;
+}
+
+function retentionAcknowledgement(request: RpcRequest): AttachmentRetentionNoticeAcknowledgementInput | undefined {
+  if (request.command !== "acknowledge_attachment_retention_notice") return undefined;
+  const { scopeId, policyVersion } = request.args;
+  if (Object.keys(request.args).length !== 2 || typeof scopeId !== "string" || scopeId.length === 0 || typeof policyVersion !== "string" || policyVersion.length === 0) return undefined;
+  return { scopeId, policyVersion };
+}
+
 /** SharedWorker coordinator: all renderer ports share the same session and serialized checkpoint owner. */
 export class BrowserWorkerHost {
   private readonly ports = new Set<BrowserPort>();
@@ -680,6 +739,8 @@ export class BrowserWorkerHost {
   /** Dispatched RPCs in flight; maintenance waits for zero so its generation delta is exact. */
   private dispatchesInFlight = 0;
   private rememberedUnlockValidation?: Promise<void>;
+  private deviceSessionScope?: { binding: string; id: string };
+  private producerAdmissionReady = false;
   private lastRememberedUnlockValidationAt = 0;
 
   public constructor(private readonly dependencies: BrowserHostDependencies) {}
@@ -724,6 +785,7 @@ export class BrowserWorkerHost {
       this.ports.clear();
       this.mediaLeases.clear();
       this.historyAttempts.clear();
+      this.deviceSessionScope = undefined;
       try { await this.owner?.release(); } catch {}
     } finally { this.dependencies.terminate?.(); }
   }
@@ -739,11 +801,21 @@ export class BrowserWorkerHost {
   }
 
   private async acquire(): Promise<void> {
-    this.owner = await acquireWorkerOwner({ locks: this.dependencies.locks, name: OWNER_NAME, start: signal => this.dependencies.boot(signal, error => { void this.fatal(error); }), stop: async session => { session.shutdown(); await session.drain?.(); } });
-    this.presenter = new BannerPresenter(this.owner.owner, new MigratingCoreNotificationSettings(this.owner.owner, this.dependencies.legacySettings, () => { this.changed(); this.dependencies.network?.wake?.(); }), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => this.presentationPort ? candidate => this.presentationPort?.postMessage({ event: "banner", candidate }) : undefined);
-    this.unsubscribeNetwork = this.dependencies.network?.subscribeChanges?.(() => this.changed());
-    if (this.owner.owner.phase === "ready") await this.dependencies.network?.start();
-    void this.startSearchIndexWhenReady();
+    const owner = await acquireWorkerOwner({ locks: this.dependencies.locks, name: OWNER_NAME, start: signal => this.dependencies.boot(signal, error => { void this.fatal(error); }), stop: async session => { session.shutdown(); await session.drain?.(); } });
+    this.owner = owner;
+    try {
+      this.presenter = new BannerPresenter(owner.owner, new MigratingCoreNotificationSettings(owner.owner, this.dependencies.legacySettings, () => { this.changed(); this.dependencies.network?.wake?.(); }), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => this.presentationPort ? candidate => this.presentationPort?.postMessage({ event: "banner", candidate }) : undefined);
+      this.unsubscribeNetwork = this.dependencies.network?.subscribeChanges?.(() => this.changed());
+      if (owner.owner.phase === "ready") { const ready = await this.dependencies.network?.start(); this.producerAdmissionReady = ready !== false; }
+      void this.startSearchIndexWhenReady();
+    } catch (error) {
+      this.unsubscribeNetwork?.();
+      owner.owner.shutdown();
+      try { await owner.owner.drain?.(); } catch {}
+      try { await owner.release(); } catch {}
+      if (this.owner === owner) this.owner = undefined;
+      throw error;
+    }
   }
 
   private async handle(port: BrowserPort, request: unknown): Promise<void> {
@@ -784,6 +856,20 @@ export class BrowserWorkerHost {
       try { await this.presenter?.acknowledgeDisplayed(ids); port.postMessage({ id: request.id, ok: true, value: undefined }); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
       return;
     }
+    if (request.command === "attachment_retention_status" || request.command === "acknowledge_attachment_retention_notice") {
+      if (this.owner.owner.phase !== "ready") { port.postMessage({ id: request.id, ok: false, error: { code: "locked", message: "Browser session is not ready." } }); return; }
+      const acknowledgement = retentionAcknowledgement(request);
+      if (request.command === "acknowledge_attachment_retention_notice" && !acknowledgement) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      if (request.command === "attachment_retention_status" && Object.keys(request.args).length !== 0) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      try {
+        const value = request.command === "attachment_retention_status"
+          ? await this.dependencies.network?.attachmentRetentionStatus?.()
+          : await this.dependencies.network?.acknowledgeAttachmentRetentionNotice?.(acknowledgement!);
+        if (value === undefined) throw { code: "unsupported" };
+        port.postMessage({ id: request.id, ok: true, value });
+      } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
+      return;
+    }
     if (request.command === "unlock" && this.owner.owner.phase === "ready") {
       const passphrase = secretString(request.args, "passphrase");
       if (!passphrase || !this.dependencies.network?.unlockNewEpoch) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
@@ -792,14 +878,19 @@ export class BrowserWorkerHost {
     }
     if (request.command.startsWith("enrollment_")) {
       const response = await this.enrollment(request);
-      port.postMessage(response);
-      if (response.ok && ENROLLMENT_MUTATIONS.has(request.command)) {
-        this.changed();
-        if (ENROLLMENT_ACTIVATIONS.has(request.command) && this.owner.owner.phase === "ready" && isReadyEnrollmentView(response.value)) {
-          await this.dependencies.network?.start();
+      if (response.ok && ENROLLMENT_ACTIVATIONS.has(request.command) && this.owner.owner.phase === "ready" && isReadyEnrollmentView(response.value)) {
+        try {
+          const ready = await this.dependencies.network?.start();
+          this.producerAdmissionReady = ready !== false;
           void this.startSearchIndexWhenReady();
+        } catch (error) {
+          port.postMessage({ id: request.id, ok: false, error: errorFor(error) });
+          await this.stop(error instanceof TransportError && error.kind === "revoked" ? "revoked" : "unavailable");
+          return;
         }
       }
+      port.postMessage(response);
+      if (response.ok && ENROLLMENT_MUTATIONS.has(request.command)) this.changed();
       if (this.owner.owner.phase === "closed") await this.stop("closed");
       return;
     }
@@ -821,10 +912,12 @@ export class BrowserWorkerHost {
     }
     const generation = this.visibleGeneration();
     const command = request.command;
+    if (this.dependencies.network && producerCommand(request) && !(this.dependencies.network.producerReady?.() ?? this.producerAdmissionReady)) { port.postMessage({ id: request.id, ok: false, error: { code: "unavailable", message: "Browser session is not ready." } }); return; }
     let response: RpcResponse;
     this.dispatchesInFlight += 1;
     try {
-      response = await dispatchValidatedBrowserRpc(this.owner.owner, request, this.dependencies.legacySettings, this.dependencies.publisher, this.portMediaLeases(port), this.dependencies.network?.syncProgress?.());
+      const sessionScopeId = command === "load_state" ? await this.currentSessionScopeId() : undefined;
+      response = await dispatchValidatedBrowserRpc(this.owner.owner, request, this.dependencies.legacySettings, this.dependencies.publisher, this.portMediaLeases(port), this.dependencies.network?.syncProgress?.(), sessionScopeId ? { sessionScopeId } : undefined);
     } finally {
       this.dispatchesInFlight -= 1;
     }
@@ -832,6 +925,17 @@ export class BrowserWorkerHost {
       const value = response.value;
       if (typeof value === "object" && value !== null && !Array.isArray(value)) {
         response = { ...response, value: { ...value as Record<string, unknown>, encryption: { ...(value as Record<string, unknown>).encryption as Record<string, unknown>, state: "mismatch" } } };
+      }
+    }
+    if (response.ok && command === "unlock") {
+      try {
+        const ready = await this.dependencies.network?.start();
+        this.producerAdmissionReady = ready !== false;
+      } catch (error) {
+        response = { id: request.id, ok: false, error: errorFor(error) };
+        if (this.ports.has(port)) port.postMessage(response);
+        await this.stop(error instanceof TransportError && error.kind === "revoked" ? "revoked" : "unavailable");
+        return;
       }
     }
     if (!this.ports.has(port)) return;
@@ -846,10 +950,7 @@ export class BrowserWorkerHost {
     const generationChanged = generation !== this.visibleGeneration();
     if (mutationChanged || successfulSideEffect || generationChanged) {
       this.changed();
-      if (command === "unlock") {
-        await this.dependencies.network?.start();
-        void this.startSearchIndexWhenReady();
-      }
+      if (command === "unlock") void this.startSearchIndexWhenReady();
       if (command === "load_state" && generationChanged) this.dependencies.network?.wake?.();
       if (command === "retry_attachment") this.dependencies.network?.retryAttachment?.(requiredId(request.args));
       if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync" || command === "request_attachment_download" || command === "media_sync_request" || command === "load_media" || command === "save_attachment") this.dependencies.network?.wake?.();
@@ -857,6 +958,20 @@ export class BrowserWorkerHost {
     if (response.ok && command === "search_local") {
       this.recordSearchIndexState(response.value);
       if (isIndexing(response.value)) this.scheduleSearchIndex();
+    }
+  }
+
+  private async currentSessionScopeId(): Promise<string | undefined> {
+    const session = this.owner?.owner;
+    if (!session || session.phase !== "ready") return undefined;
+    try {
+      const identity = object(await session.query("_worker_identity_metadata", {}));
+      if (typeof identity.vaultId !== "string" || identity.vaultId.length === 0 || typeof identity.deviceId !== "string" || identity.deviceId.length === 0) return undefined;
+      const binding = `${identity.vaultId} ${identity.deviceId}`;
+      if (this.deviceSessionScope?.binding !== binding) this.deviceSessionScope = { binding, id: crypto.randomUUID() };
+      return this.deviceSessionScope.id;
+    } catch {
+      return undefined;
     }
   }
 
@@ -1262,6 +1377,10 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let enrollmentAbort: AbortController | undefined;
   let scheduler: BrowserScheduler | undefined;
   let publicTransport: OriginTransport | undefined;
+  let retention: AttachmentRetentionDriver | undefined;
+  let retentionNotice: AttachmentRetentionNoticeFacade | undefined;
+  let retentionGeneration = 0;
+  let retentionAbort: AbortController | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let polling = false;
   let pollPromise: Promise<void> | undefined;
@@ -1274,6 +1393,8 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     pollTimer = undefined;
     scheduler?.stop();
     enrollmentAbort?.abort();
+    retentionAbort?.abort();
+    retentionNotice?.clear();
     await pollPromise?.catch(() => undefined);
   };
   const schedulePoll = () => {
@@ -1294,7 +1415,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     locks,
     terminate,
     network: {
-      async start() { if (polling || !scheduler) return; polling = true; schedulePoll(); },
+      async start() { if (!scheduler || !retentionAbort) return false; const ready = await scheduler.ensureRetentionNegotiated(retentionAbort.signal); if (!polling) { polling = true; schedulePoll(); } return ready; },
       wake() { void scheduler?.poll().catch(() => undefined); },
        startHistorySearch(attemptId) { scheduler?.trackHistorySearch(attemptId); void scheduler?.poll().catch(() => undefined); },
        stopHistorySearch(attemptId) { scheduler?.untrackHistorySearch(attemptId); },
@@ -1302,6 +1423,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       async unlockNewEpoch(passphrase) { if (!scheduler) throw { code: "unavailable" }; await scheduler.unlockNewEpoch(passphrase); },
       epochStatus() { const state = scheduler?.epochStatus?.state; return state === "epoch-mismatch" || state === "needs-unlock" ? state : undefined; },
       syncProgress() { return syncProgress; },
+      producerReady() { return scheduler?.producersReady ?? false; },
       stop: stopNetwork,
       subscribeChanges(listener) { changeListeners.add(listener); return () => changeListeners.delete(listener); },
       async enrollmentDiscover(origin) { return enrollment?.discover(origin) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
@@ -1333,8 +1455,14 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async enrollmentApproveVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.approveVaultRequest(requestId); },
         async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
         async listDevices() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/devices", { method: "GET" }); },
-        async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
-      },
+       async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
+       async attachmentRetentionStatus() {
+         return retentionNotice?.status() ?? { kind: "temporarily_unavailable" };
+       },
+       async acknowledgeAttachmentRetentionNotice(input) {
+         return retentionNotice?.acknowledge(input) ?? "temporarily_unavailable";
+       },
+       },
     async boot(_signal, onFatal) {
       const modulePromise = loadBrowserCore();
       const core = new BrowserCore(() => modulePromise);
@@ -1343,20 +1471,26 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       const session = await BrowserSession.boot({ origin: origins.logicalOrigin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), rememberedUnlock: browserRememberedUnlock(origins.fetchBase), onFatal });
         enrollmentAbort = new AbortController();
         enrollment = new BrowserEnrollment(core, session, origins.logicalOrigin, undefined, origins.fetchBase, enrollmentAbort.signal);
-      publicTransport = new OriginTransport({ origin: self.location.origin, deviceToken: () => session.tokenForTransport() });
-      scheduler = new BrowserScheduler(
+       publicTransport = new OriginTransport({ origin: self.location.origin, deviceToken: () => session.tokenForTransport() });
+       retentionGeneration += 1;
+       retentionAbort = new AbortController();
+       retention = new AttachmentRetentionDriver(session, { retention: (request, signal) => publicTransport!.retention(request, signal) });
+       retentionNotice = new AttachmentRetentionNoticeFacade(session, { retention: (request, signal) => publicTransport!.retention(request, signal) }, () => retentionGeneration, () => retentionAbort!.signal);
+       scheduler = new BrowserScheduler(
         session,
         publicTransport,
         {
           media: { readCiphertext: (file, expectedBytes, signal) => session.readCiphertext(file, expectedBytes, signal), stageDownload: (bytes, signal) => session.stageDownload(bytes, signal), cleanupStagedDownload: source => session.cleanupStagedDownload(source) },
           rotateEpoch: (profile, header, passphrase) => session.rotate(profile, header, passphrase),
-          onProgress: progress => {
+           onProgress: progress => {
             syncProgress = progress;
             for (const listener of changeListeners) listener();
-          },
+            },
+           retention,
         },
-      );
-      return session;
+       );
+
+       return session;
     },
     legacySettings: new IndexedDbNotificationSettings(`${OWNER_NAME}-presentation`),
     publisher: {

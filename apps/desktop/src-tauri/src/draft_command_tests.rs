@@ -4,9 +4,17 @@ use crate::{
     secure_store::MemoryStore,
     send_draft_for_window, session_for_update_flush, session_is_current,
     tests::{fixture_at, gateway, input, open, routed, Fixture, PHRASE},
-    AppState, BridgeError,
+    upload_public_copy, AppState, BridgeError, PreparedPublicCopy,
 };
+use axum::{
+    extract::{Path as AxumPath, State as AxumState},
+    http::StatusCode,
+    routing::post,
+    Json, Router,
+};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use peppy_client_core::IncomingSms;
+use serde_json::json;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -857,6 +865,168 @@ async fn rejected_send_retains_the_draft_and_loads_no_cleared_broadcast() {
         session.client.pending_outbox_batch(10).unwrap().len(),
         queued_before
     );
+}
+
+#[tokio::test]
+async fn unnegotiated_attachment_send_is_denied_while_text_send_is_accepted() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let gateway_id = uuid::Uuid::new_v4().to_string();
+    session.set_status(|status| {
+        status.gateways = vec![gateway(&gateway_id, true, true)];
+        status.gateways_known = true;
+    });
+    let (text_conversation, text_draft) = saved_draft_for_target(&session, "text");
+    let state = state(&fixture);
+
+    let sent = send_draft_for_window(
+        &state,
+        &label(&text_conversation),
+        session.clone(),
+        routed(
+            input(
+                &text_draft.id,
+                &text_conversation,
+                "",
+                &[],
+                &text_draft.revision,
+            ),
+            &gateway_id,
+            "sim-1",
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(sent.accepted);
+
+    let source = fixture.dir.path().join("unnegotiated-attachment.png");
+    std::fs::write(&source, crate::media::tests::sample_png(8, 8)).unwrap();
+    let attachment = session.prepare_attachment(&source).unwrap();
+    let attachment_conversation = incoming(&session, "+15555550101", "history");
+    let composer = session.client.recipientless_compose_draft().unwrap();
+    let mut attachment_input = input(
+        &composer.draft_id.to_string(),
+        &composer.conversation_id.to_string(),
+        "photo",
+        &["+15555550101"],
+        &composer.revision.to_string(),
+    );
+    attachment_input.attachment_ids = vec![attachment.id];
+    let attachment_draft = session.save_draft(&attachment_input).unwrap();
+    assert_eq!(attachment_draft.conversation_id, attachment_conversation);
+
+    let error = send_draft_for_window(
+        &state,
+        &label(&attachment_conversation),
+        session,
+        routed(
+            input(
+                &attachment_draft.id,
+                &attachment_conversation,
+                "",
+                &[],
+                &attachment_draft.revision,
+            ),
+            &gateway_id,
+            "sim-1",
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "attachment-retention-negotiating");
+}
+
+#[test]
+fn contact_photo_set_payload_requires_negotiation_but_keep_remove_and_absent_do_not() {
+    let update = |photo| {
+        json!({
+            "targetBookId": "book",
+            "kind": "update",
+            "contactId": "contact",
+            "baseRevision": "1",
+            "patches": [],
+            "photo": photo,
+        })
+    };
+
+    assert!(crate::contact_photo_requires_negotiation(&update(json!({
+        "kind": "set",
+        "croppedDataUrl": format!("data:image/png;base64,{}", STANDARD.encode(crate::media::tests::sample_png(8, 8)))
+    })))
+    .unwrap());
+    assert!(!crate::contact_photo_requires_negotiation(&update(json!({"kind": "keep"}))).unwrap());
+    assert!(
+        !crate::contact_photo_requires_negotiation(&update(json!({"kind": "remove"}))).unwrap()
+    );
+    assert!(!crate::contact_photo_requires_negotiation(&json!({
+        "targetBookId": "book",
+        "kind": "update",
+        "contactId": "contact",
+        "baseRevision": "1",
+        "patches": []
+    }))
+    .unwrap());
+}
+
+#[tokio::test]
+async fn public_copy_storage_policy_removal_tombstones_the_local_attachment_not_the_remote_id() {
+    async fn removed(
+        AxumPath(remote): AxumPath<String>,
+        AxumState(requested_remote): AxumState<Arc<std::sync::Mutex<Option<String>>>>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        *requested_remote.lock().unwrap() = Some(remote);
+        (
+            StatusCode::GONE,
+            Json(json!({"code": "attachment_removed_by_storage_policy"})),
+        )
+    }
+
+    let requested_remote = Arc::new(std::sync::Mutex::new(None));
+    let router = Router::new()
+        .route("/v1/attachments/{remote}/public-copies", post(removed))
+        .with_state(requested_remote.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let fixture = fixture_at(&origin);
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    let source = fixture.dir.path().join("local-only.png");
+    std::fs::write(&source, crate::media::tests::sample_png(8, 8)).unwrap();
+    let local = session.prepare_attachment(&source).unwrap();
+    let local_id = local.id.parse().unwrap();
+    let remote_id = uuid::Uuid::new_v4().to_string();
+    assert_ne!(local.id, remote_id);
+
+    let error = match upload_public_copy(
+        &session,
+        local_id,
+        &remote_id,
+        PreparedPublicCopy {
+            bytes: vec![1],
+            name: "copy.png".into(),
+            width: 1,
+            height: 1,
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("a typed storage-policy removal must refuse public publication"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code, "attachment-removed");
+    assert_eq!(
+        requested_remote.lock().unwrap().as_deref(),
+        Some(remote_id.as_str())
+    );
+    let state = session.client.attachment_retention_state(local_id).unwrap();
+    assert_eq!(
+        state.remote,
+        peppy_client_core::RemoteAttachmentState::RemovedByStoragePolicy
+    );
+    assert!(state.local_available);
+    server.abort();
 }
 
 #[tokio::test]

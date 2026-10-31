@@ -1,4 +1,4 @@
-import { TransportError } from "./transport.js";
+import { isAttachmentRemovedByStoragePolicy, TransportError } from "./transport.js";
 
 const ATTACHMENT_ID = /^[0-9a-f-]{36}$/;
 const SAFE_TOKEN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -8,6 +8,7 @@ export type PublicCopy = { url: string; expiresInSeconds: number };
 
 export interface PublicImageSession {
   query(command: string, args: Record<string, unknown>): Promise<unknown>;
+  mutate(command: string, args: Record<string, unknown>): Promise<unknown>;
   publicImage?(id: string): Promise<Record<string, unknown> & { bytes: Uint8Array; name: string }>;
 }
 
@@ -26,7 +27,14 @@ export async function publishAttachment(session: PublicImageSession, transport: 
   if (!remoteObjectId) throw { code: "public-copy-unavailable" };
   const image = await session.publicImage(id);
   if (!(image.bytes instanceof Uint8Array) || image.bytes.byteLength === 0 || typeof image.name !== "string" || !SAFE_NAME.test(image.name)) throw { code: "public-copy-too-large" };
-  const response = await transport.postPublicCopy<PublicCopyResponse>(`/v1/attachments/${encodeURIComponent(remoteObjectId)}/public-copies`, image.bytes, { fileName: image.name });
+  let response: PublicCopyResponse;
+  try {
+    response = await transport.postPublicCopy<PublicCopyResponse>(`/v1/attachments/${encodeURIComponent(remoteObjectId)}/public-copies`, image.bytes, { fileName: image.name });
+  } catch (error) {
+    if (!isAttachmentRemovedByStoragePolicy(error)) throw error;
+    await session.mutate("_worker_attachment_retention_report_removed", { attachmentId: id });
+    throw { code: "public-copy-unavailable" };
+  }
   if (!SAFE_TOKEN.test(String(response.token)) || !SAFE_NAME.test(String(response.safe_name))) throw new TransportError("invalid");
   const expiresInSeconds = response.expires_in_seconds;
   if (expiresInSeconds !== undefined && (typeof expiresInSeconds !== "number" || !Number.isSafeInteger(expiresInSeconds) || expiresInSeconds < 0 || expiresInSeconds > 31_536_000)) throw new TransportError("invalid");

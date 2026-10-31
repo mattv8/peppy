@@ -1,4 +1,5 @@
 pub mod api;
+pub mod attachment_retention;
 pub mod config;
 pub mod enrollment;
 pub mod health;

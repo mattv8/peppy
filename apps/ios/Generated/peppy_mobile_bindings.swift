@@ -465,6 +465,22 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -624,11 +640,31 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func appendSnapshotRawPage(generation: UInt64, records: [NativeRawSnapshotRecord]) throws  -> NativeSnapshotProgress
     
+    /**
+     * Stores a canonical transport response only when all immutable identity fields match.
+     */
+    func applyAttachmentRetentionResponse(response: NativeAttachmentUseResponse) throws 
+    
     func applyPending(limit: UInt64) throws  -> NativeApplyReport
     
     func applyPhoneReads(candidates: [NativePhoneReadCandidate]) throws  -> UInt32
     
     func attachmentInfo(attachmentId: String) throws  -> NativeAttachmentInfo
+    
+    func attachmentRetentionPreparationPending() throws  -> Bool
+    
+    func attachmentRetentionProtocolEnabled() throws  -> Bool
+    
+    func attachmentRetentionReady() throws  -> Bool
+    
+    func attachmentRetentionState(attachmentId: String) throws  -> NativeAttachmentRetentionState
+    
+    func attachmentUploadRetention(attachmentId: String) throws  -> NativeAttachmentUploadRetention
+    
+    /**
+     * Persists a protected use before the host publishes dependent attachment work.
+     */
+    func beginAttachmentRetentionUse(attachmentId: String, kind: NativeAttachmentUseKind) throws  -> NativePendingAttachmentRetentionOperation
     
     func beginContactScan(inputJson: String) throws  -> String
     
@@ -689,6 +725,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func completeSmsReconciliation(sourceGeneration: String, providerScope: String, upperBound: String, cursor: String?, exhausted: Bool) throws 
     
     func composeDrafts() throws  -> [NativeComposeDraft]
+    
+    func configureAttachmentRetentionProtocol(enabled: Bool) throws 
     
     func consumePhoneReadEffects(messageIds: [String], rows: [NativeProviderRowRef], nowMs: Int64) throws  -> UInt32
     
@@ -794,6 +832,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func installDownloadedAttachment(attachmentId: String, downloadedPath: String) throws 
     
+    func invalidateAttachmentRetentionReconciliation() throws 
+    
     func listContactBooksJson() throws  -> String
     
     func listContactRequestsJson(input: String) throws  -> String
@@ -801,6 +841,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func listConversations() throws  -> [NativeConversation]
     
     func listRestorableContactsJson(input: String) throws  -> String
+    
+    func markAttachmentRetentionReconciled() throws 
     
     func markAttachmentUploaded(attachmentId: String, remoteObjectId: String) throws 
     
@@ -850,6 +892,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func openNativePlaintextFile(attachmentId: String) throws  -> NativePlaintextHandle
     
     func pauseMmsBackfillForLocalCapacity(generation: String, scope: String) throws 
+    
+    func pendingAttachmentRetentionOperations() throws  -> [NativePendingAttachmentRetentionOperation]
     
     /**
      * Lets an SMS-only adapter reject an immutable pending MMS command before
@@ -912,6 +956,12 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func prepareAttachment(sourcePath: String, mediaType: String, displayName: String) throws  -> NativeAttachmentInfo
     
+    /**
+     * Durably prepares bounded register/release work. Hosts checkpoint before HTTP and must
+     * discard responses from an older open/restore generation before applying them.
+     */
+    func prepareAttachmentRetentionOperations(limit: UInt64) throws  -> [NativePendingAttachmentRetentionOperation]
+    
     func prepareContactPhoto(path: String) throws  -> NativeAttachmentInfo
     
     /**
@@ -934,6 +984,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func removeNotification(notificationKey: String, instance: String) throws 
     
+    func reportAttachmentRemovedByStoragePolicy(attachmentId: String) throws 
+    
     func reportContactSyncBlocked(inputJson: String) throws  -> String
     
     func reportMmsBackfillRemoteCapacity(generation: String, scope: String, hasCapacity: Bool) throws 
@@ -941,6 +993,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func reportMmsBackfillVaultQuotaExceeded(generation: String, scope: String) throws 
     
     func requestAttachmentDownload(attachmentId: String) throws 
+    
+    func requestAttachmentRetentionRelease(useId: String) throws  -> NativePendingAttachmentRetentionOperation
     
     func requestContactEdit(inputJson: String) throws  -> String
     
@@ -1148,6 +1202,18 @@ open func appendSnapshotRawPage(generation: UInt64, records: [NativeRawSnapshotR
 })
 }
     
+    /**
+     * Stores a canonical transport response only when all immutable identity fields match.
+     */
+open func applyAttachmentRetentionResponse(response: NativeAttachmentUseResponse)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_attachment_retention_response(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativeAttachmentUseResponse_lower(response),uniffiCallStatus
+    )
+}
+}
+    
 open func applyPending(limit: UInt64)throws  -> NativeApplyReport  {
     return try  FfiConverterTypeNativeApplyReport_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1174,6 +1240,67 @@ open func attachmentInfo(attachmentId: String)throws  -> NativeAttachmentInfo  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_info(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(attachmentId),uniffiCallStatus
+    )
+})
+}
+    
+open func attachmentRetentionPreparationPending()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_preparation_pending(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func attachmentRetentionProtocolEnabled()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_protocol_enabled(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func attachmentRetentionReady()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_ready(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func attachmentRetentionState(attachmentId: String)throws  -> NativeAttachmentRetentionState  {
+    return try  FfiConverterTypeNativeAttachmentRetentionState_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_retention_state(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(attachmentId),uniffiCallStatus
+    )
+})
+}
+    
+open func attachmentUploadRetention(attachmentId: String)throws  -> NativeAttachmentUploadRetention  {
+    return try  FfiConverterTypeNativeAttachmentUploadRetention_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_attachment_upload_retention(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(attachmentId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Persists a protected use before the host publishes dependent attachment work.
+     */
+open func beginAttachmentRetentionUse(attachmentId: String, kind: NativeAttachmentUseKind)throws  -> NativePendingAttachmentRetentionOperation  {
+    return try  FfiConverterTypeNativePendingAttachmentRetentionOperation_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_attachment_retention_use(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(attachmentId),
+        FfiConverterTypeNativeAttachmentUseKind_lower(kind),uniffiCallStatus
     )
 })
 }
@@ -1412,6 +1539,15 @@ open func composeDrafts()throws  -> [NativeComposeDraft]  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+open func configureAttachmentRetentionProtocol(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_configure_attachment_retention_protocol(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(enabled),uniffiCallStatus
+    )
+}
 }
     
 open func consumePhoneReadEffects(messageIds: [String], rows: [NativeProviderRowRef], nowMs: Int64)throws  -> UInt32  {
@@ -1766,6 +1902,14 @@ open func installDownloadedAttachment(attachmentId: String, downloadedPath: Stri
 }
 }
     
+open func invalidateAttachmentRetentionReconciliation()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_invalidate_attachment_retention_reconciliation(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
 open func listContactBooksJson()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1802,6 +1946,14 @@ open func listRestorableContactsJson(input: String)throws  -> String  {
         FfiConverterString.lower(input),uniffiCallStatus
     )
 })
+}
+    
+open func markAttachmentRetentionReconciled()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_attachment_retention_reconciled(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
 }
     
 open func markAttachmentUploaded(attachmentId: String, remoteObjectId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
@@ -2040,6 +2192,15 @@ open func pauseMmsBackfillForLocalCapacity(generation: String, scope: String)thr
 }
 }
     
+open func pendingAttachmentRetentionOperations()throws  -> [NativePendingAttachmentRetentionOperation]  {
+    return try  FfiConverterSequenceTypeNativePendingAttachmentRetentionOperation.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_attachment_retention_operations(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
     /**
      * Lets an SMS-only adapter reject an immutable pending MMS command before
      * requesting a carrier permit. It exposes no attachment metadata or keys.
@@ -2255,6 +2416,20 @@ open func prepareAttachment(sourcePath: String, mediaType: String, displayName: 
 })
 }
     
+    /**
+     * Durably prepares bounded register/release work. Hosts checkpoint before HTTP and must
+     * discard responses from an older open/restore generation before applying them.
+     */
+open func prepareAttachmentRetentionOperations(limit: UInt64)throws  -> [NativePendingAttachmentRetentionOperation]  {
+    return try  FfiConverterSequenceTypeNativePendingAttachmentRetentionOperation.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_attachment_retention_operations(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
 open func prepareContactPhoto(path: String)throws  -> NativeAttachmentInfo  {
     return try  FfiConverterTypeNativeAttachmentInfo_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2352,6 +2527,15 @@ open func removeNotification(notificationKey: String, instance: String)throws   
 }
 }
     
+open func reportAttachmentRemovedByStoragePolicy(attachmentId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_attachment_removed_by_storage_policy(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(attachmentId),uniffiCallStatus
+    )
+}
+}
+    
 open func reportContactSyncBlocked(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2390,6 +2574,16 @@ open func requestAttachmentDownload(attachmentId: String)throws   {try rustCallW
         FfiConverterString.lower(attachmentId),uniffiCallStatus
     )
 }
+}
+    
+open func requestAttachmentRetentionRelease(useId: String)throws  -> NativePendingAttachmentRetentionOperation  {
+    return try  FfiConverterTypeNativePendingAttachmentRetentionOperation_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_attachment_retention_release(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(useId),uniffiCallStatus
+    )
+})
 }
     
 open func requestContactEdit(inputJson: String)throws  -> String  {
@@ -4465,6 +4659,388 @@ public func FfiConverterTypeNativeAttachmentInfo_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeNativeAttachmentInfo_lower(_ value: NativeAttachmentInfo) -> RustBuffer {
     return FfiConverterTypeNativeAttachmentInfo.lower(value)
+}
+
+
+public struct NativeAttachmentRetentionProtocolHeader: Equatable, Hashable {
+    public var name: String
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, value: String) {
+        self.name = name
+        self.value = value
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeAttachmentRetentionProtocolHeader: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentRetentionProtocolHeader: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionProtocolHeader {
+        return
+            try NativeAttachmentRetentionProtocolHeader(
+                name: FfiConverterString.read(from: &buf), 
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeAttachmentRetentionProtocolHeader, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionProtocolHeader_lift(_ buf: RustBuffer) throws -> NativeAttachmentRetentionProtocolHeader {
+    return try FfiConverterTypeNativeAttachmentRetentionProtocolHeader.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionProtocolHeader_lower(_ value: NativeAttachmentRetentionProtocolHeader) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentRetentionProtocolHeader.lower(value)
+}
+
+
+public struct NativeAttachmentRetentionRequest: Equatable, Hashable {
+    public var method: String
+    public var relativePath: String
+    public var jsonBody: String?
+    public var protocolHeader: NativeAttachmentRetentionProtocolHeader?
+    public var expectedSuccessStatus: UInt16
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(method: String, relativePath: String, jsonBody: String?, protocolHeader: NativeAttachmentRetentionProtocolHeader?, expectedSuccessStatus: UInt16) {
+        self.method = method
+        self.relativePath = relativePath
+        self.jsonBody = jsonBody
+        self.protocolHeader = protocolHeader
+        self.expectedSuccessStatus = expectedSuccessStatus
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeAttachmentRetentionRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentRetentionRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionRequest {
+        return
+            try NativeAttachmentRetentionRequest(
+                method: FfiConverterString.read(from: &buf), 
+                relativePath: FfiConverterString.read(from: &buf), 
+                jsonBody: FfiConverterOptionString.read(from: &buf), 
+                protocolHeader: FfiConverterOptionTypeNativeAttachmentRetentionProtocolHeader.read(from: &buf), 
+                expectedSuccessStatus: FfiConverterUInt16.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeAttachmentRetentionRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.method, into: &buf)
+        FfiConverterString.write(value.relativePath, into: &buf)
+        FfiConverterOptionString.write(value.jsonBody, into: &buf)
+        FfiConverterOptionTypeNativeAttachmentRetentionProtocolHeader.write(value.protocolHeader, into: &buf)
+        FfiConverterUInt16.write(value.expectedSuccessStatus, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionRequest_lift(_ buf: RustBuffer) throws -> NativeAttachmentRetentionRequest {
+    return try FfiConverterTypeNativeAttachmentRetentionRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionRequest_lower(_ value: NativeAttachmentRetentionRequest) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentRetentionRequest.lower(value)
+}
+
+
+public struct NativeAttachmentRetentionState: Equatable, Hashable {
+    public var remote: NativeRemoteAttachmentState
+    public var localAvailable: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(remote: NativeRemoteAttachmentState, localAvailable: Bool) {
+        self.remote = remote
+        self.localAvailable = localAvailable
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeAttachmentRetentionState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentRetentionState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionState {
+        return
+            try NativeAttachmentRetentionState(
+                remote: FfiConverterTypeNativeRemoteAttachmentState.read(from: &buf), 
+                localAvailable: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeAttachmentRetentionState, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeRemoteAttachmentState.write(value.remote, into: &buf)
+        FfiConverterBool.write(value.localAvailable, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionState_lift(_ buf: RustBuffer) throws -> NativeAttachmentRetentionState {
+    return try FfiConverterTypeNativeAttachmentRetentionState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionState_lower(_ value: NativeAttachmentRetentionState) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentRetentionState.lower(value)
+}
+
+
+public struct NativeAttachmentStorageStatus: Equatable, Hashable {
+    /**
+     * All size fields are bytes.
+     */
+    public var usedBytes: Int64
+    public var limitBytes: Int64
+    public var baseBytes: Int64
+    public var packBytes: Int64
+    public var protectedBytes: Int64
+    public var removedBytes: Int64
+    public var cleanupState: NativeStorageCleanupState
+    public var cleanupUnavailableReason: NativeStorageCleanupUnavailableReason?
+    public var notice: NativeRetentionNotice
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * All size fields are bytes.
+         */usedBytes: Int64, limitBytes: Int64, baseBytes: Int64, packBytes: Int64, protectedBytes: Int64, removedBytes: Int64, cleanupState: NativeStorageCleanupState, cleanupUnavailableReason: NativeStorageCleanupUnavailableReason?, notice: NativeRetentionNotice) {
+        self.usedBytes = usedBytes
+        self.limitBytes = limitBytes
+        self.baseBytes = baseBytes
+        self.packBytes = packBytes
+        self.protectedBytes = protectedBytes
+        self.removedBytes = removedBytes
+        self.cleanupState = cleanupState
+        self.cleanupUnavailableReason = cleanupUnavailableReason
+        self.notice = notice
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeAttachmentStorageStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentStorageStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentStorageStatus {
+        return
+            try NativeAttachmentStorageStatus(
+                usedBytes: FfiConverterInt64.read(from: &buf), 
+                limitBytes: FfiConverterInt64.read(from: &buf), 
+                baseBytes: FfiConverterInt64.read(from: &buf), 
+                packBytes: FfiConverterInt64.read(from: &buf), 
+                protectedBytes: FfiConverterInt64.read(from: &buf), 
+                removedBytes: FfiConverterInt64.read(from: &buf), 
+                cleanupState: FfiConverterTypeNativeStorageCleanupState.read(from: &buf), 
+                cleanupUnavailableReason: FfiConverterOptionTypeNativeStorageCleanupUnavailableReason.read(from: &buf), 
+                notice: FfiConverterTypeNativeRetentionNotice.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeAttachmentStorageStatus, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.usedBytes, into: &buf)
+        FfiConverterInt64.write(value.limitBytes, into: &buf)
+        FfiConverterInt64.write(value.baseBytes, into: &buf)
+        FfiConverterInt64.write(value.packBytes, into: &buf)
+        FfiConverterInt64.write(value.protectedBytes, into: &buf)
+        FfiConverterInt64.write(value.removedBytes, into: &buf)
+        FfiConverterTypeNativeStorageCleanupState.write(value.cleanupState, into: &buf)
+        FfiConverterOptionTypeNativeStorageCleanupUnavailableReason.write(value.cleanupUnavailableReason, into: &buf)
+        FfiConverterTypeNativeRetentionNotice.write(value.notice, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentStorageStatus_lift(_ buf: RustBuffer) throws -> NativeAttachmentStorageStatus {
+    return try FfiConverterTypeNativeAttachmentStorageStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentStorageStatus_lower(_ value: NativeAttachmentStorageStatus) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentStorageStatus.lower(value)
+}
+
+
+public struct NativeAttachmentUploadRetention: Equatable, Hashable {
+    public var retentionClass: NativeAttachmentRetentionClass
+    public var referenceTracking: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(retentionClass: NativeAttachmentRetentionClass, referenceTracking: Bool) {
+        self.retentionClass = retentionClass
+        self.referenceTracking = referenceTracking
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeAttachmentUploadRetention: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentUploadRetention: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUploadRetention {
+        return
+            try NativeAttachmentUploadRetention(
+                retentionClass: FfiConverterTypeNativeAttachmentRetentionClass.read(from: &buf), 
+                referenceTracking: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeAttachmentUploadRetention, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeAttachmentRetentionClass.write(value.retentionClass, into: &buf)
+        FfiConverterBool.write(value.referenceTracking, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUploadRetention_lift(_ buf: RustBuffer) throws -> NativeAttachmentUploadRetention {
+    return try FfiConverterTypeNativeAttachmentUploadRetention.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUploadRetention_lower(_ value: NativeAttachmentUploadRetention) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentUploadRetention.lower(value)
+}
+
+
+public struct NativeAttachmentUseResponse: Equatable, Hashable {
+    public var useId: String
+    public var attachmentId: String
+    public var deviceId: String
+    public var kind: NativeAttachmentUseKind
+    public var state: NativeAttachmentUseState
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(useId: String, attachmentId: String, deviceId: String, kind: NativeAttachmentUseKind, state: NativeAttachmentUseState) {
+        self.useId = useId
+        self.attachmentId = attachmentId
+        self.deviceId = deviceId
+        self.kind = kind
+        self.state = state
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeAttachmentUseResponse: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentUseResponse: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUseResponse {
+        return
+            try NativeAttachmentUseResponse(
+                useId: FfiConverterString.read(from: &buf), 
+                attachmentId: FfiConverterString.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterTypeNativeAttachmentUseKind.read(from: &buf), 
+                state: FfiConverterTypeNativeAttachmentUseState.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeAttachmentUseResponse, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.useId, into: &buf)
+        FfiConverterString.write(value.attachmentId, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterTypeNativeAttachmentUseKind.write(value.kind, into: &buf)
+        FfiConverterTypeNativeAttachmentUseState.write(value.state, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUseResponse_lift(_ buf: RustBuffer) throws -> NativeAttachmentUseResponse {
+    return try FfiConverterTypeNativeAttachmentUseResponse.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUseResponse_lower(_ value: NativeAttachmentUseResponse) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentUseResponse.lower(value)
 }
 
 
@@ -7208,6 +7784,72 @@ public func FfiConverterTypeNativeOwnerPhoneStatus_lower(_ value: NativeOwnerPho
 }
 
 
+public struct NativePendingAttachmentRetentionOperation: Equatable, Hashable {
+    public var operation: NativeAttachmentUseOperationKind
+    public var useId: String
+    public var attachmentId: String
+    public var deviceId: String
+    public var kind: NativeAttachmentUseKind
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(operation: NativeAttachmentUseOperationKind, useId: String, attachmentId: String, deviceId: String, kind: NativeAttachmentUseKind) {
+        self.operation = operation
+        self.useId = useId
+        self.attachmentId = attachmentId
+        self.deviceId = deviceId
+        self.kind = kind
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativePendingAttachmentRetentionOperation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePendingAttachmentRetentionOperation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePendingAttachmentRetentionOperation {
+        return
+            try NativePendingAttachmentRetentionOperation(
+                operation: FfiConverterTypeNativeAttachmentUseOperationKind.read(from: &buf), 
+                useId: FfiConverterString.read(from: &buf), 
+                attachmentId: FfiConverterString.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterTypeNativeAttachmentUseKind.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativePendingAttachmentRetentionOperation, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeAttachmentUseOperationKind.write(value.operation, into: &buf)
+        FfiConverterString.write(value.useId, into: &buf)
+        FfiConverterString.write(value.attachmentId, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterTypeNativeAttachmentUseKind.write(value.kind, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePendingAttachmentRetentionOperation_lift(_ buf: RustBuffer) throws -> NativePendingAttachmentRetentionOperation {
+    return try FfiConverterTypeNativePendingAttachmentRetentionOperation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePendingAttachmentRetentionOperation_lower(_ value: NativePendingAttachmentRetentionOperation) -> RustBuffer {
+    return FfiConverterTypeNativePendingAttachmentRetentionOperation.lower(value)
+}
+
+
 public struct NativePendingVaultRequest: Equatable, Hashable {
     public var origin: String
     public var requestId: String
@@ -7691,6 +8333,90 @@ public func FfiConverterTypeNativeRawSnapshotRecord_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeNativeRawSnapshotRecord_lower(_ value: NativeRawSnapshotRecord) -> RustBuffer {
     return FfiConverterTypeNativeRawSnapshotRecord.lower(value)
+}
+
+
+public struct NativeRetentionNotice: Equatable, Hashable {
+    public var state: NativeRetentionNoticeState
+    public var policyVersion: String?
+    /**
+     * Unix seconds supplied by the server.
+     */
+    public var presentedAtSeconds: Int64?
+    /**
+     * Unix seconds supplied by the server.
+     */
+    public var acknowledgedAtSeconds: Int64?
+    /**
+     * Unix seconds supplied by the server.
+     */
+    public var activationAtSeconds: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(state: NativeRetentionNoticeState, policyVersion: String?, 
+        /**
+         * Unix seconds supplied by the server.
+         */presentedAtSeconds: Int64?, 
+        /**
+         * Unix seconds supplied by the server.
+         */acknowledgedAtSeconds: Int64?, 
+        /**
+         * Unix seconds supplied by the server.
+         */activationAtSeconds: Int64?) {
+        self.state = state
+        self.policyVersion = policyVersion
+        self.presentedAtSeconds = presentedAtSeconds
+        self.acknowledgedAtSeconds = acknowledgedAtSeconds
+        self.activationAtSeconds = activationAtSeconds
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeRetentionNotice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRetentionNotice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRetentionNotice {
+        return
+            try NativeRetentionNotice(
+                state: FfiConverterTypeNativeRetentionNoticeState.read(from: &buf), 
+                policyVersion: FfiConverterOptionString.read(from: &buf), 
+                presentedAtSeconds: FfiConverterOptionInt64.read(from: &buf), 
+                acknowledgedAtSeconds: FfiConverterOptionInt64.read(from: &buf), 
+                activationAtSeconds: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeRetentionNotice, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeRetentionNoticeState.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.policyVersion, into: &buf)
+        FfiConverterOptionInt64.write(value.presentedAtSeconds, into: &buf)
+        FfiConverterOptionInt64.write(value.acknowledgedAtSeconds, into: &buf)
+        FfiConverterOptionInt64.write(value.activationAtSeconds, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRetentionNotice_lift(_ buf: RustBuffer) throws -> NativeRetentionNotice {
+    return try FfiConverterTypeNativeRetentionNotice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRetentionNotice_lower(_ value: NativeRetentionNotice) -> RustBuffer {
+    return FfiConverterTypeNativeRetentionNotice.lower(value)
 }
 
 
@@ -8671,6 +9397,7 @@ enum MobileBindingsError: Swift.Error, Equatable, Hashable, Foundation.Localized
     case InvalidKeyCache
     case KeysUnavailable
     case InvalidMedia
+    case AttachmentRemovedByStoragePolicy
     case Storage
     case MmsAcquisitionLimit
     case MmsMediaQuota
@@ -8720,10 +9447,11 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
         case 14: return .InvalidKeyCache
         case 15: return .KeysUnavailable
         case 16: return .InvalidMedia
-        case 17: return .Storage
-        case 18: return .MmsAcquisitionLimit
-        case 19: return .MmsMediaQuota
-        case 20: return .SmsCapacity
+        case 17: return .AttachmentRemovedByStoragePolicy
+        case 18: return .Storage
+        case 19: return .MmsAcquisitionLimit
+        case 20: return .MmsMediaQuota
+        case 21: return .SmsCapacity
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -8800,20 +9528,24 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(16))
         
         
-        case .Storage:
+        case .AttachmentRemovedByStoragePolicy:
             writeInt(&buf, Int32(17))
         
         
-        case .MmsAcquisitionLimit:
+        case .Storage:
             writeInt(&buf, Int32(18))
         
         
-        case .MmsMediaQuota:
+        case .MmsAcquisitionLimit:
             writeInt(&buf, Int32(19))
         
         
-        case .SmsCapacity:
+        case .MmsMediaQuota:
             writeInt(&buf, Int32(20))
+        
+        
+        case .SmsCapacity:
+            writeInt(&buf, Int32(21))
         
         }
     }
@@ -8833,6 +9565,138 @@ public func FfiConverterTypeMobileBindingsError_lift(_ buf: RustBuffer) throws -
 public func FfiConverterTypeMobileBindingsError_lower(_ value: MobileBindingsError) -> RustBuffer {
     return FfiConverterTypeMobileBindingsError.lower(value)
 }
+
+
+
+public enum NativeAttachmentRetentionClass: Equatable, Hashable {
+    
+    case protected
+    case messageMedia
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeAttachmentRetentionClass: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentRetentionClass: FfiConverterRustBuffer {
+    typealias SwiftType = NativeAttachmentRetentionClass
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionClass {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .protected
+        
+        case 2: return .messageMedia
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeAttachmentRetentionClass, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .protected:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .messageMedia:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionClass_lift(_ buf: RustBuffer) throws -> NativeAttachmentRetentionClass {
+    return try FfiConverterTypeNativeAttachmentRetentionClass.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionClass_lower(_ value: NativeAttachmentRetentionClass) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentRetentionClass.lower(value)
+}
+
+
+
+
+public enum NativeAttachmentRetentionErrorClassification: Equatable, Hashable {
+    
+    case removedByStoragePolicy
+    case other
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeAttachmentRetentionErrorClassification: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentRetentionErrorClassification: FfiConverterRustBuffer {
+    typealias SwiftType = NativeAttachmentRetentionErrorClassification
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionErrorClassification {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .removedByStoragePolicy
+        
+        case 2: return .other
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeAttachmentRetentionErrorClassification, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .removedByStoragePolicy:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .other:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionErrorClassification_lift(_ buf: RustBuffer) throws -> NativeAttachmentRetentionErrorClassification {
+    return try FfiConverterTypeNativeAttachmentRetentionErrorClassification.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentRetentionErrorClassification_lower(_ value: NativeAttachmentRetentionErrorClassification) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentRetentionErrorClassification.lower(value)
+}
+
 
 
 
@@ -8911,6 +9775,291 @@ public func FfiConverterTypeNativeAttachmentState_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeNativeAttachmentState_lower(_ value: NativeAttachmentState) -> RustBuffer {
     return FfiConverterTypeNativeAttachmentState.lower(value)
+}
+
+
+
+
+public enum NativeAttachmentUseKind: Equatable, Hashable {
+    
+    case messageHistory
+    case pendingSend
+    case contactPhoto
+    case restoreCritical
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeAttachmentUseKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentUseKind: FfiConverterRustBuffer {
+    typealias SwiftType = NativeAttachmentUseKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUseKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .messageHistory
+        
+        case 2: return .pendingSend
+        
+        case 3: return .contactPhoto
+        
+        case 4: return .restoreCritical
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeAttachmentUseKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .messageHistory:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pendingSend:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .contactPhoto:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .restoreCritical:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUseKind_lift(_ buf: RustBuffer) throws -> NativeAttachmentUseKind {
+    return try FfiConverterTypeNativeAttachmentUseKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUseKind_lower(_ value: NativeAttachmentUseKind) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentUseKind.lower(value)
+}
+
+
+
+
+public enum NativeAttachmentUseOperationKind: Equatable, Hashable {
+    
+    case register
+    case release
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeAttachmentUseOperationKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentUseOperationKind: FfiConverterRustBuffer {
+    typealias SwiftType = NativeAttachmentUseOperationKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUseOperationKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .register
+        
+        case 2: return .release
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeAttachmentUseOperationKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .register:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .release:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUseOperationKind_lift(_ buf: RustBuffer) throws -> NativeAttachmentUseOperationKind {
+    return try FfiConverterTypeNativeAttachmentUseOperationKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUseOperationKind_lower(_ value: NativeAttachmentUseOperationKind) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentUseOperationKind.lower(value)
+}
+
+
+
+
+public enum NativeAttachmentUseState: Equatable, Hashable {
+    
+    case registered
+    case released
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeAttachmentUseState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAttachmentUseState: FfiConverterRustBuffer {
+    typealias SwiftType = NativeAttachmentUseState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUseState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .registered
+        
+        case 2: return .released
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeAttachmentUseState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .registered:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .released:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUseState_lift(_ buf: RustBuffer) throws -> NativeAttachmentUseState {
+    return try FfiConverterTypeNativeAttachmentUseState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAttachmentUseState_lower(_ value: NativeAttachmentUseState) -> RustBuffer {
+    return FfiConverterTypeNativeAttachmentUseState.lower(value)
+}
+
+
+
+
+public enum NativeDeviceRetentionAvailability: Equatable, Hashable {
+    
+    case unsupported
+    case temporarilyUnavailable
+    case other
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeDeviceRetentionAvailability: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeDeviceRetentionAvailability: FfiConverterRustBuffer {
+    typealias SwiftType = NativeDeviceRetentionAvailability
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeDeviceRetentionAvailability {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .unsupported
+        
+        case 2: return .temporarilyUnavailable
+        
+        case 3: return .other
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeDeviceRetentionAvailability, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .unsupported:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .temporarilyUnavailable:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .other:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeDeviceRetentionAvailability_lift(_ buf: RustBuffer) throws -> NativeDeviceRetentionAvailability {
+    return try FfiConverterTypeNativeDeviceRetentionAvailability.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeDeviceRetentionAvailability_lower(_ value: NativeDeviceRetentionAvailability) -> RustBuffer {
+    return FfiConverterTypeNativeDeviceRetentionAvailability.lower(value)
 }
 
 
@@ -10181,6 +11330,145 @@ public func FfiConverterTypeNativePhoneReadTransport_lower(_ value: NativePhoneR
 
 
 
+public enum NativeRemoteAttachmentState: Equatable, Hashable {
+    
+    case available
+    case removedByStoragePolicy
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeRemoteAttachmentState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRemoteAttachmentState: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRemoteAttachmentState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRemoteAttachmentState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .available
+        
+        case 2: return .removedByStoragePolicy
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeRemoteAttachmentState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .available:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .removedByStoragePolicy:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRemoteAttachmentState_lift(_ buf: RustBuffer) throws -> NativeRemoteAttachmentState {
+    return try FfiConverterTypeNativeRemoteAttachmentState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRemoteAttachmentState_lower(_ value: NativeRemoteAttachmentState) -> RustBuffer {
+    return FfiConverterTypeNativeRemoteAttachmentState.lower(value)
+}
+
+
+
+
+public enum NativeRetentionNoticeState: Equatable, Hashable {
+    
+    case notPresented
+    case gracePeriod
+    case eligible
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeRetentionNoticeState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRetentionNoticeState: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRetentionNoticeState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRetentionNoticeState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .notPresented
+        
+        case 2: return .gracePeriod
+        
+        case 3: return .eligible
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeRetentionNoticeState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .notPresented:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .gracePeriod:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .eligible:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRetentionNoticeState_lift(_ buf: RustBuffer) throws -> NativeRetentionNoticeState {
+    return try FfiConverterTypeNativeRetentionNoticeState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRetentionNoticeState_lower(_ value: NativeRetentionNoticeState) -> RustBuffer {
+    return FfiConverterTypeNativeRetentionNoticeState.lower(value)
+}
+
+
+
+
 public enum NativeSendResult: Equatable, Hashable {
     
     case submitted
@@ -10500,6 +11788,187 @@ public func FfiConverterTypeNativeSnapshotPurpose_lower(_ value: NativeSnapshotP
 
 
 
+public enum NativeStorageCleanupState: Equatable, Hashable {
+    
+    case disabled
+    case blocked
+    case pending
+    case available
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeStorageCleanupState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeStorageCleanupState: FfiConverterRustBuffer {
+    typealias SwiftType = NativeStorageCleanupState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeStorageCleanupState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .disabled
+        
+        case 2: return .blocked
+        
+        case 3: return .pending
+        
+        case 4: return .available
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeStorageCleanupState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .disabled:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .blocked:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .available:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeStorageCleanupState_lift(_ buf: RustBuffer) throws -> NativeStorageCleanupState {
+    return try FfiConverterTypeNativeStorageCleanupState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeStorageCleanupState_lower(_ value: NativeStorageCleanupState) -> RustBuffer {
+    return FfiConverterTypeNativeStorageCleanupState.lower(value)
+}
+
+
+
+
+public enum NativeStorageCleanupUnavailableReason: Equatable, Hashable {
+    
+    case noticeNotEligible
+    case deviceNotReady
+    case readOnly
+    case entitlementUnavailable
+    case providerReconciliationPending
+    case billingMutationPending
+    case cleanupDisabled
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeStorageCleanupUnavailableReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeStorageCleanupUnavailableReason: FfiConverterRustBuffer {
+    typealias SwiftType = NativeStorageCleanupUnavailableReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeStorageCleanupUnavailableReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .noticeNotEligible
+        
+        case 2: return .deviceNotReady
+        
+        case 3: return .readOnly
+        
+        case 4: return .entitlementUnavailable
+        
+        case 5: return .providerReconciliationPending
+        
+        case 6: return .billingMutationPending
+        
+        case 7: return .cleanupDisabled
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeStorageCleanupUnavailableReason, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .noticeNotEligible:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .deviceNotReady:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .readOnly:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .entitlementUnavailable:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .providerReconciliationPending:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .billingMutationPending:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .cleanupDisabled:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeStorageCleanupUnavailableReason_lift(_ buf: RustBuffer) throws -> NativeStorageCleanupUnavailableReason {
+    return try FfiConverterTypeNativeStorageCleanupUnavailableReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeStorageCleanupUnavailableReason_lower(_ value: NativeStorageCleanupUnavailableReason) -> RustBuffer {
+    return FfiConverterTypeNativeStorageCleanupUnavailableReason.lower(value)
+}
+
+
+
+
 public enum SyncStepState: Equatable, Hashable {
     
     case completed
@@ -10687,6 +12156,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNativeAttachmentRetentionProtocolHeader: FfiConverterRustBuffer {
+    typealias SwiftType = NativeAttachmentRetentionProtocolHeader?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeAttachmentRetentionProtocolHeader.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeAttachmentRetentionProtocolHeader.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeNativeCarrierCommand: FfiConverterRustBuffer {
     typealias SwiftType = NativeCarrierCommand?
 
@@ -10847,6 +12340,30 @@ fileprivate struct FfiConverterOptionTypeNativeMmsBackfillPause: FfiConverterRus
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeNativeMmsBackfillPause.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeNativeStorageCleanupUnavailableReason: FfiConverterRustBuffer {
+    typealias SwiftType = NativeStorageCleanupUnavailableReason?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeStorageCleanupUnavailableReason.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeStorageCleanupUnavailableReason.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -11230,6 +12747,31 @@ fileprivate struct FfiConverterSequenceTypeNativeNotificationTarget: FfiConverte
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNativePendingAttachmentRetentionOperation: FfiConverterRustBuffer {
+    typealias SwiftType = [NativePendingAttachmentRetentionOperation]
+
+    public static func write(_ value: [NativePendingAttachmentRetentionOperation], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativePendingAttachmentRetentionOperation.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativePendingAttachmentRetentionOperation] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativePendingAttachmentRetentionOperation]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativePendingAttachmentRetentionOperation.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNativePhoneReadCandidate: FfiConverterRustBuffer {
     typealias SwiftType = [NativePhoneReadCandidate]
 
@@ -11394,6 +12936,122 @@ public func openNativeClient(config: NativeOpenConfig)throws  -> NativeClient  {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_open_native_client(
         FfiConverterTypeNativeOpenConfig_lower(config),uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionCapabilityRequest(cleanupReady: Bool)throws  -> NativeAttachmentRetentionRequest  {
+    return try  FfiConverterTypeNativeAttachmentRetentionRequest_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_capability_request(
+        FfiConverterBool.lower(cleanupReady),uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionNoticeAcknowledgementRequest(policyVersion: String)throws  -> NativeAttachmentRetentionRequest  {
+    return try  FfiConverterTypeNativeAttachmentRetentionRequest_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_acknowledgement_request(
+        FfiConverterString.lower(policyVersion),uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionNoticeCopySupported(policyVersion: String?) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_copy_supported(
+        FfiConverterOptionString.lower(policyVersion),uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionPrepareLimitMax() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_prepare_limit_max(uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionProtocolHeader() -> NativeAttachmentRetentionProtocolHeader  {
+    return try!  FfiConverterTypeNativeAttachmentRetentionProtocolHeader_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_protocol_header(uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionRegisterRequest(operation: NativePendingAttachmentRetentionOperation)throws  -> NativeAttachmentRetentionRequest  {
+    return try  FfiConverterTypeNativeAttachmentRetentionRequest_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_register_request(
+        FfiConverterTypeNativePendingAttachmentRetentionOperation_lower(operation),uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionReleaseRequest(operation: NativePendingAttachmentRetentionOperation)throws  -> NativeAttachmentRetentionRequest  {
+    return try  FfiConverterTypeNativeAttachmentRetentionRequest_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_release_request(
+        FfiConverterTypeNativePendingAttachmentRetentionOperation_lower(operation),uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionResponseMaxBytes() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_response_max_bytes(uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionResponseReadLimitBytes() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_response_read_limit_bytes(uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionStatusRequest() -> NativeAttachmentRetentionRequest  {
+    return try!  FfiConverterTypeNativeAttachmentRetentionRequest_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_status_request(uniffiCallStatus
+    )
+})
+}
+public func attachmentRetentionSupportedNoticePolicyVersion() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_supported_notice_policy_version(uniffiCallStatus
+    )
+})
+}
+public func classifyAttachmentRetentionError(status: UInt16, responseJson: String) -> NativeAttachmentRetentionErrorClassification  {
+    return try!  FfiConverterTypeNativeAttachmentRetentionErrorClassification_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_classify_attachment_retention_error(
+        FfiConverterUInt16.lower(status),
+        FfiConverterString.lower(responseJson),uniffiCallStatus
+    )
+})
+}
+public func classifyDeviceRetentionAvailability(status: UInt16, responseJson: String) -> NativeDeviceRetentionAvailability  {
+    return try!  FfiConverterTypeNativeDeviceRetentionAvailability_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_classify_device_retention_availability(
+        FfiConverterUInt16.lower(status),
+        FfiConverterString.lower(responseJson),uniffiCallStatus
+    )
+})
+}
+public func parseAttachmentRetentionResponse(responseJson: String)throws  -> NativeAttachmentUseResponse  {
+    return try  FfiConverterTypeNativeAttachmentUseResponse_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_attachment_retention_response(
+        FfiConverterString.lower(responseJson),uniffiCallStatus
+    )
+})
+}
+public func parseAttachmentRetentionStatus(responseJson: String)throws  -> NativeAttachmentStorageStatus  {
+    return try  FfiConverterTypeNativeAttachmentStorageStatus_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_attachment_retention_status(
+        FfiConverterString.lower(responseJson),uniffiCallStatus
     )
 })
 }
@@ -11596,6 +13254,51 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_open_native_client() != 13839) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_capability_request() != 23970) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_acknowledgement_request() != 22360) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_copy_supported() != 6598) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_prepare_limit_max() != 51910) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_protocol_header() != 62707) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_register_request() != 59154) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_release_request() != 63955) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_response_max_bytes() != 19422) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_response_read_limit_bytes() != 62109) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_status_request() != 16652) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_supported_notice_policy_version() != 57264) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_classify_attachment_retention_error() != 9883) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_classify_device_retention_availability() != 32113) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_attachment_retention_response() != 15381) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_attachment_retention_status() != 57765) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_func_generate_hosted_passphrase() != 10342) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11674,6 +13377,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_raw_page() != 34355) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_attachment_retention_response() != 41715) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_pending() != 53530) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11681,6 +13387,24 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_info() != 19943) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_preparation_pending() != 30293) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_protocol_enabled() != 31798) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_ready() != 31396) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_retention_state() != 22988) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_attachment_upload_retention() != 31099) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_attachment_retention_use() != 13621) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_contact_scan() != 53985) {
@@ -11744,6 +13468,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compose_drafts() != 45000) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_configure_attachment_retention_protocol() != 5014) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_consume_phone_read_effects() != 12647) {
@@ -11839,6 +13566,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_install_downloaded_attachment() != 42975) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_invalidate_attachment_retention_reconciliation() != 16848) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_contact_books_json() != 47867) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11849,6 +13579,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_restorable_contacts_json() != 20207) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_attachment_retention_reconciled() != 315) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_attachment_uploaded() != 29397) {
@@ -11920,6 +13653,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity() != 20629) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_attachment_retention_operations() != 65527) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_command_attachment_count() != 13128) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11974,6 +13710,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment() != 2885) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment_retention_operations() != 3832) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_contact_photo() != 6113) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12001,6 +13740,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification() != 35619) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_attachment_removed_by_storage_policy() != 55290) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_contact_sync_blocked() != 17812) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12011,6 +13753,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_attachment_download() != 39338) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_attachment_retention_release() != 18267) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_edit() != 41512) {

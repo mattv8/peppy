@@ -9,7 +9,10 @@ use http_body_util::BodyExt;
 use peppy_hosted_api::{ApnsEnvironment, PushConfigAdvertisement, PushProvider};
 use peppy_server::{
     ServerBuilder,
-    api::{AccessPolicy, AccessPrincipal, Operation, PolicyFuture, create_owner},
+    api::{
+        AccessPolicy, AccessPrincipal, AttachmentStoragePolicy, Operation, PolicyFuture,
+        create_owner,
+    },
     config::Config,
 };
 use serde_json::{Value, json};
@@ -90,6 +93,36 @@ impl AccessPolicy for DatabasePolicy {
     }
 }
 
+struct CleanupPolicy {
+    limit_bytes: i64,
+}
+
+impl AccessPolicy for CleanupPolicy {
+    fn authorize(
+        &self,
+        _principal: AccessPrincipal,
+        _operation: Operation,
+    ) -> PolicyFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn attachment_storage_policy_in_transaction<'a>(
+        &'a self,
+        _principal: AccessPrincipal,
+        _configured_limit_bytes: i64,
+        _connection: &'a mut sqlx::PgConnection,
+    ) -> PolicyFuture<'a, Result<AttachmentStoragePolicy, sqlx::Error>> {
+        Box::pin(async move {
+            Ok(AttachmentStoragePolicy {
+                allow_upload: true,
+                limit_bytes: self.limit_bytes,
+                cleanup_authorized: true,
+                policy_version: Some("test-policy".into()),
+            })
+        })
+    }
+}
+
 struct TestServer {
     pool: PgPool,
     admin: PgPool,
@@ -165,6 +198,44 @@ impl TestServer {
         create_owner(&self.pool, profile, vec![7, 8, 9], fingerprint, 1)
             .await
             .unwrap()
+    }
+
+    async fn add_device(
+        &self,
+        owner: &peppy_server::api::Credential,
+    ) -> peppy_server::api::Credential {
+        let device_id = Uuid::new_v4();
+        let device_token = (0..3)
+            .map(|_| Uuid::new_v4().simple().to_string())
+            .collect::<String>();
+        let fingerprint: String =
+            sqlx::query_scalar("SELECT profile_fingerprint FROM vaults WHERE vault_id=$1")
+                .bind(owner.vault_id)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',$3,1)")
+            .bind(owner.vault_id)
+            .bind(device_id)
+            .bind(fingerprint)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)",
+        )
+        .bind(Sha256::digest(device_token.as_bytes()).as_slice())
+        .bind(owner.vault_id)
+        .bind(device_id)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        peppy_server::api::Credential {
+            device_token,
+            vault_id: owner.vault_id,
+            device_id,
+            role: "device".into(),
+        }
     }
 
     async fn request(
@@ -898,5 +969,805 @@ async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
         )
         .await;
     assert_eq!(response.0, StatusCode::PAYLOAD_TOO_LARGE, "{}", response.1);
+    server.shutdown().await;
+}
+
+async fn insert_retention_candidate(
+    pool: &PgPool,
+    owner: &peppy_server::api::Credential,
+    attachment_id: Uuid,
+    object_key: &str,
+    bytes: i64,
+    finalized_offset_seconds: i64,
+) {
+    sqlx::query("UPDATE attachment_retention_devices SET cleanup_ready=TRUE,reconciliation_needed=FALSE WHERE vault_id=$1 AND device_id=$2")
+        .bind(owner.vault_id)
+        .bind(owner.device_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id,retention_class,finalized_at) VALUES($1,$2,$3,$4,$5,$6,'message_media',now()+($7 * interval '1 second'))")
+        .bind(owner.vault_id)
+        .bind(attachment_id)
+        .bind(object_key)
+        .bind(bytes)
+        .bind(vec![0_u8; 32])
+        .bind(owner.device_id)
+        .bind(finalized_offset_seconds)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO attachment_retention_uses(vault_id,use_id,attachment_id,device_id,kind) VALUES($1,$2,$3,$4,'message_history')")
+        .bind(owner.vault_id)
+        .bind(Uuid::new_v4())
+        .bind(attachment_id)
+        .bind(owner.device_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn cleanup_reserve(
+    server: &TestServer,
+    owner: &peppy_server::api::Credential,
+    bytes: i64,
+) -> (StatusCode, Value) {
+    server
+        .raw_request(
+            "POST",
+            "/v1/attachments/reserve",
+            &owner.device_token,
+            Body::from(
+                json!({
+                    "declared_ciphertext_bytes": bytes,
+                    "declared_ciphertext_sha256": hex::encode(Sha256::digest(vec![1_u8; bytes as usize])),
+                    "retention_class": "message_media",
+                    "reference_tracking": true,
+                })
+                .to_string(),
+            ),
+            &[
+                (header::CONTENT_TYPE.as_str(), "application/json"),
+                ("peppy-attachment-retention-protocol", "1"),
+            ],
+        )
+        .await
+}
+
+#[tokio::test]
+async fn cleanup_authorized_admission_selects_only_earliest_sufficient_victims() {
+    let _guard = TEST_LOCK.lock().await;
+    let server =
+        TestServer::start_with_policy(Arc::new(CleanupPolicy { limit_bytes: 10 }), 5).await;
+
+    let owner = server.owner().await;
+    let earliest = Uuid::new_v4();
+    let later = Uuid::new_v4();
+    insert_retention_candidate(&server.pool, &owner, earliest, "private/earliest", 4, -10).await;
+    insert_retention_candidate(&server.pool, &owner, later, "private/later", 6, -5).await;
+
+    let (status, body) = cleanup_reserve(&server, &owner, 3).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "storage_cleanup_pending");
+    let removed: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT attachment_id FROM attachment_removals WHERE vault_id=$1 ORDER BY removed_at,attachment_id",
+    )
+    .bind(owner.vault_id)
+    .fetch_all(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(removed, vec![earliest]);
+    let policy_version: Option<String> = sqlx::query_scalar(
+        "SELECT policy_version FROM attachment_removals WHERE vault_id=$1 AND attachment_id=$2",
+    )
+    .bind(owner.vault_id)
+    .bind(earliest)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(policy_version.as_deref(), Some("test-policy"));
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE vault_id=$1 AND attachment_id=$2)"
+        )
+        .bind(owner.vault_id)
+        .bind(later)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap()
+    );
+
+    let protected_uses = server.owner().await;
+    for (index, kind) in ["pending_send", "contact_photo", "restore_critical"]
+        .into_iter()
+        .enumerate()
+    {
+        let attachment_id = Uuid::new_v4();
+        insert_retention_candidate(
+            &server.pool,
+            &protected_uses,
+            attachment_id,
+            &format!("private/protected-use-{index}"),
+            3,
+            index as i64,
+        )
+        .await;
+        sqlx::query("INSERT INTO attachment_retention_uses(vault_id,use_id,attachment_id,device_id,kind) VALUES($1,$2,$3,$4,$5)")
+            .bind(protected_uses.vault_id).bind(Uuid::new_v4()).bind(attachment_id).bind(protected_uses.device_id).bind(kind)
+            .execute(&server.pool).await.unwrap();
+    }
+    assert_eq!(
+        cleanup_reserve(&server, &protected_uses, 2).await.0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM attachment_removals WHERE vault_id=$1")
+            .bind(protected_uses.vault_id)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let oversized = server.owner().await;
+    let oversized_candidate = Uuid::new_v4();
+    insert_retention_candidate(
+        &server.pool,
+        &oversized,
+        oversized_candidate,
+        "private/oversized",
+        4,
+        -1,
+    )
+    .await;
+    assert_eq!(
+        cleanup_reserve(&server, &oversized, 11).await.0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM attachment_removals WHERE vault_id=$1")
+            .bind(oversized.vault_id)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let insufficient = server.owner().await;
+    let insufficient_candidate = Uuid::new_v4();
+    insert_retention_candidate(
+        &server.pool,
+        &insufficient,
+        insufficient_candidate,
+        "private/insufficient",
+        4,
+        -1,
+    )
+    .await;
+    sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id) VALUES($1,$2,'private/protected',8,$3,$4)")
+        .bind(insufficient.vault_id).bind(Uuid::new_v4()).bind(vec![0_u8; 32]).bind(insufficient.device_id).execute(&server.pool).await.unwrap();
+    assert_eq!(
+        cleanup_reserve(&server, &insufficient, 3).await.0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM attachment_removals WHERE vault_id=$1")
+            .bind(insufficient.vault_id)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn retention_capability_requires_explicit_reconciliation_and_legacy_events_withdraw_it() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start(Arc::new(Policy::allowing([Operation::Send]))).await;
+    let owner = server.owner().await;
+    let device = server.add_device(&owner).await;
+    let (_, fingerprint) = profile(device.vault_id, 1);
+
+    let initial: (bool, bool) = sqlx::query_as("SELECT cleanup_ready,reconciliation_needed FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$2")
+        .bind(device.vault_id).bind(device.device_id).fetch_one(&server.pool).await.unwrap();
+    assert_eq!(initial, (false, true));
+
+    assert_eq!(
+        server
+            .request(
+                "PUT",
+                "/v1/devices/self/retention-capability",
+                &device.device_token,
+                json!({"protocol_version":1,"cleanup_ready":true})
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let ready: (bool, bool) = sqlx::query_as("SELECT cleanup_ready,reconciliation_needed FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$2")
+        .bind(device.vault_id).bind(device.device_id).fetch_one(&server.pool).await.unwrap();
+    assert_eq!(ready, (true, false));
+
+    assert_eq!(
+        server
+            .request(
+                "POST",
+                "/v1/events",
+                &device.device_token,
+                event(device.vault_id, device.device_id, &fingerprint)
+            )
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let withdrawn: (bool, bool) = sqlx::query_as("SELECT cleanup_ready,reconciliation_needed FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$2")
+        .bind(device.vault_id).bind(device.device_id).fetch_one(&server.pool).await.unwrap();
+    assert_eq!(withdrawn, (false, true));
+
+    server.shutdown().await;
+}
+
+async fn insert_finalized_attachment(
+    server: &TestServer,
+    credential: &peppy_server::api::Credential,
+) -> Uuid {
+    let attachment_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id,retention_class) VALUES($1,$2,$3,1,$4,$5,'message_media')")
+        .bind(credential.vault_id)
+        .bind(attachment_id)
+        .bind(format!("private/{attachment_id}"))
+        .bind(vec![0_u8; 32])
+        .bind(credential.device_id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    attachment_id
+}
+
+#[tokio::test]
+async fn retention_use_routes_enforce_identity_immutability_and_terminal_release() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start(Arc::new(Policy::allowing([Operation::Upload]))).await;
+    let owner = server.owner().await;
+    let device = server.add_device(&owner).await;
+    let foreign = server.add_device(&owner).await;
+    let attachment_id = insert_finalized_attachment(&server, &device).await;
+    assert_eq!(
+        server
+            .request(
+                "PUT",
+                "/v1/devices/self/retention-capability",
+                &device.device_token,
+                json!({"protocol_version":1,"cleanup_ready":true})
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let use_id = Uuid::new_v4();
+    let path = format!("/v1/attachments/{attachment_id}/retention-uses");
+    let register = json!({"use_id":use_id,"attachment_id":attachment_id,"device_id":device.device_id,"kind":"pending_send"});
+
+    let response = server
+        .raw_request(
+            "POST",
+            &path,
+            &device.device_token,
+            Body::from(register.to_string()),
+            &[(header::CONTENT_TYPE.as_str(), "application/json")],
+        )
+        .await;
+    assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+    assert_eq!(response.1["state"], "registered");
+    let readiness: (bool, bool) = sqlx::query_as("SELECT cleanup_ready,reconciliation_needed FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$2")
+        .bind(device.vault_id).bind(device.device_id).fetch_one(&server.pool).await.unwrap();
+    assert_eq!(readiness, (false, true));
+
+    let conflict = json!({"use_id":use_id,"attachment_id":attachment_id,"device_id":device.device_id,"kind":"contact_photo"});
+    assert_eq!(
+        server
+            .raw_request(
+                "POST",
+                &path,
+                &device.device_token,
+                Body::from(conflict.to_string()),
+                &[
+                    (header::CONTENT_TYPE.as_str(), "application/json"),
+                    ("peppy-attachment-retention-protocol", "1")
+                ]
+            )
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+
+    let wrong_path = format!("/v1/attachments/{}/retention-uses", Uuid::new_v4());
+    assert_eq!(
+        server
+            .raw_request(
+                "POST",
+                &wrong_path,
+                &device.device_token,
+                Body::from(register.to_string()),
+                &[(header::CONTENT_TYPE.as_str(), "application/json")]
+            )
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let foreign_body =
+        json!({"use_id":use_id,"attachment_id":attachment_id,"device_id":device.device_id});
+    let release_path = format!("{path}/{use_id}/release");
+    assert_eq!(
+        server
+            .raw_request(
+                "POST",
+                &release_path,
+                &foreign.device_token,
+                Body::from(foreign_body.to_string()),
+                &[(header::CONTENT_TYPE.as_str(), "application/json")]
+            )
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    let release =
+        json!({"use_id":use_id,"attachment_id":attachment_id,"device_id":device.device_id});
+    assert_eq!(
+        server
+            .raw_request(
+                "POST",
+                &release_path,
+                &device.device_token,
+                Body::from(release.to_string()),
+                &[
+                    (header::CONTENT_TYPE.as_str(), "application/json"),
+                    ("peppy-attachment-retention-protocol", "1")
+                ]
+            )
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let replay = server
+        .raw_request(
+            "POST",
+            &path,
+            &device.device_token,
+            Body::from(register.to_string()),
+            &[
+                (header::CONTENT_TYPE.as_str(), "application/json"),
+                ("peppy-attachment-retention-protocol", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(replay.0, StatusCode::OK);
+    assert_eq!(replay.1["state"], "released");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn removed_attachment_id_is_gone_on_every_authorization_path() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start(Arc::new(Policy::allowing([
+        Operation::Read,
+        Operation::Upload,
+        Operation::Publish,
+        Operation::DeleteVault,
+    ])))
+    .await;
+    let owner = server.owner().await;
+    let attachment_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO attachment_removals(vault_id,attachment_id,object_key,ciphertext_bytes,policy_version,purged_at) VALUES($1,$2,'private/removed',1,'test',now())")
+        .bind(owner.vault_id).bind(attachment_id).execute(&server.pool).await.unwrap();
+    let protocol = [("peppy-attachment-retention-protocol", "1")];
+    let json_headers = [
+        (header::CONTENT_TYPE.as_str(), "application/json"),
+        ("peppy-attachment-retention-protocol", "1"),
+    ];
+    let hash = hex::encode(Sha256::digest(b"x"));
+    let cases = [
+        (
+            "POST",
+            format!("/v1/attachments/reserve"),
+            json!({"attachment_id":attachment_id,"declared_ciphertext_bytes":1,"declared_ciphertext_sha256":hash}),
+            json_headers.as_slice(),
+        ),
+        (
+            "POST",
+            format!("/v1/attachments/{attachment_id}/finalize"),
+            Value::Null,
+            protocol.as_slice(),
+        ),
+        (
+            "GET",
+            format!("/v1/attachments/{attachment_id}"),
+            Value::Null,
+            protocol.as_slice(),
+        ),
+        (
+            "POST",
+            format!("/v1/attachments/{attachment_id}/references"),
+            json!({"references":[{"producer_device_id":owner.device_id.to_string(),"producer_sequence":"1"}]}),
+            json_headers.as_slice(),
+        ),
+        (
+            "POST",
+            format!("/v1/attachments/{attachment_id}/public-copies"),
+            Value::Null,
+            protocol.as_slice(),
+        ),
+        (
+            "POST",
+            format!("/v1/attachments/{attachment_id}/retention-uses"),
+            json!({"use_id":Uuid::new_v4(),"attachment_id":attachment_id,"device_id":owner.device_id,"kind":"message_history"}),
+            json_headers.as_slice(),
+        ),
+    ];
+    for (method, path, body, headers) in cases {
+        let response = server
+            .raw_request(
+                method,
+                &path,
+                &owner.device_token,
+                Body::from(body.to_string()),
+                headers,
+            )
+            .await;
+        assert_eq!(
+            response.0,
+            StatusCode::GONE,
+            "{method} {path}: {}",
+            response.1
+        );
+    }
+    let upload = server
+        .raw_request(
+            "PUT",
+            &format!("/v1/attachments/{attachment_id}/upload"),
+            &owner.device_token,
+            Body::from("x"),
+            &protocol,
+        )
+        .await;
+    assert_eq!(upload.0, StatusCode::GONE, "{}", upload.1);
+    let deleted = server
+        .request(
+            "DELETE",
+            "/v1/vault",
+            &owner.device_token,
+            json!({"vault_id":owner.vault_id}),
+        )
+        .await;
+    assert_eq!(deleted.0, StatusCode::NO_CONTENT, "{}", deleted.1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM attachment_removals WHERE vault_id=$1")
+            .bind(owner.vault_id)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_cleanup_admissions_select_one_stable_prefix() {
+    let _guard = TEST_LOCK.lock().await;
+    let server =
+        TestServer::start_with_policy(Arc::new(CleanupPolicy { limit_bytes: 12 }), 5).await;
+    let owner = server.owner().await;
+    let candidates = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    for (index, attachment_id) in candidates.into_iter().enumerate() {
+        insert_retention_candidate(
+            &server.pool,
+            &owner,
+            attachment_id,
+            &format!("private/concurrent-{index}"),
+            4,
+            index as i64,
+        )
+        .await;
+    }
+    let (small, large) = tokio::join!(
+        cleanup_reserve(&server, &owner, 3),
+        cleanup_reserve(&server, &owner, 5)
+    );
+    assert_eq!(small.0, StatusCode::CONFLICT, "{}", small.1);
+    assert_eq!(large.0, StatusCode::CONFLICT, "{}", large.1);
+    assert_eq!(small.1["code"], "storage_cleanup_pending");
+    assert_eq!(large.1["code"], "storage_cleanup_pending");
+    let removed: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT attachment_id FROM attachment_removals WHERE vault_id=$1 ORDER BY object_key",
+    )
+    .bind(owner.vault_id)
+    .fetch_all(&server.pool)
+    .await
+    .unwrap();
+    assert!(
+        removed == candidates[..1] || removed == candidates[..2],
+        "only the winning admission's sufficient prefix may be selected: {removed:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn community_device_attachment_notice_routes_are_explicitly_unsupported() {
+    let server =
+        TestServer::start_with_policy(Arc::new(peppy_server::api::CommunityAccessPolicy), 5).await;
+    let device = server.owner().await;
+    let (get_status, get_body) = server
+        .request(
+            "GET",
+            "/v1/attachments/storage/status",
+            &device.device_token,
+            json!(null),
+        )
+        .await;
+    assert_eq!(get_status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(
+        get_body["code"],
+        peppy_hosted_api::attachments::error_codes::UNSUPPORTED
+    );
+    let (post_status, post_body) = server
+        .request(
+            "POST",
+            "/v1/attachments/storage/notice/acknowledgement",
+            &device.device_token,
+            json!({"policy_version": "hosted_attachment_retention_v1"}),
+        )
+        .await;
+    assert_eq!(post_status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(
+        post_body["code"],
+        peppy_hosted_api::attachments::error_codes::UNSUPPORTED
+    );
+    server.shutdown().await;
+}
+
+struct DeviceRetentionErrorPolicy;
+
+impl AccessPolicy for DeviceRetentionErrorPolicy {
+    fn authorize(
+        &self,
+        _principal: AccessPrincipal,
+        _operation: Operation,
+    ) -> PolicyFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn device_attachment_storage_status(
+        &self,
+        _principal: AccessPrincipal,
+    ) -> PolicyFuture<
+        '_,
+        Result<
+            peppy_hosted_api::attachments::AttachmentStorageStatusResponse,
+            peppy_server::api::DeviceAttachmentRetentionError,
+        >,
+    > {
+        Box::pin(async { Err(peppy_server::api::DeviceAttachmentRetentionError::Forbidden) })
+    }
+
+    fn acknowledge_device_attachment_retention(
+        &self,
+        _principal: AccessPrincipal,
+        _request: peppy_hosted_api::attachments::AcknowledgeRetentionNoticeRequest,
+    ) -> PolicyFuture<'_, Result<(), peppy_server::api::DeviceAttachmentRetentionError>> {
+        Box::pin(async { Err(peppy_server::api::DeviceAttachmentRetentionError::Unavailable) })
+    }
+}
+
+#[tokio::test]
+async fn device_attachment_notice_http_errors_use_canonical_forbidden_and_unavailable_codes() {
+    let server = TestServer::start_with_policy(Arc::new(DeviceRetentionErrorPolicy), 5).await;
+    let device = server.owner().await;
+    let (get_status, get_body) = server
+        .request(
+            "GET",
+            "/v1/attachments/storage/status",
+            &device.device_token,
+            json!(null),
+        )
+        .await;
+    assert_eq!(get_status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        get_body["code"],
+        peppy_hosted_api::attachments::error_codes::FORBIDDEN
+    );
+    let (post_status, post_body) = server
+        .request(
+            "POST",
+            "/v1/attachments/storage/notice/acknowledgement",
+            &device.device_token,
+            json!({"policy_version": "hosted_attachment_retention_v1"}),
+        )
+        .await;
+    assert_eq!(post_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        post_body["code"],
+        peppy_hosted_api::attachments::error_codes::UNAVAILABLE
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_quota_restart_preregisters_protection_before_reserve_and_finalize() {
+    let _guard = TEST_LOCK.lock().await;
+    let key = peppy_crypto::FileKey::generate().unwrap();
+    let mut ciphertext = Vec::new();
+    peppy_crypto::encrypt_stream(
+        Cursor::new(b"future attachment"),
+        &mut ciphertext,
+        &key,
+        b"attachment",
+    )
+    .unwrap();
+    let limit = ciphertext.len() as i64;
+    let server =
+        TestServer::start_with_policy(Arc::new(CleanupPolicy { limit_bytes: limit }), 5).await;
+    let owner = server.owner().await;
+    let old = Uuid::new_v4();
+    insert_retention_candidate(&server.pool, &owner, old, "private/full-old", limit, -10).await;
+
+    assert_eq!(
+        server
+            .request(
+                "PUT",
+                "/v1/devices/self/retention-capability",
+                &owner.device_token,
+                json!({"protocol_version":1,"cleanup_ready":false})
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let future = Uuid::new_v4();
+    let history_use = Uuid::new_v4();
+    let pending_use = Uuid::new_v4();
+    for (use_id, kind) in [
+        (history_use, "message_history"),
+        (pending_use, "pending_send"),
+    ] {
+        let response = server.raw_request(
+            "POST",
+            &format!("/v1/attachments/{future}/retention-uses"),
+            &owner.device_token,
+            Body::from(json!({"use_id":use_id,"attachment_id":future,"device_id":owner.device_id,"kind":kind}).to_string()),
+            &[(header::CONTENT_TYPE.as_str(), "application/json"), ("peppy-attachment-retention-protocol", "1")],
+        ).await;
+        assert_eq!(response.0, StatusCode::OK, "{kind}: {}", response.1);
+        assert_eq!(response.1["state"], "registered");
+    }
+    assert!(!sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM attachments WHERE vault_id=$1 AND attachment_id=$2) OR EXISTS(SELECT 1 FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2)")
+        .bind(owner.vault_id).bind(future).fetch_one(&server.pool).await.unwrap());
+
+    assert_eq!(
+        server
+            .request(
+                "PUT",
+                "/v1/devices/self/retention-capability",
+                &owner.device_token,
+                json!({"protocol_version":1,"cleanup_ready":true})
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let reserve_body = json!({
+        "attachment_id": future,
+        "declared_ciphertext_bytes": ciphertext.len(),
+        "declared_ciphertext_sha256": hex::encode(Sha256::digest(&ciphertext)),
+        "retention_class": "message_media",
+        "reference_tracking": true,
+    });
+    let first = server
+        .raw_request(
+            "POST",
+            "/v1/attachments/reserve",
+            &owner.device_token,
+            Body::from(reserve_body.to_string()),
+            &[
+                (header::CONTENT_TYPE.as_str(), "application/json"),
+                ("peppy-attachment-retention-protocol", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(first.0, StatusCode::CONFLICT, "{}", first.1);
+    assert_eq!(first.1["code"], "storage_cleanup_pending");
+
+    sqlx::query(
+        "UPDATE attachment_removals SET purged_at=now() WHERE vault_id=$1 AND attachment_id=$2",
+    )
+    .bind(owner.vault_id)
+    .bind(old)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "DELETE FROM storage_deletions WHERE vault_id=$1 AND object_key='private/full-old'",
+    )
+    .bind(owner.vault_id)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+    let retry = server
+        .raw_request(
+            "POST",
+            "/v1/attachments/reserve",
+            &owner.device_token,
+            Body::from(reserve_body.to_string()),
+            &[
+                (header::CONTENT_TYPE.as_str(), "application/json"),
+                ("peppy-attachment-retention-protocol", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(retry.0, StatusCode::OK, "{}", retry.1);
+    assert_eq!(
+        server
+            .raw_request(
+                "PUT",
+                &format!("/v1/attachments/{future}/upload"),
+                &owner.device_token,
+                Body::from(ciphertext.clone()),
+                &[("peppy-attachment-retention-protocol", "1")]
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        server
+            .raw_request(
+                "POST",
+                &format!("/v1/attachments/{future}/finalize"),
+                &owner.device_token,
+                Body::empty(),
+                &[("peppy-attachment-retention-protocol", "1")]
+            )
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    let legacy = Uuid::new_v4();
+    sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id) VALUES($1,$2,'private/legacy-protected',1,$3,$4)")
+        .bind(owner.vault_id).bind(legacy).bind(vec![0_u8;32]).bind(owner.device_id).execute(&server.pool).await.unwrap();
+    let blocked = cleanup_reserve(&server, &owner, 1).await;
+    assert_eq!(blocked.0, StatusCode::PAYLOAD_TOO_LARGE, "{}", blocked.1);
+    let classes: Vec<String> = sqlx::query_scalar("SELECT retention_class FROM attachments WHERE vault_id=$1 AND attachment_id=ANY($2) ORDER BY attachment_id")
+        .bind(owner.vault_id).bind(&[future, legacy]).fetch_all(&server.pool).await.unwrap();
+    assert!(classes.contains(&"message_media".to_owned()));
+    assert!(classes.contains(&"protected".to_owned()));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM attachment_removals WHERE vault_id=$1 AND attachment_id=$2"
+        )
+        .bind(owner.vault_id)
+        .bind(future)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    let tombstone_retry = server.raw_request("POST", "/v1/attachments/reserve", &owner.device_token, Body::from(json!({"attachment_id":old,"declared_ciphertext_bytes":1,"declared_ciphertext_sha256":hex::encode(Sha256::digest(b"x"))}).to_string()), &[(header::CONTENT_TYPE.as_str(), "application/json"), ("peppy-attachment-retention-protocol", "1")]).await;
+    assert_eq!(tombstone_retry.0, StatusCode::GONE);
+
+    let object_key: String = sqlx::query_scalar(
+        "SELECT object_key FROM attachments WHERE vault_id=$1 AND attachment_id=$2",
+    )
+    .bind(owner.vault_id)
+    .bind(future)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    let storage =
+        peppy_server::storage::Storage::new(Config::from_env().unwrap().s3.as_ref().unwrap());
+    storage.delete(&object_key).await.unwrap();
     server.shutdown().await;
 }

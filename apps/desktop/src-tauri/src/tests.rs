@@ -2339,7 +2339,7 @@ mod real_server {
         assert!(
             crate::public_copy_prompt(&info.display_name, &prepared).contains("receivedphoto.png")
         );
-        let copy = crate::upload_public_copy(&receiver, &remote, prepared)
+        let copy = crate::upload_public_copy(&receiver, attachment, &remote, prepared)
             .await
             .expect("same-vault receiver may create a separate public copy");
         assert!(copy.url.ends_with("/receivedphoto.png"));

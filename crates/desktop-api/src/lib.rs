@@ -9,6 +9,8 @@ pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Prev
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod attachment_retention;
+pub use attachment_retention::*;
 pub mod avatar;
 pub mod compose;
 pub mod gateways;
@@ -25,6 +27,9 @@ pub use search_history::*;
 pub struct Snapshot {
     pub version: &'static str,
     pub mode: &'static str,
+    /// Opaque native device-session invalidation hint, never a credential or acknowledgement scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_scope_id: Option<String>,
     pub connection: Connection,
     pub encryption: Encryption,
     pub gateways: Vec<GatewayView>,
@@ -269,6 +274,10 @@ pub struct AttachmentView {
     /// Producer metadata links a ready thumbnail independently from the original's transfer state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_meta: Option<Box<MediaMetadataView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_state: Option<RemoteAttachmentStateDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_available: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -433,6 +442,8 @@ pub fn attachment_view(
         retryable,
         media_hold: None,
         media_meta: None,
+        remote_state: None,
+        local_available: None,
     }
 }
 
@@ -751,6 +762,29 @@ mod tests {
         for forbidden in ["ciphertextBytes", "ciphertextSha256", "path", "key"] {
             assert!(value.get(forbidden).is_none(), "serialized {forbidden}");
         }
+    }
+
+    #[test]
+    fn attachment_availability_serializes_typed_optional_camel_case_fields() {
+        let attachment = AttachmentInfo {
+            attachment_id: AttachmentId::new(),
+            media_type: "image/png".into(),
+            display_name: "photo.png".into(),
+            plaintext_bytes: 42,
+            ciphertext_bytes: 99,
+            ciphertext_sha256: "sensitive-ciphertext-digest".into(),
+            state: AttachmentState::Available,
+        };
+        let mut view = attachment_view(&attachment, None, None);
+        let absent = serde_json::to_value(&view).unwrap();
+        assert!(absent.get("remoteState").is_none());
+        assert!(absent.get("localAvailable").is_none());
+
+        view.remote_state = Some(RemoteAttachmentStateDto::RemovedByStoragePolicy);
+        view.local_available = Some(true);
+        let available = serde_json::to_value(view).unwrap();
+        assert_eq!(available["remoteState"], "removed_by_storage_policy");
+        assert_eq!(available["localAvailable"], true);
     }
 
     #[test]

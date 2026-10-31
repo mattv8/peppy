@@ -492,7 +492,7 @@ describe("BrowserEnrollment", () => {
 
     expect(fetcher).toHaveBeenLastCalledWith(expect.any(URL), expect.objectContaining({
       method: "POST",
-      headers: expect.objectContaining({ "X-Peppy-CSRF-Token": "restored-csrf" }),
+      headers: expect.objectContaining({ "X-Peppy-CSRF-Token": "restored-csrf", "Peppy-Attachment-Retention-Protocol": "1" }),
     }));
   });
 
@@ -1387,7 +1387,7 @@ describe("BrowserEnrollment", () => {
     await expect(enrollment.discover()).resolves.toMatchObject({ stage: "signin" });
     await enrollment.revokeDevice(deviceId);
 
-    expect(fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({});
+    expect(fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({ "Peppy-Attachment-Retention-Protocol": "1" });
   });
 
   it("returns hosted signin when the account session expires before the protected account request", async () => {
@@ -1406,7 +1406,7 @@ describe("BrowserEnrollment", () => {
     await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: "signin" });
     await enrollment.revokeDevice(deviceId);
 
-    expect(fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({});
+    expect(fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({ "Peppy-Attachment-Retention-Protocol": "1" });
   });
 
   it("uses the mode-specific CSRF header and bounds streamed JSON before parsing", async () => {
@@ -1473,7 +1473,7 @@ describe("BrowserEnrollment", () => {
         url: `${fixtureOrigin}/v1/instance/claim`,
         method: "POST",
         credentials: "include",
-        headerNames: ["content-type"],
+        headerNames: ["content-type", "peppy-attachment-retention-protocol"],
         bodyKeys: ["admin_password", "credential_digest", "device", "material", "operation_id", "setup_token"],
       });
     } finally {

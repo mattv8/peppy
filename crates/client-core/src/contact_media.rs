@@ -181,6 +181,19 @@ pub(crate) fn payload_photo_ids(payload: &PrivatePayload) -> Vec<AttachmentId> {
     }
 }
 
+pub(crate) fn effective_payload_photo_ids(
+    conn: &Connection,
+    payload: &PrivatePayload,
+) -> Result<Vec<AttachmentId>, Error> {
+    let mut ids = payload_photo_ids(payload)
+        .into_iter()
+        .map(|id| effective_id(conn, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 /// Records the photo slots in a still-plaintext outbox payload.
 pub(crate) fn record_outbox_photos(
     conn: &Connection,
@@ -277,6 +290,14 @@ fn reprepare(
         )
         .map_err(Error::from)
         .and_then(|_| track_prepared(conn, fresh))
+        .and_then(|_| {
+            crate::attachment_retention::record_upload_retention(
+                conn,
+                fresh,
+                crate::AttachmentRetentionClass::Protected,
+                true,
+            )
+        })
         .and_then(|_| {
             conn.execute(
                 "UPDATE contact_photo_aliases SET new_id=?1 WHERE new_id=?2",
@@ -532,6 +553,9 @@ fn wire(conn: &Connection, reference: &Value) -> Result<Wire, Error> {
         return Ok(Wire::Unavailable(None, "invalid_reference"));
     };
     let id = effective_id(conn, id)?;
+    if crate::attachment_retention::is_removed(conn, id)? {
+        return Ok(Wire::Unavailable(Some(id), "removed_by_storage_policy"));
+    }
     let Some(row) = attachment_row(conn, id)? else {
         return Ok(Wire::Unavailable(Some(id), "missing"));
     };
@@ -820,12 +844,21 @@ fn ingest_descriptor(
     let Ok(descriptor) = serde_json::from_value::<MediaDescriptor>(descriptor.clone()) else {
         return Ok(None);
     };
+    let is_new = attachment_row(conn, id)?.is_none();
     if descriptor.attachment_id != id
         || !descriptor.is_valid()
         || !photo_row_ok(&descriptor.media_type, descriptor.plaintext_bytes)
         || !store_remote_media(conn, std::slice::from_ref(&descriptor))?
     {
         return Ok(None);
+    }
+    if is_new {
+        crate::attachment_retention::record_upload_retention(
+            conn,
+            id,
+            crate::AttachmentRetentionClass::Protected,
+            true,
+        )?;
     }
     // Received as a contact photo: its decrypted bytes are verified at install.
     conn.execute(
@@ -958,6 +991,7 @@ fn materialize_reclaims(conn: &Connection, now: i64) -> Result<(), Error> {
          SELECT a.attachment_id, a.remote_object_id, 'pending', 0, ?1
          FROM contact_photo_attachments t JOIN attachments a ON a.attachment_id=t.attachment_id
          WHERE a.remote_object_id IS NOT NULL
+           AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1)
            AND NOT EXISTS(SELECT 1 FROM contact_photo_references r WHERE r.attachment_id=a.attachment_id AND (r.retain_until IS NULL OR r.retain_until>?1))
            AND NOT EXISTS(SELECT 1 FROM contact_photo_registrations g WHERE g.attachment_id=a.attachment_id AND g.acknowledged=0)
            AND NOT ",
@@ -977,14 +1011,14 @@ pub(crate) fn transfer_state(conn: &Connection, own_device: &str) -> Result<Stri
 fn transfer_state_at(conn: &Connection, own_device: &str, now: i64) -> Result<String, Error> {
     materialize_reclaims(conn, now)?;
     let uploads = conn
-        .prepare(&format!("{UPLOAD_IDS_SQL} ORDER BY a.rowid"))?
+        .prepare(&format!("{UPLOAD_IDS_SQL} AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) ORDER BY a.rowid"))?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|id| json!({"attachment_id": id, "reference_tracking": true}))
         .collect::<Vec<_>>();
     let registrations = conn
-        .prepare("SELECT envelope_id,attachment_id,remote_object_id,producer_sequence FROM contact_photo_registrations WHERE acknowledged=0 ORDER BY producer_sequence,attachment_id")?
+        .prepare("SELECT envelope_id,attachment_id,remote_object_id,producer_sequence FROM contact_photo_registrations WHERE acknowledged=0 AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=contact_photo_registrations.attachment_id AND rs.removed_by_storage_policy=1) ORDER BY producer_sequence,attachment_id")?
         .query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
         })?
@@ -1009,11 +1043,11 @@ fn transfer_state_at(conn: &Connection, own_device: &str, now: i64) -> Result<St
         .optional()?;
     // Only candidates whose retry time has come; deferred ones stay durable.
     let candidates = conn
-        .prepare("SELECT attachment_id,remote_object_id,attempts,next_due_at FROM contact_photo_reclaims WHERE state='pending' AND next_due_at<=? ORDER BY next_due_at,attachment_id")?
+        .prepare("SELECT attachment_id,remote_object_id,attempts,next_due_at FROM contact_photo_reclaims WHERE state='pending' AND next_due_at<=? AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=contact_photo_reclaims.attachment_id AND rs.removed_by_storage_policy=1) ORDER BY next_due_at,attachment_id")?
         .query_map([now], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     let deferred: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM contact_photo_reclaims WHERE state='pending' AND next_due_at>?",
+        "SELECT COUNT(*) FROM contact_photo_reclaims WHERE state='pending' AND next_due_at>? AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=contact_photo_reclaims.attachment_id AND rs.removed_by_storage_policy=1)",
         [now],
         |r| r.get(0),
     )?;

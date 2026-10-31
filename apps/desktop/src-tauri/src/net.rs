@@ -6,7 +6,11 @@ use crate::{error::BridgeError, origin::is_loopback_http};
 use futures_util::StreamExt;
 use reqwest::{header, redirect, RequestBuilder, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 use tokio::io::AsyncWriteExt;
 use zeroize::Zeroizing;
 
@@ -98,6 +102,7 @@ pub struct Api {
     transfer: reqwest::Client,
     origin: String,
     token: Zeroizing<String>,
+    attachment_retention_protocol_enabled: AtomicBool,
 }
 
 fn builder(origin: &str) -> Result<reqwest::ClientBuilder, BridgeError> {
@@ -125,6 +130,7 @@ impl Api {
                 .map_err(failed)?,
             origin: origin.to_owned(),
             token: Zeroizing::new(token.to_owned()),
+            attachment_retention_protocol_enabled: AtomicBool::new(false),
         })
     }
     pub fn origin(&self) -> &str {
@@ -136,6 +142,25 @@ impl Api {
     }
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.origin, path)
+    }
+
+    pub fn set_attachment_retention_protocol_enabled(&self, enabled: bool) {
+        self.attachment_retention_protocol_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    fn retention_mutation(&self, request: RequestBuilder) -> RequestBuilder {
+        if self
+            .attachment_retention_protocol_enabled
+            .load(Ordering::Acquire)
+        {
+            request.header(
+                peppy_hosted_api::attachments::ATTACHMENT_RETENTION_PROTOCOL_HEADER,
+                peppy_hosted_api::attachments::ATTACHMENT_RETENTION_PROTOCOL_VERSION,
+            )
+        } else {
+            request
+        }
     }
 
     async fn execute(&self, request: RequestBuilder) -> Result<Response, NetError> {
@@ -184,13 +209,20 @@ impl Api {
         path: &str,
         body: &B,
     ) -> Result<T, NetError> {
-        self.json(self.http.post(self.url(path)).json(body), MAX_JSON_BYTES)
-            .await
+        self.json(
+            self.retention_mutation(self.http.post(self.url(path)))
+                .json(body),
+            MAX_JSON_BYTES,
+        )
+        .await
     }
 
     pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, NetError> {
-        self.json(self.http.post(self.url(path)), MAX_JSON_BYTES)
-            .await
+        self.json(
+            self.retention_mutation(self.http.post(self.url(path))),
+            MAX_JSON_BYTES,
+        )
+        .await
     }
 
     /// Posts a body and discards a bounded response body.
@@ -200,8 +232,11 @@ impl Api {
         body: &B,
     ) -> Result<(), NetError> {
         read_bounded(
-            self.execute(self.http.post(self.url(path)).json(body))
-                .await?,
+            self.execute(
+                self.retention_mutation(self.http.post(self.url(path)))
+                    .json(body),
+            )
+            .await?,
             MAX_JSON_BYTES,
         )
         .await
@@ -215,12 +250,44 @@ impl Api {
         body: &B,
     ) -> Result<(), NetError> {
         read_bounded(
-            self.execute(self.http.delete(self.url(path)).json(body))
-                .await?,
+            self.execute(
+                self.retention_mutation(self.http.delete(self.url(path)))
+                    .json(body),
+            )
+            .await?,
             MAX_JSON_BYTES,
         )
         .await
         .map(|_| ())
+    }
+
+    /// Sends a generated retention request and returns its bounded body even on a non-success
+    /// status so the retention codec can distinguish the one terminal removal response.
+    pub async fn retention_request(
+        &self,
+        method: &str,
+        path: &str,
+        json_body: Option<&str>,
+        protocol_header: Option<(&str, &str)>,
+        response_limit: usize,
+    ) -> Result<(u16, Vec<u8>), NetError> {
+        let method =
+            reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| NetError::Invalid)?;
+        let mut request = self
+            .http
+            .request(method, self.url(path))
+            .bearer_auth(self.token.as_str());
+        if let Some(body) = json_body {
+            request = request
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body.to_owned());
+        }
+        if let Some((name, value)) = protocol_header {
+            request = request.header(name, value);
+        }
+        let response = request.send().await.map_err(|_| NetError::Offline)?;
+        let status = response.status().as_u16();
+        Ok((status, read_bounded(response, response_limit).await?))
     }
 
     /// Streams exactly `length` bytes of a local file as the request body.
@@ -236,8 +303,7 @@ impl Api {
             TRANSFER_CHUNK,
         );
         let request = self
-            .transfer
-            .put(self.url(path))
+            .retention_mutation(self.transfer.put(self.url(path)))
             .header(header::CONTENT_TYPE, "application/octet-stream")
             .header(header::CONTENT_LENGTH, length)
             .body(reqwest::Body::wrap_stream(stream));
@@ -305,8 +371,7 @@ impl Api {
         bytes: Vec<u8>,
     ) -> Result<T, NetError> {
         let request = self
-            .transfer
-            .post(self.url(path))
+            .retention_mutation(self.transfer.post(self.url(path)))
             .header("x-file-name", safe_name)
             .header(header::CONTENT_TYPE, "application/octet-stream")
             .body(bytes);
@@ -699,5 +764,115 @@ pub mod tests {
         let target = dir.path().join("ok");
         api.download_to("/x", &target, 3000).await.unwrap();
         assert_eq!(std::fs::read(&target).unwrap().len(), 3000);
+    }
+
+    async fn capture_once(
+        head: String,
+        body: Vec<u8>,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 8192];
+            let read = socket.read(&mut request).await.unwrap();
+            let _ = sender.send(String::from_utf8_lossy(&request[..read]).into_owned());
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&body).await;
+            let _ = socket.shutdown().await;
+        });
+        (format!("http://{address}"), receiver)
+    }
+
+    #[tokio::test]
+    async fn covered_mutations_advertise_retention_only_after_negotiation() {
+        let (origin, captured) = capture_once(
+            "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+            vec![],
+        )
+        .await;
+        let api = Api::new(&origin, "t").unwrap();
+        api.post_discard("/v1/events", &serde_json::json!({"event": true}))
+            .await
+            .unwrap();
+        let request = captured.await.unwrap().to_ascii_lowercase();
+        assert!(!request.contains("peppy-attachment-retention-protocol:"));
+
+        let (origin, captured) = capture_once(
+            "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+            vec![],
+        )
+        .await;
+        let api = Api::new(&origin, "t").unwrap();
+        api.set_attachment_retention_protocol_enabled(true);
+        api.post_discard("/v1/events", &serde_json::json!({"event": true}))
+            .await
+            .unwrap();
+        let request = captured.await.unwrap().to_ascii_lowercase();
+        assert!(request.contains("peppy-attachment-retention-protocol: 1"));
+
+        let json_response = |body: &str| {
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            )
+        };
+        for mutation in [
+            "post_json",
+            "post_empty",
+            "delete_json",
+            "put_file",
+            "post_public_copy",
+        ] {
+            let body = if mutation == "delete_json" || mutation == "put_file" {
+                vec![]
+            } else {
+                b"{}".to_vec()
+            };
+            let status = if body.is_empty() {
+                "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into()
+            } else {
+                json_response("{}")
+            };
+            let (origin, captured) = capture_once(status, body).await;
+            let api = Api::new(&origin, "t").unwrap();
+            api.set_attachment_retention_protocol_enabled(true);
+            match mutation {
+                "post_json" => {
+                    let _: serde_json::Value = api
+                        .post_json("/v1/attachments/reserve", &serde_json::json!({}))
+                        .await
+                        .unwrap();
+                }
+                "post_empty" => {
+                    let _: serde_json::Value =
+                        api.post_empty("/v1/attachments/id/finalize").await.unwrap();
+                }
+                "delete_json" => api
+                    .delete_json("/v1/attachments/id", &serde_json::json!({}))
+                    .await
+                    .unwrap(),
+                "put_file" => {
+                    let file = tempfile::NamedTempFile::new().unwrap();
+                    std::fs::write(file.path(), b"x").unwrap();
+                    api.put_file("/v1/attachments/id/upload", file.path(), 1)
+                        .await
+                        .unwrap();
+                }
+                "post_public_copy" => {
+                    let _: serde_json::Value = api
+                        .post_public_copy("/v1/attachments/id/public-copies", "copy.png", vec![1])
+                        .await
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let request = captured.await.unwrap().to_ascii_lowercase();
+            assert!(
+                request.contains("peppy-attachment-retention-protocol: 1"),
+                "{mutation}"
+            );
+        }
     }
 }

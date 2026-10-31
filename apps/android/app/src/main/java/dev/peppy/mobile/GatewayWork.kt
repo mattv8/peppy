@@ -113,6 +113,8 @@ object GatewayWork {
         context.getSharedPreferences(COALESCE, 0).edit().putBoolean(CAPTURE_HINT_PENDING, true).commit()
     }
 
+    internal fun restoreCaptureHint(context: Context) = captureHintPending(context)
+
     internal fun shouldEnqueueSmsCapture(captureHint: Boolean, readGranted: Boolean) = captureHint && readGranted
 
     internal fun shouldEnqueueMmsCapture(captureHint: Boolean, enabled: Boolean, receiveGranted: Boolean) =
@@ -128,6 +130,7 @@ object GatewayWork {
         policy: Boolean,
         smsCaptureAllowed: Boolean,
         mmsCaptureAllowed: Boolean,
+        deferMmsUnavailable: Boolean = false,
         enqueueSms: () -> Unit,
         enqueueMms: () -> Unit,
         smsPermissionGranted: Boolean = permission,
@@ -146,7 +149,7 @@ object GatewayWork {
         }
         if (readiness.needsMms) {
             if (mmsCaptureAllowed) enqueueMms()
-            else settleUnavailableHistory(history, generation, "mms", mmsPermissionGranted)
+            else if (!deferMmsUnavailable) settleUnavailableHistory(history, generation, "mms", mmsPermissionGranted)
         }
         return controlPublished
     }
@@ -251,12 +254,14 @@ class GatewaySync(
     private val contactPhotos: () -> Boolean = { false },
     /** Android-only bounded cleanup after finalized outbox work. */
     private val cleanupMmsCiphertext: () -> Unit = {},
+    /** Fences transport completions from a vault/device binding replaced while the pass was active. */
+    private val sessionCurrent: () -> Boolean = { true },
     private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     private enum class GatewayPhase(val code: Long) {
         RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE),
     }
-    class PassResult(val more: Boolean, val failure: Exception?)
+    class PassResult(val more: Boolean, val failure: Exception?, val producersReady: Boolean)
 
     private var more = false
     private var failure: Exception? = null
@@ -270,12 +275,33 @@ class GatewaySync(
     private var uploadSoftRejected = false
     private var snapshotRemaining = 0L
     private var contactReadiness: BackgroundDiagnostics.GatewayReadiness? = null
+    private var retentionAllowsProducers = false
 
     fun run(): PassResult {
         if (state.phase == SyncPhase.RECOVERY_REQUIRED) {
             // Withdraw routes so the desktop stops offering this gateway; nothing else.
             phase(GatewayPhase.RECOVERY_WITHDRAW) { publish(SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false)); false }
-            return PassResult(false, failure)
+            return PassResult(false, failure, false)
+        }
+        try {
+            http.setAttachmentProducerReady(false)
+            when (AttachmentRetentionDriver(client, http, sessionCurrent).run()) {
+                AttachmentRetentionDriver.Outcome.STALE -> return PassResult(false, null, false)
+                AttachmentRetentionDriver.Outcome.DEFERRED -> {
+                    retentionAllowsProducers = false
+                    failure = GatewayTransportException("retention negotiation deferred")
+                }
+                AttachmentRetentionDriver.Outcome.MORE -> { retentionAllowsProducers = false; more = true }
+                AttachmentRetentionDriver.Outcome.DRAINED, AttachmentRetentionDriver.Outcome.LEGACY -> {
+                    retentionAllowsProducers = true
+                    http.setAttachmentProducerReady(true)
+                }
+            }
+        } catch (error: GatewayAuthException) {
+            throw error
+        } catch (error: Exception) {
+            retentionAllowsProducers = false
+            failure = error
         }
         phase(GatewayPhase.CAPABILITIES) { publish(capabilities); false }
         // Probe even when live replay does not need a resync; unknown/failed capability is false.
@@ -303,23 +329,23 @@ class GatewaySync(
                 phase(GatewayPhase.NOTIFICATION_TEST_DISMISSALS) { NotificationTestCapture.applyDismissals(client); false }
                 // Contacts follow receive/apply so incoming edits are journaled first.
                 // The contact-photo phase scans the outbox backlog and waits for accepted uploads.
-                if (mayEmit() && !client.contactRepairRequired()) phase(GatewayPhase.CONTACTS) { contacts() }
+                if (mayEmit() && retentionAllowsProducers && !client.contactRepairRequired()) phase(GatewayPhase.CONTACTS) { contacts() }
                 // Media is local encrypted work, but it must finish before its message envelope is
                 // uploaded or a carrier command which references it can be dispatched.
                 if (mayEmit()) phase(GatewayPhase.MEDIA) { transferMedia() }
                 // Photo references are registered before the core releases those envelopes.
-                if (mayPrepare()) phase(GatewayPhase.CONTACT_PHOTOS) { contactPhotos() }
+                if (mayPrepare() && retentionAllowsProducers) phase(GatewayPhase.CONTACT_PHOTOS) { contactPhotos() }
             }
             SyncPhase.RECOVERY_REQUIRED -> Unit
         }
         if (mayEmit()) phase(GatewayPhase.UPLOAD) { upload() }
         if (mayEmit()) phase(GatewayPhase.DISPATCH) { dispatch().moreRemaining }
         // Envelopes sealed during the first upload may have produced new photo registrations.
-        if (mayPrepare() && state.phase == SyncPhase.LIVE) phase(GatewayPhase.FINAL_CONTACT_PHOTOS) { contactPhotos() }
+        if (mayPrepare() && retentionAllowsProducers && state.phase == SyncPhase.LIVE) phase(GatewayPhase.FINAL_CONTACT_PHOTOS) { contactPhotos() }
         if (mayEmit()) phase(GatewayPhase.FINAL_UPLOAD) { upload() }
         if (mayEmit()) phase(GatewayPhase.MMS_CLEANUP) { cleanupMmsCiphertext(); false }
         if (diagnosticsEnabled) BackgroundDiagnostics.gateway(received, snapshotReceived, progressed, uploaded, snapshotRemaining, contactReadiness)
-        return PassResult(more, failure)
+        return PassResult(more, failure, retentionAllowsProducers)
     }
 
     private fun mayEmit() = state.phase == SyncPhase.LIVE && state.outboxRejection == null
@@ -696,9 +722,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         SmsCaptureWork.ensurePeriodic(applicationContext)
         val smsReadGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS) ==
             PackageManager.PERMISSION_GRANTED
-        if (GatewayWork.shouldEnqueueSmsCapture(captureHint, smsReadGranted)) {
-            SmsCaptureWork.enqueue(applicationContext)
-        }
+        if (GatewayWork.shouldEnqueueSmsCapture(captureHint, smsReadGranted)) SmsCaptureWork.enqueue(applicationContext)
         // Not enrolled, database unopenable, or shared vault locked: nothing can be synced yet.
         val session = NativeGateway.session(applicationContext) ?: return Result.success()
         val sendGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.SEND_SMS) ==
@@ -711,13 +735,13 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             applicationContext,
             Manifest.permission.RECEIVE_MMS,
         ) == PackageManager.PERMISSION_GRANTED
-        if (GatewayWork.shouldEnqueueMmsCapture(captureHint, mmsEnabled, mmsReceiveGranted)) MmsCaptureWork.enqueue(applicationContext)
         val binding = NativeGateway.reachabilityBinding(applicationContext)
+        val gatewayHttp = GatewayHttp(session.origin, session.bearerToken) { response ->
+            binding?.let { ServerReachabilityState.recordResponse(it, response) }
+        }
         val sync = GatewaySync(
             client = session.client,
-            http = GatewayHttp(session.origin, session.bearerToken) { response ->
-                binding?.let { ServerReachabilityState.recordResponse(it, response) }
-            },
+            http = gatewayHttp,
             state = GatewayStateStore(applicationContext),
             deviceId = session.deviceId,
             dispatch = {
@@ -737,7 +761,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             capabilities = SimRoutes.capabilityReport(routes, sendGranted, mmsEnabled, mmsReceiveGranted, session.client.mmsContentVersion()) { MmsLimits.forSubscription(applicationContext, it) },
             media = {
                 // Core filters uploads per object; downloads remain eligible for carrier commands.
-                val http = GatewayHttp(session.origin, session.bearerToken)
+                val http = gatewayHttp
                 val tracked = ContactPhotoTransfer(session.client, http).trackedUploadIds()
                 val remoteQuota = MmsRemoteQuota(applicationContext, session.client)
                 session.client.enableDeferredGatewayMedia(
@@ -749,7 +773,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
                     http,
                     applicationContext.noBackupFilesDir,
                     { it in tracked },
-                    remoteQuota.uploadsAllowed(http),
+                    gatewayHttp.attachmentProducerReady() && remoteQuota.uploadsAllowed(http),
                     { remoteQuota.pause() },
                     { remoteQuota.confirmUploadCapacity() },
                     { session.client.pendingGatewayMediaUploads() },
@@ -757,22 +781,29 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
                 ).run()
                     .also { result ->
                         MmsTransferHealth(applicationContext).record(result.failures)
-                        result.failures.filter { it.operation == "upload" }.forEach { failure ->
+                        result.failures.filter { it.operation == "upload" && it.reason != "removed" }.forEach { failure ->
                             runCatching { session.client.recordGatewayMediaFailure(failure.attachmentId, failure.reason) }
                         }
                     }
             },
             contacts = { ContactSyncHost.pass(applicationContext, session) },
-            contactPhotos = { ContactPhotoTransfer(session.client, GatewayHttp(session.origin, session.bearerToken)).run() },
+            contactPhotos = { ContactPhotoTransfer(session.client, gatewayHttp).run() },
             cleanupMmsCiphertext = {
                 val result = session.client.cleanupUploadedGatewayMmsCiphertext(16u)
                 BackgroundDiagnostics.mmsCleanup(result.marked.toLong(), result.unlinked.toLong(), result.pendingUnlink.toLong())
             },
+            sessionCurrent = { NativeGateway.isCurrent(applicationContext, session) },
         )
         val result = try {
             sync.run()
         } catch (_: GatewayAuthException) {
             return Result.failure()
+        }
+        if (result.producersReady && NativeGateway.markProducerReady(applicationContext, session)) {
+            MmsCaptureWork.resumeDeferred(applicationContext)
+            if (GatewayWork.shouldEnqueueMmsCapture(captureHint, mmsEnabled, mmsReceiveGranted)) MmsCaptureWork.enqueue(applicationContext)
+        } else if (captureHint) {
+            GatewayWork.restoreCaptureHint(applicationContext)
         }
         val historyControlPublished = GatewayWork.publishAndScheduleMessageHistory(
             session.client,
@@ -784,7 +815,8 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             smsPermissionGranted = smsReadGranted,
             mmsPermissionGranted = mmsReceiveGranted,
             smsCaptureAllowed = smsReadGranted && policy?.captureSms == true,
-            mmsCaptureAllowed = mmsEnabled && mmsReceiveGranted,
+            mmsCaptureAllowed = result.producersReady && mmsEnabled && mmsReceiveGranted,
+            deferMmsUnavailable = !result.producersReady,
             enqueueSms = { SmsCaptureWork.enqueue(applicationContext) },
             enqueueMms = { MmsCaptureWork.enqueue(applicationContext) },
         )

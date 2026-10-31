@@ -355,8 +355,58 @@ import Testing
         }
         #expect(String(describing: request).contains("application/json"))
     }
+
+    @Test func retentionDriverNegotiatesBeforeForegroundWork() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let client = try openUnlockedClient(server, passphrase: passphrase)
+        let transport = RetentionRecordingTransport { request in
+            HTTPResponse(status: 204, url: request.url, body: Data())
+        }
+        var meter = RequestMeter(limit: 8)
+        let state = AttachmentRetentionHTTPState()
+        let driver = AttachmentRetentionDriver(
+            client: client,
+            server: try serverClient(server, transport: transport),
+            state: state,
+            isActive: { true }
+        )
+
+        let result = try await driver.reconcile(meter: &meter, allowReadyAdvertisement: false)
+        #expect(transport.requests.compactMap(Self.cleanupReady) == [false])
+        let finalized = try await driver.reconcile(meter: &meter, allowReadyAdvertisement: true)
+        let again = try await driver.reconcile(meter: &meter, allowReadyAdvertisement: true)
+
+        #expect(result == .ready && finalized == .ready && again == .ready)
+        #expect(try client.attachmentRetentionProtocolEnabled())
+        #expect(transport.requests.first?.url.path == "/v1/devices/self/retention-capability")
+        #expect(transport.requests.first?.method == "PUT")
+        #expect(transport.requests.first?.headers["Authorization"] == "Bearer \(server.token)")
+        let readiness = transport.requests.compactMap(Self.cleanupReady)
+        #expect(readiness == [false, true], "ready is advertised once per open transition")
+        try client.dispose()
+    }
+
+    private static func cleanupReady(_ request: HTTPRequest) -> Bool? {
+        guard let body = request.body,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        else { return nil }
+        return object["cleanup_ready"] as? Bool
+    }
 }
 
 struct RefusingTransport: HTTPTransport {
     func send(_ request: HTTPRequest) async throws -> HTTPResponse { throw ClientError.redirectRefused }
+}
+
+final class RetentionRecordingTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [HTTPRequest] = []
+    private let response: @Sendable (HTTPRequest) -> HTTPResponse
+
+    init(response: @escaping @Sendable (HTTPRequest) -> HTTPResponse) { self.response = response }
+    var requests: [HTTPRequest] { lock.withLock { recorded } }
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        lock.withLock { recorded.append(request) }
+        return response(request)
+    }
 }

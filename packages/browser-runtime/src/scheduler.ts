@@ -2,6 +2,7 @@ import { throwIfFatalTransferError, transferContactPhotoUploads, transferMedia, 
 import { SchedulerProtocol, type VaultRefresh } from "./scheduler-protocol.js";
 import { TransportError } from "./transport.js";
 import { CoreRejectedError } from "./core.js";
+import type { AttachmentRetentionDriver } from "./attachment-retention.js";
 
 const PAGE_LIMIT = 100;
 const OUTBOX_LIMIT = 32;
@@ -47,6 +48,7 @@ export interface BrowserSchedulerOptions {
   rotateEpoch?: (profile: unknown, header: unknown, passphrase: string) => Promise<void>;
   onEpochUnlocked?: () => void;
   onProgress?: (progress: SchedulerSyncProgress) => void;
+  retention?: AttachmentRetentionDriver;
 }
 
 /** Bounded, single-flight Worker sync round. BrowserSession checkpoints every mutation before it resolves. */
@@ -62,6 +64,7 @@ export class BrowserScheduler {
   private lastPublishedProgress?: string;
   /** True when this round stopped outbox delivery on a coded server refusal; reset at each round start. */
   private outboxRejected = false;
+  private retentionNegotiationResolved = false;
 
   public constructor(
     private readonly session: SchedulerSession,
@@ -71,6 +74,14 @@ export class BrowserScheduler {
 
   public get status(): SchedulerStatus { return this.statusValue; }
   public get epochStatus(): VaultRefresh | undefined { return this.epochValue; }
+
+  public async ensureRetentionNegotiated(signal: AbortSignal): Promise<boolean> {
+    await this.options.retention?.negotiate(signal);
+    this.retentionNegotiationResolved = this.options.retention?.negotiationResolved ?? true;
+    return this.retentionNegotiationResolved;
+  }
+
+  public get producersReady(): boolean { return this.retentionNegotiationResolved; }
 
   public async unlockNewEpoch(passphrase: string): Promise<void> {
     if (!this.protocol || !this.options.rotateEpoch) throw new TransportError("invalid");
@@ -110,20 +121,29 @@ export class BrowserScheduler {
     this.outboxRejected = false;
     try {
       throwIfAborted(signal);
-      if (this.transport.discard) {
+      const retention = await this.options.retention?.prepareRound(signal);
+      const negotiationResolved = retention?.negotiationResolved ?? true;
+      const uploadsAllowed = retention === undefined || !retention.protocolEnabled || retention.dueExhausted;
+      this.retentionNegotiationResolved = negotiationResolved;
+      if (negotiationResolved && this.transport.discard) {
         const protocol = await this.protocolCoordinator();
         const outcome = await protocol.run(signal, {
-          beforeSeal: async ids => this.recordMediaTransfer(await transferContactPhotoUploads(this.session, this.transport, this.options.media, ids, signal, this.deferredMediaIds)),
-          afterReferences: async () => this.recordMediaTransfer(await transferMedia(this.session, this.transport, this.options.media, signal, this.deferredMediaIds)),
+          beforeSeal: uploadsAllowed
+            ? async ids => this.recordMediaTransfer(await transferContactPhotoUploads(this.session, this.transport, this.options.media, ids, signal, this.deferredMediaIds))
+            : async () => undefined,
+          afterReferences: async () => this.recordMediaTransfer(await transferMedia(this.session, this.transport, this.options.media, signal, this.deferredMediaIds, uploadsAllowed)),
           repairSnapshot: async () => this.snapshot(signal),
         });
         this.epochValue = outcome.vault;
-      } else {
-        this.recordMediaTransfer(await transferMedia(this.session, this.transport, this.options.media, signal, this.deferredMediaIds));
+      } else if (this.transport.discard === undefined || !negotiationResolved) {
+        this.recordMediaTransfer(await transferMedia(this.session, this.transport, this.options.media, signal, this.deferredMediaIds, negotiationResolved && uploadsAllowed));
       }
       await this.sendOutbox(signal);
-      await this.replay(signal);
-      if (await this.hasPendingProjectionWork()) await this.apply(signal);
+      if (negotiationResolved) {
+        await this.replay(signal);
+        if (await this.hasPendingProjectionWork()) await this.apply(signal);
+        await this.options.retention?.reconcile(signal);
+      }
       await this.driveHistorySearch(signal);
       await this.refreshServerContext(signal);
       await this.publishProgress("applying");

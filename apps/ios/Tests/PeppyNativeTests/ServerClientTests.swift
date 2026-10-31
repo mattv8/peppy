@@ -1,4 +1,5 @@
 import Foundation
+import PeppyBindings
 import Testing
 @testable import PeppyNative
 
@@ -247,5 +248,33 @@ private struct CancellationProbe: Sendable {
         #expect(probe.threwCancellation)
         #expect(probe.used == 0)
         #expect(transport.requests.isEmpty)
+    }
+}
+
+@Suite struct AttachmentRetentionHeaderTests {
+    @Test func canonicalHeaderCoversEveryMutationPathButNeverReads() async throws {
+        let transport = RetentionRecordingTransport { request in
+            let body = request.url.path == "/v1/json" ? Data("{}".utf8) : Data()
+            return HTTPResponse(status: request.url.path == "/v1/json" ? 200 : 204, url: request.url, body: body)
+        }
+        let state = AttachmentRetentionHTTPState()
+        let client = ServerClient(
+            origin: try ServerOrigin(canonical: "https://example.test", allowLoopbackHTTP: false),
+            token: "token", transport: transport, attachmentRetention: state
+        )
+        var meter = RequestMeter(limit: 6)
+        let header = attachmentRetentionProtocolHeader()
+        state.remember(name: header.name, value: header.value)
+
+        for method in ["POST", "PUT", "DELETE"] {
+            _ = try await client.exchange(method, "/v1/mutation/\(method)", limit: 1, meter: &meter)
+        }
+        _ = try await client.post("/v1/json", json: Data("{}".utf8), meter: &meter)
+        try await client.postNoContent("/v1/no-content", meter: &meter)
+        _ = try await client.exchange("GET", "/v1/events", limit: 1, meter: &meter)
+
+        #expect(transport.requests.dropLast().allSatisfy { $0.headers[header.name] == header.value })
+        #expect(transport.requests.last?.method == "GET")
+        #expect(transport.requests.last?.headers[header.name] == nil)
     }
 }

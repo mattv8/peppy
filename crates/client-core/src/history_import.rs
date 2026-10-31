@@ -10,7 +10,7 @@ pub(crate) const MAX_PENDING_HISTORY_OUTBOX_EVENTS: i64 = 500;
 pub(crate) fn outbox_upload_eligible_predicate() -> &'static str {
     "outbox.envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) \
      AND outbox.envelope_id NOT IN (SELECT envelope_id FROM contact_photo_registrations WHERE acknowledged=0) \
-     AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND a.state!='uploaded') \
+     AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND NOT (a.state='uploaded' OR (a.state='available' AND a.remote_object_id IS NOT NULL))) \
      AND (outbox.compaction IS NULL OR EXISTS(SELECT 1 FROM metadata WHERE k='server_compaction_supported' AND v='1'))"
 }
 

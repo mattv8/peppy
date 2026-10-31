@@ -52,6 +52,27 @@ describe("MediaTile", () => {
     expect(props.onRetry).toHaveBeenCalledWith("thumbnail-1");
   });
 
+  it("replaces only remote-only policy removals with a permanent non-retry placeholder", async () => {
+    const props = providerProps();
+    renderTile(attachment({ state: "pending", transfer: "download", previewUrl: undefined, remoteState: "removed_by_storage_policy", localAvailable: false }), props);
+
+    expect(await screen.findByRole("group", { name: "Hosted media removed" })).toHaveTextContent("This attachment was removed from hosted storage to make room. The message remains.");
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(props.requestDownload).not.toHaveBeenCalled();
+  });
+
+  it("keeps a verified local policy-removed copy usable and leaves generic failures retryable", async () => {
+    const props = providerProps();
+    renderTile(attachment({ state: "failed", previewUrl: undefined, remoteState: "removed_by_storage_policy", localAvailable: true }), props);
+
+    expect(await screen.findByText("Hosted copy removed. Available on this device.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+
+    cleanup();
+    renderTile(attachment({ state: "failed", previewUrl: undefined }), providerProps());
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
   it("uses provider actions and keeps action buttons beside the tile body", () => {
     const props = providerProps();
     renderTile(attachment(), props);

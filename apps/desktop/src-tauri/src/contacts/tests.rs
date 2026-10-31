@@ -914,6 +914,21 @@ async fn work_round_reserves_tracked_photos_and_registers_references_before_publ
     let (origin, seen) = mock_server(|method, path, body| {
         let id = path.split('/').nth(3).unwrap_or("").to_owned();
         match (method, path) {
+            ("PUT", "/v1/devices/self/retention-capability") => (204, String::new()),
+            ("POST", p) if p.ends_with("/retention-uses") => {
+                let request: Value = serde_json::from_str(body).unwrap();
+                (
+                    200,
+                    json!({
+                        "use_id": request["use_id"],
+                        "attachment_id": request["attachment_id"],
+                        "device_id": request["device_id"],
+                        "kind": request["kind"],
+                        "state": "registered",
+                    })
+                    .to_string(),
+                )
+            }
             ("POST", "/v1/attachments/reserve") => {
                 let request: Value = serde_json::from_str(body).unwrap();
                 (200, json!({"attachment_id": request["attachment_id"], "expires_in_seconds": 600}).to_string())
@@ -939,6 +954,9 @@ async fn work_round_reserves_tracked_photos_and_registers_references_before_publ
     })
     .await
     .unwrap();
+    crate::attachment_retention::negotiate(&h.session)
+        .await
+        .unwrap();
     let png = format!(
         "data:image/png;base64,{}",
         STANDARD.encode(sample_png(300, 300))
@@ -957,11 +975,19 @@ async fn work_round_reserves_tracked_photos_and_registers_references_before_publ
     crate::sync::work_round(&h.session).await.unwrap();
 
     let seen = seen.lock().unwrap().clone();
-    let reserve = seen
+    let retention_registered = seen
         .iter()
-        .find(|s| s.path == "/v1/attachments/reserve")
+        .position(|s| s.path.ends_with("/retention-uses"))
+        .expect("photo retention use registered");
+    let reserve_position = seen
+        .iter()
+        .position(|s| s.path == "/v1/attachments/reserve")
         .expect("photo reserved");
-    let reserve: Value = serde_json::from_str(&reserve.body).unwrap();
+    assert!(
+        retention_registered < reserve_position,
+        "retention registration precedes upload reservation"
+    );
+    let reserve: Value = serde_json::from_str(&seen[reserve_position].body).unwrap();
     assert_eq!(
         reserve["reference_tracking"], true,
         "contact photos are reference-tracked"

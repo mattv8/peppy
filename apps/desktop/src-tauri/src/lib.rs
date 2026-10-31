@@ -22,6 +22,7 @@ use tauri_plugin_opener::OpenerExt;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 mod app_lock;
+mod attachment_retention;
 mod clipboard_image;
 mod composer_scope;
 mod contacts;
@@ -891,6 +892,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
     Snapshot {
         version: "1",
         mode: "native",
+        session_scope_id: None,
         connection: dto::Connection {
             state: "offline",
             origin,
@@ -1423,6 +1425,52 @@ async fn session_is_current(state: &AppState, session: &Arc<Session>) -> bool {
             && !session.cancel.is_cancelled()
             && Arc::ptr_eq(current, session)
     })
+}
+
+#[tauri::command]
+async fn attachment_retention_status(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<peppy_desktop_api::attachment_retention::AttachmentRetentionStatusResult> {
+    require_main(window.label())?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    attachment_retention::status(session).await
+}
+
+#[tauri::command]
+async fn acknowledge_attachment_retention_notice(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    input: peppy_desktop_api::attachment_retention::AttachmentRetentionNoticeAcknowledgementInput,
+) -> BridgeResult<
+    peppy_desktop_api::attachment_retention::AttachmentRetentionNoticeAcknowledgementResult,
+> {
+    require_main(window.label())?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    attachment_retention::acknowledge(session, input).await
+}
+
+#[tauri::command]
+async fn attachment_retention_state(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    attachment_id: String,
+) -> BridgeResult<peppy_desktop_api::attachment_retention::AttachmentRetentionStateDto> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    check_attachment_window_scope(&state, &session, &window, &attachment_id).await?;
+    let attachment_id = AttachmentId::from_str(&attachment_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The attachment ID is invalid."))?;
+    let client = session.client.clone();
+    let result = blocking(move || {
+        client
+            .attachment_retention_state(attachment_id)
+            .map_err(core_error)
+    })
+    .await?;
+    Ok(peppy_desktop_api::attachment_retention::attachment_retention_state_dto(result))
 }
 
 #[tauri::command]
@@ -2045,6 +2093,24 @@ fn close_deleted_composers(app: &tauri::AppHandle, state: &AppState, conversatio
 }
 
 /// Sends a draft through the same scoped path as the Tauri command.
+async fn draft_contains_attachments(
+    session: &Arc<Session>,
+    input: &DraftInput,
+) -> BridgeResult<bool> {
+    let session = session.clone();
+    let draft_id = input.id.clone();
+    blocking(move || {
+        let draft_id = DraftId::from_str(&draft_id)
+            .map_err(|_| BridgeError::new("invalid-request", "The draft ID is invalid."))?;
+        Ok(session
+            .client
+            .compose_draft(draft_id)
+            .map_err(core_error)?
+            .is_some_and(|draft| !draft.attachment_ids.is_empty()))
+    })
+    .await
+}
+
 async fn send_draft_for_window(
     state: &AppState,
     label: &str,
@@ -2058,6 +2124,9 @@ async fn send_draft_for_window(
             &session,
             Some(input.conversation_id.as_str()),
         )?;
+    }
+    if draft_contains_attachments(&session, &input).await? {
+        attachment_retention::ensure_negotiated(&session)?;
     }
     let binding = session.binding.clone();
     let s = session.clone();
@@ -2331,7 +2400,17 @@ async fn submit_contact_edit(
 ) -> BridgeResult<serde_json::Value> {
     let operation = admit_update_operation(&state)?;
     let session = state.require_session_admitted(&operation).await?;
+    if contact_photo_requires_negotiation(&input)? {
+        attachment_retention::ensure_negotiated(&session)?;
+    }
     blocking(move || contacts::submit(&session, &input)).await
+}
+
+fn contact_photo_requires_negotiation(input: &serde_json::Value) -> BridgeResult<bool> {
+    Ok(matches!(
+        peppy_desktop_api::contacts::photo_input(input)?,
+        peppy_desktop_api::contacts::PhotoInput::Set(_)
+    ))
 }
 
 #[tauri::command]
@@ -2352,6 +2431,7 @@ async fn restore_contact(
 ) -> BridgeResult<serde_json::Value> {
     let operation = admit_update_operation(&state)?;
     let session = state.require_session_admitted(&operation).await?;
+    attachment_retention::ensure_negotiated(&session)?;
     blocking(move || contacts::restore(&session, &book_id, &contact_id)).await
 }
 
@@ -2362,6 +2442,7 @@ async fn pick_attachments(
 ) -> BridgeResult<Vec<dto::AttachmentView>> {
     let operation = admit_update_operation(&state)?;
     let session = state.require_session_admitted(&operation).await?;
+    attachment_retention::ensure_negotiated(&session)?;
     let paths = dialogs::pick_files(&app, "Attach files (encrypted before upload)").await?;
     if paths.len() > 10 {
         return Err(BridgeError::new(
@@ -4105,6 +4186,22 @@ async fn publish_attachment(
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
     let s = session.clone();
     let info = blocking(move || s.client.attachment_info(attachment).map_err(core_error)).await?;
+    let retention = blocking({
+        let session = session.clone();
+        move || {
+            session
+                .client
+                .attachment_retention_state(attachment)
+                .map_err(core_error)
+        }
+    })
+    .await?;
+    if retention.remote == peppy_client_core::RemoteAttachmentState::RemovedByStoragePolicy {
+        return Err(BridgeError::new(
+            "attachment-removed",
+            "This attachment was removed from hosted storage and cannot be republished.",
+        ));
+    }
     if !media::is_previewable(&info.media_type) || !info.state.is_local() {
         return Err(BridgeError::new(
             "public-copy-unsupported",
@@ -4139,7 +4236,7 @@ async fn publish_attachment(
     if !confirmed {
         return Ok(None);
     }
-    let view = upload_public_copy(&session, &remote, prepared).await?;
+    let view = upload_public_copy(&session, attachment, &remote, prepared).await?;
     // The URL is shown to the person and returned to the UI; it is never logged.
     dialogs::inform(
         &app,
@@ -4205,17 +4302,34 @@ pub(crate) async fn prepare_public_copy(
 /// Uploads a prepared derivative. Callers must already hold explicit native user confirmation.
 pub(crate) async fn upload_public_copy(
     session: &Arc<Session>,
+    attachment: AttachmentId,
     remote: &str,
     prepared: PreparedPublicCopy,
 ) -> BridgeResult<PublicCopyView> {
-    let response: PublicCopyResponse = session
+    let response: PublicCopyResponse = match session
         .api
         .post_public_copy(
             &format!("/v1/attachments/{remote}/public-copies"),
             &prepared.name,
             prepared.bytes,
         )
-        .await?;
+        .await
+    {
+        Ok(response) => response,
+        Err(error) if sync::is_storage_policy_removal(&error) => {
+            sync::record_storage_policy_removal(session, attachment)
+                .await
+                .map_err(|failure| match failure {
+                    sync::Failure::Net(error) => BridgeError::from(error),
+                    sync::Failure::Permanent(error) => error,
+                })?;
+            return Err(BridgeError::new(
+                "attachment-removed",
+                "This attachment was removed from hosted storage and cannot be republished.",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
     let safe = |value: &str, extra: &[char]| {
         !value.is_empty()
             && value.len() <= 128
@@ -4247,7 +4361,7 @@ async fn create_public_copy(
     remote: &str,
 ) -> BridgeResult<PublicCopyView> {
     let prepared = prepare_public_copy(session, attachment, display_name).await?;
-    upload_public_copy(session, remote, prepared).await
+    upload_public_copy(session, attachment, remote, prepared).await
 }
 
 async fn new_composer(app: tauri::AppHandle, conversation: Option<String>) -> BridgeResult<()> {
@@ -5554,6 +5668,9 @@ pub fn run() {
             hosted::hosted_sign_out,
             hosted::hosted_open_billing,
             hosted::hosted_provision,
+            attachment_retention_status,
+            acknowledge_attachment_retention_notice,
+            attachment_retention_state,
             enrollment::enrollment_discover,
             enrollment::enrollment_start_over,
             enrollment::enrollment_create_owner,

@@ -85,6 +85,21 @@ describe("browser host RPC", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it("does not admit renderer producers before retention negotiation completes", async () => {
+    const session = new FakeSession();
+    const gate = deferred();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start: () => gate.promise, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    const pending = host.attach(attached);
+
+    await Promise.resolve();
+    expect(attached.messages).not.toContainEqual({ event: "ready", version: 1 });
+    expect(attached.onmessage).toBeNull();
+    gate.release();
+    await pending;
+    expect(attached.messages).toContainEqual({ event: "ready", version: 1 });
+  });
+
   it("starts networking once for an already-ready recovered boot", async () => {
     const session = new FakeSession();
     const start = vi.fn(async () => undefined);
@@ -95,13 +110,101 @@ describe("browser host RPC", () => {
     expect(start).toHaveBeenCalledTimes(1);
   });
 
+  it("releases a ready owner after boot negotiation failure so a retry can start", async () => {
+    const ownerLocks = locks();
+    const failedPort = port();
+    const failed = new BrowserWorkerHost({ locks: ownerLocks, boot: async () => new FakeSession(), network: { start: async () => { throw new TransportError("offline"); }, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
+    await failed.attach(failedPort);
+    expect(failedPort.closed).toBe(true);
+
+    const retryPort = port();
+    const retry = new BrowserWorkerHost({ locks: ownerLocks, boot: async () => new FakeSession(), network: { start: async () => true, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
+    await retry.attach(retryPort);
+    expect(retryPort.messages).toContainEqual({ event: "ready", version: 1 });
+  });
+
+  it("gates special attachment producers during the unlock negotiation window", async () => {
+    const session = new FakeSession();
+    session.phase = "locked";
+    session.unlock = async () => { session.phase = "ready"; };
+    const gate = deferred();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start: () => gate.promise, stop: async () => undefined, producerReady: () => false } as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "unlock", args: { passphrase: "secret" } });
+    await vi.waitFor(() => expect(session.phase).toBe("ready"));
+    attached.emit({ id: 2, command: "prepare_attachment", args: { bytes: new ArrayBuffer(1), displayName: "a", mediaType: "image/png" } });
+    attached.emit({ id: 3, command: "publish_attachment", args: { id: "00000000-0000-0000-0000-000000000001", confirmed: true } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 3));
+
+    expect(attached.messages).toContainEqual({ id: 2, ok: false, error: expect.objectContaining({ code: "unavailable" }) });
+    expect(attached.messages).toContainEqual({ id: 3, ok: false, error: expect.objectContaining({ code: "unavailable" }) });
+    expect(session.calls).toEqual([]);
+    gate.release();
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+  });
+
+  it("keeps offline-safe mutations available while retention negotiation is unresolved", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => session,
+      network: { start: async () => false, stop: async () => undefined, producerReady: () => false } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "save_draft", args: { input: { text: "offline" } } });
+    attached.emit({ id: 2, command: "mark_read_batch", args: { conversationId: "c", throughSequence: "1" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true }));
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 2, ok: true }));
+    expect(session.calls).toContainEqual(expect.objectContaining({ command: "save_draft", mutation: true }));
+    expect(session.calls).toContainEqual(expect.objectContaining({ command: "mark_read_batch", mutation: true }));
+  });
+
+  it("responds and stops cleanly when unlock negotiation is revoked", async () => {
+    const session = new FakeSession();
+    session.phase = "locked";
+    session.unlock = async () => { session.phase = "ready"; };
+    const stop = vi.fn(async () => undefined);
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start: async () => { throw new TransportError("revoked"); }, stop } as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "unlock", args: { passphrase: "secret" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: expect.objectContaining({ code: "unavailable" }) });
+    await eventually(() => attached.closed);
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
   it("does not forward private worker commands", async () => {
     const session = new FakeSession();
-    for (const command of ["_worker_transport_token", "_worker_enrollment_finish_owner"]) {
+    for (const command of ["_worker_transport_token", "_worker_enrollment_finish_owner", "_worker_attachment_retention_prepare", "_worker_attachment_retention_capability_request"]) {
       await expect(dispatchBrowserRpc(session, { id: 1, command, args: {} }))
         .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
     }
     expect(session.calls).toEqual([]);
+  });
+
+  it("validates the retention presentation facade before invoking network methods", async () => {
+    const session = new FakeSession();
+    const acknowledge = vi.fn(async () => "acknowledged" as const);
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, acknowledgeAttachmentRetentionNotice: acknowledge } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "acknowledge_attachment_retention_notice", args: { scopeId: "", policyVersion: "hosted_attachment_retention_v1" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: expect.objectContaining({ code: "invalid-request" }) });
+    expect(acknowledge).not.toHaveBeenCalled();
   });
 
   it("keeps notification settings links native-only", async () => {
@@ -266,6 +369,137 @@ describe("browser host RPC", () => {
     expect(session.previewAttachment).not.toHaveBeenCalledWith("original");
   });
 
+  it.each([
+    ["load_state", {}],
+    ["load_history", { conversationId: "conversation", beforeMessageId: "message" }],
+    ["load_message_window", { direction: "refresh", conversationId: "conversation", messageIds: [] }],
+    ["media_page", { conversationId: "00000000-0000-0000-0000-000000000099" }],
+    ["media_page_newer", {
+      conversationId: "00000000-0000-0000-0000-000000000099",
+      cursor: { sortAtMs: "1", localOrder: "1", messageId: "00000000-0000-0000-0000-000000000098", attachmentPosition: 0 },
+    }],
+    ["media_page_around", {
+      conversationId: "00000000-0000-0000-0000-000000000099",
+      attachmentId: "00000000-0000-0000-0000-000000000001",
+      messageId: "00000000-0000-0000-0000-000000000098",
+    }],
+  ] as const)("enriches unique attachment retention state once on the %s projection", async (command, args) => {
+    const session = new FakeSession();
+    const removedId = "00000000-0000-0000-0000-000000000001";
+    const localId = "00000000-0000-0000-0000-000000000002";
+    const thumbnailId = "00000000-0000-0000-0000-000000000003";
+    const thumbnail = { id: thumbnailId, name: "preview.png", mediaType: "image/png", byteSize: 3, state: "ready" };
+    const removed = { id: removedId, name: "remote.jpg", mediaType: "image/jpeg", byteSize: 10, state: "pending", retryable: true };
+    const local = { id: localId, name: "local.pdf", mediaType: "application/pdf", byteSize: 20, state: "ready", mediaHold: "held" };
+    const removedMessageAttachment = { ...removed, mediaMeta: { thumbnail } };
+    const localMessageAttachment = { ...local, mediaMeta: { thumbnail } };
+    const messages = [{ id: "message-1", attachments: [removedMessageAttachment, removedMessageAttachment] }, { id: "message-2", attachments: [localMessageAttachment] }];
+    const snapshot = { activeConversationId: "conversation", conversations: [{ id: "conversation", messages }] };
+    const messagePage = { conversationId: "conversation", messages, hasMore: false, hasOlder: false, hasNewer: false };
+    const mediaItems = [removed, removed, local].map((attachment, index) => ({ messageId: `message-${index}`, attachment, mediaMeta: { width: 10, thumbnail } }));
+    const mediaPage = { items: mediaItems };
+    const mediaAround = { target: mediaItems[0], newer: [mediaItems[1]], older: [mediaItems[2]] };
+    const retentionQueries: string[] = [];
+    session.previewAttachment = vi.fn(async () => "data:image/png;base64,cHJldmlldw==");
+    session.query = async (coreCommand, queryArgs) => {
+      session.calls.push({ command: coreCommand, args: queryArgs, mutation: false });
+      if (coreCommand === "snapshot") return snapshot;
+      if (coreCommand === "contact_snapshot") return {};
+      if (coreCommand === "load_history" || coreCommand === "load_message_window") return messagePage;
+      if (coreCommand === "media_page" || coreCommand === "media_page_newer") return mediaPage;
+      if (coreCommand === "media_page_around") return mediaAround;
+      if (coreCommand === "attachment_retention_state") {
+        const attachmentId = queryArgs.attachmentId as string;
+        retentionQueries.push(attachmentId);
+        return attachmentId === removedId
+          ? { remote: "removed_by_storage_policy", localAvailable: false, deviceToken: "do-not-expose" }
+          : { remote: "removed_by_storage_policy", localAvailable: true, deviceToken: "do-not-expose" };
+      }
+      throw new Error(coreCommand);
+    };
+
+    const response = await dispatchBrowserRpc(session, { id: 1, command, args });
+
+    expect(response).toMatchObject({ ok: true });
+    if (!response.ok) throw new Error("expected projection");
+    const value = response.value as Record<string, unknown>;
+    const messageProjection = command === "load_state" || command === "load_history" || command === "load_message_window";
+    let projected: unknown[];
+    let projectedThumbnail: unknown;
+    if (command === "load_state") {
+      projected = (value.conversations as Array<{ messages: Array<{ attachments: unknown[] }> }>)[0].messages.flatMap(message => message.attachments);
+      projectedThumbnail = (projected[0] as { mediaMeta: { thumbnail: unknown } }).mediaMeta.thumbnail;
+    } else if (command === "load_history" || command === "load_message_window") {
+      projected = (value.messages as Array<{ attachments: unknown[] }>).flatMap(message => message.attachments);
+      projectedThumbnail = (projected[0] as { mediaMeta: { thumbnail: unknown } }).mediaMeta.thumbnail;
+    } else if (command === "media_page_around") {
+      const target = value.target as { attachment: unknown; mediaMeta: { thumbnail: unknown } };
+      projected = [target.attachment, ...(value.newer as Array<{ attachment: unknown }>).map(item => item.attachment), ...(value.older as Array<{ attachment: unknown }>).map(item => item.attachment)];
+      projectedThumbnail = target.mediaMeta.thumbnail;
+    } else {
+      const items = value.items as Array<{ attachment: unknown; mediaMeta: { thumbnail: unknown } }>;
+      projected = items.map(item => item.attachment);
+      projectedThumbnail = items[0].mediaMeta.thumbnail;
+    }
+    const expectedRemoved = messageProjection ? removedMessageAttachment : removed;
+    const expectedLocal = messageProjection ? localMessageAttachment : local;
+    expect(projected[0]).toMatchObject({ ...expectedRemoved, remoteState: "removed_by_storage_policy", localAvailable: false });
+    expect(projected[1]).toMatchObject({ ...expectedRemoved, remoteState: "removed_by_storage_policy", localAvailable: false });
+    expect(projected[2]).toMatchObject({ ...expectedLocal, remoteState: "removed_by_storage_policy", localAvailable: true });
+    expect(projectedThumbnail).toMatchObject({ ...thumbnail, previewUrl: "data:image/png;base64,cHJldmlldw==" });
+    expect(session.previewAttachment).toHaveBeenCalledWith(thumbnailId);
+    expect(session.previewAttachment).not.toHaveBeenCalledWith(removedId);
+    expect(session.previewAttachment).not.toHaveBeenCalledWith(localId);
+    expect(retentionQueries).toEqual([removedId, localId]);
+    expect(session.calls.every(call => call.mutation === false)).toBe(true);
+    expect(JSON.stringify(response)).not.toContain("do-not-expose");
+  });
+
+  it("preserves attachment descriptors and ordinary download behavior when retention state is unavailable", async () => {
+    const session = new FakeSession();
+    const attachment = { id: "00000000-0000-0000-0000-000000000001", name: "photo.jpg", mediaType: "image/jpeg", byteSize: 10, state: "pending", transfer: "download", retryable: true };
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "load_history") return { messages: [{ attachments: [attachment] }] };
+      if (command === "attachment_retention_state") throw new CoreRejectedError("unavailable");
+      throw new Error(command);
+    };
+
+    const response = await dispatchBrowserRpc(session, { id: 1, command: "load_history", args: { conversationId: "conversation", beforeMessageId: "message" } });
+
+    expect(response).toMatchObject({ ok: true, value: { messages: [{ attachments: [attachment] }] } });
+    expect(JSON.stringify(response)).not.toContain("remoteState");
+    expect(JSON.stringify(response)).not.toContain("localAvailable");
+  });
+
+  it("bounds retention enrichment to one hundred unique visible attachments", async () => {
+    const session = new FakeSession();
+    const attachments = Array.from({ length: 101 }, (_, index) => ({
+      id: `00000000-0000-0000-0000-${String(index + 1).padStart(12, "0")}`,
+      name: `file-${index}`,
+      mediaType: "application/octet-stream",
+      byteSize: index + 1,
+      state: "pending",
+    }));
+    let retentionQueries = 0;
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "load_history") return { messages: attachments.map(attachment => ({ attachments: [attachment] })) };
+      if (command === "attachment_retention_state") { retentionQueries += 1; return { remote: "available", localAvailable: false }; }
+      throw new Error(command);
+    };
+
+    const response = await dispatchBrowserRpc(session, { id: 1, command: "load_history", args: { conversationId: "conversation", beforeMessageId: "message" } });
+
+    expect(response).toMatchObject({ ok: true });
+    if (!response.ok) throw new Error("expected history");
+    const messages = (response.value as { messages: Array<{ attachments: Array<Record<string, unknown>> }> }).messages;
+    expect(retentionQueries).toBe(100);
+    expect(messages[99].attachments[0]).toMatchObject({ remoteState: "available", localAvailable: false });
+    expect(messages[100].attachments[0]).not.toHaveProperty("remoteState");
+    expect(messages[100].attachments[0]).not.toHaveProperty("localAvailable");
+  });
+
   it("uses the session's serialized media read instead of splitting availability and export", async () => {
     const session = new FakeSession();
     const id = "00000000-0000-0000-0000-000000000001";
@@ -274,6 +508,91 @@ describe("browser host RPC", () => {
     expect(response).toMatchObject({ ok: true, value: { state: "ready", byteSize: 1 } });
     expect(session.openMediaAttachment).toHaveBeenCalledWith(id, 32 * 1024 * 1024);
     expect(session.calls).toEqual([]);
+  });
+
+  it.each([{}, { metadataOnly: true }])("adds an optional session scope to %j load-state projections when host context supplies one", async args => {
+    const session = new FakeSession();
+    const response = await dispatchBrowserRpc(
+      session,
+      { id: 1, command: "load_state", args },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { sessionScopeId: "018f2c5e-6a3b-7c4d-8e5f-0123456789ab" },
+    );
+
+    expect(response).toMatchObject({ ok: true, value: { sessionScopeId: "018f2c5e-6a3b-7c4d-8e5f-0123456789ab" } });
+  });
+
+  it("keeps the actual host session scope stable without status HTTP and rotates it when the device binding changes", async () => {
+    const session = new FakeSession();
+    const firstVaultId = "00000000-0000-4000-8000-000000000001";
+    const firstDeviceId = "00000000-0000-0000-0000-000000000001";
+    const nextVaultId = "00000000-0000-4000-8000-000000000002";
+    const nextDeviceId = "00000000-0000-0000-0000-000000000002";
+    let vaultId = firstVaultId;
+    let deviceId = firstDeviceId;
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "_worker_identity_metadata") return { vaultId, deviceId, deviceToken: "do-not-expose" };
+      if (command === "snapshot") return session.snapshot;
+      if (command === "contact_snapshot") return {};
+      return { command };
+    };
+    const attachmentRetentionStatus = vi.fn(async () => ({ kind: "temporarily_unavailable" as const }));
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => true, stop: async () => undefined, attachmentRetentionStatus } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    const loadState = async (id: number, metadataOnly = false): Promise<Record<string, unknown>> => {
+      attached.emit({ id, command: "load_state", args: metadataOnly ? { metadataOnly: true } : {} });
+      await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === id));
+      const response = attached.messages.find(message => typeof message === "object" && message !== null && "id" in message && message.id === id) as { ok: boolean; value: Record<string, unknown> };
+      expect(response.ok).toBe(true);
+      return response.value;
+    };
+
+    const first = await loadState(1);
+    const second = await loadState(2, true);
+    vaultId = nextVaultId;
+    deviceId = nextDeviceId;
+    const switched = await loadState(3);
+
+    expect(first.sessionScopeId).toEqual(expect.any(String));
+    expect(second.sessionScopeId).toBe(first.sessionScopeId);
+    expect(switched.sessionScopeId).not.toBe(first.sessionScopeId);
+    expect(attachmentRetentionStatus).not.toHaveBeenCalled();
+    expect(session.calls.every(call => call.mutation === false)).toBe(true);
+    const payload = JSON.stringify(attached.messages);
+    for (const privateValue of [firstVaultId, firstDeviceId, nextVaultId, nextDeviceId, "do-not-expose"]) expect(payload).not.toContain(privateValue);
+  });
+
+  it("rotates the actual host session scope when the same device session is locked and reopened", async () => {
+    const firstSession = new FakeSession();
+    const firstHost = new BrowserWorkerHost({ locks: locks(), boot: async () => firstSession, network: { start: async () => true, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
+    const firstPort = port();
+    await firstHost.attach(firstPort);
+    firstPort.emit({ id: 1, command: "load_state", args: {} });
+    await eventually(() => firstPort.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    const firstResponse = firstPort.messages.find(message => typeof message === "object" && message !== null && "id" in message && message.id === 1) as { value: { sessionScopeId?: string } };
+    firstPort.emit({ id: 2, command: "lock_sync", args: {} });
+    await eventually(() => firstPort.closed);
+
+    const reopenedSession = new FakeSession();
+    const reopenedHost = new BrowserWorkerHost({ locks: locks(), boot: async () => reopenedSession, network: { start: async () => true, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
+    const reopenedPort = port();
+    await reopenedHost.attach(reopenedPort);
+    reopenedPort.emit({ id: 3, command: "load_state", args: {} });
+    await eventually(() => reopenedPort.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 3));
+    const reopenedResponse = reopenedPort.messages.find(message => typeof message === "object" && message !== null && "id" in message && message.id === 3) as { value: { sessionScopeId?: string } };
+
+    expect(firstResponse.value.sessionScopeId).toEqual(expect.any(String));
+    expect(reopenedResponse.value.sessionScopeId).toEqual(expect.any(String));
+    expect(reopenedResponse.value.sessionScopeId).not.toBe(firstResponse.value.sessionScopeId);
   });
 
   it.each([

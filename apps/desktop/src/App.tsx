@@ -16,6 +16,7 @@ import { flushSync } from "react-dom";
 import type { GatewayAvailability, LocalSearchHit, LocalSearchRequest } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
+  attachmentStorageRemovalText,
   OmniSearch,
   Check,
   CheckCheck,
@@ -98,7 +99,7 @@ import { ContactsView, type ContactNavigationGuard, type ContactTarget } from ".
 import { findContactTarget } from "./contact-target";
 import { useHistorySearch } from "./useHistorySearch";
 import { DevicesSettings } from "./DevicesSettings";
-import { HostedAccountSettings } from "./HostedAccountSettings";
+import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./HostedAccountSettings";
 import { PrivacySettings } from "./PrivacySettings";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./AppLock";
@@ -905,8 +906,10 @@ function MessageList({
                 const copy = publicCopies[file.id];
                 if (originalPending(file)) return <MediaTile key={file.id} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
                 const shareable =
-                  file.state === "ready" && file.mediaType.startsWith("image/");
+                  file.remoteState !== "removed_by_storage_policy" && file.state === "ready" && file.mediaType.startsWith("image/");
                 if (file.mediaType.startsWith("video/") || file.mediaType.startsWith("audio/")) return <InlineMedia key={file.id} attachment={file} requestOriginal={requestOriginal} checkOriginal={checkOriginal} releaseMedia={releaseMedia} retryKey={mediaRetryKey} />;
+                const removedRemoteOnly = file.remoteState === "removed_by_storage_policy" && !file.localAvailable;
+                const removedWithLocalCopy = file.remoteState === "removed_by_storage_policy" && file.localAvailable;
                 return (
                   <div
                     key={file.id}
@@ -929,14 +932,15 @@ function MessageList({
                     )}
                     <span>{file.name}</span>
                     <small>
-                      {fileSize(file.byteSize)} · {attachmentState(file)}
+                      {fileSize(file.byteSize)}{removedRemoteOnly ? "" : ` · ${attachmentState(file)}`}
                     </small>
-                    {file.retryable && file.transfer && (
+                    {removedRemoteOnly ? <p data-attachment-storage-removed role="status">{attachmentStorageRemovalText(false, peppyCopy).body}</p> : file.retryable && file.transfer && (
                       <button className="secondary-button" onClick={() => onRetryAttachment(file)} aria-label={`Retry ${file.transfer} for ${file.name}`}>
                         Retry {file.transfer}
                       </button>
                     )}
-                    {(!file.mediaType.startsWith("image/") || file.state === "ready") && (
+                    {removedWithLocalCopy && <p data-attachment-storage-local-copy role="status">{attachmentStorageRemovalText(true, peppyCopy).body}</p>}
+                    {!removedRemoteOnly && (!file.mediaType.startsWith("image/") || file.state === "ready") && (
                       <button className="secondary-button" onClick={() => onSaveAttachment(file)} aria-label={`Save ${file.name}`}>
                         Save {file.name}
                       </button>
@@ -1043,6 +1047,7 @@ function SettingsView({
   onAppLock,
   browserHost = false,
   accountUrl,
+  sessionScopeId,
   canRevealVaultSecret = false,
   serverOffline = false,
   requestedSection,
@@ -1082,6 +1087,7 @@ function SettingsView({
   onAppLock(enabled: boolean): Promise<boolean>;
   browserHost?: boolean;
   accountUrl?: string;
+  sessionScopeId?: string;
   canRevealVaultSecret?: boolean;
   serverOffline?: boolean;
   requestedSection?: string;
@@ -1348,9 +1354,7 @@ function SettingsView({
       {hasAccount && <section id="settings-account-billing" className="settings-card" data-settings-section="account-billing">
         <h2>Account &amp; billing</h2>
         <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
-        {!browserHost && <HostedAccountSettings />}
-        {!browserHost ? <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("account") || undefined} onClick={() => void runAction("account")}>Open account &amp; billing</button> : <a id="settings-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer" className="secondary-button">Open account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a>}
-        {actionAlert("account")}
+        {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} hostKind="browser" manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} />}
       </section>}
       <PrivacySettings browserHost={browserHost} />
       </div>
@@ -4533,6 +4537,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onOrigin={setOrigin}
               onAction={runSetupAction}
               onOpenAccount={() => bridge.hosted_open_billing()}
+              sessionScopeId={snapshot?.sessionScopeId}
               encryption={snapshot?.encryption.state ?? "locked"}
               canUnlock={canRecoverNativeSync}
               theme={theme}

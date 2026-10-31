@@ -125,6 +125,7 @@ async fn create(
     .fetch_one(&mut *tx)
     .await
     .map_err(database)?;
+    withdraw_legacy_enrollment(&mut tx, &headers, &owner).await?;
     sqlx::query("UPDATE computer_enrollments SET state='expired' WHERE vault_id=$1 AND owner_device_id=$2 AND state='waiting' AND expires_at < now()")
         .bind(owner.vault_id)
         .bind(owner.device_id)
@@ -247,6 +248,7 @@ async fn approve(
         .map_err(database)?;
     revalidate_owner(&mut tx, &owner).await?;
     let row = sqlx::query("SELECT c.*,v.profile_fingerprint current_fingerprint,v.key_epoch current_epoch,d.revoked_at IS NOT NULL AS owner_revoked,c.expires_at > now() AS expires_valid,GREATEST(0,floor(extract(epoch FROM c.expires_at-now())))::bigint AS expires_remaining FROM computer_enrollments c JOIN vaults v ON v.vault_id=c.vault_id JOIN devices d ON d.vault_id=c.vault_id AND d.device_id=c.owner_device_id WHERE c.id=$1 AND c.vault_id=$2 AND c.owner_device_id=$3 FOR UPDATE OF c,v,d").bind(id).bind(owner.vault_id).bind(owner.device_id).fetch_optional(&mut *tx).await.map_err(database)?.ok_or(Error(StatusCode::NOT_FOUND, "computer_enrollment_not_found"))?;
+    withdraw_legacy_enrollment(&mut tx, &headers, &owner).await?;
     if row.get::<bool, _>("owner_revoked")
         || row.get::<String, _>("profile_fingerprint")
             != row.get::<String, _>("current_fingerprint")
@@ -381,14 +383,26 @@ async fn cancel(
     let mut tx = scope::begin(&state.db, owner.vault_id)
         .await
         .map_err(database)?;
+    let enrollment = sqlx::query("SELECT c.state FROM computer_enrollments c JOIN vaults v ON v.vault_id=c.vault_id WHERE c.id=$1 AND c.vault_id=$2 AND c.owner_device_id=$3 FOR UPDATE OF c,v")
+        .bind(id)
+        .bind(owner.vault_id)
+        .bind(owner.device_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database)?;
     revalidate_owner(&mut tx, &owner).await?;
-    let changed = sqlx::query("UPDATE computer_enrollments SET state='cancelled' WHERE id=$1 AND vault_id=$2 AND owner_device_id=$3 AND state='waiting'").bind(id).bind(owner.vault_id).bind(owner.device_id).execute(&mut *tx).await.map_err(database)?;
-    if changed.rows_affected() != 1 {
+    withdraw_legacy_enrollment(&mut tx, &headers, &owner).await?;
+    if enrollment.is_none_or(|row| row.get::<String, _>("state") != "waiting") {
         return Err(Error(
             StatusCode::CONFLICT,
             "computer_enrollment_not_cancellable",
         ));
     }
+    sqlx::query("UPDATE computer_enrollments SET state='cancelled' WHERE id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(database)?;
     tx.commit().await.map_err(database)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -453,6 +467,21 @@ fn route_method(operation: EnrollmentOperation) -> Method {
         _ => Method::POST,
     }
 }
+async fn withdraw_legacy_enrollment(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    headers: &HeaderMap,
+    owner: &Owner,
+) -> Result<(), Error> {
+    crate::attachment_retention::withdraw_legacy_retention_readiness_on_connection(
+        &mut **tx,
+        headers,
+        owner.vault_id,
+        owner.device_id,
+    )
+    .await
+    .map_err(database)
+}
+
 async fn revalidate_owner(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     owner: &Owner,

@@ -14,6 +14,25 @@ function renderWithActions(ui: ReactElement) {
 }
 
 describe("MediaLightbox", () => {
+  it("keeps a remote-only policy removal permanent without requesting or offering recovery actions", () => {
+    const requestOriginal = vi.fn();
+    renderWithActions(<MediaLightbox items={[{ ...items[0], attachment: { ...items[0].attachment, remoteState: "removed_by_storage_policy", localAvailable: false } }]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={vi.fn()} saveMedia={vi.fn()} />);
+
+    expect(screen.getByText("This attachment was removed from hosted storage to make room. The message remains.")).toBeInTheDocument();
+    expect(requestOriginal).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /save|public|retry/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps a verified local policy-removed attachment usable and labels it", async () => {
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:local" });
+    renderWithActions(<MediaLightbox items={[{ ...items[0], attachment: { ...items[0].attachment, remoteState: "removed_by_storage_policy", localAvailable: true } }]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn()} />);
+
+    expect(await screen.findByText("Hosted copy removed. Available on this device.")).toBeInTheDocument();
+    expect(requestOriginal).toHaveBeenCalledWith("one");
+    expect(await screen.findByRole("button", { name: "Save image" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create public link" })).toBeInTheDocument();
+  });
+
   it("navigates with keys and releases a loaded original on close", async () => {
     const releaseMedia = vi.fn();
     const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:one" });

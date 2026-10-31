@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEventHandler, type Ref } from "react";
-import { Download, ImageDown, ImageOff, Link, Loader2, RotateCw, WifiOff } from "@peppy/desktop-ui";
+import { attachmentStorageRemovalText, Download, ImageDown, ImageOff, Link, Loader2, RotateCw, WifiOff } from "@peppy/desktop-ui";
 import type { GalleryAttachment, GalleryMessage } from "./grouping";
 import { canOpen, demandTarget, holdNoteText, originalPending, originalView, previewUrl, tileLabel, tileState } from "./mediaState";
 import { useMediaActions } from "./MediaActionsContext";
 import { TileContextMenu } from "./TileContextMenu";
 import { useLazyDemand, usePreviewHydration } from "./useLazyDemand";
 import { withHydratedPreview } from "./previewHydration";
+import { peppyCopy } from "../generated/peppyCopy";
 import "./media-tile.css";
 
 export type MediaTileProps = {
@@ -116,13 +117,15 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
   const previousState = useRef(state);
   const previousPendingOriginal = useRef(pendingOriginal);
   const heldControlFocused = useRef(false);
-  const canAct = canOpen(shown, hydration.exhausted);
+  const removedRemoteOnly = attachment.remoteState === "removed_by_storage_policy" && !attachment.localAvailable;
+  const removedWithLocalCopy = attachment.remoteState === "removed_by_storage_policy" && attachment.localAvailable;
+  const canAct = !removedRemoteOnly && canOpen(shown, hydration.exhausted);
   // A held original with a visible preview can still be copied natively; the menu then offers Copy only.
   const nativeHeldCopy = pendingOriginal && Boolean(actions?.nativeCopy) && previewUrl(shown) !== undefined && attachment.mediaType.startsWith("image/");
   const hasActions = Boolean(actions && canAct);
   const accessibleLabel = state === "ready" && label ? label : tileLabel(attachment, state);
   const isSaving = actions?.isSaving(attachment.id) ?? false;
-  useLazyDemand(rootRef, [demandTarget(attachment), ...prefetchIds]);
+  useLazyDemand(rootRef, !removedRemoteOnly ? [demandTarget(attachment), ...prefetchIds] : []);
 
   const mergedBodyRef = useCallback((element: HTMLButtonElement | null) => {
     bodyElementRef.current = element;
@@ -186,8 +189,8 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
   const heldNote = holdNoteText(effectiveSyncState, Boolean(actions?.canRequestMediaSync), attachment.error);
   const syncAccessibleLabel = original.phase === "requested" ? `Requested ${label?.toLowerCase() || attachment.name || "image"}` : `Sync ${label?.toLowerCase() || attachment.name || "image"} using mobile data if needed`;
   const syncLabel = attachment.mediaType.startsWith("image/") ? "Sync image" : attachment.mediaType.startsWith("video/") ? "Sync video" : "Sync file";
-  return <div ref={rootRef} tabIndex={-1} data-media-tile data-variant={variant} data-state={state} data-original={pendingOriginal ? original.phase : undefined} data-partly-visible={observeSlideVisibility && !slideFullyVisible ? true : undefined} data-sync={pendingOriginal ? effectiveSyncState : undefined} data-has-actions={hasActions || undefined} data-menu-open={menuAnchor ? true : undefined} aria-busy={state === "loading" || heldSyncState === "requesting" || undefined}>
-    {pendingOriginal ? <>
+  return <div ref={rootRef} tabIndex={-1} data-media-tile data-variant={variant} data-state={state} data-original={pendingOriginal ? original.phase : undefined} data-partly-visible={observeSlideVisibility && !slideFullyVisible ? true : undefined} data-sync={pendingOriginal ? effectiveSyncState : undefined} data-has-actions={hasActions || undefined} data-local-copy={removedWithLocalCopy || undefined} data-menu-open={menuAnchor ? true : undefined} aria-busy={state === "loading" || heldSyncState === "requesting" || undefined}>
+    {removedRemoteOnly ? <div className="tile-body tile-removed" role="group" aria-label={peppyCopy.attachment_storage_removed_title} {...bodyProps}><ImageOff size={20} aria-hidden="true" /><span>{attachmentStorageRemovalText(false, peppyCopy).body}</span></div> : pendingOriginal ? <>
       <div ref={heldBodyRef} className="tile-body tile-held" role="img" aria-label={accessibleLabel} {...bodyProps} tabIndex={nativeHeldCopy ? 0 : undefined} aria-haspopup={nativeHeldCopy ? "menu" : undefined} onContextMenu={(event) => { if (!nativeHeldCopy) return; event.preventDefault(); openMenu(event.clientX, event.clientY); }} onKeyDown={(event) => { if (!nativeHeldCopy || !isMenuKey(event)) return; event.preventDefault(); const bounds = event.currentTarget.getBoundingClientRect(); openMenu(bounds.left + 8, bounds.top + 8); }}>
         {imageUrl ? <img className="tile-held-preview" loading="lazy" decoding="async" src={imageUrl} alt="" aria-hidden="true" /> : <WifiOff className="tile-held-icon" size={20} aria-hidden="true" />}
       </div>
@@ -198,6 +201,7 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
       {state === "loading" && <Loader2 className="tile-loading-icon" size={20} aria-hidden="true" />}
       {state === "unavailable" && <span className="tile-unavailable"><ImageOff size={20} aria-hidden="true" />Preview unavailable</span>}
     </button>}
+    {removedWithLocalCopy && <p data-attachment-storage-local-copy>{attachmentStorageRemovalText(true, peppyCopy).body}</p>}
     {actions && canAct && <div data-tile-actions><button type="button" aria-label="Save image" title="Save image" aria-busy={isSaving || undefined} aria-disabled={isSaving || undefined} onClick={() => { if (!isSaving) actions.save(attachment); }}>{isSaving ? <Loader2 className="tile-action-spinner" size={16} aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}</button>{actions.canShareLink && <button type="button" aria-label={actions.publicCopy(attachment.id) ? "Copy public link" : "Create public link"} title={actions.publicCopy(attachment.id) ? "Copy public link" : "Create public link"} onClick={() => actions.shareLink(attachment)}><Link size={16} aria-hidden="true" /></button>}</div>}
     {menuAnchor && actions && <TileContextMenu attachment={attachment} actions={actions} anchor={menuAnchor} onRetryPreview={hydration.exhausted ? hydration.retry : undefined} onClose={() => setMenuAnchor(undefined)} returnFocus={() => (bodyElementRef.current ?? heldBodyRef.current)?.focus()} />}
   </div>;
