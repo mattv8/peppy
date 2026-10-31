@@ -1,7 +1,6 @@
 //! Provider SMS capture keeps provider identity separate from message content.
-mod common;
 
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 fn provider_input(

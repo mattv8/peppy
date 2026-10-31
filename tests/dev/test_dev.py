@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# Hang guard only: these waits expect success, but a loaded machine running modules in parallel can exceed a few seconds.
+HANG_GUARD_TIMEOUT = 30
 
 
 class DevScriptTests(unittest.TestCase):
@@ -501,8 +503,8 @@ class DevScriptTests(unittest.TestCase):
             started = time.monotonic()
             first = subprocess.Popen(["bash", "infra/dev/container-run.sh", "build", "server"], cwd=ROOT, env=env)
             second = subprocess.Popen(["bash", "infra/dev/container-run.sh", "build", "server"], cwd=ROOT, env=env)
-            self.assertEqual(first.wait(timeout=5), 0)
-            self.assertEqual(second.wait(timeout=5), 0)
+            self.assertEqual(first.wait(timeout=HANG_GUARD_TIMEOUT), 0)
+            self.assertEqual(second.wait(timeout=HANG_GUARD_TIMEOUT), 0)
             self.assertGreaterEqual(time.monotonic() - started, 0.45)
 
     @unittest.skipUnless(shutil.which("flock"), "flock is provided by the Linux tooling image")
@@ -529,7 +531,7 @@ class DevScriptTests(unittest.TestCase):
                 self.assertIn("timed out", timed.stderr)
             finally:
                 holder.terminate()
-                holder.wait(timeout=2)
+                holder.wait(timeout=HANG_GUARD_TIMEOUT)
 
     def test_development_image_preserves_rustup_path_and_numeric_user(self):
         image = (ROOT / "infra/docker/development.Dockerfile").read_text()

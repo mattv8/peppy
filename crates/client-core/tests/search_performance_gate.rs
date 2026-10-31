@@ -1,9 +1,7 @@
 //! Explicit native performance evidence for the SQLCipher-backed local search index.
-//! Run with `cargo test -p peppy-client-core --test search_performance_gate -- --ignored --nocapture`.
+//! Run with `cargo test --release -p peppy-client-core --test integration search_performance_gate:: -- --ignored --nocapture`.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::{

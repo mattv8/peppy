@@ -1,8 +1,7 @@
 //! Regression coverage for the final SMS repair wave, using provider-shaped evidence: Android SMS
 //! `date` is milliseconds, outgoing `date_sent` is 0, and incoming `date_sent` is the SMSC time.
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 

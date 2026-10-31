@@ -7,6 +7,11 @@ import subprocess
 import tempfile
 import unittest
 
+try:
+    from tests.dev.stub_commands import write_stub
+except ModuleNotFoundError:
+    from stub_commands import write_stub
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HELPER = ROOT / "infra/dev/desktop.sh"
@@ -29,10 +34,7 @@ class DesktopHelperTests(unittest.TestCase):
         )
 
     def fake_command(self, directory, name, body):
-        path = pathlib.Path(directory) / name
-        path.write_text("#!/usr/bin/env bash\nset -eu\n" + body)
-        path.chmod(0o755)
-        return path
+        return write_stub(pathlib.Path(directory) / name, "set -eu\n" + body, "bash")
 
     def tls_environment(self, fake_bin, debug):
         return {"DEBUG": debug, "PEPPY_DEV_TLS_DIR": str(pathlib.Path(fake_bin) / "tls")}

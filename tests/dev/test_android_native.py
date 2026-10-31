@@ -7,6 +7,11 @@ import sys
 import tempfile
 import unittest
 
+try:
+    from tests.dev.stub_commands import write_stub
+except ModuleNotFoundError:
+    from stub_commands import write_stub
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -383,35 +388,30 @@ class AndroidNativeVerifierTests(unittest.TestCase):
                 "llvm-ranlib",
                 "aarch64-linux-android26-clang", "x86_64-linux-android26-clang",
             ):
-                path = host_bin / tool
-                path.write_text("#!/bin/sh\nexit 0\n")
-                path.chmod(0o755)
+                write_stub(host_bin / tool, "exit 0\n")
             llvm_readelf = host_bin / "llvm-readelf"
-            llvm_readelf.write_text(
-                "#!/bin/sh\n"
+            write_stub(
+                llvm_readelf,
                 "if [ -n \"$FAKE_UNRESOLVED_SYMBOL\" ]; then\n"
                 "  printf '0 0 0 0 0 0 UND sodium_test\\n'\n"
-                "fi\n"
+                "fi\n",
             )
-            llvm_readelf.chmod(0o755)
             llvm_ar = host_bin / "llvm-ar"
-            llvm_ar.write_text(
-                "#!/bin/sh\n"
+            write_stub(
+                llvm_ar,
                 "if [ \"$1\" = t ]; then\n"
                 "  case \"$(cat \"$2\")\" in\n"
                 "    healthy) printf 'member.o\\n' ;;\n"
                 "    invalid) exit 1 ;;\n"
                 "  esac\n"
-                "fi\n"
+                "fi\n",
             )
-            llvm_ar.chmod(0o755)
             if host.startswith("darwin") or ndk_bin is None:
                 ndk_bin = host_bin
         return ndk_home, ndk_bin
 
     def write_fake_uname(self, path, host_name):
-        path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{host_name}'\n")
-        path.chmod(0o755)
+        write_stub(path, f"printf '%s\\n' '{host_name}'\n")
 
     def write_fake_cargo(self, path):
         path.write_text(

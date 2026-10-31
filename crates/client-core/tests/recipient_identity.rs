@@ -1,6 +1,5 @@
 //! Recipient identity uses the sole contact-book region and exact MMS participants.
-mod common;
-use common::*;
+use crate::common::*;
 use serde_json::json;
 use tempfile::TempDir;
 

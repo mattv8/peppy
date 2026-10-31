@@ -1,7 +1,6 @@
 //! Bounded, durable-ID conversation history paging.
-mod common;
 
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 fn capture_messages(client: &Client, count: usize) -> (ConversationId, Vec<MessageId>) {

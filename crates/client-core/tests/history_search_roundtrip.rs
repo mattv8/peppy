@@ -2,9 +2,8 @@
 //! back" attempt asks the phone, the phone captures imported SMS through the public acquisition
 //! and checkpoint APIs, and the completed result plus the captured message let the desktop's
 //! local search find it. Only encrypted envelopes move between the clients.
-mod common;
 
-use common::*;
+use crate::common::*;
 use peppy_client_core::EnvelopeId;
 use serde_json::{Value, json};
 use uuid::Uuid;

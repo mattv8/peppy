@@ -21,8 +21,6 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[derive(Default)]
 struct Policy {
     allowed: Vec<Operation>,
@@ -371,7 +369,6 @@ fn assert_called_by(
 
 #[tokio::test]
 async fn attachment_usage_uses_policy_quota_and_requires_read_permission() {
-    let _guard = TEST_LOCK.lock().await;
     let policy = Arc::new(Policy {
         allowed: vec![Operation::Read],
         quota: Some(123_456),
@@ -417,7 +414,6 @@ async fn attachment_usage_uses_policy_quota_and_requires_read_permission() {
 
 #[tokio::test]
 async fn policy_receives_verified_principals_and_cannot_be_tricked_by_foreign_envelopes() {
-    let _guard = TEST_LOCK.lock().await;
     let policy = Arc::new(Policy::allowing([
         Operation::Read,
         Operation::Sync,
@@ -475,7 +471,6 @@ async fn policy_receives_verified_principals_and_cannot_be_tricked_by_foreign_en
 
 #[tokio::test]
 async fn readonly_policy_denies_mutations_before_semantic_validation_but_permits_safe_operations() {
-    let _guard = TEST_LOCK.lock().await;
     let policy = Arc::new(Policy::allowing([
         Operation::Read,
         Operation::Sync,
@@ -589,7 +584,6 @@ async fn readonly_policy_denies_mutations_before_semantic_validation_but_permits
 
 #[tokio::test]
 async fn wake_routes_use_sync_and_revoke_policy_and_delete_matching_jobs() {
-    let _guard = TEST_LOCK.lock().await;
     let policy = Arc::new(Policy::allowing([Operation::Sync, Operation::Revoke]));
     let server = TestServer::start(policy.clone()).await;
     let owner = server.owner().await;
@@ -658,7 +652,6 @@ async fn wake_routes_use_sync_and_revoke_policy_and_delete_matching_jobs() {
 
 #[tokio::test]
 async fn push_config_and_wake_routes_require_device_auth_and_honor_route_fences() {
-    let _guard = TEST_LOCK.lock().await;
     let policy = Arc::new(Policy::allowing([
         Operation::Read,
         Operation::Sync,
@@ -824,7 +817,6 @@ async fn push_config_and_wake_routes_require_device_auth_and_honor_route_fences(
 
 #[tokio::test]
 async fn default_push_config_is_unavailable_and_uses_sync_policy() {
-    let _guard = TEST_LOCK.lock().await;
     let policy = Arc::new(Policy::allowing([Operation::Sync]));
     let server = TestServer::start(policy.clone()).await;
     let owner = server.owner().await;
@@ -848,7 +840,6 @@ async fn default_push_config_is_unavailable_and_uses_sync_policy() {
 
 #[tokio::test]
 async fn policy_attachment_quota_overrides_the_server_default_for_reservations() {
-    let _guard = TEST_LOCK.lock().await;
     let policy = Arc::new(Policy {
         allowed: vec![Operation::Upload],
         quota: Some(3),
@@ -880,7 +871,6 @@ async fn policy_attachment_quota_overrides_the_server_default_for_reservations()
 
 #[tokio::test]
 async fn quota_policy_callback_does_not_reacquire_a_one_connection_pool_inside_the_transaction() {
-    let _guard = TEST_LOCK.lock().await;
     let policy = Arc::new(DatabasePolicy {
         pool: tokio::sync::OnceCell::new(),
         quota: 64 * 1024 * 1024,
@@ -909,7 +899,6 @@ async fn quota_policy_callback_does_not_reacquire_a_one_connection_pool_inside_t
 
 #[tokio::test]
 async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
-    let _guard = TEST_LOCK.lock().await;
     let key = peppy_crypto::FileKey::generate().unwrap();
     let mut ciphertext = Vec::new();
     peppy_crypto::encrypt_stream(Cursor::new(b"x"), &mut ciphertext, &key, b"attachment").unwrap();
@@ -1036,7 +1025,6 @@ async fn cleanup_reserve(
 
 #[tokio::test]
 async fn cleanup_authorized_admission_selects_only_earliest_sufficient_victims() {
-    let _guard = TEST_LOCK.lock().await;
     let server =
         TestServer::start_with_policy(Arc::new(CleanupPolicy { limit_bytes: 10 }), 5).await;
 
@@ -1164,7 +1152,6 @@ async fn cleanup_authorized_admission_selects_only_earliest_sufficient_victims()
 
 #[tokio::test]
 async fn retention_capability_requires_explicit_reconciliation_and_legacy_events_withdraw_it() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start(Arc::new(Policy::allowing([Operation::Send]))).await;
     let owner = server.owner().await;
     let device = server.add_device(&owner).await;
@@ -1228,7 +1215,6 @@ async fn insert_finalized_attachment(
 
 #[tokio::test]
 async fn retention_use_routes_enforce_identity_immutability_and_terminal_release() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start(Arc::new(Policy::allowing([Operation::Upload]))).await;
     let owner = server.owner().await;
     let device = server.add_device(&owner).await;
@@ -1351,7 +1337,6 @@ async fn retention_use_routes_enforce_identity_immutability_and_terminal_release
 
 #[tokio::test]
 async fn removed_attachment_id_is_gone_on_every_authorization_path() {
-    let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start(Arc::new(Policy::allowing([
         Operation::Read,
         Operation::Upload,
@@ -1456,7 +1441,6 @@ async fn removed_attachment_id_is_gone_on_every_authorization_path() {
 
 #[tokio::test]
 async fn concurrent_cleanup_admissions_select_one_stable_prefix() {
-    let _guard = TEST_LOCK.lock().await;
     let server =
         TestServer::start_with_policy(Arc::new(CleanupPolicy { limit_bytes: 12 }), 5).await;
     let owner = server.owner().await;
@@ -1596,7 +1580,6 @@ async fn device_attachment_notice_http_errors_use_canonical_forbidden_and_unavai
 
 #[tokio::test]
 async fn full_quota_restart_preregisters_protection_before_reserve_and_finalize() {
-    let _guard = TEST_LOCK.lock().await;
     let key = peppy_crypto::FileKey::generate().unwrap();
     let mut ciphertext = Vec::new();
     peppy_crypto::encrypt_stream(

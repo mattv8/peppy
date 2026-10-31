@@ -1,7 +1,6 @@
 //! Public API regressions for draft movement, deletion, and phone identity.
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::{
     fs,
     sync::{Arc, Barrier},

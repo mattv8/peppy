@@ -14,6 +14,9 @@ use tokio::{net::TcpListener, task::JoinHandle};
 use url::Url;
 use uuid::Uuid;
 
+// Under plain `cargo test`, uploads share the process-wide spool directory (src/api/attachments.rs)
+// and several tests assert exact `spool_entries()` counts, so every test takes this lock.
+// nextest runs each test in its own process, where the lock has no effect.
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct TestServer {

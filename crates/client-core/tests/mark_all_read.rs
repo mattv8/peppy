@@ -1,6 +1,4 @@
-mod common;
-
-use common::*;
+use crate::common::*;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -190,13 +188,13 @@ fn rejected_later_batch_preserves_earlier_commit_and_explicit_retry_converges() 
 }
 
 #[test]
-#[ignore = "explicit scale evidence: cargo test --release -p peppy-client-core --test mark_all_read -- --ignored --nocapture"]
+#[ignore = "explicit scale evidence: cargo test --release -p peppy-client-core --test integration mark_all_read:: -- --ignored --nocapture"]
 fn batches_a_thousand_unread_messages_with_one_read_state_each() {
     measure_bulk_read(1_000);
 }
 
 #[test]
-#[ignore = "explicit scale evidence: cargo test --release -p peppy-client-core --test mark_all_read -- --ignored --nocapture"]
+#[ignore = "explicit scale evidence: cargo test --release -p peppy-client-core --test integration mark_all_read:: -- --ignored --nocapture"]
 fn batches_fifty_thousand_unread_messages_with_bounded_critical_sections() {
     measure_bulk_read(50_000);
 }

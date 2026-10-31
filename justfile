@@ -179,8 +179,7 @@ desktop-build:
     pnpm --filter @peppy/desktop build
 
 desktop-test:
-    pnpm --filter @peppy/desktop-ui test
-    pnpm --filter @peppy/desktop test
+    pnpm --filter @peppy/desktop-ui test & ui=$!; pnpm --filter @peppy/desktop test & app=$!; trap 'kill "$ui" "$app" 2>/dev/null' INT TERM; status=0; wait "$ui" || status=$?; wait "$app" || status=$?; exit "$status"
 
 ffi-smoke:
     cargo build -p peppy-mobile-bindings --locked

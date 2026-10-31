@@ -344,7 +344,7 @@ describe("DevicesSettings", () => {
     expect(document.querySelector("[data-devices-offline-notice]")).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove Pixel 8" })).toBeEnabled();
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await act(async () => {});
     expect(bridge.list_devices).toHaveBeenCalledTimes(2);
   });
 

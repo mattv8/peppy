@@ -1,7 +1,6 @@
 //! Durable phone-read permits are issued only for live, locally acquired SMS rows.
-mod common;
 
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 fn input(id: &str, thread: &str, date: i64, imported: bool) -> SmsAcquisitionInput {

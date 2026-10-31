@@ -1,6 +1,5 @@
 //! Durable replicated conversation-pin regression coverage.
-mod common;
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 fn incoming_from(body: &str, provider_id: &str, sender_address: &str) -> IncomingSms {

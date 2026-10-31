@@ -1,6 +1,5 @@
 //! Private MMS envelopes remain out of the normal outbox until their media is uploaded.
-mod common;
-use common::*;
+use crate::common::*;
 use peppy_client_core::{AttachmentUseKind, AttachmentUseResponse, AttachmentUseState};
 use std::fs;
 use tempfile::TempDir;

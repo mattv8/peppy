@@ -1,7 +1,6 @@
 //! Download candidate priority is host-scheduled after core eligibility filtering.
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::fs;
 use tempfile::TempDir;
 

@@ -15,6 +15,8 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# Hang guard only: these waits expect success, but a loaded machine running modules in parallel can exceed a few seconds.
+HANG_GUARD_TIMEOUT = 30
 SPEC = importlib.util.spec_from_file_location("demo", ROOT / "infra/dev/demo.py")
 demo = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = demo
@@ -81,8 +83,8 @@ class DemoTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             reader = demo.ProcessOutput(process, Path(directory) / "log")
-            self.assertTrue(reader.wait_for("ready", "stdout", 2))
-            process.wait(timeout=2)
+            self.assertTrue(reader.wait_for("ready", "stdout", HANG_GUARD_TIMEOUT))
+            process.wait(timeout=HANG_GUARD_TIMEOUT)
             reader.close()
 
     def test_pipe_reader_requires_marker_after_checkpoint(self):
@@ -92,12 +94,12 @@ class DemoTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             reader = demo.ProcessOutput(process, Path(directory) / "log")
-            self.assertTrue(reader.wait_for("phase=sync", "stdout", 2))
+            self.assertTrue(reader.wait_for("phase=sync", "stdout", HANG_GUARD_TIMEOUT))
             checkpoint = reader.checkpoint("stdout")
             process.stdin.write(b"continue\n")
             process.stdin.flush()
-            self.assertTrue(reader.wait_for("phase=sync", "stdout", 2, after=checkpoint))
-            self.assertEqual(process.wait(timeout=2), 0)
+            self.assertTrue(reader.wait_for("phase=sync", "stdout", HANG_GUARD_TIMEOUT, after=checkpoint))
+            self.assertEqual(process.wait(timeout=HANG_GUARD_TIMEOUT), 0)
             process.stdin.close()
             reader.close()
 
@@ -234,7 +236,7 @@ class DemoTests(unittest.TestCase):
         controller = demo.ChildController()
         controller.add(child)
         controller.cleanup()
-        self.assertIsNotNone(child.wait(timeout=2))
+        self.assertIsNotNone(child.wait(timeout=HANG_GUARD_TIMEOUT))
 
     def test_credential_metadata_requires_exact_https_origin(self):
         with tempfile.TemporaryDirectory() as directory:

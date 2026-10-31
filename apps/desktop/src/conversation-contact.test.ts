@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
 import type { ContactBookView, ContactResolutionMap, ConversationView } from "./bridge";
 import { canCreateContactInBook, conversationContactAddress } from "./conversation-contact";

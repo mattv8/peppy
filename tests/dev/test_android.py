@@ -10,8 +10,15 @@ import tempfile
 import time
 import unittest
 
+try:
+    from tests.dev.stub_commands import write_stub
+except ModuleNotFoundError:
+    from stub_commands import write_stub
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+# Hang guard only: the emulator boot wait expects success, and a loaded machine running modules in parallel can exceed a few seconds.
+BOOT_HANG_GUARD_TIMEOUT = 30
 
 
 class AndroidHelperTests(unittest.TestCase):
@@ -303,12 +310,12 @@ class AndroidHelperTests(unittest.TestCase):
             env = os.environ.copy()
             for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT", "PEPPY_ANDROID_SERIAL", "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_BOOT_TIMEOUT", "PEPPY_ANDROID_ARTIFACTS"):
                 env.pop(name, None)
-            env.update({"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_AVD": "test-avd", "PEPPY_ANDROID_BOOT_TIMEOUT": "5", "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "STARTED": str(state), "EMULATOR_PID": str(pid_path)})
+            env.update({"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_AVD": "test-avd", "PEPPY_ANDROID_BOOT_TIMEOUT": str(BOOT_HANG_GUARD_TIMEOUT), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "STARTED": str(state), "EMULATOR_PID": str(pid_path)})
             child, terminal = pty.fork()
             if child == 0:
                 os.execvpe("bash", ["bash", str(ROOT / "infra/dev/android.sh"), "emulator"], env)
             output = ""
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + 2 * BOOT_HANG_GUARD_TIMEOUT
             try:
                 while "Android emulator ready:" not in output:
                     remaining = deadline - time.monotonic()
@@ -413,7 +420,7 @@ class AndroidHelperTests(unittest.TestCase):
             emulator.write_text("#!/bin/sh\n[ \"$1\" = -list-avds ] && { echo race-avd; exit; }\ntouch \"$STARTED\"\nread ignored < \"$EXIT_FIFO\"\ntouch \"$EXITED\"\nprintf x > \"$EXIT_DONE_FIFO\"\n")
             adb.chmod(0o755); emulator.chmod(0o755)
 
-            result = self.run_helper("emulator", env={"ANDROID_SDK_ROOT": str(sdk), "STARTED": str(state), "ADB_COUNT": str(count_path), "EXIT_FIFO": str(fifo), "EXIT_DONE_FIFO": str(done_fifo), "EXITED": str(exited), "ADB_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "PEPPY_ANDROID_BOOT_TIMEOUT": "2"})
+            result = self.run_helper("emulator", env={"ANDROID_SDK_ROOT": str(sdk), "STARTED": str(state), "ADB_COUNT": str(count_path), "EXIT_FIFO": str(fifo), "EXIT_DONE_FIFO": str(done_fifo), "EXITED": str(exited), "ADB_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "PEPPY_ANDROID_BOOT_TIMEOUT": str(BOOT_HANG_GUARD_TIMEOUT)})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("process exited", result.stderr)
             self.assertNotIn("emu kill", log.read_text())
@@ -664,12 +671,11 @@ class AndroidHelperTests(unittest.TestCase):
         verify_log = temp / "verify.log"
 
         sdkmanager = bin_dir / "sdkmanager"
-        sdkmanager.write_text("#!/bin/sh\nexit 0\n")
-        sdkmanager.chmod(0o755)
+        write_stub(sdkmanager, "exit 0\n")
 
         gradlew = repo / "apps/android/gradlew"
         gradlew.parent.mkdir(parents=True)
-        gradle_script = "#!/bin/sh\necho \"$@\" >> \"$GRADLE_LOG\"\n"
+        gradle_script = "echo \"$@\" >> \"$GRADLE_LOG\"\n"
         if gradle_exit_code == 0:
             gradle_script += (
                 "root=$(cd \"$(dirname \"$0\")/../..\" && pwd)\n"
@@ -681,13 +687,10 @@ class AndroidHelperTests(unittest.TestCase):
                     "mkdir -p \"$root/apps/android/app/build/outputs/apk/androidTest/debug\"\n"
                     "touch \"$root/apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk\"\n"
                 )
-        gradlew.write_text(f"{gradle_script}exit {gradle_exit_code}\n")
-        gradlew.chmod(0o755)
+        write_stub(gradlew, f"{gradle_script}exit {gradle_exit_code}\n")
 
         verifier = repo / "infra/compose/verify-android-native.sh"
-        verifier.parent.mkdir(parents=True)
-        verifier.write_text("#!/bin/sh\necho verify >> \"$VERIFY_LOG\"\n")
-        verifier.chmod(0o755)
+        write_stub(verifier, "echo verify >> \"$VERIFY_LOG\"\n")
 
         return {
             "artifacts": artifacts,
@@ -761,8 +764,7 @@ class AndroidHelperTests(unittest.TestCase):
             (repo / ".env").touch()
             docker_log = pathlib.Path(temp) / "docker.log"
             docker = pathlib.Path(temp) / "bin/docker"
-            docker.write_text("#!/bin/sh\necho \"$@\" >> \"$DOCKER_LOG\"\nexit 0\n")
-            docker.chmod(0o755)
+            write_stub(docker, "echo \"$@\" >> \"$DOCKER_LOG\"\nexit 0\n")
             env = fixture["env"] | {
                 "DOCKER_LOG": str(docker_log),
                 "PEPPY_ANDROID_CONTAINER": "0",

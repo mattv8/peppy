@@ -1,7 +1,6 @@
 //! Regression coverage for history-import ordering and upload prioritization.
-mod common;
 
-use common::*;
+use crate::common::*;
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;

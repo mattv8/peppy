@@ -1,6 +1,5 @@
 //! C3: pre-cutover command retirement, native key cache, atomic compose drafts, hardening.
-mod common;
-use common::*;
+use crate::common::*;
 use peppy_crypto::{KeyPurpose, derive_purpose_key, derive_root_key, encrypt};
 use std::collections::HashMap;
 use tempfile::TempDir;

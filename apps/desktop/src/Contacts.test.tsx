@@ -996,8 +996,7 @@ describe("ContactsView", () => {
       render(<ContactsView />);
       fireEvent.click(await screen.findByRole("button", { name: /iPhone/ }));
       expect(await screen.findByText("The phone is scanning contacts.")).toBeInTheDocument();
-      resolveFirst({ requestId: "pixel", bookId: "book-pixel8", state: "waiting" });
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await act(async () => { resolveFirst({ requestId: "pixel", bookId: "book-pixel8", state: "waiting" }); });
       expect(screen.queryByText("Waiting for the phone to scan contacts.")).not.toBeInTheDocument();
     });
 
@@ -1318,8 +1317,7 @@ describe("ContactsView", () => {
       fireEvent.click(screen.getByRole("button", { name: /Sort:/ }));
       fireEvent.click(await screen.findByRole("menuitemradio", { name: "First name" }));
       await waitFor(() => expect(bridge.list_contacts).toHaveBeenCalledWith("book-pixel8", "", 0, { key: "given", direction: "asc" }));
-      oldPage.resolve([mockContactRiver]);
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await act(async () => { oldPage.resolve([mockContactRiver]); });
       expect(screen.queryByRole("heading", { name: "River Park" })).not.toBeInTheDocument();
       newPage.resolve([mockContactRiver]);
       expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
@@ -1350,8 +1348,7 @@ describe("ContactsView", () => {
       await waitFor(() => expect(resolvers).toHaveLength(3));
       resolvers[0]([mockContactAurora]);
       resolvers[1]([mockContactAurora]);
-      await new Promise(resolve => setTimeout(resolve, 10));
-      resolvers[2]([mockContactRiver]);
+      await act(async () => { resolvers[2]([mockContactRiver]); });
       expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
       expect(consumed).toHaveBeenCalledWith(14);
       expect(consumed).not.toHaveBeenCalledWith(13);
@@ -1366,8 +1363,7 @@ describe("ContactsView", () => {
       await screen.findByText(/Finding requested contact/);
       view.unmount();
       resolveLookup([mockContactAurora]);
-      await new Promise(resolve => setTimeout(resolve, 10));
-      expect(consumed).toHaveBeenCalledWith(15);
+      await waitFor(() => expect(consumed).toHaveBeenCalledWith(15));
       expect(screen.queryByText("Aurora Chen")).not.toBeInTheDocument();
     });
 
@@ -1431,13 +1427,18 @@ describe("ContactsView", () => {
       await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1));
       const offsetZeroBefore = vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && (offset ?? 0) === 0).length;
 
-      act(() => hint?.());
-      await new Promise(resolve => setTimeout(resolve, 180));
-      expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && (offset ?? 0) === 0)).toHaveLength(offsetZeroBefore + 1);
-      pageTwo.resolve(firstPage);
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        act(() => hint?.());
+        await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+        expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && (offset ?? 0) === 0)).toHaveLength(offsetZeroBefore + 1);
+        pageTwo.resolve(firstPage);
 
-      expect(await screen.findByRole("heading", { name: "Person 400" })).toBeInTheDocument();
-      expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1);
+        expect(await screen.findByRole("heading", { name: "Person 400" })).toBeInTheDocument();
+        expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("clears a failed target alert when a newer target succeeds", async () => {
@@ -1462,8 +1463,7 @@ describe("ContactsView", () => {
       await waitFor(() => expect(vi.mocked(bridge.list_contacts)).toHaveBeenCalledWith("book-pixel8", "", 200, { key: "family", direction: "asc" }));
       fireEvent.click(screen.getByRole("button", { name: "New contact" }));
       expect(screen.getByRole("form")).toBeInTheDocument();
-      latePage.resolve([{ ...mockContactAurora, id: "contact-400", displayName: "Person 400" }]);
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await act(async () => { latePage.resolve([{ ...mockContactAurora, id: "contact-400", displayName: "Person 400" }]); });
 
       expect(screen.getByRole("form")).toBeInTheDocument();
       expect(screen.queryByRole("heading", { name: "Person 400" })).not.toBeInTheDocument();
@@ -1498,8 +1498,7 @@ describe("ContactsView", () => {
       rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 48 }} />);
       await waitFor(() => expect(targetCall).toBe(3));
 
-      oldLookup.resolve([mockContactAurora]);
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await act(async () => { oldLookup.resolve([mockContactAurora]); });
       expect(screen.queryByRole("heading", { name: "Aurora Chen" })).not.toBeInTheDocument();
       newLookup.resolve([mockContactRiver]);
       expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
@@ -1540,7 +1539,7 @@ describe("ContactsView", () => {
       vi.mocked(bridge.list_contact_books).mockRejectedValueOnce(new Error("transient"));
       act(() => hint?.());
       await waitFor(() => expect(vi.mocked(bridge.list_contact_books)).toHaveBeenCalledTimes(2));
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await act(async () => {});
       expect(consumed).not.toHaveBeenCalled();
       expect(screen.getByText(/Finding requested contact/)).toBeInTheDocument();
 

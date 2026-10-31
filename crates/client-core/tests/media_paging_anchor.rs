@@ -1,7 +1,6 @@
 //! Cursor-stable, metadata-only media paging around a visible message attachment.
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::{fs, path::Path};
 use tempfile::TempDir;
 

@@ -2,8 +2,7 @@
 //! tombstone the server has since purged (offline past the 120-day horizon) loses the removed
 //! contact/notification, while owner state, unsent local writes and non-compactable history are
 //! untouched, and nothing visible is cleared before the whole snapshot is authenticated.
-mod common;
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use tempfile::TempDir;

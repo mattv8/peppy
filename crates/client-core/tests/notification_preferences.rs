@@ -1,6 +1,5 @@
 //! Vault-wide notification preference replication.
-mod common;
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 fn hidden() -> NotificationPreferences {

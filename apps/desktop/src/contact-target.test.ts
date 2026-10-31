@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import type { ContactView } from "./bridge";
 import { CONTACTS_PAGE_SIZE, MAX_TARGET_LOOKUP_PAGES, findContactTarget } from "./contact-target";

@@ -7,6 +7,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+# Hang guard only: `just doctor` finishes quickly, but a loaded machine running modules in parallel can exceed a few seconds.
+DOCTOR_TIMEOUT = 30
 
 
 @unittest.skipUnless(shutil.which("just"), "just is required")
@@ -61,7 +63,7 @@ class DoctorNodeVersionTests(unittest.TestCase):
                 env=os.environ | {"PATH": f"{tools}:{os.environ['PATH']}"},
                 text=True,
                 capture_output=True,
-                timeout=10,
+                timeout=DOCTOR_TIMEOUT,
             )
 
 

@@ -1,13 +1,16 @@
 import contextlib
 import os
 import pathlib
-import shutil
 import subprocess
 import tempfile
 import unittest
 
+try:
+    from tests.dev.stub_commands import install_android_scripts, write_stub
+except ModuleNotFoundError:
+    from stub_commands import install_android_scripts, write_stub
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+
 RUNNING_X86 = "List of devices attached\nemulator-5554\tdevice\n"
 NO_DEVICES = "List of devices attached\n"
 ADB_SHIM = """echo "adb:$*" >> "$CALLS"
@@ -29,14 +32,6 @@ elif sys.argv[1] == "ca-path":
 elif sys.argv[1] != "prepare":
     sys.exit(64)
 """
-
-
-def install_android_scripts(repo):
-    helper_directory = repo / "infra/dev"
-    helper_directory.mkdir(parents=True)
-    for name in ("android.sh", "dev_port.py", "dev_tls.py"):
-        shutil.copy(ROOT / "infra/dev" / name, helper_directory / name)
-    return helper_directory / "android.sh"
 
 
 class AndroidFixture:
@@ -69,9 +64,7 @@ class AndroidFixture:
         self.write_gradle()
 
     def write_script(self, path, body):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"#!/bin/sh\n{body}\n")
-        path.chmod(0o755)
+        write_stub(path, body)
 
     def shim(self, name, body):
         self.write_script(self.bin / name, body)
@@ -123,9 +116,7 @@ class AndroidFastTests(unittest.TestCase):
             yield AndroidFixture(pathlib.Path(temporary_directory))
 
     def write_command(self, directory, name, body):
-        command = directory / name
-        command.write_text(f"#!/bin/sh\n{body}\n")
-        command.chmod(0o755)
+        write_stub(directory / name, body)
 
     def copy_android_script(self, repo):
         return install_android_scripts(repo)
@@ -244,8 +235,7 @@ class AndroidFastTests(unittest.TestCase):
             sdkmanager.write_text("#!/bin/sh\nexit 0\n")
             sdkmanager.chmod(0o755)
             adb = sdk / "platform-tools/adb"
-            adb.parent.mkdir(parents=True)
-            shutil.copy(bin_directory / "adb", adb)
+            write_stub(adb, (bin_directory / "adb.body").read_text())
             jdk = temporary_directory / "jdk"
             java = jdk / "bin/java"
             java.parent.mkdir(parents=True)

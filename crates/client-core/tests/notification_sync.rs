@@ -1,6 +1,5 @@
 //! Cross-device proofs that app mutes and dismissals replicate within a vault.
-mod common;
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 fn capture(key: &str, instance: &str, text: &str) -> NotificationCapture {

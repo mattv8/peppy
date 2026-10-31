@@ -1,6 +1,4 @@
-mod common;
-
-use common::*;
+use crate::common::*;
 use peppy_client_core::{
     AttachmentRetentionState, AttachmentUseKind, AttachmentUseOperationKind, AttachmentUseResponse,
     AttachmentUseState, Error, RemoteAttachmentState, SendResult,

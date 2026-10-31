@@ -1,6 +1,5 @@
 //! Encrypted remote contact-scan requests are durable, capability-gated and fenced to a new scan.
-mod common;
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
