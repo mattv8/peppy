@@ -2,8 +2,7 @@
 //! attachment -> held contact event -> upload -> durable reference registration -> publish ->
 //! peer descriptor ingest -> download/install -> decrypt. Also GC references and reclaims.
 
-mod common;
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use std::path::Path;
 use tempfile::TempDir;

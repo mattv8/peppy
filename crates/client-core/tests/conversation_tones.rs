@@ -1,6 +1,5 @@
 //! Durable replicated conversation-tone regression coverage.
-mod common;
-use common::*;
+use crate::common::*;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 

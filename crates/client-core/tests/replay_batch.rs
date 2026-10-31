@@ -1,6 +1,5 @@
 //! Atomic raw replay-page receipt and durable progress tests.
-mod common;
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 fn raw(cursor: u64, envelope: &Envelope) -> RawReplayRecord {

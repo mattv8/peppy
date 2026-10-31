@@ -1,7 +1,6 @@
 //! Two-client SMS checkpoint tests through the public API and a minimal in-memory server that
 //! assigns contiguous vault cursors exactly like `/v1/events`.
-mod common;
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 #[test]

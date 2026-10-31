@@ -1,8 +1,7 @@
 //! Compaction frontier: legacy history, overflow folding, multiwriter filters and edit-request
 //! lifecycles are fully referenced, so terminal-root expiry never strands an older state.
 //! The end-to-end purge runs against the real server in services/server/tests/transport.rs.
-mod common;
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use tempfile::TempDir;

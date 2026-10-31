@@ -621,10 +621,7 @@ describe("App reactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Aurora Chen reacted 😆 to “plan?”" }));
     const target = document.querySelector<HTMLElement>('[data-message-id="plan"]')!;
     expect(target).toHaveAttribute("data-reaction-highlight", "true");
-    await act(async () => {
-      resolveSearch(searchPage([{ messageId: "deep", snippet: "deep text" }]));
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await act(async () => { resolveSearch(searchPage([{ messageId: "deep", snippet: "deep text" }])); });
     expect(bridge.load_message_window).not.toHaveBeenCalled();
     expect(target).toHaveAttribute("data-reaction-highlight", "true");
     expect(screen.getByRole("button", { name: "Aurora Chen reacted 😆 to “deep text”" })).not.toHaveAttribute("aria-disabled");

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import type { NotificationActivation } from "@peppy/generated/notification-activation";
 import { createNotificationActivationDrain, nativeNotificationActivation, type ActivationContext } from "./notificationActivation";

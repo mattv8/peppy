@@ -315,21 +315,26 @@ it("preserves detached history when refreshing the mirrored feed", async () => {
 it("keeps the acknowledged mirrored highlight until its 1600ms expiry", async () => {
   render(<App />);
   await screen.findByRole("textbox", { name: "Message" });
-  await clickBanner({ kind: "mirrored", target: snapshot.notifications[0].target });
-  await waitFor(() => expect(native.ack).toHaveBeenCalledOnce());
-  const row = document.activeElement!;
-  expect(row).toHaveAttribute("data-activation-highlight", "true");
-  await act(async () => { feed.result?.("click-1", true); feed.result?.("click-1", true); });
-  expect(native.ack).toHaveBeenCalledOnce();
-  expect(row).toHaveAttribute("data-activation-highlight", "true");
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 500)); });
-  // Native emits the availability hint for ordinary STATE_EVENT updates too.
-  await act(async () => { stateHint(); native.hint(); });
-  expect(native.pending).toBeNull();
-  expect(row).toHaveAttribute("data-activation-highlight", "true");
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 1150)); });
-  expect(row).not.toHaveAttribute("data-activation-highlight");
-  expect(native.ack).toHaveBeenCalledOnce();
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    await clickBanner({ kind: "mirrored", target: snapshot.notifications[0].target });
+    await waitFor(() => expect(native.ack).toHaveBeenCalledOnce());
+    const row = document.activeElement!;
+    expect(row).toHaveAttribute("data-activation-highlight", "true");
+    await act(async () => { feed.result?.("click-1", true); feed.result?.("click-1", true); });
+    expect(native.ack).toHaveBeenCalledOnce();
+    expect(row).toHaveAttribute("data-activation-highlight", "true");
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    // Native emits the availability hint for ordinary STATE_EVENT updates too.
+    await act(async () => { stateHint(); native.hint(); });
+    expect(native.pending).toBeNull();
+    expect(row).toHaveAttribute("data-activation-highlight", "true");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_150); });
+    expect(row).not.toHaveAttribute("data-activation-highlight");
+    expect(native.ack).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("supersedes acknowledged mirrored focus only when the hint reveals a newer activation", async () => {

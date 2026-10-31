@@ -1,7 +1,6 @@
 //! Public carrier-history API: capability revision ownership, coalescing and strict wire values.
-mod common;
 
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

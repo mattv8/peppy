@@ -1,5 +1,4 @@
-mod common;
-use common::*;
+use crate::common::*;
 
 /// The pre-feature MMS shape, deliberately without any deferred event variants.
 #[derive(serde::Deserialize)]

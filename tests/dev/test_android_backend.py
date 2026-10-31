@@ -1,22 +1,17 @@
 import contextlib
 import os
 import pathlib
-import shutil
 import subprocess
 import tempfile
 import unittest
 
+try:
+    from tests.dev.stub_commands import install_android_scripts, write_stub
+except ModuleNotFoundError:
+    from stub_commands import install_android_scripts, write_stub
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+
 BOTH_RUST_TARGETS = "aarch64-linux-android\nx86_64-linux-android\n"
-
-
-def install_android_scripts(repo):
-    helper_directory = repo / "infra/dev"
-    helper_directory.mkdir(parents=True)
-    for name in ("android.sh", "dev_port.py", "dev_tls.py"):
-        shutil.copy(ROOT / "infra/dev" / name, helper_directory / name)
-    return helper_directory / "android.sh"
 
 
 class AndroidFixture:
@@ -52,9 +47,7 @@ class AndroidFixture:
         self.shim("docker", 'echo "docker:$*" >> "$CALLS"\nexit 99')
 
     def write_script(self, path, body):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"#!/bin/sh\n{body}\n")
-        path.chmod(0o755)
+        write_stub(path, body)
 
     def shim(self, name, body):
         self.write_script(self.bin / name, body)
@@ -104,9 +97,7 @@ class AndroidBackendTests(unittest.TestCase):
             yield AndroidFixture(pathlib.Path(temporary_directory))
 
     def write_command(self, directory, name, body):
-        command = directory / name
-        command.write_text(f"#!/bin/sh\n{body}\n")
-        command.chmod(0o755)
+        write_stub(directory / name, body)
 
     def copy_android_script(self, repo):
         return install_android_scripts(repo)
@@ -120,27 +111,19 @@ class AndroidBackendTests(unittest.TestCase):
 
     def create_native_build_files(self, repo, sdk):
         sdkmanager = sdk / "cmdline-tools/latest/bin/sdkmanager"
-        sdkmanager.parent.mkdir(parents=True)
-        sdkmanager.write_text("#!/bin/sh\nexit 0\n")
-        sdkmanager.chmod(0o755)
+        write_stub(sdkmanager, "exit 0\n")
         gradlew = repo / "apps/android/gradlew"
-        gradlew.parent.mkdir(parents=True)
-        gradlew.write_text(
-            "#!/bin/sh\n"
+        write_stub(
+            gradlew,
             "mkdir -p app/build/outputs/apk/debug\n"
-            "touch app/build/outputs/apk/debug/app-debug.apk\n"
+            "touch app/build/outputs/apk/debug/app-debug.apk\n",
         )
-        gradlew.chmod(0o755)
         verifier = repo / "infra/compose/verify-android-native.sh"
-        verifier.parent.mkdir(parents=True)
-        verifier.write_text("#!/bin/sh\nexit 0\n")
-        verifier.chmod(0o755)
+        write_stub(verifier, "exit 0\n")
 
     def write_jdk(self, java_home):
         java = java_home / "bin/java"
-        java.parent.mkdir(parents=True)
-        java.write_text("#!/bin/sh\necho 'openjdk version \"17.0.1\"' >&2\n")
-        java.chmod(0o755)
+        write_stub(java, "echo 'openjdk version \"17.0.1\"' >&2\n")
 
     def write_rust_tools(self, bin_dir):
         bin_dir.mkdir(parents=True)
@@ -267,7 +250,7 @@ class AndroidBackendTests(unittest.TestCase):
             self.write_rust_tools(cargo_home / "bin")
             cargo_home_record = temp / "cargo-home-record"
             verifier = repo / "infra/compose/verify-android-native.sh"
-            verifier.write_text("#!/bin/sh\nprintf '%s\\n' \"$CARGO_HOME\" > \"$CARGO_HOME_RECORD\"\n")
+            write_stub(verifier, "printf '%s\\n' \"$CARGO_HOME\" > \"$CARGO_HOME_RECORD\"\n")
             self.write_command(bin_dir, "uname", "echo Darwin")
             self.write_command(bin_dir, "brew", "echo brew >> \"$CALLS\"; exit 99")
             self.write_command(bin_dir, "pkg-config", "exit 0")

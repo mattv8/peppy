@@ -1,6 +1,5 @@
 //! C5: staged snapshot resync, historical commands and the restore execution guard.
-mod common;
-use common::*;
+use crate::common::*;
 use std::fs;
 use tempfile::TempDir;
 

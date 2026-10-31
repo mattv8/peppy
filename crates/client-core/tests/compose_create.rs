@@ -1,7 +1,6 @@
 //! Atomic initial compose-draft creation and reuse.
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::fs;
 use tempfile::TempDir;
 

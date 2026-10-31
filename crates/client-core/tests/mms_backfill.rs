@@ -1,7 +1,6 @@
 //! Durable MMS provider-history lifecycle, wired by the core module export.
-mod common;
 
-use common::*;
+use crate::common::*;
 use tempfile::TempDir;
 
 fn input(id: &str) -> MmsAcquisitionInput {

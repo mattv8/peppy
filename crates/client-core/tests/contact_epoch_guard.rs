@@ -1,8 +1,7 @@
 //! Old encrypted contact edit events stay readable after key rotation, but may not
 //! authorize a new OS contact write under a retired epoch.
 
-mod common;
-use common::*;
+use crate::common::*;
 use peppy_crypto::{create_vault_check_header, derive_root_key};
 use serde_json::{Value, json};
 use tempfile::TempDir;

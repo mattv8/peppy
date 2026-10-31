@@ -104,6 +104,7 @@ describe("OmniSearch", () => {
   });
 
   it("ignores a stale response and activates only the current query result", async () => {
+    vi.useFakeTimers();
     let resolveOld: (value: ReturnType<typeof page>) => void = () => {};
     const onSearch = vi.fn((request) => request.query === "a"
       ? new Promise<ReturnType<typeof page>>((resolve) => { resolveOld = resolve; })
@@ -112,10 +113,10 @@ describe("OmniSearch", () => {
     render(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={onActivate} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(input, { target: { value: "a" } });
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 110)); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(110); });
     fireEvent.change(input, { target: { value: "au" } });
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 110)); });
-    await screen.findByRole("option", { name: /Current/ });
+    await act(async () => { await vi.advanceTimersByTimeAsync(110); });
+    expect(screen.getByRole("option", { name: /Current/ })).toBeInTheDocument();
     await act(async () => resolveOld(page("a")));
     fireEvent.keyDown(input, { key: "Enter" });
     expect(onActivate).toHaveBeenCalledWith(expect.objectContaining({ contactId: "new" }));

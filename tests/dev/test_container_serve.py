@@ -9,6 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / 'infra/dev/container-run.sh'
+# Hang guard only: helper runs finish quickly, but a loaded machine running modules in parallel can exceed a few seconds.
+RUNNER_TIMEOUT = 30
 
 
 class ContainerServeTests(unittest.TestCase):
@@ -76,7 +78,7 @@ chmod +x "$target/debug/peppy-server"
             self.tearDown()
             with mock.patch.dict(os.environ, {'CARGO_TARGET_DIR': str(outside)}):
                 self.setUp()
-            result = self.run_runner('build', 'server', env=self.env, timeout=3)
+            result = self.run_runner('build', 'server', env=self.env, timeout=RUNNER_TIMEOUT)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(sentinel.read_text(), 'do not overwrite')
 
@@ -99,33 +101,33 @@ chmod +x "$target/debug/peppy-server"
         try:
             self.wait_for_server()
             (self.source / 'payload').write_text('two')
-            helper = self.run_runner('build', 'server', env=self.env, timeout=3)
+            helper = self.run_runner('build', 'server', env=self.env, timeout=RUNNER_TIMEOUT)
             self.assertEqual(helper.returncode, 0, helper.stderr)
             self.assertIsNone(process.poll())
             self.assertIn('one', (Path(self.env['HOME']) / '.local/lib/peppy/peppy-server').read_text())
             self.assertNotIn('two', (Path(self.env['HOME']) / '.local/lib/peppy/peppy-server').read_text())
         finally:
             process.terminate()
-            process.wait(timeout=5)
+            process.wait(timeout=RUNNER_TIMEOUT)
 
     def wait_for_server(self):
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + RUNNER_TIMEOUT
         while time.monotonic() < deadline:
             if self.events.exists() and 'serve:one' in self.events.read_text():
                 return
             time.sleep(.02)
-        self.fail('server did not start within 10 seconds')
+        self.fail(f'server did not start within {RUNNER_TIMEOUT} seconds')
 
     @unittest.skipUnless(shutil.which('flock'), 'requires real util-linux flock')
     def test_serve_releases_lock_before_exec(self):
         process = subprocess.Popen(['bash', str(RUNNER), 'serve'], cwd=ROOT, env=self.env | {'PEPPY_BLOCK_SERVE': '1'}, text=True)
         try:
             self.wait_for_server()
-            helper = self.run_runner('build', 'server', env=self.env | {'PEPPY_WORKSPACE_LOCK_TIMEOUT': '1'}, timeout=3)
+            helper = self.run_runner('build', 'server', env=self.env | {'PEPPY_WORKSPACE_LOCK_TIMEOUT': '1'}, timeout=RUNNER_TIMEOUT)
             self.assertEqual(helper.returncode, 0, helper.stderr)
         finally:
             process.terminate()
-            process.wait(timeout=5)
+            process.wait(timeout=RUNNER_TIMEOUT)
 
 
 if __name__ == '__main__':

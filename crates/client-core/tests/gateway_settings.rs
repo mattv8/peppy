@@ -1,6 +1,4 @@
-mod common;
-
-use common::*;
+use crate::common::*;
 
 fn roll_back_migrations_after_version_25(conn: &rusqlite::Connection) {
     conn.execute_batch(

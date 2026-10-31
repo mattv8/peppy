@@ -1,7 +1,6 @@
 //! Phone-provider reads only accept exact, live per-message acquisition evidence.
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::fs;
 use tempfile::TempDir;
 
@@ -331,7 +330,7 @@ fn restore_and_locked_clients_fail_closed_for_phone_read_ingestion() {
     assert_eq!(client.apply_phone_reads(&candidate).unwrap(), 0);
     drop(client);
 
-    let locked_config = common::config(&dir, "locked-gateway", &vault);
+    let locked_config = crate::common::config(&dir, "locked-gateway", &vault);
     let unlocked_client = unlocked(&locked_config, &vault);
     enable(&unlocked_client);
     let acquisition = unlocked_client
