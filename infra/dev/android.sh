@@ -375,8 +375,12 @@ emulator() {
         test -n "$pid" || return 0
         # Windows cleanup uses verified native process identity, not an inferred adb serial.
         if ! is_wsl && test -n "$owned_serial" && kill -0 "$pid" 2>/dev/null; then adb -s "$owned_serial" emu kill >/dev/null 2>&1 || true; fi
-        if is_wsl; then powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$helper_path" -Action stop -EmulatorPath "$emulator_path" -Avd "$AVD_NAME" -ProcessId "$pid" -StartedAt "$started_at" >/dev/null 2>&1 || true
-        else kill "$pid" 2>/dev/null || true; fi
+        if is_wsl; then
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$helper_path" -Action stop -EmulatorPath "$emulator_path" -Avd "$AVD_NAME" -ProcessId "$pid" -StartedAt "$started_at" >/dev/null 2>&1 || true
+        else
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
     }
     trap cleanup_emulator EXIT
     trap 'exit 130' INT

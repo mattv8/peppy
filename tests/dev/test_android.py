@@ -25,7 +25,7 @@ class AndroidHelperTests(unittest.TestCase):
     def run_helper(self, *args, env=None):
         return self.run_script(ROOT / "infra/dev/android.sh", *args, env=env)
 
-    def run_script(self, script, *args, env=None):
+    def helper_environment(self, env=None):
         values = os.environ.copy()
         for name in (
             "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_SERIAL", "PEPPY_ANDROID_BUILD_BACKEND",
@@ -39,9 +39,12 @@ class AndroidHelperTests(unittest.TestCase):
         values["PEPPY_ANDROID_BUILD_BACKEND"] = "docker"
         values["DEBUG"] = "false"
         values.update(env or {})
+        return values
+
+    def run_script(self, script, *args, env=None):
         return subprocess.run(
             ["bash", str(script), *args],
-            cwd=script.parents[2], env=values, text=True, capture_output=True,
+            cwd=script.parents[2], env=self.helper_environment(env), text=True, capture_output=True,
         )
 
     def test_rejects_unknown_command(self):
@@ -170,16 +173,51 @@ class AndroidHelperTests(unittest.TestCase):
     def test_emulator_timeout_terminates_only_started_process(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp); sdk = temp / "sdk"; log = temp / "emulator.log"
+            term_received = temp / "term-received"
+            allow_exit = temp / "allow-exit"
             (sdk / "platform-tools").mkdir(parents=True); (sdk / "emulator").mkdir()
             adb = sdk / "platform-tools" / "adb"
             adb.write_text("#!/bin/sh\n[ \"$1\" = devices ] && echo 'List of devices attached'\n")
             emulator = sdk / "emulator" / "emulator"
-            emulator.write_text("#!/bin/sh\nif [ \"$1\" = -list-avds ]; then echo test-avd; exit; fi\necho started >> \"$EMULATOR_LOG\"\ntrap 'echo stopped >> \"$EMULATOR_LOG\"; exit' TERM\nsleep 30 & wait\n")
+            emulator.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = -list-avds ]; then echo test-avd; exit; fi\n"
+                "echo started >> \"$EMULATOR_LOG\"\n"
+                "trap 'touch \"$TERM_RECEIVED\"; while [ ! -e \"$ALLOW_EXIT\" ]; do sleep 0.01; done; echo stopped >> \"$EMULATOR_LOG\"; exit' TERM\n"
+                "sleep 30 & wait\n"
+            )
             adb.chmod(0o755); emulator.chmod(0o755)
-            result = self.run_helper("emulator", env={"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_AVD": "test-avd", "PEPPY_ANDROID_BOOT_TIMEOUT": "1", "EMULATOR_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts")})
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("did not appear", result.stderr)
-            self.assertNotIn(".opencode", result.stderr)
+            values = {
+                "ANDROID_SDK_ROOT": str(sdk),
+                "PEPPY_ANDROID_AVD": "test-avd",
+                "PEPPY_ANDROID_BOOT_TIMEOUT": "1",
+                "EMULATOR_LOG": str(log),
+                "TERM_RECEIVED": str(term_received),
+                "ALLOW_EXIT": str(allow_exit),
+                "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"),
+            }
+            process = subprocess.Popen(
+                ["bash", str(ROOT / "infra/dev/android.sh"), "emulator"],
+                cwd=ROOT,
+                env=self.helper_environment(values),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not term_received.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                received_term = term_received.exists()
+                returned_before_emulator_exit = process.poll() is not None
+            finally:
+                allow_exit.touch()
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertTrue(received_term, "emulator did not receive TERM")
+            self.assertFalse(returned_before_emulator_exit, "helper returned before its emulator exited")
+            self.assertNotEqual(process.returncode, 0, stdout)
+            self.assertIn("did not appear", stderr)
+            self.assertNotIn(".opencode", stderr)
             self.assertIn("stopped", log.read_text())
 
     def test_emulator_timeout_never_kills_preexisting_other_avd(self):
