@@ -17,6 +17,7 @@ Security, data, and evidence rules live in [domain guidance](AGENTS.md).
 | `apps/desktop/src/app.css`, `settings.css`, `vibrancy.css` | Desktop chrome, settings cards, native-material CSS |
 | `apps/desktop/src-tauri/src/window_chrome.rs`, `material_state.rs`, `tray.rs` | Native effect lifecycle, success inspection, deferred show, `data-vibrancy` |
 | `apps/desktop/src-tauri/tauri.conf.json`, `tauri.macos.conf.json` | Base config keeps the main window opaque; the macOS overlay makes it transparent |
+| `peppy-platform/web/src/web.css` (private) | Account website styles; consumes `--peppy-*` tokens, adds no token values. |
 
 ## Surfaces and themes
 
@@ -118,6 +119,32 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
   populated groups without moving focus.
 - Setup follows the server-advertised deployment mode. Never route a community
   browser into hosted sign-in because an outer UI preference defaults to Hosted.
+
+## Account website admin lists
+
+- One row per record in a table. Record identity (for example, email) sits in
+  the first column, a text status badge follows, and row-scoped actions end the
+  row. Badges carry text; color is never the only signal.
+- Destructive row actions confirm inline in the same row, stating consequences,
+  with explicit confirm and Cancel. Do not use a modal.
+- One add bar sits above the table. It accepts one or many values separated by
+  commas, whitespace, or newlines. Validation errors appear inline on the
+  affected row where draft rows exist; otherwise in the page alert.
+- Offer no reorder controls for unordered sets. Show ordering UI only when the
+  server persists order.
+- Secret entry (vault phrase) is a single row: one password field and its primary
+  action. Secondary recovery flows, such as re-encrypt after vault rotation, sit
+  behind `<details>` disclosure.
+- Show capacity as `N / max` in the page header, next to the lock action.
+- Dense sizing: 28px controls and about 34px rows on fine pointers.
+  `@media (pointer: coarse)` restores 44px targets. Below 600px, row actions wrap
+  beneath the record instead of overflowing.
+- Remove retired one-time migration steps from the UI once the server no longer
+  needs them. Keep no dead reconciliation sections.
+- Keep the vault phrase in the page's transient secret handling: clear inputs
+  and decrypted rows on lock, page exit, and session change.
+- Give the page, table, rows (`<prefix>-<durable id>`), confirmation regions, and
+  forms stable ids or `data-*` attributes.
 
 ## Enrollment UI
 

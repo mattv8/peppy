@@ -65,10 +65,13 @@ const displayEmail = await decryptText(key, envelope, aad)
   operator, never an email allowlist or source UUID. Any deletion intent disables
   it permanently for that account. Tester membership controls Stripe mode only;
   membership never grants admin. Nonowners get no admin UI or list requests.
-- Initialization explicitly reconciles legacy sandbox UUIDs. Phrase rekey uses
-  both phrases and preserves the complete entry set/membership. Lost-phrase
-  reset revokes old memberships and requires recent real OAuth authentication.
-  Neither changes the lookup secret; recover that original secret if lost.
+- Initialization creates entries only; legacy sandbox reconciliation is
+  retired. The runtime never reads `legacy_test_accounts`; sandbox eligibility
+  comes only from active tester membership. Drop the table only in a release
+  after the previous runtime can no longer be restored. Phrase rekey uses both
+  phrases and preserves the complete entry set/membership. Lost-phrase reset revokes old memberships and requires recent
+  real OAuth authentication. Neither changes the lookup secret; recover that
+  original secret if lost.
 - Encryption epoch IDs are never reusable. Migration 0020 records observed and
   subsequent IDs in `tester_registry.encryption_key_history` with an append-only
   trigger; keep this history through empty lists, rekey and reset. Backfill cannot
