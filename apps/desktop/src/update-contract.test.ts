@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { UPDATE_STATUS_SERDE_FIXTURE } from "./update-contract";
 
