@@ -78,8 +78,13 @@ jobs:
       last_stable: ${{ steps.compute.outputs.last_stable }}
       commits_since: ${{ steps.compute.outputs.commits_since }}
       head_released: ${{ steps.compute.outputs.head_released }}
-      android_version_code: ${{ steps.compute.outputs.android_version_code }}
       wix_version: ${{ steps.compute.outputs.wix_version }}
+      android_version: ${{ steps.android-compute.outputs.version }}
+      android_tag: ${{ steps.android-compute.outputs.tag }}
+      android_version_code: ${{ steps.android-compute.outputs.android_version_code }}
+      android_changed: ${{ steps.android-compute.outputs.changed }}
+      android_budget_refresh: ${{ steps.android-compute.outputs.budget_refresh }}
+      android_head_released: ${{ steps.android-compute.outputs.head_released }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -90,6 +95,10 @@ jobs:
         env:
           CHANNEL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' && 'prerelease' || 'dev' }}
         run: infra/release/compute-version.sh --channel "$CHANNEL" | tee -a "$GITHUB_OUTPUT"
+      - id: android-compute
+        env:
+          CHANNEL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' && 'prerelease' || 'dev' }}
+        run: infra/release/compute-version.sh --component android --channel "$CHANNEL" | tee -a "$GITHUB_OUTPUT"
 
   release-tooling:
     runs-on: ubuntu-24.04
@@ -124,6 +133,8 @@ jobs:
           exit "$sdkmanager_status"
       - run: infra/release/test-compute-version.sh
       - run: infra/release/test-release-scripts.sh
+      - run: bash infra/release/test-release-asset-groups.sh
+      - run: bash infra/release/test-release-prefixes.sh
       - run: infra/release/test-android-signing.sh
       - run: infra/release/linux-repository/test-linux-repository.sh
       - run: infra/release/test-desktop-bundles.sh
@@ -476,8 +487,12 @@ jobs:
     with:
       ref: ${{ github.sha }}
       version: ${{ needs.version.outputs.version }}
+      android_version: ${{ needs.version.outputs.android_version }}
       android_version_code: ${{ needs.version.outputs.android_version_code }}
       wix_version: ${{ needs.version.outputs.wix_version }}
+      build_android: ${{ (github.event_name == 'push' && (needs.version.outputs.android_changed == 'true' || needs.version.outputs.android_budget_refresh == 'true')) || (github.event_name != 'push' && needs.changes.outputs.artifacts_android == 'true') }}
+      build_desktop: ${{ needs.changes.outputs.artifacts_desktop == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/staging') }}
+      build_ios: ${{ needs.changes.outputs.artifacts_ios == 'true' }}
       trusted_update_build: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' }}
       update_channel: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' && 'staging' || '' }}
     secrets:
@@ -556,6 +571,21 @@ jobs:
     secrets:
       PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
       PEPPY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD }}
+      PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
+      PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
+  publish-prerelease-android:
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success' && needs.version.result == 'success' && needs.development-artifacts.result == 'success' && needs.publish-prerelease.result != 'failure' && needs.version.outputs.android_head_released != 'true' && (needs.version.outputs.android_changed == 'true' || needs.version.outputs.android_budget_refresh == 'true')"
+    needs: [version, gate, development-artifacts, publish-prerelease]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-release.yml
+    with:
+      component: android
+      version: ${{ needs.version.outputs.android_version }}
+      channel: staging
+      sha: ${{ github.sha }}
+      trusted_update_build: true
+    secrets:
       PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
       PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
   publish-staging-server:

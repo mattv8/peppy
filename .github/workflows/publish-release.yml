@@ -15,6 +15,10 @@ on:
       trusted_update_build:
         required: true
         type: boolean
+      component:
+        required: false
+        type: string
+        default: desktop
     secrets:
       PEPPY_UPDATER_PRIVATE_KEY:
         required: false
@@ -35,19 +39,27 @@ defaults:
 jobs:
   publish:
     environment: "${{ inputs.channel == 'stable' && 'updates-stable' || inputs.channel == 'staging' && 'updates-staging' || 'invalid-update-channel' }}"
+    env:
+      TAG_PREFIX: ${{ inputs.component == 'android' && 'android-v' || 'v' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
     concurrency:
-      group: release-publish
+      # Android tags, guards, and pruning are prefix-isolated, so its publisher queues separately from v*.
+      group: ${{ inputs.component == 'android' && 'release-publish-android' || 'release-publish' }}
       cancel-in-progress: false
     steps:
       - name: Reject untrusted publish context
         env:
           CHANNEL: ${{ inputs.channel }}
+          COMPONENT: ${{ inputs.component }}
           REQUESTED_SHA: ${{ inputs.sha }}
         run: |
+          case "$COMPONENT" in
+            desktop|android) ;;
+            *) echo "invalid component: $COMPONENT" >&2; exit 1 ;;
+          esac
           [ "$REQUESTED_SHA" = "$GITHUB_SHA" ] || { echo 'release SHA must equal the triggering SHA' >&2; exit 1; }
           case "$GITHUB_EVENT_NAME:$GITHUB_REF:$CHANNEL" in
             workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
@@ -63,26 +75,33 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
           REQUESTED_SHA: ${{ inputs.sha }}
         run: bash .github/scripts/release-context-guard.sh
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - if: inputs.component == 'desktop'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+      - if: inputs.component == 'android'
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
           distribution: temurin
           java-version: '17'
-      - run: npm install --global corepack@0.36.0
-      - run: corepack enable && pnpm install --frozen-lockfile --filter @peppy/desktop --ignore-scripts
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+      - if: inputs.component == 'desktop'
+        run: npm install --global corepack@0.36.0
+      - if: inputs.component == 'desktop'
+        run: corepack enable && pnpm install --frozen-lockfile --filter @peppy/desktop --ignore-scripts
+      - if: inputs.component == 'desktop'
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.98.1
       - run: infra/release/install-git-cliff.sh "$RUNNER_TEMP/bin"
       - run: echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Build the read-only manifest verifier before signing credentials are mapped
+      - if: inputs.component == 'desktop'
+        name: Build the read-only manifest verifier before signing credentials are mapped
         run: cargo build --quiet --locked --manifest-path infra/release/manifest-verifier/Cargo.toml
       - id: guard
         env:
           CHANNEL: ${{ inputs.channel }}
           VERSION: ${{ inputs.version }}
+          COMPONENT: ${{ inputs.component }}
           GH_TOKEN: ${{ github.token }}
         run: |
           case "$CHANNEL" in
@@ -93,44 +112,54 @@ jobs:
           [[ "$VERSION" =~ $regex ]] || { echo "invalid version: $VERSION" >&2; exit 1; }
           git fetch --tags --force origin
           if [ "$CHANNEL" = staging ]; then
-            computed_output=$(infra/release/compute-version.sh --channel prerelease)
+            computed_output=$(infra/release/compute-version.sh --channel prerelease --component "$COMPONENT")
             computed=$(printf '%s\n' "$computed_output" | sed -n 's/^version=//p')
             if [ "$computed" != "$VERSION" ]; then
             echo '::notice::A newer staging version is available; skipping prerelease publish'
               echo 'skip=true' >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            guard=$(infra/release/prerelease-guard.sh "$VERSION")
+            guard=$(infra/release/prerelease-guard.sh --prefix "$TAG_PREFIX" "$VERSION")
             if [ "$guard" = skip=true ]; then
               echo '::warning::A matching or newer release tag exists; skipping prerelease publish'
               echo 'skip=true' >> "$GITHUB_OUTPUT"
               exit 0
             fi
           else
-            if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
-              echo "tag v$VERSION already exists" >&2
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG_PREFIX$VERSION" >/dev/null 2>&1; then
+              echo "tag $TAG_PREFIX$VERSION already exists" >&2
               exit 1
             fi
-            if gh release list --limit 1000 --json tagName,isDraft | jq -e --arg tag "v$VERSION" '.[] | select(.tagName == $tag and (.isDraft | not))' >/dev/null; then
-              echo "published release v$VERSION already exists" >&2
+            if gh release list --limit 1000 --json tagName,isDraft | jq -e --arg tag "$TAG_PREFIX$VERSION" '.[] | select(.tagName == $tag and (.isDraft | not))' >/dev/null; then
+              echo "published release $TAG_PREFIX$VERSION already exists" >&2
               exit 1
             fi
           fi
-          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg tag "v$VERSION" '.[] | select(.tag_name == $tag and .draft) | .id' | while IFS= read -r id; do
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg tag "$TAG_PREFIX$VERSION" '.[] | select(.tag_name == $tag and .draft) | .id' | while IFS= read -r id; do
             [ -z "$id" ] || gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
           done
           echo 'skip=false' >> "$GITHUB_OUTPUT"
-      - if: steps.guard.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: '{android-release-artifacts,desktop-*-release-artifacts}'
+          pattern: 'desktop-*-release-artifacts'
           path: dist/download
-      - if: steps.guard.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'android'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-release-artifacts
+          path: dist/download
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         env:
           CHANNEL: ${{ inputs.channel }}
           VERSION: ${{ inputs.version }}
-        run: infra/release/stage-assets.sh "$VERSION" "$CHANNEL" dist/download dist/release
-      - if: steps.guard.outputs.skip != 'true'
+        run: infra/release/stage-assets.sh --group desktop "$VERSION" "$CHANNEL" dist/download dist/release
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'android'
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+        run: infra/release/stage-assets.sh --group android "$VERSION" "$CHANNEL" dist/download dist/release
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'android'
         name: Install Android build tools
         run: |
           set +e
@@ -139,25 +168,25 @@ jobs:
           sdkmanager_status=${PIPESTATUS[1]}
           set -e
           exit "$sdkmanager_status"
-      - if: steps.guard.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'android'
         name: Verify staged Android release signatures
         env:
           VERSION: ${{ inputs.version }}
           PEPPY_ANDROID_SIGNING_CERT_SHA256: ${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}
         run: bash infra/release/verify-android-artifacts.sh "dist/release/peppy-$VERSION-android.apk" "dist/release/peppy-$VERSION-android.aab"
-      - if: steps.guard.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD || '' }}
           VERSION: ${{ inputs.version }}
           CHANNEL: ${{ inputs.channel }}
         run: infra/release/sign-update-assets.sh "$VERSION" "$CHANNEL" dist/release
-      - if: steps.guard.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         env:
           VERSION: ${{ inputs.version }}
           CHANNEL: ${{ inputs.channel }}
         run: infra/release/generate-update-manifest.sh "$VERSION" "$CHANNEL" dist/release
-      - if: steps.guard.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         env:
           PEPPY_UPDATE_PUBLIC_KEY: ${{ vars.PEPPY_UPDATE_PUBLIC_KEY }}
           VERSION: ${{ inputs.version }}
@@ -171,14 +200,19 @@ jobs:
           PEPPY_RELEASE_GPG_KEY_ID: ${{ inputs.trusted_update_build && vars.PEPPY_RELEASE_GPG_KEY_ID || '' }}
           PEPPY_RELEASE_GPG_PASSPHRASE: ${{ inputs.trusted_update_build && secrets.PEPPY_RELEASE_GPG_PASSPHRASE || '' }}
         run: infra/release/sign-checksums.sh dist/release
-      - if: steps.guard.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         env:
           VERSION: ${{ inputs.version }}
           TRUSTED_UPDATE_BUILD: ${{ inputs.trusted_update_build }}
           PEPPY_MACOS_SIGNING_MODE: ${{ vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id' }}
           PEPPY_WINDOWS_SIGNING_MODE: ${{ vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode' }}
         run: infra/release/release-notes.sh "$VERSION" > dist/notes.md
-      - if: steps.guard.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'android'
+        env:
+          VERSION: ${{ inputs.version }}
+          TRUSTED_UPDATE_BUILD: ${{ inputs.trusted_update_build }}
+        run: infra/release/release-notes.sh "$VERSION" --component android > dist/notes.md
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         env:
           CHANNEL: ${{ inputs.channel }}
           SHA: ${{ inputs.sha }}
@@ -188,16 +222,26 @@ jobs:
           prerelease=()
           if [ "$CHANNEL" = staging ]; then prerelease=(--prerelease); fi
           gh release create "v$VERSION" --draft --target "$SHA" --title "Peppy v$VERSION" --notes-file dist/notes.md "${prerelease[@]}" dist/release/*
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'android'
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          SHA: ${{ inputs.sha }}
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          if [ "$CHANNEL" = staging ]; then prerelease=(--prerelease); fi
+          gh release create "${TAG_PREFIX}$VERSION" --draft --latest=false --target "$SHA" --title "Peppy Android v$VERSION" --notes-file dist/notes.md "${prerelease[@]}" dist/release/*
       - if: steps.guard.outputs.skip != 'true' && inputs.channel == 'staging'
         env:
           VERSION: ${{ inputs.version }}
         run: |
           git fetch --tags --force origin
-          if [ "$(infra/release/prerelease-guard.sh "$VERSION")" = skip=true ]; then
+          if [ "$(infra/release/prerelease-guard.sh --prefix "$TAG_PREFIX" "$VERSION")" = skip=true ]; then
             echo "a matching or newer tag appeared during publish" >&2
             exit 1
           fi
-      - if: steps.guard.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         env:
           CHANNEL: ${{ inputs.channel }}
           VERSION: ${{ inputs.version }}
@@ -208,15 +252,26 @@ jobs:
           else
             gh release edit "v$VERSION" --draft=false --prerelease --latest=false
           fi
+      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'android'
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$CHANNEL" = stable ]; then
+            gh release edit "${TAG_PREFIX}$VERSION" --draft=false --latest=false
+          else
+            gh release edit "${TAG_PREFIX}$VERSION" --draft=false --prerelease --latest=false
+          fi
       - if: failure() && steps.guard.outputs.skip != 'true'
         env:
           VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg tag "v$VERSION" '.[] | select(.tag_name == $tag and .draft) | .id' | while IFS= read -r id; do
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg tag "${TAG_PREFIX}$VERSION" '.[] | select(.tag_name == $tag and .draft) | .id' | while IFS= read -r id; do
             [ -z "$id" ] || gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
           done
       - if: steps.guard.outputs.skip != 'true' && inputs.channel == 'staging'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: infra/release/prune-prereleases.sh --keep 10
+        run: infra/release/prune-prereleases.sh --keep 10 --prefix "$TAG_PREFIX"
