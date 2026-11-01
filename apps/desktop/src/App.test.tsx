@@ -592,8 +592,14 @@ describe("setup landing routing", () => {
     render(<App />);
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
-    expect(document.getElementById("server-offline-banner")).toHaveTextContent("Server offline");
-    expect(document.getElementById("server-offline-banner")).toHaveTextContent("Peppy will reconnect automatically.");
+    expect(document.getElementById("system-ribbon")).toHaveTextContent("Server offline");
+    expect(document.getElementById("system-ribbon")).toHaveTextContent("Peppy will reconnect automatically.");
+    /* One global ribbon: a direct child of the shell, outside the content pane. */
+    const ribbon = document.getElementById("system-ribbon")!;
+    expect(ribbon.parentElement).toBe(document.getElementById("desktop-shell"));
+    expect(ribbon.closest("#desktop-body")).toBeNull();
+    expect(ribbon.nextElementSibling?.id).toBe("system-ribbon-announcement");
+    expect(document.querySelectorAll("#system-ribbon")).toHaveLength(1);
     expect(document.querySelector("[data-status-trigger]")).toHaveAttribute("data-status-tone", "warning");
     expect(document.getElementById("connection-status")).toHaveAttribute("data-server-unreachable");
   });
@@ -626,7 +632,7 @@ describe("setup landing routing", () => {
     await act(async () => hint?.());
 
     expect(document.getElementById("setup-landing")).toBeInTheDocument();
-    expect(document.getElementById("server-offline-banner")).toHaveTextContent("Server offline");
+    expect(document.getElementById("system-ribbon")).toHaveTextContent("Server offline");
     current = { ...current, connection: { state: "connected", origin: "https://example.test" } };
     await act(async () => hint?.());
     await waitFor(() => expect(document.getElementById("setup-landing")).not.toBeInTheDocument());
@@ -636,8 +642,8 @@ describe("setup landing routing", () => {
     await landingSnapshot({ connection: { state: "offline", errorCode: "connecting" }, encryption: { state: "unlocked" } });
     render(<App />);
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
-    expect(document.getElementById("server-offline-banner")).not.toBeInTheDocument();
-    expect(document.getElementById("server-offline-announcement")).toHaveTextContent("");
+    expect(document.getElementById("system-ribbon")).not.toBeInTheDocument();
+    expect(document.getElementById("system-ribbon-announcement")).toHaveTextContent("");
   });
 
   it("keeps the onboarding header when SetupLanding is displayed", async () => {

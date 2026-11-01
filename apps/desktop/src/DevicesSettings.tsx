@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Modal } from "@peppy/desktop-ui";
 import { bridge, type DeviceRosterView, type ManagedDeviceView } from "./bridge";
 import { errorCode } from "./bridgeErrors";
+import { peppyCopy } from "./generated/peppyCopy";
 import "./device-settings.css";
 
 const deviceKind = (kind: string | null) => ({ android: "Android", ios: "iPhone or iPad", desktop: "Desktop", browser: "Browser" }[kind ?? ""] ?? "Unknown platform");
@@ -15,7 +16,13 @@ const presenceLabel = (device: ManagedDeviceView) => {
   if (seconds === null) return "Status unknown";
   return `Last seen ${seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`} ago`;
 };
-const presenceState = (device: ManagedDeviceView) => !device.presence ? "unknown" : device.presence.state === "never" ? "never" : device.presence.state === "connected" ? "connected" : "delayed";
+/** While the account is read-only, a stale phone is expected: its writes are refused, so the age is neutral. */
+const presenceState = (device: ManagedDeviceView, accountPaused: boolean) => {
+  if (!device.presence) return "unknown";
+  if (device.presence.state === "never") return "never";
+  if (device.presence.state === "connected") return "connected";
+  return accountPaused ? "paused" : "delayed";
+};
 const OFFLINE_REMOVE_ERROR = "The device may not have been removed because the server is offline. The list refreshes when Peppy reconnects, or you can retry now.";
 const loadError = (error: unknown) => typeof error === "object" && error !== null && "message" in error && typeof error.message === "string" && error.message ? error.message : "The device roster could not be loaded.";
 const revokeError = (error: unknown) => {
@@ -29,7 +36,7 @@ const revokeError = (error: unknown) => {
   return "The removal outcome is unknown. The roster was reloaded to check it.";
 };
 
-export function DevicesSettings({ serverOffline = false }: { serverOffline?: boolean }) {
+export function DevicesSettings({ serverOffline = false, accountReadOnly = false }: { serverOffline?: boolean; accountReadOnly?: boolean }) {
   const [roster, setRoster] = useState<DeviceRosterView | null>(null);
   const [loading, setLoading] = useState(true);
   const [target, setTarget] = useState<ManagedDeviceView | null>(null);
@@ -44,6 +51,8 @@ export function DevicesSettings({ serverOffline = false }: { serverOffline?: boo
   const titleHeading = useRef<HTMLHeadingElement>(null);
   const previousServerOffline = useRef(serverOffline);
   const offline = serverOffline || offlineFromFailure;
+  /* Server-offline takes precedence: the offline wording stays exactly as before. */
+  const accountPaused = accountReadOnly && !serverOffline;
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
@@ -129,7 +138,8 @@ export function DevicesSettings({ serverOffline = false }: { serverOffline?: boo
         <span data-device-badge="role">{deviceRole(device.role)}</span>
         <span data-device-badge="enrollment">{device.revoked ? "Removed" : "Active"}</span>
         {device.id === roster?.currentDeviceId && <span data-device-badge="current">This device</span>}
-        {!device.revoked && <span data-device-badge="presence" data-presence-state={presenceState(device)}>{presenceLabel(device)}</span>}
+        {!device.revoked && <span data-device-badge="presence" data-presence-state={presenceState(device, accountPaused)}>{presenceLabel(device)}</span>}
+        {accountPaused && device.role === "gateway" && !device.revoked && <span data-device-badge="account-paused">{peppyCopy.devices_sending_paused_badge}</span>}
       </span>
       {device.kind === "ios" && !device.revoked && <small data-ios-sms-note>Can't send SMS through Peppy on iPhone</small>}
     </div>
@@ -141,6 +151,7 @@ export function DevicesSettings({ serverOffline = false }: { serverOffline?: boo
     <p>Devices can access this encrypted vault. Removing a device revokes server access; it does not erase local data or secrets.</p>
     {offline && <p id="devices-offline-notice" data-devices-offline-notice role="status" className="settings-note">{roster ? "Server offline. Showing the last loaded list; removing devices is unavailable." : "Server offline. The device list will load when the server is back."}</p>}
     {error && <p role="alert" className="settings-error" data-devices-remove-error={error === OFFLINE_REMOVE_ERROR || undefined}>{error}</p>}
+    {accountPaused && roster && <p id="devices-read-only-caption" data-devices-read-only-caption className="settings-note">{peppyCopy.devices_read_only_caption}</p>}
     {loading && <p role="status">Loading devices…</p>}
     {!loading && (!roster || offline || loadFailed) && <button id="devices-retry" className="secondary-button" type="button" onClick={() => void load()}>Retry loading devices</button>}
     {roster && <div aria-hidden={target ? "true" : undefined} inert={target ? true : undefined}>
