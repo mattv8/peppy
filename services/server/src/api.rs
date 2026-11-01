@@ -1,3 +1,4 @@
+mod account_access;
 mod attachments;
 mod instance;
 mod key_profiles;
@@ -37,6 +38,13 @@ pub enum DeviceAttachmentRetentionError {
     Unsupported,
     Forbidden,
     InvalidPolicyVersion,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceAccountAccessError {
+    Unsupported,
+    Forbidden,
     Unavailable,
 }
 
@@ -87,6 +95,16 @@ pub trait AccessPolicy: Send + Sync {
         _request: peppy_hosted_api::attachments::AcknowledgeRetentionNoticeRequest,
     ) -> PolicyFuture<'_, Result<(), DeviceAttachmentRetentionError>> {
         Box::pin(async { Err(DeviceAttachmentRetentionError::Unsupported) })
+    }
+    /// Owns authorization for this read. The handler authenticates the device only.
+    fn device_account_access(
+        &self,
+        _principal: AccessPrincipal,
+    ) -> PolicyFuture<
+        '_,
+        Result<peppy_hosted_api::account_access::AccountAccessResponse, DeviceAccountAccessError>,
+    > {
+        Box::pin(async { Err(DeviceAccountAccessError::Unsupported) })
     }
 }
 
@@ -570,6 +588,10 @@ pub(crate) fn build_router(
         .route(
             peppy_hosted_api::attachments::routes::DEVICE_ATTACHMENT_STORAGE_STATUS,
             get(attachments::device_attachment_storage_status),
+        )
+        .route(
+            peppy_hosted_api::account_access::routes::DEVICE_ACCOUNT_ACCESS,
+            get(account_access::device_account_access),
         )
         .route(
             peppy_hosted_api::attachments::routes::DEVICE_RETENTION_NOTICE_ACKNOWLEDGEMENT,
@@ -1479,7 +1501,7 @@ pub(super) struct Principal {
     token_digest: Vec<u8>,
 }
 
-fn access_principal(principal: &Principal) -> AccessPrincipal {
+pub(super) fn access_principal(principal: &Principal) -> AccessPrincipal {
     AccessPrincipal {
         vault_id: principal.vault,
         device_id: principal.device,
