@@ -321,6 +321,28 @@ class MmsTransferTest {
         assertTrue(unavailable.remoteCapacity.isEmpty())
     }
 
+    @Test fun accountPolicyPauseStopsAllUploadsForThePassWithoutAMediaFailure() {
+        val file = Files.createTempFile("cipher", ".bin").toFile().apply { writeText("cipher") }
+        val client = fakeClient(List(3) { cipher() })
+        var reserves = 0
+        LoopbackHttpServer { request ->
+            if (request.target.endsWith("/reserve")) {
+                reserves++
+                LoopbackHttpServer.Response(403, """{"code":"operation_not_permitted"}""")
+            } else {
+                LoopbackHttpServer.Response(500)
+            }
+        }.use { server ->
+            val result = MmsMediaTransfer(client.client, GatewayHttp(server.origin, "token"), file.parentFile).run(4)
+
+            assertEquals("no further upload request after the policy pause", 1, reserves)
+            assertEquals(listOf(MMS_ACCOUNT_PAUSED_REASON), result.failures.map { it.reason })
+            assertEquals(0, result.uploaded)
+            assertTrue(client.marked.isEmpty())
+        }
+        file.delete()
+    }
+
     private fun cipher(attachment: String = id, remote: String? = null) = NativeCipherObject(attachment, 6u, sha, remote)
     private class Fake(val uploads: List<NativeCipherObject>, val downloads: List<NativeCipherObject>, val file: File, var remotePaused: Boolean) {
         val marked = mutableListOf<Pair<String, String>>(); val installed = mutableListOf<String>()

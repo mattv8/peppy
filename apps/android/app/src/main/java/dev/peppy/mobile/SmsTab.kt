@@ -16,6 +16,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -187,12 +188,13 @@ internal fun SmsTab(
         dev.peppy.mobile.ui.ScreenBody("sms-details-screen") {
             TextButton(onClick = { detailsOpen = false }, modifier = Modifier.testTag("sms-details-back")) { Text(stringResource(R.string.peppy_back)) }
             gatewayStatus?.let {
+                val accountReadOnly by AccountAccessState.readOnly.collectAsState()
                 Section("status-section", stringResource(R.string.peppy_toggle_android_phone_status), showDivider = false) {
                     StatusRow("status-credential", stringResource(R.string.peppy_toggle_android_device_credential), stringResource(if (it.enrolled) R.string.peppy_toggle_android_enrolled else R.string.peppy_toggle_android_not_enrolled))
                     StatusRow("status-database", stringResource(R.string.peppy_toggle_android_local_database), stringResource(if (it.databaseOpen) R.string.peppy_toggle_android_database_open else R.string.peppy_toggle_android_database_closed))
                     StatusRow("status-vault-keys", stringResource(R.string.peppy_toggle_android_vault_keys), stringResource(if (it.sharedKeysReady) R.string.peppy_toggle_android_keys_unlocked else R.string.peppy_toggle_android_keys_locked))
                     StatusRow("status-receive", stringResource(R.string.peppy_toggle_android_receive_sms), stringResource(if (granted(context, Manifest.permission.RECEIVE_SMS)) R.string.peppy_sms_history_allowed else R.string.peppy_sms_history_not_allowed))
-                    StatusRow("status-send", stringResource(R.string.peppy_toggle_android_send_sms), stringResource(if (granted(context, Manifest.permission.SEND_SMS)) R.string.peppy_sms_history_allowed else R.string.peppy_sms_history_not_allowed))
+                    StatusRow("status-send", stringResource(R.string.peppy_toggle_android_send_sms), if (accountReadOnly) stringResource(R.string.peppy_account_send_paused_status) else stringResource(if (granted(context, Manifest.permission.SEND_SMS)) R.string.peppy_sms_history_allowed else R.string.peppy_sms_history_not_allowed))
                     StatusRow("status-sim", stringResource(R.string.peppy_toggle_android_sim_route), stringResource(if (SimRoutes.current().isEmpty()) R.string.peppy_toggle_android_sim_missing else R.string.peppy_toggle_android_sim_default))
                 }
                 StatusRow(

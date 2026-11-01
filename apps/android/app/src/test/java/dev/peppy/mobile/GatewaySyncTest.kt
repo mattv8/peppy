@@ -5,6 +5,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -35,6 +36,7 @@ class GatewaySyncTest : GatewayTestBase() {
     /** Overrides the `/v1/snapshot` cut as (high_water_cursor, record_count). */
     private var snapshotCut: Pair<String, String>? = null
     private var compactionCapabilityResponse = LoopbackHttpServer.Response(204)
+    private var capabilitiesResponse = LoopbackHttpServer.Response(204)
     private var retentionCapabilityResponse = LoopbackHttpServer.Response(404)
     private var snapshotCompactionSupported = false
     private var snapshotCompactionActive = false
@@ -48,7 +50,7 @@ class GatewaySyncTest : GatewayTestBase() {
         when {
             unauthorized || request.headers["authorization"] != "Bearer $TEST_TOKEN" -> LoopbackHttpServer.Response(401)
             request.method == "PUT" && path == "/v1/devices/self/retention-capability" -> retentionCapabilityResponse
-            request.method == "POST" && path == "/v1/capabilities" -> LoopbackHttpServer.Response(204)
+            request.method == "POST" && path == "/v1/capabilities" -> capabilitiesResponse
             request.method == "POST" && path == "/v1/compaction/capability" -> compactionCapabilityResponse
             request.method == "GET" && path == "/v1/events" ->
                 if (eventsStatus == 200) LoopbackHttpServer.Response(200, JSONObject().put("events", events).toString())
@@ -566,6 +568,70 @@ class GatewaySyncTest : GatewayTestBase() {
 
         assertTrue(recovering.more)
         assertEquals(1, contactPhotoCalls)
+    }
+
+    private val policyDenial = LoopbackHttpServer.Response(403, """{"code":"operation_not_permitted"}""")
+
+    @Test
+    fun codedPolicyDenialOnUploadPausesWithoutRejectingOrAckingEnvelopes() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550008801", "paused upload", "p-policy-upload", false))
+        uploadResponse = policyDenial
+        val result = sync(client).run()
+        assertNull(result.failure)
+        assertTrue(result.accountPaused)
+        assertNull(state.outboxRejection)
+        assertNull(state.softRejection)
+        assertEquals("one POST per pass while paused", 1, uploads())
+        assertEquals("envelope stays pending, unacked", 1, client.pendingOutboxJsonBatch(10uL).size)
+    }
+
+    @Test
+    fun capabilityPolicyDenialSkipsPublishAndKeepsReceiving() {
+        val client = live()
+        capabilitiesResponse = policyDenial
+        val result = sync(client).run()
+        assertNull(result.failure)
+        assertTrue(result.accountPaused)
+        assertTrue(requests.any { it.first.startsWith("GET /v1/events?after=") })
+    }
+
+    @Test
+    fun compactionPolicyDenialFallsBackAndKeepsReceiving() {
+        val client = live()
+        compactionCapabilityResponse = policyDenial
+        val result = sync(client).run()
+        assertNull(result.failure)
+        assertTrue(result.accountPaused)
+        assertTrue(requests.any { it.first.startsWith("GET /v1/events?after=") })
+    }
+
+    @Test
+    fun retentionPolicyDenialDefersRetentionWithoutFailingThePass() {
+        val client = live()
+        retentionCapabilityResponse = policyDenial
+        val result = sync(client).run()
+        assertNull(result.failure)
+        assertTrue(result.accountPaused)
+        assertFalse("producers wait for retention", result.producersReady)
+        assertTrue(requests.any { it.first.startsWith("GET /v1/events?after=") })
+    }
+
+    @Test
+    fun unauthorizedUploadStillThrowsAuthFailure() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550008802", "unauthorized", "p-401", false))
+        uploadResponse = LoopbackHttpServer.Response(401)
+        assertThrows(GatewayAuthException::class.java) { sync(client).run() }
+        assertNull(state.outboxRejection)
+    }
+
+    @Test
+    fun onlyTheCodedOperationNotPermittedIsAPolicyDenial() {
+        assertTrue(HttpResult(403, """{"code":"operation_not_permitted"}""").isAccountPolicyDenial())
+        assertFalse(HttpResult(403, null).isAccountPolicyDenial())
+        assertFalse(HttpResult(403, """{"code":"producer_not_authorized"}""").isAccountPolicyDenial())
+        assertFalse(HttpResult(401, """{"code":"operation_not_permitted"}""").isAccountPolicyDenial())
     }
 
     @Test

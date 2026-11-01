@@ -7,6 +7,7 @@
     "./protocol": "./src/protocol.ts",
     "./local-search": "./src/local-search.ts",
     "./notification-activation": "./src/notification-activation.ts",
-    "./attachment-retention": "./src/attachment-retention.ts"
+    "./attachment-retention": "./src/attachment-retention.ts",
+    "./account-access": "./src/account-access.ts"
   }
 }

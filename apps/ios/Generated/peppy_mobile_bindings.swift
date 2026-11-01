@@ -4451,6 +4451,88 @@ public func FfiConverterTypeGatewayHealth_lower(_ value: GatewayHealth) -> RustB
 }
 
 
+public struct NativeAccountNotice: Equatable, Hashable {
+    public var kind: NativeAccountNoticeKind
+    public var severity: NativeNoticeSeverity
+    /**
+     * Unix seconds supplied by the server.
+     */
+    public var deadline: Int64?
+    /**
+     * Present only when the URL passed the shared trust check; `None` means no action.
+     */
+    public var manageUrl: String?
+    public var dismissible: Bool
+    public var snoozeKey: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: NativeAccountNoticeKind, severity: NativeNoticeSeverity, 
+        /**
+         * Unix seconds supplied by the server.
+         */deadline: Int64?, 
+        /**
+         * Present only when the URL passed the shared trust check; `None` means no action.
+         */manageUrl: String?, dismissible: Bool, snoozeKey: String) {
+        self.kind = kind
+        self.severity = severity
+        self.deadline = deadline
+        self.manageUrl = manageUrl
+        self.dismissible = dismissible
+        self.snoozeKey = snoozeKey
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeAccountNotice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAccountNotice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAccountNotice {
+        return
+            try NativeAccountNotice(
+                kind: FfiConverterTypeNativeAccountNoticeKind.read(from: &buf), 
+                severity: FfiConverterTypeNativeNoticeSeverity.read(from: &buf), 
+                deadline: FfiConverterOptionInt64.read(from: &buf), 
+                manageUrl: FfiConverterOptionString.read(from: &buf), 
+                dismissible: FfiConverterBool.read(from: &buf), 
+                snoozeKey: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeAccountNotice, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeAccountNoticeKind.write(value.kind, into: &buf)
+        FfiConverterTypeNativeNoticeSeverity.write(value.severity, into: &buf)
+        FfiConverterOptionInt64.write(value.deadline, into: &buf)
+        FfiConverterOptionString.write(value.manageUrl, into: &buf)
+        FfiConverterBool.write(value.dismissible, into: &buf)
+        FfiConverterString.write(value.snoozeKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAccountNotice_lift(_ buf: RustBuffer) throws -> NativeAccountNotice {
+    return try FfiConverterTypeNativeAccountNotice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAccountNotice_lower(_ value: NativeAccountNotice) -> RustBuffer {
+    return FfiConverterTypeNativeAccountNotice.lower(value)
+}
+
+
 public struct NativeAppFilter: Equatable, Hashable {
     public var sourceDeviceId: String
     public var packageName: String
@@ -9568,6 +9650,204 @@ public func FfiConverterTypeMobileBindingsError_lower(_ value: MobileBindingsErr
 
 
 
+public enum NativeAccountAccessResult: Equatable, Hashable {
+    
+    case notice(notice: NativeAccountNotice
+    )
+    case none
+    case unsupported
+    case temporarilyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeAccountAccessResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAccountAccessResult: FfiConverterRustBuffer {
+    typealias SwiftType = NativeAccountAccessResult
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAccountAccessResult {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .notice(notice: try FfiConverterTypeNativeAccountNotice.read(from: &buf)
+        )
+        
+        case 2: return .none
+        
+        case 3: return .unsupported
+        
+        case 4: return .temporarilyUnavailable
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeAccountAccessResult, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .notice(notice):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeNativeAccountNotice.write(notice, into: &buf)
+            
+        
+        case .none:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unsupported:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .temporarilyUnavailable:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAccountAccessResult_lift(_ buf: RustBuffer) throws -> NativeAccountAccessResult {
+    return try FfiConverterTypeNativeAccountAccessResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAccountAccessResult_lower(_ value: NativeAccountAccessResult) -> RustBuffer {
+    return FfiConverterTypeNativeAccountAccessResult.lower(value)
+}
+
+
+
+
+public enum NativeAccountNoticeKind: Equatable, Hashable {
+    
+    case paymentFailedGrace
+    case endingScheduled
+    case readOnlyPastDue
+    case readOnlyCanceled
+    case readOnlyIncomplete
+    case readOnlyNoSubscription
+    case readOnlyTesterIneligible
+    case readOnlyAccountDeleting
+    case readOnlyOther
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeAccountNoticeKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeAccountNoticeKind: FfiConverterRustBuffer {
+    typealias SwiftType = NativeAccountNoticeKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAccountNoticeKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .paymentFailedGrace
+        
+        case 2: return .endingScheduled
+        
+        case 3: return .readOnlyPastDue
+        
+        case 4: return .readOnlyCanceled
+        
+        case 5: return .readOnlyIncomplete
+        
+        case 6: return .readOnlyNoSubscription
+        
+        case 7: return .readOnlyTesterIneligible
+        
+        case 8: return .readOnlyAccountDeleting
+        
+        case 9: return .readOnlyOther
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeAccountNoticeKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .paymentFailedGrace:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .endingScheduled:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .readOnlyPastDue:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .readOnlyCanceled:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .readOnlyIncomplete:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .readOnlyNoSubscription:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .readOnlyTesterIneligible:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .readOnlyAccountDeleting:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .readOnlyOther:
+            writeInt(&buf, Int32(9))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAccountNoticeKind_lift(_ buf: RustBuffer) throws -> NativeAccountNoticeKind {
+    return try FfiConverterTypeNativeAccountNoticeKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeAccountNoticeKind_lower(_ value: NativeAccountNoticeKind) -> RustBuffer {
+    return FfiConverterTypeNativeAccountNoticeKind.lower(value)
+}
+
+
+
+
 public enum NativeAttachmentRetentionClass: Equatable, Hashable {
     
     case protected
@@ -10977,6 +11257,72 @@ public func FfiConverterTypeNativeMmsPreviewState_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeNativeMmsPreviewState_lower(_ value: NativeMmsPreviewState) -> RustBuffer {
     return FfiConverterTypeNativeMmsPreviewState.lower(value)
+}
+
+
+
+
+public enum NativeNoticeSeverity: Equatable, Hashable {
+    
+    case warning
+    case error
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeNoticeSeverity: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeNoticeSeverity: FfiConverterRustBuffer {
+    typealias SwiftType = NativeNoticeSeverity
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeNoticeSeverity {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .warning
+        
+        case 2: return .error
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeNoticeSeverity, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .warning:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .error:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeNoticeSeverity_lift(_ buf: RustBuffer) throws -> NativeNoticeSeverity {
+    return try FfiConverterTypeNativeNoticeSeverity.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeNoticeSeverity_lower(_ value: NativeNoticeSeverity) -> RustBuffer {
+    return FfiConverterTypeNativeNoticeSeverity.lower(value)
 }
 
 
@@ -12939,6 +13285,37 @@ public func openNativeClient(config: NativeOpenConfig)throws  -> NativeClient  {
     )
 })
 }
+/**
+ * Interprets one account-access response. A 200 whose body does not parse is
+ * transient, so the host keeps its last good notice.
+ */
+public func accountAccessFromResponse(status: UInt16, body: String, nowUnix: Int64, trustedOrigins: [String]) -> NativeAccountAccessResult  {
+    return try!  FfiConverterTypeNativeAccountAccessResult_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_account_access_from_response(
+        FfiConverterUInt16.lower(status),
+        FfiConverterString.lower(body),
+        FfiConverterInt64.lower(nowUnix),
+        FfiConverterSequenceString.lower(trustedOrigins),uniffiCallStatus
+    )
+})
+}
+public func accountAccessRequest() -> NativeAttachmentRetentionRequest  {
+    return try!  FfiConverterTypeNativeAttachmentRetentionRequest_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_account_access_request(uniffiCallStatus
+    )
+})
+}
+public func isAccountPolicyDenial(status: UInt16, body: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_is_account_policy_denial(
+        FfiConverterUInt16.lower(status),
+        FfiConverterString.lower(body),uniffiCallStatus
+    )
+})
+}
 public func attachmentRetentionCapabilityRequest(cleanupReady: Bool)throws  -> NativeAttachmentRetentionRequest  {
     return try  FfiConverterTypeNativeAttachmentRetentionRequest_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -13252,6 +13629,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_open_native_client() != 13839) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_account_access_from_response() != 39232) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_account_access_request() != 58527) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_is_account_policy_denial() != 10922) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_capability_request() != 23970) {

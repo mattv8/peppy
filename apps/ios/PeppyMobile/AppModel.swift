@@ -32,6 +32,8 @@ final class AppModel {
     private(set) var lastSync: SyncReport?
     private(set) var lastSyncDate: Date?
     private(set) var serverReachability: ServerReachabilityState = .unknown
+    /// The global ribbon's account notice. It stays empty until the first successful read.
+    let accountAccess = AccountAccessModel()
     private(set) var attachmentStorage: AttachmentStorageStatusResult?
     private(set) var attachmentStorageRefreshing = false
     private(set) var attachmentStorageIsStale = false
@@ -749,6 +751,7 @@ final class AppModel {
             lastSync = report
             lastSyncDate = Date()
             lastError = report.uploadRefused.map { "Upload refused; the message stays queued. \($0.userMessage)" }
+            if report.refusedByAccountPolicy { await refreshAccountAccessAfterPolicyDenial() }
         } catch ClientError.canceled {
             // Leaving the foreground is not a failure.
         } catch ClientError.syncInProgress {
@@ -760,6 +763,30 @@ final class AppModel {
         if let opened = try? await session.open() { setStatus(opened) }
         await publishServerReachability()
         await runContactsPass(.foreground)
+    }
+
+    /// Launch and foreground read of the account decision. It runs with or without vault keys, and a failure keeps
+    /// the last good notice.
+    func refreshAccountAccess() async {
+        guard let identity = status.identity else { return }
+        let session = self.session
+        await accountAccess.refresh(identity: identity, trustedOrigins: Self.accountTrustedOrigins(for: identity)) {
+            try await session.accountAccessResponse(for: $0)
+        }
+    }
+
+    /// A coded policy pause re-reads the decision, at most once per interval and never while already read-only.
+    private func refreshAccountAccessAfterPolicyDenial() async {
+        guard let identity = status.identity else { return }
+        let session = self.session
+        await accountAccess.refreshAfterPolicyDenial(identity: identity, trustedOrigins: Self.accountTrustedOrigins(for: identity)) {
+            try await session.accountAccessResponse(for: $0)
+        }
+    }
+
+    /// The server origin and the hosted account origin are the only places a manage URL may point.
+    private static func accountTrustedOrigins(for identity: EnrollmentIdentity) -> [String] {
+        [identity.origin, HostedAccountClient.productionOrigin]
     }
 
     /// Starts foreground-only observation for the current enrollment. A full sync supplies the

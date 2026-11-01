@@ -10,6 +10,8 @@ import { BannerPresenter, BrowserNotificationAdapter, CoreNotificationSettings, 
 import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
 import { AttachmentRetentionDriver, AttachmentRetentionNoticeFacade } from "./attachment-retention.js";
+import { AccountAccessDriver } from "./account-access.js";
+import type { AccountAccessResult } from "@peppy/generated/account-access";
 import type { AttachmentRetentionNoticeAcknowledgementInput, AttachmentRetentionNoticeAcknowledgementResult, AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
 
 const MAX_RPC_BYTES = 1024 * 1024;
@@ -105,6 +107,7 @@ export interface BrowserNetwork {
   producerReady?(): boolean;
   attachmentRetentionStatus?(): Promise<AttachmentRetentionStatusResult>;
   acknowledgeAttachmentRetentionNotice?(input: AttachmentRetentionNoticeAcknowledgementInput): Promise<AttachmentRetentionNoticeAcknowledgementResult>;
+  accountAccess?(): Promise<AccountAccessResult>;
 }
 
 export interface BrowserHostDependencies {
@@ -883,6 +886,15 @@ export class BrowserWorkerHost {
       } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
       return;
     }
+    if (request.command === "account_access") {
+      if (this.owner.owner.phase !== "ready") { port.postMessage({ id: request.id, ok: false, error: { code: "locked", message: "Browser session is not ready." } }); return; }
+      if (Object.keys(request.args).length !== 0) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      try {
+        const value = await this.dependencies.network?.accountAccess?.() ?? { kind: "unsupported" };
+        port.postMessage({ id: request.id, ok: true, value });
+      } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
+      return;
+    }
     if (request.command === "unlock" && this.owner.owner.phase === "ready") {
       const passphrase = secretString(request.args, "passphrase");
       if (!passphrase || !this.dependencies.network?.unlockNewEpoch) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
@@ -1378,17 +1390,26 @@ export async function loadBrowserCore(): Promise<EmscriptenCoreModule> {
   return module.default({ locateFile: file => file.endsWith(".wasm") ? "/core/peppy_browser_core.wasm" : `/core/${file}` });
 }
 
-async function browserOrigins(): Promise<{ logicalOrigin: string; fetchBase: string }> {
+async function browserOrigins(): Promise<{ logicalOrigin: string; fetchBase: string; accountOrigin?: string }> {
   const fetchBase = self.location.origin;
   try {
     const response = await fetch("/web/config.json", { credentials: "omit" });
     if (!response.ok) return { logicalOrigin: fetchBase, fetchBase };
     const config: unknown = await response.json();
     const apiOrigin = typeof config === "object" && config !== null ? (config as { apiOrigin?: unknown }).apiOrigin : undefined;
+    const accountUrl = typeof config === "object" && config !== null ? (config as { accountUrl?: unknown }).accountUrl : undefined;
     const parsed = typeof apiOrigin === "string" ? new URL(apiOrigin) : undefined;
     if (!parsed || parsed.protocol !== "https:" || parsed.username || parsed.password) return { logicalOrigin: fetchBase, fetchBase };
-    return { logicalOrigin: parsed.origin, fetchBase };
+    return { logicalOrigin: parsed.origin, fetchBase, accountOrigin: httpsOrigin(accountUrl) };
   } catch { return { logicalOrigin: fetchBase, fetchBase }; }
+}
+
+function httpsOrigin(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? url.origin : undefined;
+  } catch { return undefined; }
 }
 
 export function browserRememberedUnlock(fetchBase: string, fetchImpl: typeof fetch = fetch): RememberedUnlock {
@@ -1402,6 +1423,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let publicTransport: OriginTransport | undefined;
   let retention: AttachmentRetentionDriver | undefined;
   let retentionNotice: AttachmentRetentionNoticeFacade | undefined;
+  let accountAccess: AccountAccessDriver | undefined;
   let retentionGeneration = 0;
   let retentionAbort: AbortController | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1489,6 +1511,9 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async acknowledgeAttachmentRetentionNotice(input) {
          return retentionNotice?.acknowledge(input) ?? "temporarily_unavailable";
        },
+       async accountAccess() {
+         return accountAccess?.status() ?? { kind: "temporarily_unavailable" };
+       },
        },
     async boot(_signal, onFatal) {
       const modulePromise = loadBrowserCore();
@@ -1504,6 +1529,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        retentionAbort = new AbortController();
        retention = new AttachmentRetentionDriver(session, { retention: (request, signal) => publicTransport!.retention(request, signal) });
        retentionNotice = new AttachmentRetentionNoticeFacade(session, { retention: (request, signal) => publicTransport!.retention(request, signal) }, () => retentionGeneration, () => retentionAbort!.signal);
+       accountAccess = new AccountAccessDriver(session, { retention: (request, signal) => publicTransport!.retention(request, signal) }, () => [origins.logicalOrigin, origins.accountOrigin].filter((origin): origin is string => origin !== undefined), () => retentionGeneration, () => retentionAbort!.signal);
        scheduler = new BrowserScheduler(
         session,
         publicTransport,

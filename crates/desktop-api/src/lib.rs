@@ -9,6 +9,7 @@ pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Prev
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod account_access;
 pub mod attachment_retention;
 pub use attachment_retention::*;
 pub mod avatar;

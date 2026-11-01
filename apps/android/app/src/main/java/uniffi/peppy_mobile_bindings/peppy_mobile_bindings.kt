@@ -679,6 +679,12 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_open_native_client(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_account_access_from_response(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_account_access_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_is_account_policy_denial(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_capability_request(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_acknowledgement_request(
@@ -1683,6 +1689,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_open_native_client(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_account_access_from_response(`status`: Short,`body`: RustBuffer.ByValue,`nowUnix`: Long,`trustedOrigins`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_account_access_request(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_is_account_policy_denial(`status`: Short,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_capability_request(`cleanupReady`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_acknowledgement_request(`policyVersion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1874,6 +1886,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_open_native_client() and 0xFFFF) != 13839) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_account_access_from_response() and 0xFFFF) != 39232) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_account_access_request() and 0xFFFF) != 58527) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_is_account_policy_denial() and 0xFFFF) != 10922) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_capability_request() and 0xFFFF) != 23970) {
@@ -8833,6 +8854,70 @@ public object FfiConverterTypeGatewayHealth: FfiConverterRustBuffer<GatewayHealt
 
 
 
+data class NativeAccountNotice (
+    var `kind`: NativeAccountNoticeKind
+    , 
+    var `severity`: NativeNoticeSeverity
+    , 
+    /**
+     * Unix seconds supplied by the server.
+     */
+    var `deadline`: kotlin.Long?
+    , 
+    /**
+     * Present only when the URL passed the shared trust check; `None` means no action.
+     */
+    var `manageUrl`: kotlin.String?
+    , 
+    var `dismissible`: kotlin.Boolean
+    , 
+    var `snoozeKey`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAccountNotice: FfiConverterRustBuffer<NativeAccountNotice> {
+    override fun read(buf: ByteBuffer): NativeAccountNotice {
+        return NativeAccountNotice(
+            FfiConverterTypeNativeAccountNoticeKind.read(buf),
+            FfiConverterTypeNativeNoticeSeverity.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeAccountNotice) = (
+            FfiConverterTypeNativeAccountNoticeKind.allocationSize(value.`kind`) +
+            FfiConverterTypeNativeNoticeSeverity.allocationSize(value.`severity`) +
+            FfiConverterOptionalLong.allocationSize(value.`deadline`) +
+            FfiConverterOptionalString.allocationSize(value.`manageUrl`) +
+            FfiConverterBoolean.allocationSize(value.`dismissible`) +
+            FfiConverterString.allocationSize(value.`snoozeKey`)
+    )
+
+    override fun write(value: NativeAccountNotice, buf: ByteBuffer) {
+            FfiConverterTypeNativeAccountNoticeKind.write(value.`kind`, buf)
+            FfiConverterTypeNativeNoticeSeverity.write(value.`severity`, buf)
+            FfiConverterOptionalLong.write(value.`deadline`, buf)
+            FfiConverterOptionalString.write(value.`manageUrl`, buf)
+            FfiConverterBoolean.write(value.`dismissible`, buf)
+            FfiConverterString.write(value.`snoozeKey`, buf)
+    }
+}
+
+
+
 data class NativeAppFilter (
     var `sourceDeviceId`: kotlin.String
     , 
@@ -13079,6 +13164,148 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
 
 
 
+sealed class NativeAccountAccessResult {
+    
+    data class Notice(
+        val `notice`: uniffi.peppy_mobile_bindings.NativeAccountNotice) : NativeAccountAccessResult()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object None : NativeAccountAccessResult()
+    
+    
+    object Unsupported : NativeAccountAccessResult()
+    
+    
+    object TemporarilyUnavailable : NativeAccountAccessResult()
+    
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAccountAccessResult : FfiConverterRustBuffer<NativeAccountAccessResult>{
+    override fun read(buf: ByteBuffer): NativeAccountAccessResult {
+        return when(buf.getInt()) {
+            1 -> NativeAccountAccessResult.Notice(
+                FfiConverterTypeNativeAccountNotice.read(buf),
+                )
+            2 -> NativeAccountAccessResult.None
+            3 -> NativeAccountAccessResult.Unsupported
+            4 -> NativeAccountAccessResult.TemporarilyUnavailable
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: NativeAccountAccessResult): ULong = when(value) {
+        is NativeAccountAccessResult.Notice -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeNativeAccountNotice.allocationSize(value.`notice`)
+            )
+        }
+        is NativeAccountAccessResult.None -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeAccountAccessResult.Unsupported -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeAccountAccessResult.TemporarilyUnavailable -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: NativeAccountAccessResult, buf: ByteBuffer) {
+        when(value) {
+            is NativeAccountAccessResult.Notice -> {
+                buf.putInt(1)
+                FfiConverterTypeNativeAccountNotice.write(value.`notice`, buf)
+                Unit
+            }
+            is NativeAccountAccessResult.None -> {
+                buf.putInt(2)
+                Unit
+            }
+            is NativeAccountAccessResult.Unsupported -> {
+                buf.putInt(3)
+                Unit
+            }
+            is NativeAccountAccessResult.TemporarilyUnavailable -> {
+                buf.putInt(4)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class NativeAccountNoticeKind {
+    
+    PAYMENT_FAILED_GRACE,
+    ENDING_SCHEDULED,
+    READ_ONLY_PAST_DUE,
+    READ_ONLY_CANCELED,
+    READ_ONLY_INCOMPLETE,
+    READ_ONLY_NO_SUBSCRIPTION,
+    READ_ONLY_TESTER_INELIGIBLE,
+    READ_ONLY_ACCOUNT_DELETING,
+    READ_ONLY_OTHER;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeAccountNoticeKind: FfiConverterRustBuffer<NativeAccountNoticeKind> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeAccountNoticeKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeAccountNoticeKind) = 4UL
+
+    override fun write(value: NativeAccountNoticeKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 
 enum class NativeAttachmentRetentionClass {
     
@@ -13788,6 +14015,40 @@ public object FfiConverterTypeNativeMmsPreviewState: FfiConverterRustBuffer<Nati
     override fun allocationSize(value: NativeMmsPreviewState) = 4UL
 
     override fun write(value: NativeMmsPreviewState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeNoticeSeverity {
+    
+    WARNING,
+    ERROR;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeNoticeSeverity: FfiConverterRustBuffer<NativeNoticeSeverity> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeNoticeSeverity.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeNoticeSeverity) = 4UL
+
+    override fun write(value: NativeNoticeSeverity, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -15356,6 +15617,46 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
     
         
         FfiConverterTypeNativeOpenConfig.lower(`config`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Interprets one account-access response. A 200 whose body does not parse is
+         * transient, so the host keeps its last good notice.
+         */ fun `accountAccessFromResponse`(`status`: kotlin.UShort, `body`: kotlin.String, `nowUnix`: kotlin.Long, `trustedOrigins`: List<kotlin.String>): NativeAccountAccessResult {
+            return FfiConverterTypeNativeAccountAccessResult.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_account_access_from_response(
+    
+        
+        FfiConverterUShort.lower(`status`),
+        FfiConverterString.lower(`body`),
+        FfiConverterLong.lower(`nowUnix`),
+        FfiConverterSequenceString.lower(`trustedOrigins`),_status)
+}
+    )
+    }
+    
+ fun `accountAccessRequest`(): NativeAttachmentRetentionRequest {
+            return FfiConverterTypeNativeAttachmentRetentionRequest.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_account_access_request(
+    
+        _status)
+}
+    )
+    }
+    
+ fun `isAccountPolicyDenial`(`status`: kotlin.UShort, `body`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_is_account_policy_denial(
+    
+        
+        FfiConverterUShort.lower(`status`),
+        FfiConverterString.lower(`body`),_status)
 }
     )
     }

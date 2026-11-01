@@ -273,7 +273,9 @@ fn native_attachment_use_kind(value: AttachmentUseKind) -> NativeAttachmentUseKi
     }
 }
 
-fn request_view(value: codec::AttachmentRetentionRequest) -> NativeAttachmentRetentionRequest {
+pub(crate) fn request_view(
+    value: codec::AttachmentRetentionRequest,
+) -> NativeAttachmentRetentionRequest {
     NativeAttachmentRetentionRequest {
         method: value.method.into(),
         relative_path: value.relative_path,

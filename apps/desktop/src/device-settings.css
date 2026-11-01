@@ -7,6 +7,8 @@
 #settings-devices [data-device-badge="presence"][data-presence-state="connected"] { color: var(--peppy-success); }
 #settings-devices [data-device-badge="presence"][data-presence-state="delayed"] { color: var(--peppy-warning-text); }
 #settings-devices [data-device-badge="presence"][data-presence-state="never"], #settings-devices [data-device-badge="presence"][data-presence-state="unknown"] { color: var(--peppy-text-muted); }
+#settings-devices [data-device-badge="presence"][data-presence-state="paused"] { color: var(--peppy-text-secondary); }
+#settings-devices [data-device-badge="account-paused"] { color: var(--peppy-text-secondary); }
 #settings-devices li small { color: var(--peppy-text-secondary); font-size: 12px; }
 #devices-removed { display: grid; gap: 8px; }
 @media (forced-colors: active) { #settings-devices [data-device-badge] { border-color: CanvasText; } }

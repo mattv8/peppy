@@ -259,20 +259,30 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 #thread-contact-avatar:hover { box-shadow: 0 0 0 2px var(--peppy-focus-ring-alpha); }
 #thread-contact-avatar:focus-visible { outline-offset: 2px; }
 #notifications-dismiss-all { flex: 0 0 auto; white-space: nowrap; }
-.server-offline-banner {
+.system-ribbon {
   display: flex;
   flex: 0 0 auto;
   gap: 8px;
-  align-items: center;
+  align-items: flex-start;
   padding: 7px 12px;
   border-bottom: 1px solid var(--peppy-warning-border);
   background: var(--peppy-warning-surface);
   color: var(--peppy-warning-text);
   font-size: 12px;
 }
-.server-offline-banner > svg { flex: 0 0 auto; }
-.server-offline-banner div { display: flex; min-width: 0; gap: 4px; flex-wrap: wrap; }
-.server-offline-banner strong { color: var(--peppy-text-strong); }
+.system-ribbon[data-system-ribbon-severity="error"] {
+  border-bottom: 2px solid var(--peppy-error);
+  background: var(--peppy-error-surface);
+  color: var(--peppy-text-primary);
+}
+.system-ribbon > svg { flex: 0 0 auto; margin-top: 2px; }
+.system-ribbon[data-system-ribbon-severity="error"] > svg { color: var(--peppy-error); }
+.system-ribbon-text { display: flex; flex: 1 1 auto; min-width: 0; gap: 4px; flex-wrap: wrap; }
+.system-ribbon-open-failed { flex: 1 0 100%; }
+.system-ribbon strong { color: var(--peppy-text-strong); }
+.system-ribbon .secondary-button { font-size: 12px; }
+.system-ribbon-strip { padding: 4px 10px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.system-ribbon-strip > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #app-notice-banner {
   display: grid;
   flex: 0 0 auto;
@@ -320,7 +330,21 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   .app-notice-row p { flex-basis: 100%; }
   .app-notice-actions { margin-left: auto; }
 }
+@media (max-width: 480px) {
+  .system-ribbon { flex-wrap: wrap; }
+  .system-ribbon-text { flex: 1 1 calc(100% - 24px); }
+  .system-ribbon .app-notice-actions { margin-left: auto; }
+}
 @media (forced-colors: active) {
+  .system-ribbon,
+  .system-ribbon[data-system-ribbon-severity="error"] {
+    border-color: CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+  .system-ribbon[data-system-ribbon-severity="error"] { border-bottom: 2px solid CanvasText; }
+  .system-ribbon :is(.secondary-button, .app-notice-dismiss) { border: 1px solid ButtonText; background: ButtonFace; color: ButtonText; }
+  .system-ribbon :is(.secondary-button, .app-notice-dismiss):focus-visible { outline-color: Highlight; }
   .app-notice-row,
   .app-notice-row[data-app-notice-severity="error"],
   .app-notice-row[data-app-notice-severity="warning"] {

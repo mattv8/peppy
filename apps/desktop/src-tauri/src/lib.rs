@@ -21,6 +21,7 @@ use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_opener::OpenerExt;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
+mod account_access;
 mod app_lock;
 mod attachment_retention;
 mod clipboard_image;
@@ -203,6 +204,7 @@ pub struct AppState {
 /// Commands a composer window may call (mirrors `capabilities/composer.json`).
 pub const COMPOSER_COMMANDS: &[&str] = &[
     "load_state",
+    "account_access",
     "load_history",
     "open_external_url",
     "save_draft",
@@ -246,6 +248,15 @@ fn admit_update_operation(state: &AppState) -> BridgeResult<update_safety::Opera
 /// composer creation and head commands are main-window only.
 pub fn require_main(label: &str) -> BridgeResult<()> {
     if label == tray::MAIN {
+        Ok(())
+    } else {
+        Err(window_error())
+    }
+}
+
+/// Main window or a composer window; for commands both windows' capabilities grant.
+fn require_main_or_composer(label: &str) -> BridgeResult<()> {
+    if label == tray::MAIN || tray::composer_conversation(label).is_some() {
         Ok(())
     } else {
         Err(window_error())
@@ -1410,9 +1421,7 @@ fn open_external_url(
         return Err(BridgeError::new("app-locked", "Peppy is locked."));
     }
     let _operation = admit_update_operation(&state)?;
-    if window.label() != tray::MAIN && tray::composer_conversation(window.label()).is_none() {
-        return Err(window_error());
-    }
+    require_main_or_composer(window.label())?;
     let url = validate_external_url(&url)?;
     app.opener()
         .open_url(url.as_str(), None::<String>)
@@ -1425,6 +1434,17 @@ async fn session_is_current(state: &AppState, session: &Arc<Session>) -> bool {
             && !session.cancel.is_cancelled()
             && Arc::ptr_eq(current, session)
     })
+}
+
+#[tauri::command]
+async fn account_access(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<peppy_desktop_api::account_access::AccountAccessResult> {
+    require_main_or_composer(window.label())?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    account_access::status(session).await
 }
 
 #[tauri::command]
@@ -5668,6 +5688,7 @@ pub fn run() {
             hosted::hosted_sign_out,
             hosted::hosted_open_billing,
             hosted::hosted_provision,
+            account_access,
             attachment_retention_status,
             acknowledge_attachment_retention_notice,
             attachment_retention_state,

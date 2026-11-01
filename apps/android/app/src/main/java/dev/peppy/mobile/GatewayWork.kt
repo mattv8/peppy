@@ -226,6 +226,12 @@ internal object GatewayDispatchPolicy {
 class GatewayAuthException : IOException("credential rejected")
 
 /**
+ * A coded `operation_not_permitted` 403: the account is read-only. It pauses the phase that hit it
+ * for this pass. It is never an auth failure, an outbox rejection, or a soft rejection.
+ */
+internal class GatewayAccountPausedException : IOException("account access paused")
+
+/**
  * One bounded sync pass over authenticated HTTP. Phases are isolated: a receive or snapshot failure
  * does not prevent uploading captures, and vice versa; the first transient failure is reported so
  * the worker retries with backoff.
@@ -261,7 +267,7 @@ class GatewaySync(
     private enum class GatewayPhase(val code: Long) {
         RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE),
     }
-    class PassResult(val more: Boolean, val failure: Exception?, val producersReady: Boolean)
+    class PassResult(val more: Boolean, val failure: Exception?, val producersReady: Boolean, val accountPaused: Boolean = false)
 
     private var more = false
     private var failure: Exception? = null
@@ -276,20 +282,23 @@ class GatewaySync(
     private var snapshotRemaining = 0L
     private var contactReadiness: BackgroundDiagnostics.GatewayReadiness? = null
     private var retentionAllowsProducers = false
+    private var accountPaused = false
 
     fun run(): PassResult {
         if (state.phase == SyncPhase.RECOVERY_REQUIRED) {
             // Withdraw routes so the desktop stops offering this gateway; nothing else.
             phase(GatewayPhase.RECOVERY_WITHDRAW) { publish(SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false)); false }
-            return PassResult(false, failure, false)
+            return PassResult(false, failure, false, accountPaused)
         }
         try {
             http.setAttachmentProducerReady(false)
-            when (AttachmentRetentionDriver(client, http, sessionCurrent).run()) {
+            val retention = AttachmentRetentionDriver(client, http, sessionCurrent)
+            when (retention.run()) {
                 AttachmentRetentionDriver.Outcome.STALE -> return PassResult(false, null, false)
                 AttachmentRetentionDriver.Outcome.DEFERRED -> {
                     retentionAllowsProducers = false
-                    failure = GatewayTransportException("retention negotiation deferred")
+                    if (retention.accountPaused) accountPaused = true
+                    else failure = GatewayTransportException("retention negotiation deferred")
                 }
                 AttachmentRetentionDriver.Outcome.MORE -> { retentionAllowsProducers = false; more = true }
                 AttachmentRetentionDriver.Outcome.DRAINED, AttachmentRetentionDriver.Outcome.LEGACY -> {
@@ -345,7 +354,7 @@ class GatewaySync(
         if (mayEmit()) phase(GatewayPhase.FINAL_UPLOAD) { upload() }
         if (mayEmit()) phase(GatewayPhase.MMS_CLEANUP) { cleanupMmsCiphertext(); false }
         if (diagnosticsEnabled) BackgroundDiagnostics.gateway(received, snapshotReceived, progressed, uploaded, snapshotRemaining, contactReadiness)
-        return PassResult(more, failure, retentionAllowsProducers)
+        return PassResult(more, failure, retentionAllowsProducers, accountPaused)
     }
 
     private fun mayEmit() = state.phase == SyncPhase.LIVE && state.outboxRejection == null
@@ -356,6 +365,9 @@ class GatewaySync(
             if (SyncDiagnostics.measurePhase(phase.code, block)) more = true
         } catch (error: GatewayAuthException) {
             throw error
+        } catch (_: GatewayAccountPausedException) {
+            // Policy pause: this phase stops for the pass; the rest of the pass continues.
+            accountPaused = true
         } catch (error: Exception) {
             val transient = error is IOException || error is JSONException ||
                 error is MobileBindingsException || error is NumberFormatException
@@ -365,7 +377,9 @@ class GatewaySync(
     }
 
     private fun publish(report: JSONObject) {
-        requireOk(http.postJson("/v1/capabilities", report.toString()))
+        val response = http.postJson("/v1/capabilities", report.toString())
+        if (response.isAccountPolicyDenial()) throw GatewayAccountPausedException()
+        requireOk(response)
     }
 
     private fun bootstrap(): Boolean {
@@ -461,6 +475,7 @@ class GatewaySync(
         snapshotForRepair = null
         client.setServerCompactionSupported(false)
         val declaration = http.postJson("/v1/compaction/capability", "{}")
+        if (declaration.isAccountPolicyDenial()) return pauseCompactionProbe()
         if (declaration.code == 401 || declaration.code == 403) throw GatewayAuthException()
         // A 404 is an older server; any other unavailable declaration is likewise fail-closed.
         if (!declaration.ok) {
@@ -468,6 +483,7 @@ class GatewaySync(
             return
         }
         val response = http.get("/v1/snapshot")
+        if (response.isAccountPolicyDenial()) return pauseCompactionProbe()
         if (response.code == 401 || response.code == 403) throw GatewayAuthException()
         if (!response.ok) {
             client.setServerCompactionState(false, false)
@@ -494,6 +510,12 @@ class GatewaySync(
         // The returned readiness is diagnostic-only. Its parsing cannot change the capability
         // result, trigger the failure fallback above, or alter this pass's outcome.
         if (diagnosticsEnabled) contactReadiness = BackgroundDiagnostics.gatewayReadiness(readinessJson)
+    }
+
+    /** Compaction is unknown while the account is read-only; the pass continues without it. */
+    private fun pauseCompactionProbe() {
+        accountPaused = true
+        client.setServerCompactionState(false, false)
     }
 
     /** Validates the canonical server fence; legacy snapshot metadata is explicitly unsupported. */
@@ -596,6 +618,13 @@ class GatewaySync(
                     if (diagnosticsEnabled) uploaded++
                     if (SyncDiagnostics.enabled) SyncDiagnostics.record(SyncTraceEvent.OUTBOX_ACK, SyncTraceField.COUNT to 1)
                 }
+                // Paused, not rejected: envelopes stay pending and unacked until access returns.
+                response.isAccountPolicyDenial() -> {
+                    // Like a soft rejection, the final upload of this pass does not POST again.
+                    accountPaused = true
+                    uploadSoftRejected = true
+                    return false
+                }
                 response.code == 401 -> throw GatewayAuthException()
                 response.code == 409 && response.errorCode == "idempotency_conflict" -> {
                     enterRecovery(RecoveryReason.PRODUCER_CONFLICT)
@@ -625,6 +654,10 @@ class GatewaySync(
     private fun transferMedia(): Boolean {
         val result = media()
         when {
+            result.failures.any { it.reason == MMS_ACCOUNT_PAUSED_REASON } -> {
+                accountPaused = true
+                return false
+            }
             result.failures.any { it.reason == "auth" } -> throw GatewayAuthException()
             // The retained core queue retries on a later bounded gateway pass. Retrying this
             // otherwise productive pass would exhaust its WorkManager backoff on one attachment.
@@ -780,8 +813,8 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
                     { session.client.pendingGatewayMediaDownloads() },
                 ).run()
                     .also { result ->
-                        MmsTransferHealth(applicationContext).record(result.failures)
-                        result.failures.filter { it.operation == "upload" && it.reason != "removed" }.forEach { failure ->
+                        MmsTransferHealth(applicationContext).record(result.failures.filterNot { it.reason == MMS_ACCOUNT_PAUSED_REASON })
+                        result.failures.filter { it.operation == "upload" && it.reason != "removed" && it.reason != MMS_ACCOUNT_PAUSED_REASON }.forEach { failure ->
                             runCatching { session.client.recordGatewayMediaFailure(failure.attachmentId, failure.reason) }
                         }
                     }
@@ -799,6 +832,8 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         } catch (_: GatewayAuthException) {
             return Result.failure()
         }
+        if (result.accountPaused) AccountAccessState.onPolicyDenial(applicationContext)
+        runCatching { AccountAccessState.refreshIfDue(applicationContext) }
         if (result.producersReady && NativeGateway.markProducerReady(applicationContext, session)) {
             MmsCaptureWork.resumeDeferred(applicationContext)
             if (GatewayWork.shouldEnqueueMmsCapture(captureHint, mmsEnabled, mmsReceiveGranted)) MmsCaptureWork.enqueue(applicationContext)

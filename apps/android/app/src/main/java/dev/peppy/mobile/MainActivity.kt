@@ -55,6 +55,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -96,6 +97,17 @@ class MainActivity : ComponentActivity() {
         val systemBars = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT)
         enableEdgeToEdge(statusBarStyle = systemBars, navigationBarStyle = systemBars)
         setContent { PeppyTheme { Surface { CompanionScreen(this@MainActivity) } } }
+        if (savedInstanceState == null) requestAccountTabIfNotified(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        requestAccountTabIfNotified(intent)
+    }
+
+    private fun requestAccountTabIfNotified(intent: Intent?) {
+        if (intent?.getBooleanExtra(AccountStatusNotifier.EXTRA_OPEN_ACCOUNT, false) == true) AccountTabRequests.request()
     }
 
     override fun onResume() {
@@ -211,6 +223,17 @@ private fun CompanionScreen(activity: ComponentActivity) {
     var appFiltersOpen by remember { mutableStateOf(false) }
     var smsDetailsOpen by remember { mutableStateOf(false) }
     var accountDetailsOpen by remember { mutableStateOf(false) }
+    val accountTabRequested by AccountTabRequests.state.collectAsState()
+    LaunchedEffect(accountTabRequested) {
+        if (accountTabRequested) {
+            AccountTabRequests.consume()
+            settingsOpen = false
+            appFiltersOpen = false
+            smsDetailsOpen = false
+            accountDetailsOpen = false
+            destination = "account"
+        }
+    }
     var welcomeDestination by rememberSaveable { mutableStateOf(WelcomeDestination.HOSTED) }
     var ownerPhoneHost by remember { mutableStateOf<OwnerPhoneApprovalHost?>(null) }
     var ownerComputerHost by remember { mutableStateOf<OwnerComputerApprovalHost?>(null) }
@@ -334,145 +357,150 @@ private fun CompanionScreen(activity: ComponentActivity) {
 
     if (appFiltersOpen && !settingsOpen && status?.enrolled == true) {
         Column(Modifier.fillMaxSize()) {
-            if (status?.sharedKeysReady == true) ServerOfflineBanner()
-            NotificationAppFiltersScreen(onBack = {
-                appFiltersOpen = false
-                refresh++
-            })
+            val ribbonVisible = SystemRibbonHost(enrolled = true, unlocked = status?.sharedKeysReady == true)
+            Box(Modifier.weight(1f).belowSystemRibbon(ribbonVisible)) {
+                NotificationAppFiltersScreen(onBack = {
+                    appFiltersOpen = false
+                    refresh++
+                })
+            }
         }
         return
     }
 
     BackHandler(enabled = settingsOpen) { settingsOpen = false }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(if (settingsOpen) R.string.peppy_settings else R.string.peppy_app_name)) },
-                navigationIcon = {
-                    if (settingsOpen) IconButton(onClick = { settingsOpen = false }, Modifier.testTag("settings-back-button")) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.peppy_back))
-                    }
-                },
-            )
-        },
-        bottomBar = {
-            if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen && !smsDetailsOpen && !accountDetailsOpen) NavigationBar {
-                listOf("mirroring" to R.string.peppy_mirroring, "sms" to R.string.peppy_sms, "contacts" to R.string.peppy_permissions_contacts, "account" to R.string.peppy_account).forEach { (route, labelRes) ->
-                    val label = stringResource(labelRes)
-                    val icon = when (route) { "mirroring" -> Icons.Default.Notifications; "sms" -> Icons.Default.Sms; "contacts" -> Icons.Default.Contacts; else -> Icons.Default.Person }
-                    NavigationBarItem(selected = destination == route, onClick = { destination = route }, icon = { Icon(icon, contentDescription = label) }, label = { Text(label) }, modifier = Modifier.testTag("tab-$route"))
-                }
-            }
-        },
-    ) { innerPadding ->
-        Column(Modifier.fillMaxSize().padding(innerPadding)) {
-            if (status?.enrolled == true && status?.sharedKeysReady == true) ServerOfflineBanner()
-            Column(
-                Modifier.fillMaxSize().verticalScroll(rememberScrollState()).then(
-                    if (status?.enrolled == true && status?.sharedKeysReady == true) Modifier else Modifier.padding(24.dp),
-                )
-                    .semantics { testTagsAsResourceId = true }.testTag("companion-screen"),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-        if (status?.enrolled != true && !settingsOpen) {
-            when (welcomeDestination) {
-                WelcomeDestination.HOSTED -> WelcomeScreen(
-                    onGetStarted = { welcomeDestination = WelcomeDestination.HOSTED_ENROLLMENT },
-                    onSelectSelfHosted = { welcomeDestination = WelcomeDestination.SELF_HOSTED },
-                )
-                WelcomeDestination.SELF_HOSTED -> SelfHostedSetupScreen(
-                    onBack = { welcomeDestination = WelcomeDestination.HOSTED },
-                    onEnroll = { welcomeDestination = WelcomeDestination.SELF_HOSTED_ENROLLMENT },
-                    onOpenGuide = {
-                        context.startActivity(
-                            android.content.Intent(
-                                android.content.Intent.ACTION_VIEW,
-                                Uri.parse("https://github.com/mattv8/peppy#readme"),
-                            ),
-                        )
+    Column(Modifier.fillMaxSize()) {
+        val ribbonVisible = SystemRibbonHost(enrolled = status?.enrolled == true, unlocked = status?.sharedKeysReady == true)
+        Scaffold(
+            modifier = Modifier.weight(1f).belowSystemRibbon(ribbonVisible),
+            topBar = {
+                TopAppBar(
+                    title = { Text(stringResource(if (settingsOpen) R.string.peppy_settings else R.string.peppy_app_name)) },
+                    navigationIcon = {
+                        if (settingsOpen) IconButton(onClick = { settingsOpen = false }, Modifier.testTag("settings-back-button")) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.peppy_back))
+                        }
                     },
                 )
-                else -> Unit
-            }
-        }
-
-        if (status?.enrolled == true && !status!!.sharedKeysReady && !settingsOpen) Section("lock-screen", stringResource(R.string.peppy_locked), showDivider = false) {
-            Text(
-                "Enter the existing encryption passphrase you already use on your other devices. This phone does not create a new passphrase.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            OutlinedTextField(
-                value = passphrase,
-                onValueChange = { passphrase = it },
-                label = { Text(stringResource(R.string.peppy_passphrase_field)) },
-                singleLine = true,
-                enabled = !unlockBusy && status?.enrolled == true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier.fillMaxWidth().testTag("passphrase-field"),
-            )
-            BusyButton(
-                "unlock-button", "Unlock", unlockBusy,
-                enabled = !unlockBusy && status?.enrolled == true && passphrase.isNotEmpty(),
-            ) {
-                val attempt = passphrase
-                passphrase = ""
-                unlockBusy = true
-                scope.launch {
-                    val result = withContext(Dispatchers.IO) { NativeGateway.unlock(context, attempt) }
-                    if (result == UnlockResult.UNLOCKED) { NotificationMirrorService.reconcile(); GatewayWork.enqueue(context) }
-                    unlockResult = result
-                    unlockBusy = false
-                    refresh++
+            },
+            bottomBar = {
+                if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen && !smsDetailsOpen && !accountDetailsOpen) NavigationBar {
+                    listOf("mirroring" to R.string.peppy_mirroring, "sms" to R.string.peppy_sms, "contacts" to R.string.peppy_permissions_contacts, "account" to R.string.peppy_account).forEach { (route, labelRes) ->
+                        val label = stringResource(labelRes)
+                        val icon = when (route) { "mirroring" -> Icons.Default.Notifications; "sms" -> Icons.Default.Sms; "contacts" -> Icons.Default.Contacts; else -> Icons.Default.Person }
+                        NavigationBarItem(selected = destination == route, onClick = { destination = route }, icon = { Icon(icon, contentDescription = label) }, label = { Text(label) }, modifier = Modifier.testTag("tab-$route"))
+                    }
                 }
-            }
-            unlockResult?.let { Text(unlockMessage(it), Modifier.testTag("unlock-error"), style = MaterialTheme.typography.bodySmall) }
-            TextButton(onClick = { settingsOpen = true }, modifier = Modifier.testTag("locked-settings-button")) { Text(stringResource(R.string.peppy_settings)) }
-        }
-
-        if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "sms") SmsTab(
-            context = context,
-            refresh = refresh + permissionRefresh,
-            databaseOpen = status?.databaseOpen == true,
-            onChanged = { refresh++ },
-            gatewayStatus = status,
-            onDetailsChanged = { smsDetailsOpen = it },
-        )
-        if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ }, onOpenAppFilters = { appFiltersOpen = true })
-        if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "contacts") {
-            ContactSyncSettings(
-                context = context,
-                refresh = refresh,
-                onChanged = { refresh++ },
-            )
-        }
-        if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ }, onOpenSettings = { settingsOpen = true }, onAddPhone = {
-            scope.launch { ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }; addPhoneOpen = ownerPhoneHost != null }
-        }, canAddPhone = ownerPhoneAvailable, onConnectComputer = {
-            scope.launch { ownerComputerHost = withContext(Dispatchers.IO) { createOwnerComputerApprovalHost(context) }; connectComputerOpen = ownerComputerHost != null }
-        }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it })
-        if (settingsOpen) {
-            ScreenBody("settings-screen") {
-                Section("about-section", "About") {
-                    Text(stringResource(R.string.peppy_encrypted))
-                    StatusRow("settings-server", "Server", status?.origin ?: "Not enrolled")
-                    TextButton(
-                        onClick = {
-                            try {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/privacy")))
-                            } catch (_: ActivityNotFoundException) {
-                                Toast.makeText(context, "No app is available to open the Privacy Policy.", Toast.LENGTH_SHORT).show()
-                            }
+            },
+        ) { innerPadding ->
+            Column(Modifier.fillMaxSize().padding(innerPadding)) {
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()).then(
+                        if (status?.enrolled == true && status?.sharedKeysReady == true) Modifier else Modifier.padding(24.dp),
+                    )
+                        .semantics { testTagsAsResourceId = true }.testTag("companion-screen"),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+            if (status?.enrolled != true && !settingsOpen) {
+                when (welcomeDestination) {
+                    WelcomeDestination.HOSTED -> WelcomeScreen(
+                        onGetStarted = { welcomeDestination = WelcomeDestination.HOSTED_ENROLLMENT },
+                        onSelectSelfHosted = { welcomeDestination = WelcomeDestination.SELF_HOSTED },
+                    )
+                    WelcomeDestination.SELF_HOSTED -> SelfHostedSetupScreen(
+                        onBack = { welcomeDestination = WelcomeDestination.HOSTED },
+                        onEnroll = { welcomeDestination = WelcomeDestination.SELF_HOSTED_ENROLLMENT },
+                        onOpenGuide = {
+                            context.startActivity(
+                                android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    Uri.parse("https://github.com/mattv8/peppy#readme"),
+                                ),
+                            )
                         },
-                        modifier = Modifier.testTag("settings-privacy-policy"),
-                    ) { Text(stringResource(R.string.peppy_privacy_policy)) }
-                    Text(stringResource(R.string.peppy_privacy_policy_scope), style = MaterialTheme.typography.bodySmall)
+                    )
+                    else -> Unit
                 }
-                DiagnosticsSettings()
-                if (status?.sharedKeysReady == true) GatewayAccountSettings(onChanged = { refresh++ }, settingsMode = true)
             }
-        }
+
+            if (status?.enrolled == true && !status!!.sharedKeysReady && !settingsOpen) Section("lock-screen", stringResource(R.string.peppy_locked), showDivider = false) {
+                Text(
+                    "Enter the existing encryption passphrase you already use on your other devices. This phone does not create a new passphrase.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedTextField(
+                    value = passphrase,
+                    onValueChange = { passphrase = it },
+                    label = { Text(stringResource(R.string.peppy_passphrase_field)) },
+                    singleLine = true,
+                    enabled = !unlockBusy && status?.enrolled == true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth().testTag("passphrase-field"),
+                )
+                BusyButton(
+                    "unlock-button", "Unlock", unlockBusy,
+                    enabled = !unlockBusy && status?.enrolled == true && passphrase.isNotEmpty(),
+                ) {
+                    val attempt = passphrase
+                    passphrase = ""
+                    unlockBusy = true
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) { NativeGateway.unlock(context, attempt) }
+                        if (result == UnlockResult.UNLOCKED) { NotificationMirrorService.reconcile(); GatewayWork.enqueue(context) }
+                        unlockResult = result
+                        unlockBusy = false
+                        refresh++
+                    }
+                }
+                unlockResult?.let { Text(unlockMessage(it), Modifier.testTag("unlock-error"), style = MaterialTheme.typography.bodySmall) }
+                TextButton(onClick = { settingsOpen = true }, modifier = Modifier.testTag("locked-settings-button")) { Text(stringResource(R.string.peppy_settings)) }
+            }
+
+            if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "sms") SmsTab(
+                context = context,
+                refresh = refresh + permissionRefresh,
+                databaseOpen = status?.databaseOpen == true,
+                onChanged = { refresh++ },
+                gatewayStatus = status,
+                onDetailsChanged = { smsDetailsOpen = it },
+            )
+            if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ }, onOpenAppFilters = { appFiltersOpen = true })
+            if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "contacts") {
+                ContactSyncSettings(
+                    context = context,
+                    refresh = refresh,
+                    onChanged = { refresh++ },
+                )
+            }
+            if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ }, onOpenSettings = { settingsOpen = true }, onAddPhone = {
+                scope.launch { ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }; addPhoneOpen = ownerPhoneHost != null }
+            }, canAddPhone = ownerPhoneAvailable, onConnectComputer = {
+                scope.launch { ownerComputerHost = withContext(Dispatchers.IO) { createOwnerComputerApprovalHost(context) }; connectComputerOpen = ownerComputerHost != null }
+            }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it })
+            if (settingsOpen) {
+                ScreenBody("settings-screen") {
+                    Section("about-section", "About") {
+                        Text(stringResource(R.string.peppy_encrypted))
+                        StatusRow("settings-server", "Server", status?.origin ?: "Not enrolled")
+                        TextButton(
+                            onClick = {
+                                try {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/privacy")))
+                                } catch (_: ActivityNotFoundException) {
+                                    Toast.makeText(context, "No app is available to open the Privacy Policy.", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.testTag("settings-privacy-policy"),
+                        ) { Text(stringResource(R.string.peppy_privacy_policy)) }
+                        Text(stringResource(R.string.peppy_privacy_policy_scope), style = MaterialTheme.typography.bodySmall)
+                    }
+                    DiagnosticsSettings()
+                    if (status?.sharedKeysReady == true) GatewayAccountSettings(onChanged = { refresh++ }, settingsMode = true)
+                }
+            }
+                }
             }
         }
     }

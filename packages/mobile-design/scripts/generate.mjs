@@ -70,7 +70,8 @@ function color(value, background) {
 function selected(theme) {
   return Object.fromEntries(semanticTokens.map(key => {
     if (!theme[key]) throw new Error(`Missing --peppy-${key}`);
-    return [key, color(theme[key], theme["surface-panel"])];
+    const background = key === "error-surface" ? theme["surface-desk"] : theme["surface-panel"];
+    return [key, color(theme[key], background)];
   }));
 }
 function kotlin(theme) {
@@ -142,7 +143,7 @@ ${Object.entries(nativeCatalog).map(([key, value]) => `    <string name="peppy_$
 </resources>
 `; }
 function iosCopy() {
-  const strings = Object.fromEntries(Object.entries(nativeCatalog).map(([key, value]) => [`peppy.${key}`, { localizations: { en: { stringUnit: { state: "translated", value } } } }]));
+  const strings = Object.fromEntries(Object.entries(nativeCatalog).map(([key, value]) => [`peppy.${key}`, { localizations: { en: { stringUnit: { state: "translated", value: value.replace(/%(\d+)\$s/g, (_, index) => `%${index}$@`) } } } }]));
   return `${JSON.stringify({ sourceLanguage: "en", strings, version: "1.0" }, null, 2)}\n`;
 }
 function desktopCopy() {
@@ -153,6 +154,10 @@ ${entries}
 } as const;
 
 export type PeppyCopyKey = keyof typeof peppyCopy;
+
+export function formatCopy(template: string, ...args: string[]): string {
+  return template.replace(/%(\\d+)\\$s/g, (_, index: string) => args[Number(index) - 1] ?? "");
+}
 `;
 }
 function parseMark(mark) {

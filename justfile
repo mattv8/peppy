@@ -173,6 +173,7 @@ contracts-check:
     cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-account-access-contracts -- --check
     cargo run --locked -p peppy-hosted-api --bin export-web-schema -- --check
 
 desktop-build:

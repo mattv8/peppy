@@ -6,12 +6,17 @@ use axum::{
 };
 use base64::Engine as _;
 use http_body_util::BodyExt;
-use peppy_hosted_api::{ApnsEnvironment, PushConfigAdvertisement, PushProvider};
+use peppy_hosted_api::{
+    ApnsEnvironment, PushConfigAdvertisement, PushProvider,
+    account_access::{
+        AccountAccessLevel, AccountAccessReason, AccountAccessResponse, AccountAccessState,
+    },
+};
 use peppy_server::{
     ServerBuilder,
     api::{
-        AccessPolicy, AccessPrincipal, AttachmentStoragePolicy, Operation, PolicyFuture,
-        create_owner,
+        AccessPolicy, AccessPrincipal, AttachmentStoragePolicy, CommunityAccessPolicy,
+        DeviceAccountAccessError, Operation, PolicyFuture, create_owner,
     },
     config::Config,
 };
@@ -1753,4 +1758,189 @@ async fn full_quota_restart_preregisters_protection_before_reserve_and_finalize(
         peppy_server::storage::Storage::new(Config::from_env().unwrap().s3.as_ref().unwrap());
     storage.delete(&object_key).await.unwrap();
     server.shutdown().await;
+}
+
+const ACCOUNT_ACCESS_ROUTE: &str = "/v1/account/access";
+
+/// Denies every `authorize` call. The account-access route must not depend on it.
+struct AccountAccessPolicy;
+
+impl AccessPolicy for AccountAccessPolicy {
+    fn authorize(
+        &self,
+        _principal: AccessPrincipal,
+        _operation: Operation,
+    ) -> PolicyFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
+    fn device_account_access(
+        &self,
+        _principal: AccessPrincipal,
+    ) -> PolicyFuture<'_, Result<AccountAccessResponse, DeviceAccountAccessError>> {
+        Box::pin(async {
+            Ok(AccountAccessResponse {
+                access: AccountAccessLevel::ReadOnly,
+                state: AccountAccessState::ReadOnly,
+                reason: Some(AccountAccessReason::PastDue),
+                deadline: Some(1_700_000_000),
+                manage_url: Some("https://peppy.pro/account".into()),
+            })
+        })
+    }
+}
+
+struct FailingAccountAccessPolicy {
+    error: DeviceAccountAccessError,
+}
+
+impl AccessPolicy for FailingAccountAccessPolicy {
+    fn authorize(
+        &self,
+        _principal: AccessPrincipal,
+        _operation: Operation,
+    ) -> PolicyFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn device_account_access(
+        &self,
+        _principal: AccessPrincipal,
+    ) -> PolicyFuture<'_, Result<AccountAccessResponse, DeviceAccountAccessError>> {
+        let error = self.error;
+        Box::pin(async move { Err(error) })
+    }
+}
+
+#[tokio::test]
+async fn community_device_account_access_is_explicitly_unsupported() {
+    let server = TestServer::start_with_policy(Arc::new(CommunityAccessPolicy), 5).await;
+    let device = server.owner().await;
+
+    let (status, body) = server
+        .request(
+            "GET",
+            ACCOUNT_ACCESS_ROUTE,
+            &device.device_token,
+            json!(null),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(
+        body["code"],
+        peppy_hosted_api::account_access::error_codes::UNSUPPORTED
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn device_account_access_returns_the_policy_response_even_when_authorize_denies() {
+    let server = TestServer::start_with_policy(Arc::new(AccountAccessPolicy), 5).await;
+    let device = server.owner().await;
+
+    let (status, body) = server
+        .request(
+            "GET",
+            ACCOUNT_ACCESS_ROUTE,
+            &device.device_token,
+            json!(null),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({
+            "access": "read_only",
+            "state": "read_only",
+            "reason": "past_due",
+            "deadline": 1_700_000_000,
+            "manage_url": "https://peppy.pro/account"
+        })
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn device_account_access_rejects_an_invalid_bearer_before_the_policy() {
+    let server = TestServer::start_with_policy(Arc::new(AccountAccessPolicy), 5).await;
+
+    let (status, _) = server
+        .request(
+            "GET",
+            ACCOUNT_ACCESS_ROUTE,
+            "not-a-device-token",
+            json!(null),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn device_account_access_rejects_a_revoked_device_before_the_policy() {
+    let server = TestServer::start_with_policy(Arc::new(AccountAccessPolicy), 5).await;
+    let device = server.owner().await;
+    sqlx::query(
+        "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(device.vault_id)
+    .bind(device.device_id)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+
+    let (status, _) = server
+        .request(
+            "GET",
+            ACCOUNT_ACCESS_ROUTE,
+            &device.device_token,
+            json!(null),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn device_account_access_errors_map_to_canonical_status_and_codes() {
+    use peppy_hosted_api::account_access::error_codes;
+
+    for (error, status, code) in [
+        (
+            DeviceAccountAccessError::Unsupported,
+            StatusCode::NOT_IMPLEMENTED,
+            error_codes::UNSUPPORTED,
+        ),
+        (
+            DeviceAccountAccessError::Forbidden,
+            StatusCode::FORBIDDEN,
+            error_codes::FORBIDDEN,
+        ),
+        (
+            DeviceAccountAccessError::Unavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::UNAVAILABLE,
+        ),
+    ] {
+        let server =
+            TestServer::start_with_policy(Arc::new(FailingAccountAccessPolicy { error }), 5).await;
+        let device = server.owner().await;
+
+        let (actual_status, body) = server
+            .request(
+                "GET",
+                ACCOUNT_ACCESS_ROUTE,
+                &device.device_token,
+                json!(null),
+            )
+            .await;
+
+        assert_eq!(actual_status, status, "{error:?}");
+        assert_eq!(body["code"], code, "{error:?}");
+        server.shutdown().await;
+    }
 }

@@ -5,6 +5,7 @@ const COMMANDS: &[&str] = &[
     "peek_notification_activation",
     "ack_notification_activation",
     "load_state",
+    "account_access",
     "attachment_retention_status",
     "acknowledge_attachment_retention_notice",
     "attachment_retention_state",

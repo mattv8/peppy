@@ -106,7 +106,9 @@ import { AppLockScreen, AppLockSettings } from "./AppLock";
 import { UpdatesSettings } from "./UpdatesSettings";
 import { isTauriUpdateHost, useUpdateActivity } from "./updates";
 import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
-import { ServerOfflineAnnouncement, ServerOfflineBanner } from "./ServerOfflineBanner";
+import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./SystemRibbon";
+import { openAccountManageUrl, resolveSystemRibbon } from "./systemRibbonModel";
+import { useAccountNotice } from "./useAccountNotice";
 import { AppNoticeBanner, type AppNotice } from "./AppNoticeBanner";
 import { MarkAllReadAction } from "./MarkAllReadAction";
 import { peppyCopy } from "./generated/peppyCopy";
@@ -399,9 +401,13 @@ function simLabels(gateways: GatewayView[]): Map<string, string> {
   });
   return labels;
 }
-function availabilityLabel(gateway: GatewayView): string {
+/** While the account is read-only, a stale SIM route reads as paused, with the age kept as secondary text. */
+function availabilityLabel(gateway: GatewayView, accountReadOnly = false): string {
   switch (gatewayAvailability(gateway)) {
-    case "delayed": return gateway.lastSeenAgeSeconds !== undefined ? `Last seen ${formatAge(gateway.lastSeenAgeSeconds)} ago` : "Last seen";
+    case "delayed": {
+      const seen = gateway.lastSeenAgeSeconds !== undefined ? `Last seen ${formatAge(gateway.lastSeenAgeSeconds)} ago` : "Last seen";
+      return accountReadOnly ? `${peppyCopy.account_send_paused_status} · ${seen}` : seen;
+    }
     case "offline": return "Not responding";
     case "never_connected": return "Never connected";
     case "no_sms_sim": return "No SMS SIM";
@@ -497,11 +503,13 @@ function GatewaySelector({
   content,
   problem,
   onSelect,
+  accountReadOnly = false,
 }: {
   gateways: GatewayView[];
   content: DraftContent;
   problem?: string;
   onSelect(gateway: GatewayView): void;
+  accountReadOnly?: boolean;
 }) {
   const route = resolveRoute(content, gateways);
   const labels = simLabels(gateways);
@@ -539,7 +547,7 @@ function GatewaySelector({
             value: routeKey(item.id, item.simId),
             name: item.name,
             simLabel: simLabel(item),
-            statusLabel: availabilityLabel(item),
+            statusLabel: availabilityLabel(item, accountReadOnly),
             simulated: item.simulated,
             availability: gatewayAvailability(item),
             disabled: gatewayAvailability(item) === "unsupported_platform",
@@ -558,7 +566,9 @@ function GatewaySelector({
   );
 }
 
-function headRoutePresentation(route: RouteChoice, gateways: GatewayView[]): { sim?: string; state: string; label: string } {
+const seenText = (gateway: GatewayView) => gateway.lastSeenAgeSeconds === undefined ? "Last seen" : `Seen ${formatAge(gateway.lastSeenAgeSeconds)} ago`;
+
+function headRoutePresentation(route: RouteChoice, gateways: GatewayView[], accountReadOnly = false): { sim?: string; state: string; label: string } {
   if (route.kind === "none") {
     const state = gateways.length ? "No SIM chosen" : "No phone";
     return { state, label: state };
@@ -569,16 +579,16 @@ function headRoutePresentation(route: RouteChoice, gateways: GatewayView[]): { s
   let state: string;
   switch (gatewayAvailability(route.gateway)) {
     case "connected": state = "Online"; break;
-    case "delayed": state = route.gateway.lastSeenAgeSeconds === undefined ? "Last seen" : `Seen ${formatAge(route.gateway.lastSeenAgeSeconds)} ago`; break;
+    case "delayed": state = accountReadOnly ? `${peppyCopy.account_send_paused_status} · ${seenText(route.gateway)}` : seenText(route.gateway); break;
     case "offline": state = "Not responding"; break;
-    default: state = availabilityLabel(route.gateway);
+    default: state = availabilityLabel(route.gateway, accountReadOnly);
   }
   return { sim: simLabel, state, label: `${simLabel} · ${state}` };
 }
 
-function HeadRoutePill({ content, gateways }: { content: DraftContent; gateways: GatewayView[] }) {
+function HeadRoutePill({ content, gateways, accountReadOnly = false }: { content: DraftContent; gateways: GatewayView[]; accountReadOnly?: boolean }) {
   const route = resolveRoute(content, gateways);
-  const { sim, state, label } = headRoutePresentation(route, gateways);
+  const { sim, state, label } = headRoutePresentation(route, gateways, accountReadOnly);
   const tooltip = route.kind === "route"
     ? `${route.gateway.name}: choose this phone and SIM in the main window.`
     : "Choose a phone and SIM in the main window.";
@@ -1050,6 +1060,7 @@ function SettingsView({
   sessionScopeId,
   canRevealVaultSecret = false,
   serverOffline = false,
+  accountReadOnly = false,
   requestedSection,
   onRequestedSectionConsumed,
 }: {
@@ -1090,6 +1101,7 @@ function SettingsView({
   sessionScopeId?: string;
   canRevealVaultSecret?: boolean;
   serverOffline?: boolean;
+  accountReadOnly?: boolean;
   requestedSection?: string;
   onRequestedSectionConsumed?(): void;
 }) {
@@ -1268,7 +1280,7 @@ function SettingsView({
           </button>
         )}
       </section>
-      <DevicesSettings serverOffline={serverOffline} />
+      <DevicesSettings serverOffline={serverOffline} accountReadOnly={accountReadOnly} />
       <NotificationSettings
         notifications={notifications}
         filters={filters}
@@ -3738,6 +3750,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     };
   }, [resolution]);
 
+  const accountIdentityKey = snapshot ? `${snapshot.connection.origin ?? ""}|${snapshot.sessionScopeId ?? ""}` : null;
+  const accountNotice = useAccountNotice(accountIdentityKey);
+  const [ribbonOpenFailed, setRibbonOpenFailed] = useState(false);
+
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   const lockCode = snapshot?.connection.errorCode;
   if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable"))
@@ -3765,6 +3781,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const hideThreadList = settingsOpen || notificationsOpen || contactsOpen || (narrowConversationListMode ? !showingMobileConversationList : listCollapsed);
   const enrolled = Boolean(snapshot && (nativeCredentialed || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state !== "preview")));
   const serverOffline = Boolean(snapshot && enrolled && isServerUnreachable(snapshot.connection));
+  const accountNoticeShown = enrolled ? accountNotice.notice : null;
+  const systemRibbon = resolveSystemRibbon(serverOffline, accountNoticeShown, Date.now());
+  const accountReadOnly = accountNoticeShown?.severity === "error";
+  const openRibbonAction = () => {
+    void openAccountManageUrl(systemRibbon?.actionUrl ?? null, browserHost, bridge.open_external_url).then(opened => setRibbonOpenFailed(!opened));
+  };
   const attachments: Attachment[] = content.attachmentIds.map(
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
@@ -4041,9 +4063,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         maxAutoGrowHeight={maxAutoGrowHeight}
         platform={platform}
         gatewaySlot={snapshot ? (headPanel ? (
-          <HeadRoutePill content={content} gateways={gateways} />
+          <HeadRoutePill content={content} gateways={gateways} accountReadOnly={accountReadOnly} />
         ) : (
           <GatewaySelector
+          accountReadOnly={accountReadOnly}
             gateways={gateways}
             content={content}
             problem={unavailableReason}
@@ -4274,6 +4297,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}><Minus size={14} strokeWidth={1.75} aria-hidden /></button>
             <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} strokeWidth={1.75} aria-hidden /></button>
           </header>}
+          {systemRibbon && (headPanel
+            ? <SystemRibbonStrip model={systemRibbon} />
+            : <SystemRibbon model={systemRibbon} openFailed={ribbonOpenFailed} onAction={openRibbonAction} onDismiss={accountNotice.dismiss} />)}
+          {!headPanel && <SystemRibbonAnnouncement model={systemRibbon} />}
           {appNoticeBanner}
           <div
             id="conversation-stage"
@@ -4332,6 +4359,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           </StatusPopover>
         ) : undefined}
       />
+      {systemRibbon && <SystemRibbon model={systemRibbon} openFailed={ribbonOpenFailed} onAction={openRibbonAction} onDismiss={accountNotice.dismiss} />}
+      <SystemRibbonAnnouncement model={systemRibbon} />
       {appNoticeBanner}
       {syncProgressBanner}
       <div ref={desktopBodyRef} id="desktop-body" className="desktop-layout">
@@ -4530,8 +4559,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             </button>}
           </header>
           {notificationsOpen && notificationActionNotice && <p id="notifications-action-notice" role="status">{notificationActionNotice}</p>}
-          <ServerOfflineAnnouncement offline={serverOffline} />
-          {serverOffline && <ServerOfflineBanner />}
           {settingsOpen ? (
             <SettingsView
               mode={mode}
@@ -4574,6 +4601,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               accountUrl={accountUrl}
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
                serverOffline={serverOffline}
+               accountReadOnly={accountReadOnly}
                requestedSection={notificationSettingsRequested ? "notifications" : undefined}
                onRequestedSectionConsumed={() => setNotificationSettingsRequested(false)}
              />

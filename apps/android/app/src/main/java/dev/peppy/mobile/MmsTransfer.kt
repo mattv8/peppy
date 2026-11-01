@@ -14,6 +14,9 @@ import java.util.UUID
 data class MmsTransferFailure(val attachmentId: String, val operation: String, val reason: String)
 data class MmsTransferResult(val more: Boolean, val uploaded: Int, val downloaded: Int, val failures: List<MmsTransferFailure>)
 
+/** A coded account policy denial: the upload pauses for this pass and is never recorded as a media failure. */
+internal const val MMS_ACCOUNT_PAUSED_REASON = "account_paused"
+
 /** Bounded cipher-file transfer. Core retains all encryption and verification authority. */
 /**
  * [referenceTracked] marks uploads (contact photos) whose server reservation must opt into
@@ -35,6 +38,7 @@ class MmsMediaTransfer(
         val uploads = pendingUploads(); val downloads = pendingDownloads()
         val upBudget = if (uploadsAllowed) (budget + 1) / 2 else 0
         var quotaExceeded = !uploadsAllowed
+        var accountPaused = false
         for (objectToUpload in uploads.take(upBudget)) {
             attempted++
             if (upload(objectToUpload, failures)) uploaded++
@@ -42,17 +46,25 @@ class MmsMediaTransfer(
                 quotaExceeded = true
                 break
             }
+            if (failures.lastOrNull()?.reason == MMS_ACCOUNT_PAUSED_REASON) {
+                accountPaused = true
+                break
+            }
         }
         for (objectToDownload in downloads.take(budget - attempted)) {
             attempted++
             if (download(objectToDownload, failures)) downloaded++
         }
-        if (!quotaExceeded && attempted < budget) for (objectToUpload in uploads.drop(upBudget).take(budget - attempted)) {
+        if (!quotaExceeded && !accountPaused && attempted < budget) for (objectToUpload in uploads.drop(upBudget).take(budget - attempted)) {
             attempted++
             if (upload(objectToUpload, failures)) uploaded++
-            if (failures.lastOrNull()?.reason == "quota") break
+            if (failures.lastOrNull()?.reason == "quota" || failures.lastOrNull()?.reason == MMS_ACCOUNT_PAUSED_REASON) {
+                if (failures.last().reason == MMS_ACCOUNT_PAUSED_REASON) accountPaused = true
+                break
+            }
         }
-        val more = if (quotaExceeded) downloads.size > downloaded else uploads.size + downloads.size > attempted && failures.size < attempted
+        val uploadsHalted = quotaExceeded || accountPaused
+        val more = if (uploadsHalted) downloads.size > downloaded else uploads.size + downloads.size > attempted && failures.size < attempted
         return MmsTransferResult(more, uploaded, downloaded, failures)
     }
 
@@ -136,6 +148,7 @@ class MmsMediaTransfer(
         }
     }
     private fun reason(result: HttpResult): String = when {
+        result.isAccountPolicyDenial() -> MMS_ACCOUNT_PAUSED_REASON
         result.code == 401 || result.code == 403 -> "auth"
         result.errorCode == "vault_quota_exceeded" -> "quota"
         result.code == 408 || result.code == 429 || result.code >= 500 || result.errorCode in setOf("attachment_upload_in_progress", "attachment_unavailable") -> "transient"

@@ -78,6 +78,14 @@ test("native warning tokens composite translucent CSS values over the panel surf
   }
 });
 
+test("native error surface tokens composite translucent CSS values over the desk surface", () => {
+  const android = readFileSync(path("apps/android/app/src/main/java/dev/peppy/mobile/ui/theme/PeppyTokens.kt"), "utf8");
+  const swift = readFileSync(path("apps/ios/PeppyMobile/Design/PeppyTokens.swift"), "utf8");
+
+  assert.match(android, /val errorSurface: Color,[\s\S]*val Dark = PeppyColorScheme\([\s\S]*errorSurface = Color\(0xFF3E312F\),[\s\S]*val Light = PeppyColorScheme\([\s\S]*errorSurface = Color\(0xFFEFDFDC\)/);
+  assert.match(swift, /let ErrorSurface: Color[\s\S]*static let dark = PeppyColorScheme\([\s\S]*ErrorSurface: Color\(argb: 0xFF3E312F\),[\s\S]*static let light = PeppyColorScheme\([\s\S]*ErrorSurface: Color\(argb: 0xFFEFDFDC\)/);
+});
+
 test("android resources preserve canonical mark geometry within the safe zone", () => {
   const mark = readFileSync(path("apps/desktop/public/peppy-logo.svg"), "utf8");
   const sourcePath = mark.match(/<path[^>]*\bd="([^"]+)"/)?.[1].replace(/\s+/g, " ").trim();
@@ -135,6 +143,38 @@ test("server offline copy is generated for desktop and native clients", () => {
     assert.equal(ios.strings[`peppy.${key}`].localizations.en.stringUnit.value, value);
     assert.ok(desktop.includes(`${key}: ${JSON.stringify(value)},`));
   }
+});
+
+test("account access copy and placeholders are generated for every client", () => {
+  const keys = [
+    "system_banner_dismiss", "system_banner_opens_in_browser", "system_banner_more", "system_banner_less",
+    "account_payment_failed_grace_title", "account_payment_failed_grace_body", "account_payment_failed_grace_body_gateway", "account_payment_failed_grace_body_nodate", "account_payment_failed_grace_body_gateway_nodate", "account_payment_failed_grace_action",
+    "account_ending_scheduled_title", "account_ending_scheduled_body", "account_ending_scheduled_body_gateway", "account_ending_scheduled_action",
+    ...["past_due", "canceled", "incomplete", "no_subscription", "tester_ineligible", "account_deleting", "other"].flatMap(kind => [
+      `account_read_only_${kind}_title`, `account_read_only_${kind}_body`, `account_read_only_${kind}_body_gateway`, `account_read_only_${kind}_action`,
+    ]),
+    "account_notif_channel_name", "account_notif_title", "account_notif_body", "account_send_paused_status",
+    "devices_read_only_caption", "devices_sending_paused_badge",
+  ];
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const ios = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
+  const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
+
+  for (const key of keys) {
+    assert.ok(key in catalog, `catalog is missing ${key}`);
+    assert.ok(key in nativeCatalog, `native catalog is missing ${key}`);
+    assert.match(android, new RegExp(`<string name="peppy_${key}">`));
+    assert.ok(ios.strings[`peppy.${key}`], `iOS copy is missing ${key}`);
+    assert.ok(desktop.includes(`${key}: ${JSON.stringify(catalog[key])},`), `desktop copy is missing ${key}`);
+  }
+
+  assert.equal(catalog.account_payment_failed_grace_body.includes("%1$s"), true);
+  assert.match(android, /<string name="peppy_account_payment_failed_grace_body">[^<]*%1\$s[^<]*<\/string>/);
+  assert.match(desktop, /account_payment_failed_grace_body: "[^"]*%1\$s[^"]*",/);
+  assert.equal(ios.strings["peppy.account_payment_failed_grace_body"].localizations.en.stringUnit.value.includes("%1$@"), true);
+  assert.match(desktop, /export function formatCopy\(template: string, \.\.\.args: string\[\]\): string/);
+  assert.match(desktop, /template\.replace\(\/%\(\\d\+\)\\\$s\/g, \(_, index: string\) => args\[Number\(index\) - 1\] \?\? ""\)/);
+  assert.equal(ios.strings["peppy.toggle_android_account_role"].localizations.en.stringUnit.value, "Role: %1$@");
 });
 
 test("wake status copy maps to both native catalog formats", () => {

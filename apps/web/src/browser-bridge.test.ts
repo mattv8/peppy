@@ -67,6 +67,17 @@ describe("BrowserBridge", () => {
     bridge.dispose();
   });
 
+  it("forwards the account-access notice request without arguments", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const access = bridge.account_access();
+
+    expect(port.sent).toEqual([{ id: 1, command: "account_access", args: {} }]);
+    port.reply({ id: 1, ok: true, value: { kind: "none" } });
+    await expect(access).resolves.toEqual({ kind: "none" });
+    bridge.dispose();
+  });
+
   it("forwards tone reset with a JSON null palette index", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);
