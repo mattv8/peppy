@@ -40,7 +40,7 @@ peppy_android_paths() {
 }
 
 peppy_last_stable_tag() {
-    local component prefix regex tag last_stable bootstrap_tag
+    local component prefix regex tag last_stable='' bootstrap_tag=''
     component=$1
     prefix=$(peppy_tag_prefix "$component") || return
     regex=$(peppy_stable_tag_regex "$prefix") || return
