@@ -22,6 +22,7 @@ import type {
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
 import { SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION } from "@peppy/generated/attachment-retention";
+import type { AccountAccessResult } from "@peppy/generated/account-access";
 export type {
   HistorySearchAttemptInput,
   HistorySearchReason,
@@ -45,6 +46,7 @@ export type {
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
 export { SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION } from "@peppy/generated/attachment-retention";
+export type { AccountAccessResult, AccountNoticeDto, AccountNoticeKindDto, AccountNoticeSeverityDto } from "@peppy/generated/account-access";
 
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
@@ -152,6 +154,16 @@ export type MaximizeButtonRegion = { x: number; y: number; width: number; height
 export const attachmentRetentionNoticeCopySupported = (policyVersion: string | null | undefined): boolean =>
   policyVersion === SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION;
 
+/** A host without `account_access` reports `unsupported`; a thrown host error never shows a notice. */
+export const readAccountAccess = async (bridge: { account_access?(): Promise<AccountAccessResult> }): Promise<AccountAccessResult> => {
+  if (!bridge.account_access) return { kind: "unsupported" };
+  try {
+    return await bridge.account_access();
+  } catch {
+    return { kind: "temporarily_unavailable" };
+  }
+};
+
 export interface DesktopBridge {
   load_state(conversationId?: string, historyFromMessageId?: string, options?: { metadataOnly?: boolean }): Promise<DesktopSnapshot>;
   search_local(input: LocalSearchRequest): Promise<LocalSearchPage>;
@@ -252,6 +264,8 @@ export interface DesktopBridge {
   acknowledge_attachment_retention_notice?(input: AttachmentRetentionNoticeAcknowledgementInput): Promise<AttachmentRetentionNoticeAcknowledgementResult>;
   /** Optional host read of one attachment's core-owned remote/local availability. */
   attachment_retention_state?(attachmentId: string): Promise<AttachmentRetentionStateDto>;
+  /** Optional account-access notice. A missing method is treated as `unsupported`. */
+  account_access?(): Promise<AccountAccessResult>;
   enrollment_discover(origin?: string): Promise<EnrollmentView>;
   enrollment_start_over(): Promise<EnrollmentView>;
   enrollment_create_owner(input?: { username?: string }): Promise<EnrollmentView>;

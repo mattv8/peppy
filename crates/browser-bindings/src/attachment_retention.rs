@@ -7,9 +7,9 @@ use peppy_desktop_api::{
     AttachmentRetentionProtocolStatusDto, AttachmentRetentionReadyDto,
     AttachmentRetentionReleaseInput, AttachmentRetentionResponseBodyInput, AttachmentUseKindDto,
     AttachmentUseOperationKindDto, PendingAttachmentUseOperationDto,
-    attachment_retention_request_dto, attachment_retention_state_dto,
-    attachment_storage_status_dto, attachment_upload_retention_dto, attachment_use_response,
-    attachment_use_response_dto,
+    account_access::account_access_result_from_response, attachment_retention_request_dto,
+    attachment_retention_state_dto, attachment_storage_status_dto, attachment_upload_retention_dto,
+    attachment_use_response, attachment_use_response_dto,
     client_supported_attachment_retention_notice_acknowledgement_request_dto,
     pending_attachment_use_operation_dto,
 };
@@ -43,7 +43,20 @@ pub(super) fn handles(command: &str) -> bool {
             | "_worker_attachment_retention_ready"
             | "_worker_attachment_retention_mark_reconciled"
             | "_worker_attachment_retention_invalidate_reconciliation"
+            | "_worker_account_access_request"
+            | "_worker_account_access_parse"
     )
+}
+
+/// Browser transport hands the core the HTTP status and body it received, plus the
+/// clock and trusted origins. The core owns classification and the notice decision.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountAccessParseInput {
+    status: u16,
+    body: String,
+    now_unix_seconds: i64,
+    trusted_origins: Vec<String>,
 }
 
 impl BrowserCore {
@@ -94,6 +107,22 @@ impl BrowserCore {
             "_worker_attachment_retention_status_request" => {
                 require_empty(args)?;
                 request_json(codec::build_device_attachment_storage_status_request())
+            }
+            "_worker_account_access_request" => {
+                require_empty(args)?;
+                request_json(
+                    peppy_hosted_client::account_access::build_device_account_access_request(),
+                )
+            }
+            "_worker_account_access_parse" => {
+                let input: AccountAccessParseInput =
+                    serde_json::from_value(args).map_err(|_| invalid())?;
+                serialize(account_access_result_from_response(
+                    input.status,
+                    &input.body,
+                    input.now_unix_seconds,
+                    &input.trusted_origins,
+                ))
             }
             "_worker_attachment_retention_parse_status" => {
                 let input: AttachmentRetentionResponseBodyInput =
@@ -677,6 +706,56 @@ mod tests {
             json!({"cleanupReady": false, "extra": true}),
         );
         assert_eq!(extra["error"]["code"], "invalid-request");
+    }
+
+    #[test]
+    fn account_access_parse_maps_transport_status_without_trusting_renderer_urls() {
+        let root = tempfile::tempdir().unwrap();
+        let mut browser = BrowserCore::new(root.path().to_owned());
+        let origins = json!(["https://peppy.pro"]);
+        let body = r#"{"access":"read_only","state":"read_only","reason":"past_due","deadline":null,"manage_url":"https://evil.example/account"}"#;
+
+        let notice = dispatch(
+            &mut browser,
+            "_worker_account_access_parse",
+            json!({"status": 200, "body": body, "nowUnixSeconds": 1000, "trustedOrigins": origins}),
+        );
+        assert_eq!(notice["value"]["kind"], "notice");
+        assert_eq!(notice["value"]["notice"]["kind"], "read_only_past_due");
+        assert!(notice["value"]["notice"]["manageUrl"].is_null());
+
+        for status in [404, 501] {
+            let legacy = dispatch(
+                &mut browser,
+                "_worker_account_access_parse",
+                json!({"status": status, "body": "", "nowUnixSeconds": 1000, "trustedOrigins": origins}),
+            );
+            assert_eq!(legacy["value"]["kind"], "unsupported");
+        }
+        let outage = dispatch(
+            &mut browser,
+            "_worker_account_access_parse",
+            json!({"status": 503, "body": "", "nowUnixSeconds": 1000, "trustedOrigins": origins}),
+        );
+        assert_eq!(outage["value"]["kind"], "temporarily_unavailable");
+
+        let extra = dispatch(
+            &mut browser,
+            "_worker_account_access_parse",
+            json!({"status": 200, "body": body, "nowUnixSeconds": 1000, "trustedOrigins": origins, "extra": true}),
+        );
+        assert_eq!(extra["error"]["code"], "invalid-request");
+    }
+
+    #[test]
+    fn account_access_request_uses_the_canonical_device_route() {
+        let root = tempfile::tempdir().unwrap();
+        let mut browser = BrowserCore::new(root.path().to_owned());
+        let request = dispatch(&mut browser, "_worker_account_access_request", json!({}));
+        assert_eq!(request["value"]["method"], "GET");
+        assert_eq!(request["value"]["relativePath"], "/v1/account/access");
+        assert!(request["value"]["jsonBody"].is_null());
+        assert_eq!(request["value"]["expectedSuccessStatus"], 200);
     }
 
     #[test]

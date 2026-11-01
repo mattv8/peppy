@@ -23,6 +23,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
+mod account_access;
 mod attachment_retention;
 mod hosted;
 pub mod newenrollment;

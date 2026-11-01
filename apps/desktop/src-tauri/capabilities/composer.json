@@ -10,6 +10,7 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "allow-load-state",
+    "allow-account-access",
     "allow-load-history",
     "allow-open-external-url",
     "allow-save-draft",
