@@ -27,7 +27,7 @@ expect_failure() {
   fi
 }
 
-scope_cases=(force_full production_push docs_only rust desktop android ios mobile_design server build ci unclassified)
+scope_cases=(force_full production_push docs_only rust_shared rust_mobile rust_desktop rust_browser rust_server android_bindings desktop web android ios mobile_design server build ci unclassified)
 for case_name in "${scope_cases[@]}"; do
   output="$temp_dir/$case_name"
   : > "$output"
@@ -35,11 +35,17 @@ for case_name in "${scope_cases[@]}"; do
     force_full) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true "$SCOPE" ;;
     production_push) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true PRODUCTION_PUSH=true "$SCOPE" ;;
     docs_only) env GITHUB_OUTPUT="$output" "$SCOPE" ;;
-    rust) env GITHUB_OUTPUT="$output" FILTER_RUST=true "$SCOPE" ;;
+    rust_shared) env GITHUB_OUTPUT="$output" FILTER_RUST_SHARED=true "$SCOPE" ;;
+    rust_mobile) env GITHUB_OUTPUT="$output" FILTER_RUST_MOBILE=true "$SCOPE" ;;
+    rust_desktop) env GITHUB_OUTPUT="$output" FILTER_RUST_DESKTOP=true "$SCOPE" ;;
+    rust_browser) env GITHUB_OUTPUT="$output" FILTER_RUST_BROWSER=true "$SCOPE" ;;
+    rust_server) env GITHUB_OUTPUT="$output" FILTER_RUST_SERVER=true "$SCOPE" ;;
+    android_bindings) env GITHUB_OUTPUT="$output" FILTER_ANDROID_BINDINGS=true "$SCOPE" ;;
     desktop) env GITHUB_OUTPUT="$output" FILTER_DESKTOP=true "$SCOPE" ;;
+    web) env GITHUB_OUTPUT="$output" FILTER_WEB=true "$SCOPE" ;;
     android) env GITHUB_OUTPUT="$output" FILTER_ANDROID=true "$SCOPE" ;;
     ios) env GITHUB_OUTPUT="$output" FILTER_IOS=true "$SCOPE" ;;
-    mobile_design) env GITHUB_OUTPUT="$output" FILTER_DESKTOP=true FILTER_ANDROID=true FILTER_IOS=true "$SCOPE" ;;
+    mobile_design) env GITHUB_OUTPUT="$output" FILTER_ANDROID=true FILTER_IOS=true "$SCOPE" ;;
     server) env GITHUB_OUTPUT="$output" FILTER_SERVER=true "$SCOPE" ;;
     build) env GITHUB_OUTPUT="$output" FILTER_BUILD=true "$SCOPE" ;;
     ci) env GITHUB_OUTPUT="$output" FILTER_CI=true "$SCOPE" ;;
@@ -49,6 +55,9 @@ done
 
 expect_output "$temp_dir/production_push" 'rust=true'
 expect_output "$temp_dir/production_push" 'container_image=true'
+expect_output "$temp_dir/production_push" 'artifacts_android=false'
+expect_output "$temp_dir/production_push" 'artifacts_desktop=false'
+expect_output "$temp_dir/production_push" 'artifacts_ios=false'
 expect_output "$temp_dir/production_push" 'development_artifacts=false'
 
 for case_name in "${scope_cases[@]}"; do
@@ -61,41 +70,95 @@ for case_name in "${scope_cases[@]}"; do
   fi
 done
 
-for name in rust integration desktop android swift_bindings container_image development_artifacts; do
+for name in rust integration desktop android swift_bindings container_image artifacts_android artifacts_desktop artifacts_ios development_artifacts; do
   expect_output "$temp_dir/force_full" "$name=true"
   expect_output "$temp_dir/docs_only" "$name=false"
-  expect_output "$temp_dir/rust" "$name=true"
   expect_output "$temp_dir/ci" "$name=true"
   expect_output "$temp_dir/unclassified" "$name=true"
 done
 
+for case_name in force_full desktop rust_shared rust_desktop; do
+  expect_output "$temp_dir/$case_name" 'desktop_matrix=["ubuntu-24.04","macos-15","windows-2025"]'
+done
+for case_name in server web rust_browser rust_server; do
+  expect_output "$temp_dir/$case_name" 'desktop_matrix=["ubuntu-24.04"]'
+done
+
+for name in rust integration desktop android swift_bindings container_image artifacts_android artifacts_desktop artifacts_ios development_artifacts; do
+  expect_output "$temp_dir/rust_shared" "$name=true"
+done
+
+expect_output "$temp_dir/rust_mobile" 'rust=true'
+expect_output "$temp_dir/rust_mobile" 'integration=true'
+expect_output "$temp_dir/rust_mobile" 'desktop=true'
+expect_output "$temp_dir/rust_mobile" 'android=true'
+expect_output "$temp_dir/rust_mobile" 'swift_bindings=true'
+expect_output "$temp_dir/rust_mobile" 'artifacts_android=true'
+expect_output "$temp_dir/rust_mobile" 'artifacts_desktop=false'
+expect_output "$temp_dir/rust_mobile" 'artifacts_ios=true'
+expect_output "$temp_dir/rust_desktop" 'rust=true'
+expect_output "$temp_dir/rust_desktop" 'container_image=true'
+expect_output "$temp_dir/rust_desktop" 'artifacts_desktop=true'
+expect_output "$temp_dir/rust_desktop" 'artifacts_android=false'
+expect_output "$temp_dir/rust_browser" 'rust=true'
+expect_output "$temp_dir/rust_browser" 'container_image=true'
+expect_output "$temp_dir/rust_browser" 'development_artifacts=false'
+expect_output "$temp_dir/rust_server" 'rust=true'
+expect_output "$temp_dir/rust_server" 'container_image=true'
+expect_output "$temp_dir/rust_server" 'development_artifacts=false'
+expect_output "$temp_dir/android_bindings" 'rust=false'
+expect_output "$temp_dir/android_bindings" 'swift_bindings=true'
+expect_output "$temp_dir/android_bindings" 'development_artifacts=false'
 expect_output "$temp_dir/desktop" 'rust=false'
 expect_output "$temp_dir/desktop" 'integration=true'
 expect_output "$temp_dir/desktop" 'desktop=true'
 expect_output "$temp_dir/desktop" 'android=false'
 expect_output "$temp_dir/desktop" 'swift_bindings=false'
 expect_output "$temp_dir/desktop" 'container_image=false'
+expect_output "$temp_dir/desktop" 'artifacts_android=false'
+expect_output "$temp_dir/desktop" 'artifacts_desktop=true'
+expect_output "$temp_dir/desktop" 'artifacts_ios=false'
 expect_output "$temp_dir/desktop" 'development_artifacts=true'
+expect_output "$temp_dir/web" 'rust=false'
+expect_output "$temp_dir/web" 'integration=false'
+expect_output "$temp_dir/web" 'desktop=true'
+expect_output "$temp_dir/web" 'container_image=true'
+expect_output "$temp_dir/web" 'development_artifacts=false'
 expect_output "$temp_dir/ios" 'rust=false'
 expect_output "$temp_dir/ios" 'swift_bindings=true'
+expect_output "$temp_dir/ios" 'artifacts_android=false'
+expect_output "$temp_dir/ios" 'artifacts_desktop=false'
+expect_output "$temp_dir/ios" 'artifacts_ios=true'
 expect_output "$temp_dir/ios" 'development_artifacts=true'
 expect_output "$temp_dir/android" 'rust=false'
 expect_output "$temp_dir/android" 'android=true'
-expect_output "$temp_dir/android" 'swift_bindings=true'
+expect_output "$temp_dir/android" 'swift_bindings=false'
+expect_output "$temp_dir/android" 'artifacts_android=true'
+expect_output "$temp_dir/android" 'artifacts_desktop=false'
+expect_output "$temp_dir/android" 'artifacts_ios=false'
 expect_output "$temp_dir/android" 'development_artifacts=true'
-expect_output "$temp_dir/mobile_design" 'desktop=true'
+expect_output "$temp_dir/mobile_design" 'desktop=false'
 expect_output "$temp_dir/mobile_design" 'android=true'
 expect_output "$temp_dir/mobile_design" 'swift_bindings=true'
+expect_output "$temp_dir/mobile_design" 'artifacts_android=true'
+expect_output "$temp_dir/mobile_design" 'artifacts_desktop=false'
+expect_output "$temp_dir/mobile_design" 'artifacts_ios=true'
 expect_output "$temp_dir/mobile_design" 'development_artifacts=true'
 expect_output "$temp_dir/server" 'rust=false'
 expect_output "$temp_dir/server" 'integration=true'
 expect_output "$temp_dir/server" 'desktop=true'
 expect_output "$temp_dir/server" 'container_image=true'
+expect_output "$temp_dir/server" 'artifacts_android=false'
+expect_output "$temp_dir/server" 'artifacts_desktop=false'
+expect_output "$temp_dir/server" 'artifacts_ios=false'
 expect_output "$temp_dir/server" 'development_artifacts=false'
 expect_output "$temp_dir/build" 'rust=false'
 expect_output "$temp_dir/build" 'integration=false'
+expect_output "$temp_dir/build" 'artifacts_android=true'
+expect_output "$temp_dir/build" 'artifacts_desktop=true'
+expect_output "$temp_dir/build" 'artifacts_ios=true'
 expect_output "$temp_dir/build" 'development_artifacts=true'
-expect_failure env GITHUB_OUTPUT="$temp_dir/invalid" FILTER_RUST=invalid "$SCOPE"
+expect_failure env GITHUB_OUTPUT="$temp_dir/invalid" FILTER_RUST_SHARED=invalid "$SCOPE"
 
 gate_env=(
   CHANGES_RESULT=success CHANGES_REQUIRED=true

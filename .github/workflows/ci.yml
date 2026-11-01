@@ -24,9 +24,13 @@ jobs:
       rust: ${{ steps.scope.outputs.rust }}
       integration: ${{ steps.scope.outputs.integration }}
       desktop: ${{ steps.scope.outputs.desktop }}
+      desktop_matrix: ${{ steps.scope.outputs.desktop_matrix }}
       android: ${{ steps.scope.outputs.android }}
       swift_bindings: ${{ steps.scope.outputs.swift_bindings }}
       container_image: ${{ steps.scope.outputs.container_image }}
+      artifacts_android: ${{ steps.scope.outputs.artifacts_android }}
+      artifacts_desktop: ${{ steps.scope.outputs.artifacts_desktop }}
+      artifacts_ios: ${{ steps.scope.outputs.artifacts_ios }}
       development_artifacts: ${{ steps.scope.outputs.development_artifacts }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -43,7 +47,12 @@ jobs:
         env:
           FILTER_FORCE_FULL: ${{ github.event_name != 'pull_request' }}
           PRODUCTION_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/production' }}
-          FILTER_RUST: ${{ steps.filter.outputs.rust }}
+          FILTER_RUST_SHARED: ${{ steps.filter.outputs.rust_shared }}
+          FILTER_RUST_MOBILE: ${{ steps.filter.outputs.rust_mobile }}
+          FILTER_RUST_DESKTOP: ${{ steps.filter.outputs.rust_desktop }}
+          FILTER_RUST_BROWSER: ${{ steps.filter.outputs.rust_browser }}
+          FILTER_RUST_SERVER: ${{ steps.filter.outputs.rust_server }}
+          FILTER_ANDROID_BINDINGS: ${{ steps.filter.outputs.android_bindings }}
           FILTER_DESKTOP: ${{ steps.filter.outputs.desktop }}
           FILTER_WEB: ${{ steps.filter.outputs.web }}
           FILTER_ANDROID: ${{ steps.filter.outputs.android }}
@@ -212,7 +221,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        os: ${{ fromJSON(needs.changes.outputs.desktop_matrix) }}
     runs-on: ${{ matrix.os }}
     # Linux also runs ignored integration tests using the desktop build below.
     # All native platforms need cold-cache headroom for their Tauri dependencies.
@@ -433,6 +442,7 @@ jobs:
       - run: bash -n infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh && shellcheck infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh
       - run: shellcheck .github/scripts/*.sh
       - run: bash .github/scripts/test-ci-scripts.sh
+      - run: python3 .github/scripts/check-ci-scope-closure.py
       - run: just --list
 
   swift-bindings:
