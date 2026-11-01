@@ -22,6 +22,7 @@ struct PeppyColorScheme {
     let AccentText: Color
     let Success: Color
     let Error: Color
+    let ErrorSurface: Color
     let ErrorText: Color
     let WarningText: Color
     let WarningSurface: Color
@@ -54,6 +55,7 @@ enum PeppyTokens {
       AccentText: Color(argb: 0xFF1A1A1A),
       Success: Color(argb: 0xFF89D185),
       Error: Color(argb: 0xFFF48771),
+      ErrorSurface: Color(argb: 0xFF3E312F),
       ErrorText: Color(argb: 0xFFF48771),
       WarningText: Color(argb: 0xFFF2CC60),
       WarningSurface: Color(argb: 0xFF322E21),
@@ -84,6 +86,7 @@ enum PeppyTokens {
       AccentText: Color(argb: 0xFFFFFFFF),
       Success: Color(argb: 0xFF2E7D32),
       Error: Color(argb: 0xFFC72E0F),
+      ErrorSurface: Color(argb: 0xFFEFDFDC),
       ErrorText: Color(argb: 0xFFC72E0F),
       WarningText: Color(argb: 0xFF7A5200),
       WarningSurface: Color(argb: 0xFFEBE7DF),

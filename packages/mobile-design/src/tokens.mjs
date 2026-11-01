@@ -6,7 +6,7 @@ export const semanticTokens = Object.freeze([
   "surface-desk", "surface-chrome", "surface-panel", "surface-editor",
   "surface-widget", "surface-hover", "surface-active", "surface-input",
   "border", "border-strong", "text-primary", "text-strong", "text-secondary",
-  "text-muted", "brand", "accent", "accent-hover", "accent-text", "success", "error",
+  "text-muted", "brand", "accent", "accent-hover", "accent-text", "success", "error", "error-surface",
   "error-text", "warning-text", "warning-surface", "warning-border", "focus", "focus-ring", "primary", "primary-text"
 ]);
 
@@ -18,7 +18,7 @@ export const kotlinNames = Object.freeze({
   brand: "brand", border: "border", "border-strong": "borderStrong", "text-primary": "textPrimary",
   "text-strong": "textStrong", "text-secondary": "textSecondary", "text-muted": "textMuted",
   brand: "brand", accent: "accent", "accent-hover": "accentHover", "accent-text": "accentText",
-  success: "success", error: "error", "error-text": "errorText", "warning-text": "warningText",
+  success: "success", error: "error", "error-surface": "errorSurface", "error-text": "errorText", "warning-text": "warningText",
   "warning-surface": "warningSurface", "warning-border": "warningBorder",
   focus: "focus", "focus-ring": "focusRing", primary: "primary", "primary-text": "primaryText"
 });

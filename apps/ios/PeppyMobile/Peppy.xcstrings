@@ -186,7 +186,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Role: %1$s"
+            "value": "Role: %1$@"
           }
         }
       }
@@ -1346,7 +1346,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "More about %1$s"
+            "value": "More about %1$@"
           }
         }
       }
@@ -1717,6 +1717,486 @@
           "stringUnit": {
             "state": "translated",
             "value": "Peppy will reconnect automatically."
+          }
+        }
+      }
+    },
+    "peppy.system_banner_dismiss": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dismiss"
+          }
+        }
+      }
+    },
+    "peppy.system_banner_opens_in_browser": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens in your browser"
+          }
+        }
+      }
+    },
+    "peppy.system_banner_more": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More"
+          }
+        }
+      }
+    },
+    "peppy.system_banner_less": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Less"
+          }
+        }
+      }
+    },
+    "peppy.account_payment_failed_grace_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Payment failed"
+          }
+        }
+      }
+    },
+    "peppy.account_payment_failed_grace_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update your payment method by %1$@ to keep sending texts. Your messages are safe either way."
+          }
+        }
+      }
+    },
+    "peppy.account_payment_failed_grace_body_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update your payment method by %1$@ or this phone will stop sending texts from your computer. Your messages are safe either way."
+          }
+        }
+      }
+    },
+    "peppy.account_payment_failed_grace_body_nodate": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update your payment method soon to keep sending texts. Your messages are safe either way."
+          }
+        }
+      }
+    },
+    "peppy.account_payment_failed_grace_body_gateway_nodate": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update your payment method soon or this phone will stop sending texts from your computer. Your messages are safe either way."
+          }
+        }
+      }
+    },
+    "peppy.account_payment_failed_grace_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update payment"
+          }
+        }
+      }
+    },
+    "peppy.account_ending_scheduled_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your subscription ends %1$@"
+          }
+        }
+      }
+    },
+    "peppy.account_ending_scheduled_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "After that, Peppy becomes read-only: you can read and export your messages but not send new ones. Your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.account_ending_scheduled_body_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "After that, this phone will stop sending texts from your computer. Your messages stay available and your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.account_ending_scheduled_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Renew subscription"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_past_due_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sending paused: payment overdue"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_past_due_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update your payment method to resume sending. You can still read, sync and export your messages, and your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_past_due_body_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone can't send texts from your computer until payment is updated. Messages already in Peppy stay available, and your data is kept. New texts you receive are saved on this phone and upload when access returns."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_past_due_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update payment"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_canceled_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscription ended"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_canceled_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sending is paused. You can still read, sync and export your messages, and your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_canceled_body_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone can't send texts from your computer. Messages already in Peppy stay available, and your data is kept. New texts you receive are saved on this phone and upload when access returns."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_canceled_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Renew subscription"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_incomplete_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish setting up your subscription"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_incomplete_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your payment didn't go through, so sending is paused. You can still read, sync and export your messages, and your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_incomplete_body_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone can't send texts from your computer until setup is finished. Messages already in Peppy stay available, and your data is kept. New texts you receive are saved on this phone and upload when access returns."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_incomplete_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish setup"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_no_subscription_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No active subscription"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_no_subscription_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscribe to send texts. You can still read, sync and export your messages, and your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_no_subscription_body_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone can't send texts from your computer without an active subscription. Messages already in Peppy stay available, and your data is kept. New texts you receive are saved on this phone and upload when access returns."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_no_subscription_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a plan"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_tester_ineligible_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tester access has ended"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_tester_ineligible_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This account no longer qualifies for tester access, so sending is paused. You can still read, sync and export your messages, and your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_tester_ineligible_body_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone can't send texts from your computer because tester access has ended. Messages already in Peppy stay available, and your data is kept. New texts you receive are saved on this phone and upload when access returns."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_tester_ineligible_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View account"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_account_deleting_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account is being deleted"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_account_deleting_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sending is off while deletion finishes. Export anything you want to keep before it completes."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_account_deleting_body_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone isn't sending texts from your computer while the account is deleted. Export anything you want to keep before it completes."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_account_deleting_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View account"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_other_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sending paused"
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_other_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account is read-only. You can still read, sync and export your messages, and your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_other_body_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone can't send texts from your computer. Messages already in Peppy stay available, and your data is kept. New texts you receive are saved on this phone and upload when access returns."
+          }
+        }
+      }
+    },
+    "peppy.account_read_only_other_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage account"
+          }
+        }
+      }
+    },
+    "peppy.account_notif_channel_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account status"
+          }
+        }
+      }
+    },
+    "peppy.account_notif_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy has stopped sending texts"
+          }
+        }
+      }
+    },
+    "peppy.account_notif_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@. Tap to see options. Your messages are kept."
+          }
+        }
+      }
+    },
+    "peppy.account_send_paused_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused: plan is read-only"
+          }
+        }
+      }
+    },
+    "peppy.devices_read_only_caption": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account is read-only, so phones may not send texts or report activity. Last seen times can be out of date until your plan is active."
+          }
+        }
+      }
+    },
+    "peppy.devices_sending_paused_badge": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sending paused"
           }
         }
       }
