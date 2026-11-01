@@ -1,29 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# != 1)); then echo "usage: $0 <version>" >&2; exit 2; fi
+if (($# < 1)); then echo "usage: $0 <version> [--component desktop|android]" >&2; exit 2; fi
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-case $1 in *-*) kind=prerelease ;; *) kind='stable release' ;; esac
+version=$1
+shift
+component=desktop
+while (($# > 0)); do
+  case "$1" in
+    --component) shift; (($# > 0)) || { echo '--component requires a value' >&2; exit 2; }; component=$1 ;;
+    *) echo "usage: $0 <version> [--component desktop|android]" >&2; exit 2 ;;
+  esac
+  shift
+done
+case "$component" in desktop|android) ;; *) echo "invalid component: $component" >&2; exit 2 ;; esac
+case $version in *-*) kind=prerelease ;; *) kind='stable release' ;; esac
 if [ "${TRUSTED_UPDATE_BUILD:-false}" = true ]; then
-  macos_mode="${PEPPY_MACOS_SIGNING_MODE-developer-id}"
-  windows_mode="${PEPPY_WINDOWS_SIGNING_MODE-authenticode}"
-  case "$macos_mode" in developer-id|adhoc) ;; *) echo 'PEPPY_MACOS_SIGNING_MODE must be developer-id or adhoc' >&2; exit 1 ;; esac
-  case "$windows_mode" in authenticode|none) ;; *) echo 'PEPPY_WINDOWS_SIGNING_MODE must be authenticode or none' >&2; exit 1 ;; esac
-  printf 'This %s includes Tauri-signed updater artifacts, a GPG-signed SHA256SUMS, and GPG-signed RPM packages.\n' "$kind"
-  if [ "$macos_mode" = adhoc ]; then printf 'macOS is ad-hoc signed and not notarized; it is not a Developer ID or Gatekeeper-approved build and may require the System Settings bypass.\n'; fi
-  if [ "$windows_mode" = none ]; then printf 'Windows installers are not Authenticode publisher-signed and can show SmartScreen or UAC warnings on installation and updates.\n'; fi
-  printf 'Android APK and AAB artifacts are signed with the protected release certificate; the AAB is store tooling input, while the APK supports direct sideloading without Play enrollment. The iOS archive remains unsigned and is not an installable IPA.\n\n'
-  if [ "$macos_mode" = adhoc ]; then
-    printf '### macOS first launch\n\n'
-    printf 'Copy Peppy.app from the downloaded DMG to /Applications first, and use only a trusted official release after verifying its download checksum. This command removes the macOS quarantine flag from Peppy.app only; it does not sign or notarize the app and does not disable Gatekeeper globally.\n\n'
-    cat <<'EOF'
+  if [ "$component" = android ]; then
+    printf 'This %s includes a signed Android APK for direct sideloading, an AAB for store tooling input, and a GPG-signed SHA256SUMS.\n\n' "$kind"
+  else
+    macos_mode="${PEPPY_MACOS_SIGNING_MODE-developer-id}"
+    windows_mode="${PEPPY_WINDOWS_SIGNING_MODE-authenticode}"
+    case "$macos_mode" in developer-id|adhoc) ;; *) echo 'PEPPY_MACOS_SIGNING_MODE must be developer-id or adhoc' >&2; exit 1 ;; esac
+    case "$windows_mode" in authenticode|none) ;; *) echo 'PEPPY_WINDOWS_SIGNING_MODE must be authenticode or none' >&2; exit 1 ;; esac
+    printf 'This %s includes Tauri-signed updater artifacts, a GPG-signed SHA256SUMS, and GPG-signed RPM packages.\n' "$kind"
+    if [ "$macos_mode" = adhoc ]; then printf 'macOS is ad-hoc signed and not notarized; it is not a Developer ID or Gatekeeper-approved build and may require the System Settings bypass.\n'; fi
+    if [ "$windows_mode" = none ]; then printf 'Windows installers are not Authenticode publisher-signed and can show SmartScreen or UAC warnings on installation and updates.\n'; fi
+    printf 'Android releases are published separately under android-v* tags. The iOS archive remains unsigned and is not published.\n\n'
+    if [ "$macos_mode" = adhoc ]; then
+      printf '### macOS first launch\n\n'
+      printf 'Copy Peppy.app from the downloaded DMG to /Applications first, and use only a trusted official release after verifying its download checksum. This command removes the macOS quarantine flag from Peppy.app only; it does not sign or notarize the app and does not disable Gatekeeper globally.\n\n'
+      cat <<'EOF'
 ```sh
 xattr -dr com.apple.quarantine "/Applications/Peppy.app" && open "/Applications/Peppy.app"
 ```
 
 EOF
+    fi
   fi
 else
   printf 'This is an unsigned development-grade %s. It is not notarized, signed, or store-distributed.\n\n' "$kind"
 fi
-git cliff --config "$script_dir/cliff.toml" --unreleased --tag "v$1" --strip all
+
+if [ "$component" = desktop ]; then
+  git cliff --config "$script_dir/cliff.toml" --unreleased --tag "v$version" --strip all
+  exit
+fi
+
+# shellcheck source=infra/release/lib.sh
+# shellcheck disable=SC1091
+source "${PEPPY_RELEASE_LIB:-$script_dir/lib.sh}"
+include_paths=()
+while IFS= read -r path; do include_paths+=(--include-path "$path" --include-path "$path/**"); done < <(peppy_android_paths)
+base=$(peppy_last_stable_tag android)
+args=(--config "$script_dir/cliff.toml" --tag "android-v$version" --tag-pattern "$(peppy_stable_tag_regex android-v)" --strip all "${include_paths[@]}")
+if [ -n "$base" ]; then args+=("$base..HEAD"); fi
+git cliff "${args[@]}"
