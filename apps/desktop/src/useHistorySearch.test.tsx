@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesktopBridge, HistorySearchSnapshot } from "@peppy/desktop-ui/bridge-contracts";
 import { useHistorySearch } from "./useHistorySearch";
@@ -53,6 +53,7 @@ describe("useHistorySearch", () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -121,6 +122,20 @@ describe("useHistorySearch", () => {
     expect(fixture.bridge.get_history_search).toHaveBeenCalledTimes(4);
     expect(fixture.bridge.subscribe).toHaveBeenCalledTimes(1);
     unmount();
+  });
+
+  it("stops active polling when the hook is cleaned up", async () => {
+    vi.useFakeTimers();
+    const fixture = bridgeFixture(active());
+    renderHook(() => useHistorySearch({ sessionKey: "a", enabled: true, visible: true, bridge: fixture.bridge }));
+    await act(async () => { await Promise.resolve(); });
+
+    cleanup();
+    vi.mocked(fixture.bridge.get_history_search).mockReset();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_001); });
+
+    expect(fixture.bridge.get_history_search).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("ignores late reads and starts after a session switch", async () => {
@@ -373,13 +388,14 @@ describe("useHistorySearch", () => {
     vi.useFakeTimers();
     const fixture = bridgeFixture(active({ attemptId: "owned" }));
     vi.mocked(fixture.bridge.get_history_search).mockResolvedValueOnce(active({ attemptId: "owned" })).mockRejectedValueOnce(new Error("read lost")).mockResolvedValue(active({ attemptId: "owned", progressVersion: "2" }));
-    const { result } = renderHook(() => useHistorySearch({ sessionKey: "a", enabled: true, visible: true, bridge: fixture.bridge }));
+    const { result, unmount } = renderHook(() => useHistorySearch({ sessionKey: "a", enabled: true, visible: true, bridge: fixture.bridge }));
     await act(async () => { await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     expect(result.current.historySearch?.state).toBe("catchingUp");
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     expect(fixture.bridge.get_history_search).toHaveBeenCalledTimes(3);
 
+    unmount();
     vi.useRealTimers();
     const startedFixture = bridgeFixture(inactive());
     vi.mocked(startedFixture.bridge.start_history_search).mockResolvedValue(active({ attemptId: "owned" }));
