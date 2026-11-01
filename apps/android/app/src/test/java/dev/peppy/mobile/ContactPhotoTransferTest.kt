@@ -5,6 +5,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -15,6 +17,7 @@ import uniffi.peppy_mobile_bindings.NativeClientInterface
 @Config(sdk = [34])
 class ContactPhotoTransferTest {
     private val attachmentId = "11111111-1111-1111-1111-111111111111"
+    private val policyDenied = """{"code":"operation_not_permitted"}"""
 
     @Test fun registrationExactTyped410ReportsRemovalWithoutAcknowledgement() {
         val fake = fakeClient(JSONObject().put("registrations", JSONArray().put(
@@ -45,6 +48,49 @@ class ContactPhotoTransferTest {
             assertEquals(acks, fake.acks)
         }
     }
+
+    @Test fun registrationPolicyDenialPausesThePhaseWithoutAcknowledgementOrFurtherRequests() {
+        val fake = fakeClient(JSONObject().put("registrations", JSONArray()
+            .put(registrationRow("envelope-1"))
+            .put(registrationRow("envelope-2")),
+        ).toString())
+        var registrations = 0
+        LoopbackHttpServer {
+            registrations++
+            LoopbackHttpServer.Response(403, policyDenied)
+        }.use { server ->
+            assertThrows(GatewayAccountPausedException::class.java) {
+                ContactPhotoTransfer(fake.client, GatewayHttp(server.origin, "token")).run()
+            }
+        }
+        assertEquals("the pause stops the remaining registrations", 1, registrations)
+        assertEquals(0, fake.acks)
+        assertTrue(fake.removed.isEmpty())
+    }
+
+    @Test fun reclaimPolicyDenialPausesThePhaseWithoutAcknowledgement() {
+        val fake = fakeClient(JSONObject().put("reclaims", JSONArray().put(
+            JSONObject().put("attachment_id", attachmentId).put("remote_object_id", attachmentId).put("release_after_cursor", "1"),
+        )).toString())
+        var deletes = 0
+        LoopbackHttpServer { request ->
+            if (request.method == "GET") LoopbackHttpServer.Response(200, """{"compaction_supported":true,"compaction_generation":"2","replay_floor_cursor":"3"}""")
+            else {
+                deletes++
+                LoopbackHttpServer.Response(403, policyDenied)
+            }
+        }.use { server ->
+            assertThrows(GatewayAccountPausedException::class.java) {
+                ContactPhotoTransfer(fake.client, GatewayHttp(server.origin, "token")).run()
+            }
+        }
+        assertEquals(1, deletes)
+        assertEquals(0, fake.acks)
+        assertTrue(fake.removed.isEmpty())
+    }
+
+    private fun registrationRow(envelopeId: String) = JSONObject().put("envelope_id", envelopeId).put("attachment_id", attachmentId)
+        .put("producer_device_id", "device").put("producer_sequence", "1")
 
     private class Fake(state: String) {
         val removed = mutableListOf<String>()

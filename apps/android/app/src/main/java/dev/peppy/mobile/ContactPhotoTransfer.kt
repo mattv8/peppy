@@ -75,6 +75,7 @@ class ContactPhotoTransfer(private val client: NativeClientInterface, private va
             response.ok -> client.acknowledgeContactPhotoReferenceJson(
                 JSONObject().put("schema_version", 1).put("envelope_id", row.getString("envelope_id")).put("attachment_id", remote).toString(),
             )
+            response.isAccountPolicyDenial() -> throw GatewayAccountPausedException()
             response.code == 401 || response.code == 403 -> throw GatewayAuthException()
             // Untracked upload: the envelope stays held (never published unregistered); visible as stuck work.
             response.code == 409 -> Unit
@@ -104,6 +105,7 @@ class ContactPhotoTransfer(private val client: NativeClientInterface, private va
         val body = JSONObject().put("compaction_generation", fence.generation).put("release_before_cursor", fence.replayFloor.toString())
         val response = http.deleteJson("/v1/attachments/$remote", body.toString())
         if (reportRemoval(response, row.getString("attachment_id"))) return
+        if (response.isAccountPolicyDenial()) throw GatewayAccountPausedException()
         when (response.code) {
             204, 404, 409 -> client.acknowledgeContactPhotoReclaimJson(
                 JSONObject().put("schema_version", 1).put("attachment_id", row.getString("attachment_id")).put("http_status", response.code).toString(),

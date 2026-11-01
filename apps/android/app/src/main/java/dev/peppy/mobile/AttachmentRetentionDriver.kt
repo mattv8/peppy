@@ -19,7 +19,18 @@ internal class AttachmentRetentionDriver(
 ) {
     enum class Outcome { DRAINED, LEGACY, DEFERRED, STALE, MORE }
 
-    fun run(): Outcome {
+    /** True when the last [run] was deferred only by an account policy denial; the pass is not a failure. */
+    var accountPaused = false
+        private set
+
+    fun run(): Outcome = try {
+        runNegotiation()
+    } catch (_: GatewayAccountPausedException) {
+        accountPaused = true
+        Outcome.DEFERRED
+    }
+
+    private fun runNegotiation(): Outcome {
         http.initializeRetentionProtocol(client.attachmentRetentionProtocolEnabled())
         if (!client.attachmentRetentionProtocolEnabled()) {
             val capability = attachmentRetentionCapabilityRequest(false)
@@ -73,6 +84,7 @@ internal class AttachmentRetentionDriver(
     }
 
     private fun requireAuthentication(response: HttpResult) {
+        if (response.isAccountPolicyDenial()) throw GatewayAccountPausedException()
         if (response.code == 401 || response.code == 403) throw GatewayAuthException()
     }
 

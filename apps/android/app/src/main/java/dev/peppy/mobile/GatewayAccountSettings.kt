@@ -27,6 +27,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -185,6 +186,7 @@ internal fun GatewayAccountSettings(
         }
     }
     Column(Modifier.fillMaxWidth().testTag(if (settingsMode) "settings-account-group" else if (devicesOpen) "devices-screen" else "account-tab-screen")) {
+        val accountReadOnly by AccountAccessState.readOnly.collectAsState()
         val account = state
         if (account == null) {
             if (!settingsMode) {
@@ -200,7 +202,11 @@ internal fun GatewayAccountSettings(
             if (!settingsMode && !devicesOpen && !storageOpen) {
                 HeroBanner(
                     title = stringResource(R.string.peppy_account),
-                    body = listOfNotNull(gatewayStatus?.origin, stringResource(R.string.peppy_toggle_android_account_role, account.self.role)).joinToString("\n"),
+                    body = listOfNotNull(
+                        gatewayStatus?.origin,
+                        stringResource(R.string.peppy_toggle_android_account_role, account.self.role),
+                        if (accountReadOnly) stringResource(R.string.peppy_account_send_paused_status) else null,
+                    ).joinToString("\n"),
                     tag = "account-hero",
                 )
                 ScreenBody("account-body") {
