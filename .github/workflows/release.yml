@@ -49,7 +49,9 @@ jobs:
       actions: read
     outputs:
       version: ${{ steps.compute.outputs.version }}
-      android_version_code: ${{ steps.compute.outputs.android_version_code }}
+      android_version: ${{ steps.android-compute.outputs.version }}
+      android_version_code: ${{ steps.android-compute.outputs.android_version_code }}
+      android_skip: ${{ steps.android-compute.outputs.skip == 'true' || (steps.android-compute.outputs.changed != 'true' && steps.android-compute.outputs.budget_refresh != 'true') }}
       wix_version: ${{ steps.compute.outputs.wix_version }}
       sha: ${{ steps.target.outputs.sha }}
       skip: ${{ steps.target.outputs.skip == 'true' || steps.compute.outputs.skip == 'true' }}
@@ -140,6 +142,34 @@ jobs:
           if ! message=$(bash infra/release/check-stable-prerelease-floor.sh 2>&1); then
             if [ "$DRY_RUN" = true ]; then echo "::warning::$message"; else echo "::error::$message"; exit 1; fi
           fi
+      - id: android-compute
+        if: steps.target.outputs.skip != 'true'
+        # Manual bump/version inputs choose the v* version only; Android always bumps from its own commits.
+        run: |
+          set +e
+          output=$(infra/release/compute-version.sh --component android --channel stable --bump auto --allow-auto-patch-fallback)
+          status=$?
+          set -e
+          if [ "$status" -eq 4 ]; then
+            echo '::notice::This production SHA already has an Android stable release; skipping Android'
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$status" -ne 0 ]; then
+            printf '%s\n' "$output" >&2
+            exit "$status"
+          fi
+          printf '%s\n' "$output" | tee -a "$GITHUB_OUTPUT"
+          echo 'skip=false' >> "$GITHUB_OUTPUT"
+      - name: Reject Android stable version below published prereleases
+        if: steps.target.outputs.skip != 'true' && steps.android-compute.outputs.skip != 'true' && (steps.android-compute.outputs.changed == 'true' || steps.android-compute.outputs.budget_refresh == 'true')
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          VERSION: ${{ steps.android-compute.outputs.version }}
+        run: |
+          if ! message=$(bash infra/release/check-stable-prerelease-floor.sh --prefix android-v 2>&1); then
+            if [ "$DRY_RUN" = true ]; then echo "::warning::$message"; else echo "::error::$message"; exit 1; fi
+          fi
       # This summary is deliberately skipped for stale or duplicate auto runs.
       - name: Summarize release preparation
         if: steps.target.outputs.skip != 'true' && steps.compute.outputs.skip != 'true'
@@ -194,8 +224,12 @@ jobs:
     with:
       ref: ${{ needs.prepare.outputs.sha }}
       version: ${{ needs.prepare.outputs.version }}
+      android_version: ${{ needs.prepare.outputs.android_version }}
       android_version_code: ${{ needs.prepare.outputs.android_version_code }}
       wix_version: ${{ needs.prepare.outputs.wix_version }}
+      build_android: ${{ needs.prepare.outputs.android_skip != 'true' }}
+      build_desktop: true
+      build_ios: true
       trusted_update_build: true
       update_channel: stable
     secrets:
@@ -229,6 +263,21 @@ jobs:
     secrets:
       PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
       PEPPY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD }}
+      PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
+      PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
+  publish-android:
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.android_skip != 'true' && needs.publish.result == 'success' }}
+    needs: [prepare, signing, artifacts, publish]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-release.yml
+    with:
+      component: android
+      version: ${{ needs.prepare.outputs.android_version }}
+      channel: stable
+      sha: ${{ needs.prepare.outputs.sha }}
+      trusted_update_build: true
+    secrets:
       PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
       PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
   publish-server-image:

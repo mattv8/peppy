@@ -12,6 +12,26 @@ on:
         required: false
         type: string
         default: ''
+      android_version:
+        description: Android version to stamp into artifacts
+        required: false
+        type: string
+        default: ''
+      build_android:
+        description: Build Android artifacts
+        required: false
+        type: boolean
+        default: true
+      build_desktop:
+        description: Build desktop artifacts
+        required: false
+        type: boolean
+        default: true
+      build_ios:
+        description: Build iOS artifacts
+        required: false
+        type: boolean
+        default: true
       android_version_code:
         description: Android version code to stamp into artifacts
         required: false
@@ -82,6 +102,26 @@ on:
         required: false
         type: string
         default: ''
+      android_version:
+        description: Android version to stamp into artifacts
+        required: false
+        type: string
+        default: ''
+      build_android:
+        description: Build Android artifacts
+        required: false
+        type: boolean
+        default: true
+      build_desktop:
+        description: Build desktop artifacts
+        required: false
+        type: boolean
+        default: true
+      build_ios:
+        description: Build iOS artifacts
+        required: false
+        type: boolean
+        default: true
       android_version_code:
         description: Android version code to stamp into artifacts
         required: false
@@ -103,6 +143,7 @@ permissions:
 
 jobs:
   android-development-artifacts:
+    if: inputs.build_android != false
     environment: "${{ inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}"
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -113,8 +154,10 @@ jobs:
         env:
           CHANNEL: ${{ inputs.update_channel }}
           REQUESTED_REF: ${{ inputs.ref }}
+          BUILD_DESKTOP: ${{ inputs.build_desktop }}
         run: |
           [ "$REQUESTED_REF" = "$GITHUB_SHA" ] || { echo 'trusted Android build ref must equal the triggering SHA' >&2; exit 1; }
+          [ "$BUILD_DESKTOP" != false ] || { echo 'trusted Android builds must include desktop artifacts' >&2; exit 1; }
           case "$GITHUB_EVENT_NAME:$GITHUB_REF:$CHANNEL" in
             workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
             *) echo 'trusted Android builds require a production stable dispatch/push or staging push' >&2; exit 1 ;;
@@ -171,7 +214,7 @@ jobs:
       - name: Build trusted Android release artifacts
         if: inputs.trusted_update_build
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.android_version || inputs.version }}
           ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
           PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID }}
           PEPPY_ANDROID_NATIVE_PROFILE: release
@@ -208,7 +251,7 @@ jobs:
       - name: Build development Android debug APK
         if: ${{ !inputs.trusted_update_build }}
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.android_version || inputs.version }}
           ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
           PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID }}
           PEPPY_ANDROID_NATIVE_PROFILE: release
@@ -247,6 +290,7 @@ jobs:
           compression-level: 0
 
   desktop-development-artifacts:
+    if: inputs.build_desktop != false
     environment: "${{ inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}"
     strategy:
       fail-fast: false
@@ -415,6 +459,7 @@ jobs:
           compression-level: 0
 
   ios-development-artifacts:
+    if: inputs.build_ios != false
     runs-on: macos-26
     timeout-minutes: 60
     steps:

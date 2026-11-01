@@ -21,11 +21,19 @@ assert_eq "$(semver_compare 0.2.0 0.2.0-staging.9)" 1
 assert_eq "$(semver_compare 0.2.0-staging.10 0.2.0-staging.9)" 1
 assert_eq "$(semver_compare 1.0.0 0.99.99)" 1
 assert_eq "$(semver_compare v1.0.0 v1.0.0)" 0
+assert_eq "$(semver_compare android-v1.0.0 android-v1.0.0-staging.9)" 1
+assert_eq "$(peppy_tag_prefix android)" android-v
 assert_eq "$(semver_bump v0.1.9 minor)" 0.2.0
 grep -F "tag_pattern = '$PEPPY_STABLE_TAG_REGEX'" "$script_dir/cliff.toml" >/dev/null
 
 repo=$tmp/no-tags; new_repo "$repo"
 assert_eq "$(field "$(run "$repo" --channel prerelease)" version)" 0.1.0-staging.1
+default_desktop=$(run "$repo" --channel prerelease)
+component_desktop=$(run "$repo" --channel prerelease --component desktop)
+assert_eq "$component_desktop" "$default_desktop"
+assert_eq "$(field "$component_desktop" tag)" v0.1.0-staging.1
+assert_eq "$(field "$component_desktop" last_stable)" ''
+assert_eq "$(field "$component_desktop" commits_since)" 1
 out=$(run "$repo" --channel stable); assert_eq "$(field "$out" version)" 0.1.0
 assert_eq "$(field "$out" android_version_code)" 100999
 assert_eq "$(field "$(run "$repo" --channel dev)" version)" 0.1.0-dev.1
@@ -112,6 +120,59 @@ git -C "$repo" tag v0.1.0
 i=0; while ((i < 999)); do git -C "$repo" commit --allow-empty -qm "fix: $i"; i=$((i + 1)); done
 if run "$repo" --channel prerelease --bump patch >/dev/null 2>&1; then exit 1; else [[ $? == 5 ]]; fi
 
+touch_commit() {
+    local repo=$1 path=$2 message=$3
+    mkdir -p "$(dirname "$repo/$path")"
+    printf '%s\n' "$message" >>"$repo/$path"
+    git -C "$repo" add "$path"
+    git -C "$repo" commit -qm "$message"
+}
+
+repo=$tmp/android-bootstrap; new_repo "$repo"; git -C "$repo" tag v0.17.1
+touch_commit "$repo" apps/android/release.txt 'feat: android release'
+android_staging=$(PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel prerelease --component android)
+assert_eq "$(field "$android_staging" last_stable)" v0.17.1
+assert_eq "$(field "$android_staging" tag)" android-v0.18.0-staging.1
+assert_eq "$(field "$android_staging" changed)" true
+assert_eq "$(field "$android_staging" budget_refresh)" false
+android_stable=$(PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel stable --component android)
+assert_eq "$(field "$android_stable" android_version_code)" 1800999
+
+repo=$tmp/android-before-first-tag; new_repo "$repo"; git -C "$repo" tag v0.17.1
+touch_commit "$repo" apps/android/release.txt 'fix: android release'
+touch_commit "$repo" packages/desktop-ui/release.txt 'feat: desktop release'; git -C "$repo" tag v0.18.0
+out=$(PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel stable --component android)
+assert_eq "$(field "$out" last_stable)" v0.17.1
+assert_eq "$(field "$out" version)" 0.17.2
+assert_eq "$(field "$out" changed)" true
+
+repo=$tmp/android-changes; new_repo "$repo"; git -C "$repo" tag v0.17.1
+touch_commit "$repo" apps/android/release.txt 'fix: android release'; git -C "$repo" tag android-v0.17.2-staging.1
+for path in packages/desktop-ui/release.txt services/server/release.txt apps/web/release.txt; do
+    touch_commit "$repo" "$path" 'docs: desktop only'
+    out=$(PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel prerelease --component android)
+    assert_eq "$(field "$out" changed)" false
+done
+for path in crates/crypto/release.txt Cargo.lock rust-toolchain.toml crates/protocol/release.txt apps/android/release.txt; do
+    touch_commit "$repo" "$path" 'fix: android input'
+    out=$(PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel prerelease --component android)
+    assert_eq "$(field "$out" changed)" true
+    git -C "$repo" tag -f android-v0.17.2-staging.1 HEAD >/dev/null
+done
+
+repo=$tmp/android-tags; new_repo "$repo"; git -C "$repo" tag v0.17.1
+touch_commit "$repo" apps/android/release.txt 'fix: android release'; git -C "$repo" tag android-v0.17.2
+if PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel stable --component android >/dev/null 2>&1; then exit 1; else [[ $? == 4 ]]; fi
+assert_eq "$(field "$(run "$repo" --channel prerelease --component desktop)" last_stable)" v0.17.1
+touch_commit "$repo" packages/desktop-ui/release.txt 'fix: desktop release'; git -C "$repo" tag v0.99.0
+out=$(PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel prerelease --component android)
+assert_eq "$(field "$out" last_stable)" android-v0.17.2
+
+repo=$tmp/android-budget; new_repo "$repo"; git -C "$repo" tag v0.17.1
+i=0; while ((i < 501)); do git -C "$repo" commit --allow-empty -qm "docs: $i"; i=$((i + 1)); done
+out=$(PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel prerelease --component android)
+assert_eq "$(field "$out" budget_refresh)" true
+
 repo=$tmp/notes; new_repo "$repo"; git -C "$repo" tag v0.1.0; git -C "$repo" commit --allow-empty -qm 'feat(api): note'; git -C "$repo" tag v0.2.0-staging.1
 notes=$(cd "$repo" && "$script_dir/release-notes.sh" 0.2.0-staging.9)
 printf '%s\n' "$notes" | grep -F 'unsigned development-grade prerelease' >/dev/null
@@ -123,8 +184,12 @@ printf '%s\n' "$notes" | grep -F 'GPG-signed SHA256SUMS' >/dev/null
 printf '%s\n' "$notes" | grep -F 'GPG-signed RPM packages' >/dev/null
 printf '%s\n' "$notes" | grep -F 'macOS is ad-hoc signed and not notarized' >/dev/null
 printf '%s\n' "$notes" | grep -F 'Windows installers are not Authenticode publisher-signed' >/dev/null
-printf '%s\n' "$notes" | grep -F 'Android APK and AAB artifacts are signed with the protected release certificate' >/dev/null
+printf '%s\n' "$notes" | grep -F 'Android releases are published separately under android-v* tags' >/dev/null
 printf '%s\n' "$notes" | grep -F 'iOS archive remains unsigned' >/dev/null
+if printf '%s\n' "$notes" | grep -F 'Android APK' >/dev/null; then exit 1; fi
+android_notes=$(cd "$repo" && TRUSTED_UPDATE_BUILD=true "$script_dir/release-notes.sh" 0.2.0-staging.9 --component android)
+printf '%s\n' "$android_notes" | grep -F 'signed Android APK for direct sideloading' >/dev/null
+if printf '%s\n' "$android_notes" | grep -Eq 'Tauri|RPM|macOS'; then exit 1; fi
 printf '%s\n' "$notes" | grep -F '### macOS first launch' >/dev/null
 printf '%s\n' "$notes" | grep -Fx '```sh' >/dev/null
 printf '%s\n' "$notes" | grep -Fx 'xattr -dr com.apple.quarantine "/Applications/Peppy.app" && open "/Applications/Peppy.app"' >/dev/null

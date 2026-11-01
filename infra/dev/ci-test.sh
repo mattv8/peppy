@@ -78,6 +78,8 @@ main() {
     shellcheck infra/release/*.sh
     infra/release/test-compute-version.sh
     infra/release/test-release-scripts.sh
+    bash infra/release/test-release-asset-groups.sh
+    bash infra/release/test-release-prefixes.sh
     just audit-secrets
 
     suite "Development tooling"
@@ -87,6 +89,7 @@ main() {
     bash -n infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/ci-test.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh
     shellcheck infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/ci-test.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh .github/scripts/*.sh
     bash .github/scripts/test-ci-scripts.sh
+    python3 .github/scripts/check-ci-scope-closure.py
 
     suite "Rust workspace"
     cargo fmt --all -- --check
