@@ -25,7 +25,10 @@ public actor HostedAccountClient {
     private var renewalTask: Task<Void, Error>?
     private var lastFailedRenewal: Date?
 
-    public init(transport: any HTTPTransport = URLSessionTransport(), secureStore: any SecureStore = KeychainSecureStore(), origin: String = "https://peppy.pro") throws {
+    /// The hosted account origin. Billing and account links use it, and it is trusted for account notices.
+    public static let productionOrigin = "https://peppy.pro"
+
+    public init(transport: any HTTPTransport = URLSessionTransport(), secureStore: any SecureStore = KeychainSecureStore(), origin: String = HostedAccountClient.productionOrigin) throws {
         self.transport = transport; self.secureStore = secureStore
         self.origin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: false)
         sessionKey = "hosted-account-session:\(self.origin.serialized)"

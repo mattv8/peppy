@@ -63,15 +63,25 @@ struct DeviceView: View {
                 enrolledTabs
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            SystemRibbonHost(colors: colors)
+        }
+        .environment(model)
         .tint(colors.Accent)
         .task { await model.load(); enrollmentLoaded = true }
-        .task(id: "\(scenePhase == .active)-\(model.status.identity != nil)-\(model.status.keysUnlocked)") {
+        .task(id: foregroundTaskID) {
             let active = scenePhase == .active
             model.setForegroundActive(active)
             guard active, !Task.isCancelled else { return }
             await model.reconcileWakeRegistration()
             guard !Task.isCancelled else { return }
             await model.syncInForeground()
+        }
+        // A separate task: SwiftUI runs it alongside the foreground pass, so the account read never delays
+        // wake registration or sync.
+        .task(id: foregroundTaskID) {
+            guard scenePhase == .active else { return }
+            await model.refreshAccountAccess()
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             model.observeContactChanges(phase == .active)
@@ -112,6 +122,11 @@ struct DeviceView: View {
     }
 
     private var colors: PeppyColorScheme { PeppyTokens.colors(for: colorScheme) }
+
+    /// Changes when the foreground pass should run again.
+    private var foregroundTaskID: String {
+        "\(scenePhase == .active)-\(model.status.identity != nil)-\(model.status.keysUnlocked)"
+    }
 
     @ViewBuilder private var welcome: some View {
         ScrollView {
@@ -243,11 +258,6 @@ struct DeviceView: View {
                 recordHostedAccountInteraction()
             }
         )
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if model.serverReachability == .unavailable {
-                ServerOfflineBanner(colors: colors)
-            }
-        }
     }
 
     private var syncTab: some View {
@@ -535,7 +545,6 @@ struct DeviceView: View {
 
 struct SettingsView: View {
     @Bindable var model: AppModel
-    @Environment(\.colorScheme) private var colorScheme
     @State private var vaultDeleteText = ""
     @State private var deletingVault = false
     @State private var showingVaultDelete = false
@@ -593,11 +602,6 @@ struct SettingsView: View {
                 }
             }.formStyle(.grouped).navigationTitle(Text("peppy.settings", tableName: "Peppy"))
         .accessibilityIdentifier("settings-screen")
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if model.serverReachability == .unavailable {
-                    ServerOfflineBanner(colors: PeppyTokens.colors(for: colorScheme), announcesTransition: false)
-                }
-            }
             .sheet(isPresented: $showingVaultDelete, onDismiss: {
                 vaultDeleteText = ""
                 deletingVault = false
@@ -803,33 +807,195 @@ private struct NativeHero: View {
     }
 }
 
-struct ServerOfflineBanner: View {
+struct SystemRibbonAction {
+    let label: String
+    let url: URL
+}
+
+/// The global status strip: an icon, a title and message, then an action and a dismiss row below the text.
+/// Callers resolve the copy and pass plain strings.
+struct SystemRibbon: View {
     let colors: PeppyColorScheme
-    var announcesTransition = true
+    let title: String
+    let message: String
+    let severity: AccountNoticeSeverity
+    var action: SystemRibbonAction?
+    var onDismiss: (() -> Void)?
+    @Environment(\.openURL) private var openURL
+    @State private var linkUnavailable = false
+    @State private var messageExpanded = false
+    @State private var fullMessageHeight: CGFloat = 0
+    @State private var collapsedMessageHeight: CGFloat = 0
+
+    private static let collapsedLineLimit = 3
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(colors.WarningText)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("peppy.server_offline_title", tableName: "Peppy").font(.subheadline.weight(.semibold))
-                Text("peppy.server_offline_body", tableName: "Peppy").font(.footnote)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(iconColor)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(titleForeground)
+                    messageText
+                }
+                .accessibilityElement(children: .combine)
+                .onPreferenceChange(FullMessageHeightKey.self) { fullMessageHeight = $0 }
+                .onPreferenceChange(CollapsedMessageHeightKey.self) { collapsedMessageHeight = $0 }
             }
-            Spacer(minLength: 0)
+            if showsActionRow {
+                HStack(spacing: 16) {
+                    Spacer(minLength: 0)
+                    if showsToggle {
+                        Button {
+                            messageExpanded.toggle()
+                        } label: {
+                            Text(toggleKey, tableName: "Peppy")
+                                .font(.footnote.weight(.semibold)).frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(messageForeground)
+                        .accessibilityIdentifier("system-ribbon-toggle")
+                    }
+                    if let action {
+                        Button {
+                            openURL(action.url) { accepted in linkUnavailable = !accepted }
+                        } label: {
+                            Text(action.label).font(.footnote.weight(.semibold)).frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(messageForeground)
+                        .accessibilityLabel("\(action.label), \(String(localized: "peppy.system_banner_opens_in_browser", table: "Peppy"))")
+                        .accessibilityIdentifier("system-ribbon-action")
+                    }
+                    if let onDismiss {
+                        Button(action: onDismiss) {
+                            Text("peppy.system_banner_dismiss", tableName: "Peppy")
+                                .font(.footnote.weight(.semibold)).frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(messageForeground)
+                        .accessibilityIdentifier("system-ribbon-dismiss")
+                    }
+                }
+            }
+            if linkUnavailable {
+                Text("peppy.toggle_android_link_unavailable", tableName: "Peppy")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(messageForeground)
+            }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
-        .background(colors.WarningSurface)
-        .overlay(alignment: .bottom) { colors.WarningBorder.frame(height: 1) }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("server-offline-banner")
-        .onAppear {
-            guard announcesTransition else { return }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(surface, ignoresSafeAreaEdges: .top)
+        .overlay(alignment: .bottom) { border.frame(height: severity == .error ? 2 : 1) }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("system-ribbon")
+    }
+
+    private var showsToggle: Bool { isMessageTruncated || messageExpanded }
+    private var showsActionRow: Bool { showsToggle || action != nil || onDismiss != nil }
+    /// Measured, not guessed: the body is truncated when its unlimited height exceeds its three-line height.
+    private var isMessageTruncated: Bool { fullMessageHeight > collapsedMessageHeight + 0.5 }
+    private var toggleKey: LocalizedStringKey {
+        messageExpanded ? "peppy.system_banner_less" : "peppy.system_banner_more"
+    }
+
+    private var messageText: some View {
+        Text(message)
+            .font(.footnote)
+            .foregroundStyle(messageForeground)
+            .lineLimit(messageExpanded ? nil : Self.collapsedLineLimit)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(alignment: .topLeading) { heightProbes }
+    }
+
+    /// Hidden copies, excluded from layout and accessibility, that report the unlimited and three-line heights.
+    private var heightProbes: some View {
+        ZStack(alignment: .topLeading) {
+            heightProbe(lineLimit: nil, key: FullMessageHeightKey.self)
+            heightProbe(lineLimit: Self.collapsedLineLimit, key: CollapsedMessageHeightKey.self)
+        }
+        .hidden()
+        .accessibilityHidden(true)
+    }
+
+    private func heightProbe<Key: PreferenceKey>(lineLimit: Int?, key: Key.Type) -> some View where Key.Value == CGFloat {
+        Text(message)
+            .font(.footnote)
+            .lineLimit(lineLimit)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: key, value: proxy.size.height)
+            })
+    }
+
+    private var surface: Color { severity == .error ? colors.ErrorSurface : colors.WarningSurface }
+    /// Error body text uses the primary text colour; coral stays on the icon and the bottom border.
+    private var messageForeground: Color { severity == .error ? colors.TextPrimary : colors.WarningText }
+    private var titleForeground: Color { severity == .error ? colors.TextStrong : colors.WarningText }
+    private var iconColor: Color { severity == .error ? colors.Error : colors.WarningText }
+    private var border: Color { severity == .error ? colors.Error : colors.WarningBorder }
+}
+
+private struct FullMessageHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+private struct CollapsedMessageHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// The one ribbon slot. Server offline wins, then the account notice. Shows nothing before enrollment.
+/// It announces only when the slot's kind changes; the ribbon is keyed by kind so its expansion state resets then.
+struct SystemRibbonHost: View {
+    @Environment(AppModel.self) private var model
+    let colors: PeppyColorScheme
+
+    var body: some View {
+        let presentation = currentPresentation
+        Group {
+            if let presentation {
+                SystemRibbon(
+                    colors: colors,
+                    title: resolved(presentation.titleKey, presentation.titleArgument),
+                    message: resolved(presentation.bodyKey, presentation.bodyArgument),
+                    severity: presentation.severity,
+                    action: presentation.action.map {
+                        SystemRibbonAction(label: resolved($0.labelKey, nil), url: $0.url)
+                    },
+                    onDismiss: presentation.snoozeKey.map { key in { model.accountAccess.dismiss(snoozeKey: key) } }
+                )
+                .id(presentation.kindIdentifier)
+            }
+        }
+        .onChange(of: presentation?.kindIdentifier) { previous, current in
+            guard current != nil, current != previous, let presentation else { return }
             #if canImport(UIKit)
-            let title = String(localized: "peppy.server_offline_title", table: "Peppy")
-            let body = String(localized: "peppy.server_offline_body", table: "Peppy")
-            UIAccessibility.post(notification: .announcement, argument: "\(title). \(body)")
+            let title = resolved(presentation.titleKey, presentation.titleArgument)
+            let message = resolved(presentation.bodyKey, presentation.bodyArgument)
+            UIAccessibility.post(notification: .announcement, argument: "\(title). \(message)")
             #endif
         }
+    }
+
+    private var currentPresentation: SystemRibbonPresentation? {
+        guard let identity = model.status.identity else { return nil }
+        let now = Date()
+        let notice = model.accountAccess.visibleNotice(for: identity, now: now)
+        return SystemRibbonResolver.presentation(
+            serverOffline: model.serverReachability == .unavailable, notice: notice, now: now
+        )
+    }
+
+    /// Catalog copy from the Peppy table; `%1$@` takes the formatted deadline when one is present.
+    private func resolved(_ key: String, _ argument: String?) -> String {
+        let template = String(localized: String.LocalizationValue(key), table: "Peppy")
+        guard let argument else { return template }
+        return String(format: template, argument)
     }
 }

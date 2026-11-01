@@ -1200,6 +1200,22 @@ public actor NativeSession {
         }
     }
 
+    /// Device-authenticated `GET /v1/account/access` for the enrollment the caller shows. It needs no vault
+    /// keys, so it also runs on the lock screen. The raw status and body go to the shared Rust decision.
+    public func accountAccessResponse(for identity: EnrollmentIdentity) async throws -> (status: UInt16, body: String) {
+        guard let record, record.identity == identity else { throw ClientError.notEnrolled }
+        let request = accountAccessRequest()
+        var meter = RequestMeter(limit: 1)
+        let response = try await authenticatedServer(identity).exchange(
+            request.method, request.relativePath, limit: ServerClient.maxSmallBytes, meter: &meter
+        )
+        guard self.record?.identity == identity, !Task.isCancelled else { throw ClientError.canceled }
+        guard let text = String(data: response.body, encoding: .utf8) else {
+            throw ClientError.invalidResponse("account access")
+        }
+        return (UInt16(clamping: response.status), text)
+    }
+
     public func acknowledgeAttachmentStorageNotice(scopeId: String, policyVersion: String?) async throws {
         guard attachmentRetentionNoticeCopySupported(policyVersion: policyVersion),
               let policyVersion, let scope = attachmentStorageScopes[scopeId],
