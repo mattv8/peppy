@@ -1,5 +1,7 @@
 # Optional push relay
 
+For coding agents: use this reference when changing relay storage, provider configuration, proxy trust, or readiness behavior.
+
 The relay is a separately deployable, optional service. It stores only provider tokens, route relationships, credential digests, bounded wake jobs, and limited operational timing/IP metadata. It never receives message bodies, contact identifiers, attachment URLs, or user-server URLs.
 
 `PEPPY_RELAY_PROVIDER=unconfigured` is the default and makes registration and wake requests return `503 provider_unconfigured`. It is safe for tests and development: no provider HTTP request is made. Set it to `apns`, `fcm`, or `apns,fcm` only in an operator deployment with secrets supplied through the environment or secret files (the corresponding `*_FILE` variable contains a file path).

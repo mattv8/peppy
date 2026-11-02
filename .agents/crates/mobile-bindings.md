@@ -1,5 +1,7 @@
 # Peppy mobile bindings
 
+For coding agents: use this reference when changing UniFFI mobile bindings, native boundary contracts, or generated output.
+
 Follow the canonical [contributing workflow](../../CONTRIBUTING.md) for shared setup and checks.
 
 `peppy-mobile-bindings` is the UniFFI 0.32.2 facade over the shared SQLCipher client and Rust-owned gateway policy. Native hosts provide HTTP transport, OS scheduling, carrier effects, current OS facts, and secure persistence; the binding provides no implicit HTTP client, callbacks, or runtime.

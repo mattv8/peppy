@@ -1,5 +1,7 @@
 # Peppy Linux package repository
 
+For coding agents: use this reference when changing Linux repository generation, verification, or update setup.
+
 This directory builds separate `stable` and `staging` APT/DNF repositories from
 final staged GitHub Release assets. It does not publish them. Operators serve
 the generated tree and signing key from an HTTPS URL they control.

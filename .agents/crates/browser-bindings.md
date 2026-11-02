@@ -1,5 +1,7 @@
 # Browser core bindings
 
+For coding agents: use this reference when changing the browser core ABI, worker boundary, persistence, or its build checks.
+
 This crate adapts `peppy-client-core` to a browser worker. Rust retains ownership
 of SQLCipher, encrypted envelopes, drafts, contact edits, and replay state.
 The shared `peppy-desktop-api` crate supplies display projections.

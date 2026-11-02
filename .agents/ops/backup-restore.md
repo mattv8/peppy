@@ -1,5 +1,7 @@
 # Peppy backup and restore
 
+Operator runbook; also the reference coding agents follow when changing backup, restore, Community Compose, or proxy behavior. Preserve the recovery guarantees below.
+
 Use these procedures from the repository root. Read this document before a recovery operation. A restore can revive revoked credentials and public links, reuse cursor ranges, and leave carrier outcomes uncertain.
 
 ## Backup

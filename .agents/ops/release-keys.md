@@ -1,5 +1,7 @@
 # Release verification keys
 
+For coding agents: use this reference when changing committed release verification material or its trust and rotation rules.
+
 These public keys identify the initial stable and staging release-signing authorities.
 Private keys and recovery backups are not stored in this repository.
 
@@ -24,6 +26,6 @@ pinning them. A public key downloaded alongside an artifact does not by itself
 authenticate its publisher. Neither a valid update signature nor a GPG signature
 establishes Apple Developer ID or Windows Authenticode approval.
 
-See [release provisioning](../README-updates.md) for signing policies and updater
+See [release provisioning](release-updates.md) for signing policies and updater
 key rotation. Do not replace a published updater key without a compatible,
 authenticated update path for existing installations.

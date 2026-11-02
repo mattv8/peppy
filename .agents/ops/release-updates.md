@@ -1,5 +1,7 @@
 # Desktop update release provisioning
 
+Operator runbook; also the reference coding agents follow when changing trusted release inputs, updater artifacts, signing, or Android release delivery.
+
 Only protected `updates-stable` and `updates-staging` environments may provide
 release credentials. Direct `build-artifacts.yml` dispatches and pull requests
 never enable the trusted updater build input and therefore produce no update

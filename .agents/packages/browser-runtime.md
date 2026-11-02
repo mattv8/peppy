@@ -1,5 +1,7 @@
 # Browser runtime primitives
 
+For coding agents: use this reference when changing browser-worker ownership, checkpoints, RPC, or recovery behavior.
+
 Worker-side adapters for the Rust core, bundled with SharedWorker coordination, port/session routing, enrollment orchestration, and sync scheduling.
 
 ## Worker ownership

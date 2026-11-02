@@ -1,13 +1,15 @@
 # Peppy domain guidance
 
-This reference records non-obvious Peppy domain constraints. Related references:
+This reference records non-obvious Peppy domain constraints.
 
-- [Infrastructure and release boundaries](infra.md): public/private images,
-  source pins, Harbor signing, and native/browser build pitfalls.
-- [Hosted platform security](platform-security.md): purpose-separated encryption,
-  lookup keys, tester authority and billing-binding lifecycle.
-- [Desktop frontend](frontend-style-guide.md) and
-  [native mobile](mobile-style-guide.md): shared design APIs and platform rules.
+## Reference index
+
+- [Domain guidance](AGENTS.md): cross-cutting security, protocol, host, and verification constraints.
+- [Android app guidance](apps/android.md), [desktop app guidance](apps/desktop.md), [iOS app guidance](apps/ios.md), and [web app guidance](apps/web.md): application-specific implementation constraints.
+- [Browser bindings](crates/browser-bindings.md), [mobile bindings](crates/mobile-bindings.md), and [tester cryptography](crates/tester-crypto.md): Rust binding and cryptography boundaries.
+- [Browser runtime](packages/browser-runtime.md) and [push relay](services/push-relay.md): package and service runtime behavior.
+- [Backup and restore](ops/backup-restore.md), [release updates](ops/release-updates.md), [Linux repository](ops/linux-repository.md), [release keys](ops/release-keys.md), and [packaging assets](ops/packaging-assets.md): operational and release procedures.
+- [Infrastructure and release boundaries](infra.md), [data, trust, and recovery boundaries](data-boundaries.md), [hosted platform security](platform-security.md), [desktop frontend](frontend-style-guide.md), and [native mobile](mobile-style-guide.md): shared implementation guidance.
 
 ## Ownership boundaries
 
@@ -121,7 +123,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
   device credentials or stop device-authenticated sync. Native sign-in does not
   create a browser cookie; website billing can require another sign-in to the
   same account. See the native account clients for
-  [Android](../apps/android/app/src/main/java/dev/peppy/mobile/HostedAccountClient.kt)
+  [Android](../apps/android/app/src/main/java/dev/peppy/mobile/account/HostedAccountClient.kt)
   and [iOS](../apps/ios/PeppyNative/HostedAccountClient.swift).
 - Hosted billing uses Stripe through Peppy's website. Subscription lapse means
   indefinite read-only retention, not scheduled account deletion. Read-only
@@ -305,7 +307,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
 - Android is a companion to the default messaging app: do not request the
   default-SMS role or `WRITE_SMS`, use hidden APIs, or imply general RCS
   support. Default-app status alone does not grant RCS access. See
-  [Android limits](../apps/android/README.md).
+  [Android limits](apps/android.md).
 - MMS capture reconciles content already downloaded by the default messaging
   app's provider; it does not make Peppy the carrier/default app. Provider
   acquisition is offline reconciliation, separate from gateway upload. See
@@ -313,7 +315,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
 - A SIM route is the exact current default-SMS subscription route, not a
   physical-SIM identity. Commands for an old or missing route remain pending;
   never redirect them to another SIM. See
-  [SIM routes](../apps/android/app/src/main/java/dev/peppy/mobile/SimRoutes.kt).
+  [SIM routes](../apps/android/app/src/main/java/dev/peppy/mobile/telephony/SimRoutes.kt).
 - `Client` is one `Mutex<Store>`; every binding call takes it, and a gateway
   pass can hold it for seconds (a slow core query, a large outbox). Compose
   code therefore never calls `NativeGateway`, `GatewayPolicyHost`,
@@ -327,7 +329,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
   `adb bugreport` (`FS/data/anr/`), and `dumpsys activity exit-info
   dev.peppy.mobile` lists the exits. See
   [main screen](../apps/android/app/src/main/java/dev/peppy/mobile/MainActivity.kt)
-  and [MMS settings](../apps/android/app/src/main/java/dev/peppy/mobile/MmsSettings.kt).
+  and [MMS settings](../apps/android/app/src/main/java/dev/peppy/mobile/mms/MmsSettings.kt).
 - Outbox rejection policy: a 4xx on `POST /v1/events` that carries a server
   `code` is a permanent decision (`rejectOutbox`, re-pair required). A 4xx
   with no code is a `SoftRejection`: retried one head envelope per pass with
@@ -335,7 +337,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
   Every Peppy server 403 is an `ApiError` with a JSON `code`; a bodiless 403
   comes from a reverse proxy (see [infra](infra.md#community-setup-state-and-proxies))
   and must not halt the outbox. See
-  [gateway state](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayState.kt)
+  [gateway state](../apps/android/app/src/main/java/dev/peppy/mobile/gateway/GatewayState.kt)
   and [gateway pass](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayWork.kt).
 - The pass order is receive/apply, contacts, media, contact photos, upload,
   dispatch. The contact-photo phase asks the core which tracked photos an
@@ -360,7 +362,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
   minute, so it is not a timing source. See
   [gateway scheduling](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayWork.kt),
   [MMS capture](../apps/android/app/src/main/java/dev/peppy/mobile/MmsCaptureWork.kt),
-  and [MMS previews](../apps/android/app/src/main/java/dev/peppy/mobile/MmsMediaPreview.kt).
+  and [MMS previews](../apps/android/app/src/main/java/dev/peppy/mobile/mms/MmsMediaPreview.kt).
 - Encrypted media is published with an atomic no-replace rename first;
   SELinux denies `hard_link` for app data on current Android, so the link
   path is a fallback, not the primary. See
@@ -374,7 +376,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
   bounded background passes with expiration cancellation and durable progress;
   do not introduce a long-lived background WebSocket. Background execution is
   discretionary and must not promise immediate remote edits. See
-  [iOS behavior](../apps/ios/README.md) and
+  [iOS behavior](apps/ios.md) and
   [telephony eligibility](../apps/ios/PeppyNative/TelephonyEligibility.swift).
 - A host Swift package build is not evidence of an iOS SDK build, carrier
   eligibility, or carrier capability.
@@ -452,7 +454,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
 
 - The browser host requires SharedWorker, WebAssembly, IndexedDB, Web Locks,
   and same-origin HTTPS. It is not a native capability fallback. See
-  [web host](../apps/web/README.md).
+  [web host](apps/web.md).
 - Worker ownership uses an exclusive, non-stealable Web Lock. An older or
   suspended worker retains ownership; uncertain teardown keeps the lock until
   worker termination. Do not start a competing sender to recover. See
@@ -463,7 +465,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
   committed generation without automatically retrying the mutation. Missing or
   malformed data in an existing checkpoint does not authorize resetting the
   vault. Browser storage retention remains platform-dependent. See
-  [checkpoint contract](../packages/browser-runtime/README.md#checkpoints).
+  [checkpoint contract](packages/browser-runtime.md#checkpoints).
 - Checkpoints contain SQLCipher state, referenced attachment ciphertext and
   opaque wrapped identity, not plaintext SQLite or live journals. Rust
   authenticates restored data; capture checks are not authentication. Lazy

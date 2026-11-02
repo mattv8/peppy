@@ -1,5 +1,7 @@
 # Vault-bound tester cryptography
 
+For coding agents: use this reference when changing the hosted tester cryptography worker boundary or its build output.
+
 This crate supplies a small worker-local cryptographic boundary for hosted tester
 administration. It does not open a local database, enroll a device, grant
 administrator authority, or retrieve account credentials. The hosted service must
