@@ -211,6 +211,8 @@ android_download = publisher_steps.find { |step| step.dig('with', 'name') == 'an
 assert.call(!desktop_download.nil? && desktop_download.fetch('if').include?("inputs.component == 'desktop'"), 'desktop publisher must download only desktop release artifacts')
 assert.call(!desktop_download.dig('with', 'pattern').include?('android-release-artifacts'), 'desktop download pattern must never match Android release artifacts')
 assert.call(!android_download.nil? && android_download.fetch('if').include?("inputs.component == 'android'"), 'Android publisher must download exactly Android release artifacts')
+# A by-name download extracts straight into path; only pattern downloads add a per-artifact directory.
+assert.call(android_download.dig('with', 'path') == 'dist/download/android-release-artifacts', 'Android download must land where stage-assets.sh reads android-release-artifacts')
 
 trusted_contexts = 'workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging'
 helper = File.read(File.join(__dir__, 'release-context-guard.sh'))
