@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bridge } from "../bridge";
+import { bridge } from "../bridge/bridge";
 import { InvalidMediaViewerWindow, MediaViewerWindow, readMediaViewerWindow } from "./MediaViewerWindow";
 
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ close: vi.fn() }) }));

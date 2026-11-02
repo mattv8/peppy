@@ -1,5 +1,5 @@
 import { formatPhoneNumber } from "@peppy/desktop-ui";
-import type { ContactResolutionMap } from "../bridge";
+import type { ContactResolutionMap } from "../bridge/bridge";
 
 export type SenderLabel = {
   text: string;

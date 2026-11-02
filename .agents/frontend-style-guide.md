@@ -148,7 +148,7 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
 
 ## Enrollment UI
 
-Stable stage and QR hooks live in [SetupLanding](../apps/desktop/src/SetupLanding.tsx).
+Stable stage and QR hooks live in [SetupLanding](../apps/desktop/src/setup/SetupLanding.tsx).
 Protocol rules are in [domain guidance](AGENTS.md).
 
 - Two enrollment QR purposes, each shown by one side and never in Settings.

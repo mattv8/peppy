@@ -23,7 +23,7 @@ import {
   type GatewayView,
   type ContactBookView,
   type SendDraftInput,
-} from "./bridge";
+} from "./bridge/bridge";
 
 /**
  * In-memory stand-in for the native host contract (apps/desktop/src-tauri/src/session.rs):

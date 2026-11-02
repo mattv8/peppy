@@ -8,6 +8,8 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import kotlin.concurrent.thread
+import org.junit.Assert.*
+
 
 /** Minimal HTTP/1.1 loopback server for transport tests (android.jar has no JDK httpserver). */
 class LoopbackHttpServer(private val handler: (Request) -> Response) : AutoCloseable {

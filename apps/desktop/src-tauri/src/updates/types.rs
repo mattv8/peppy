@@ -144,7 +144,7 @@ mod tests {
             unattended: false,
         };
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../src/update-status.fixture.json")).unwrap();
+            serde_json::from_str(include_str!("../../../src/updates/update-status.fixture.json")).unwrap();
         assert_eq!(serde_json::to_value(status).unwrap(), fixture);
     }
 

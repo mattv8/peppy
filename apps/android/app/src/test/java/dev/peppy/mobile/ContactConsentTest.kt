@@ -1,7 +1,12 @@
 package dev.peppy.mobile
 
+import dev.peppy.mobile.enrollment.ConsentEffect
+import dev.peppy.mobile.enrollment.ConsentGatedToggle
+import dev.peppy.mobile.enrollment.ConsentPhase
+import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Test
+
 
 class ContactConsentTest {
     @Test fun alreadyGrantedReadStillRequiresDisclosureBeforeApply() {

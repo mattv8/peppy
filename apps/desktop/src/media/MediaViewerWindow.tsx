@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ImageOff, Loader2, RotateCw, X } from "@peppy/desktop-ui";
-import { bridge } from "../bridge";
+import { bridge } from "../bridge/bridge";
 import { MediaActionsProvider } from "./MediaActionsContext";
 import { MediaLightbox } from "./MediaLightbox";
 import type { MediaPageItem } from "./MediaPanel";

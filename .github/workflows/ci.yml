@@ -209,7 +209,7 @@ jobs:
       - name: Install cargo-nextest
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
-          bash infra/ci/install-cargo-nextest.sh "$RUNNER_TEMP/bin"
+          bash .github/scripts/install-cargo-nextest.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Run workspace integration tests
         run: |

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MessageView } from "../bridge";
+import type { MessageView } from "../bridge/bridge";
 import { boundedAroundMessages, mergeDetachedMessages, searchSessionKey } from "./detachedHistory";
 
 const messages = (prefix: string, count: number): MessageView[] => Array.from({ length: count }, (_, index) => ({

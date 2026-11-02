@@ -1,4 +1,4 @@
-import type { MessageView } from "../bridge";
+import type { MessageView } from "../bridge/bridge";
 
 export const DETACHED_HISTORY_LIMIT = 150;
 

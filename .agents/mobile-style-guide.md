@@ -32,6 +32,10 @@ semantic Kotlin and Swift names.
   output. Binary icons use `pnpm --dir packages/mobile-design icons`, which
   requires desktop Tauri tooling and macOS `sips`.
 
+## Android package names
+
+Android classes named in `AndroidManifest.xml` and WorkManager worker classes stay in package `dev.peppy.mobile`: the OS persists their FQCNs in notification-listener grants and queued work. Put new feature code in feature subpackages.
+
 ## Enrollment
 
 - Rust owns enrollment protocol and durable state; native UI presents its
@@ -41,7 +45,7 @@ semantic Kotlin and Swift names.
 - For phone status, native hosts use only Rust-produced, claimant-authenticated
   same-origin descriptors. Use the canonical enrollment origin for identity;
   the private claim header is not UI data or a general HTTP capability. See
-  [Android enrollment host](../apps/android/app/src/main/java/dev/peppy/mobile/EnrollmentHost.kt)
+  [Android enrollment host](../apps/android/app/src/main/java/dev/peppy/mobile/enrollment/EnrollmentHost.kt)
   and [iOS enrollment host](../apps/ios/PeppyNative/EnrollmentHost.swift).
 - The phone UI scans the `connect_phone` code and shows the SAS for the owner to
   compare. A transfer pairing confirms automatically after owner approval and
@@ -53,7 +57,7 @@ semantic Kotlin and Swift names.
   actions; do not add automatic requests, default-SMS role requests, or general
   RCS claims. Pairing belongs in onboarding or the primary owner flow, not
   Settings, and has no Save QR action.
-  See [Android enrollment UI](../apps/android/app/src/main/java/dev/peppy/mobile/EnrollmentScreen.kt)
+  See [Android enrollment UI](../apps/android/app/src/main/java/dev/peppy/mobile/enrollment/EnrollmentScreen.kt)
   and [iOS enrollment UI](../apps/ios/PeppyMobile/PhoneEnrollmentView.swift).
 
 ### Owner phone approval
@@ -74,7 +78,7 @@ semantic Kotlin and Swift names.
   the shared-secret method, then reveals the Vault key phrase only after device
   authentication, transiently, never in saved UI state, and clears it when the
   app leaves the foreground. This control does not apply to `connect_computer`.
-  See [Android owner flow](../apps/android/app/src/main/java/dev/peppy/mobile/OwnerPhoneApprovalScreen.kt)
+  See [Android owner flow](../apps/android/app/src/main/java/dev/peppy/mobile/approval/OwnerPhoneApprovalScreen.kt)
   and [iOS owner flow](../apps/ios/PeppyMobile/OwnerPhoneApprovalView.swift).
 
 ### Computer approval
@@ -108,7 +112,7 @@ semantic Kotlin and Swift names.
   missing policy conservatively for older servers. Do not offer first-claim
   destructive recovery or reset controls. This does not prohibit the existing
   owner-only **Delete vault** action, which requires exact `ERASE` confirmation. See
-  [Android account settings](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayAccountSettings.kt)
+  [Android account settings](../apps/android/app/src/main/java/dev/peppy/mobile/gateway/GatewayAccountSettings.kt)
   and [iOS Account](../apps/ios/PeppyMobile/PeppyMobileApp.swift).
 - Community owner and family-vault setup store a generated vault secret silently;
   show saved-secret feedback only after storage succeeds. Resume already
@@ -117,12 +121,12 @@ semantic Kotlin and Swift names.
 - An invite link and display name request a **new vault on the server**, not
   admission to another vault. Show waiting, denied, and expired states distinctly.
   After administrator approval, collect new-vault credentials and create the
-  vault. See [Android vault requests](../apps/android/app/src/main/java/dev/peppy/mobile/EnrollmentScreen.kt)
+  vault. See [Android vault requests](../apps/android/app/src/main/java/dev/peppy/mobile/enrollment/EnrollmentScreen.kt)
   and [iOS vault requests](../apps/ios/PeppyMobile/SelfHostedEnrollmentView.swift).
 - Hosted onboarding retains its save acknowledgement and confirmation screens;
   the acknowledgement is a UI step, not a replacement for protected native
   storage. Existing-vault admission and website billing are separate outcomes.
-  See [Android hosted enrollment](../apps/android/app/src/main/java/dev/peppy/mobile/HostedEnrollmentScreen.kt)
+  See [Android hosted enrollment](../apps/android/app/src/main/java/dev/peppy/mobile/enrollment/HostedEnrollmentScreen.kt)
   and [iOS hosted enrollment](../apps/ios/PeppyMobile/HostedEnrollmentView.swift).
 
 ## Contacts
@@ -131,14 +135,14 @@ semantic Kotlin and Swift names.
   action, not startup or background work. Offer only writable accounts as
   destinations for new contacts. Approval means pending OS work, not a completed
   write; show uncertain outcomes without implying success or automatic retry.
-  See [Android contact settings](../apps/android/app/src/main/java/dev/peppy/mobile/ContactSyncSettings.kt)
+  See [Android contact settings](../apps/android/app/src/main/java/dev/peppy/mobile/contacts/ContactSyncSettings.kt)
   and [domain contacts guidance](AGENTS.md#contacts).
 - iOS **Pause contact sync** leaves the last published book intact. **Retire**
   leaves phone contacts untouched and re-enabling starts a new book. Android's
   **Stop and retire** has the retirement effect; when requested while locked,
   show publication as pending until the next unlock. See
   [iOS contact settings](../apps/ios/PeppyMobile/ContactsSettings.swift) and
-  [Android contact host](../apps/android/app/src/main/java/dev/peppy/mobile/ContactSyncHost.kt).
+  [Android contact host](../apps/android/app/src/main/java/dev/peppy/mobile/contacts/ContactSyncHost.kt).
 - iOS selected Contacts access syncs only the selection; excluded contacts are
   not deletions. iOS does not sync notes. Its OS-scheduled updates may be delayed;
   do not promise immediate sync.
@@ -187,11 +191,11 @@ semantic Kotlin and Swift names.
 - Android notification access, mirroring capture, and vault unlock are separate
   states. **WiFi only** means active WiFi, excluding Ethernet and cellular.
   A queued test notification or MMS history import is not delivery or completion.
-  See [notification settings](../apps/android/app/src/main/java/dev/peppy/mobile/NotificationMirroringSettings.kt)
-  and [MMS settings](../apps/android/app/src/main/java/dev/peppy/mobile/MmsSettings.kt).
+  See [notification settings](../apps/android/app/src/main/java/dev/peppy/mobile/notifications/NotificationMirroringSettings.kt)
+  and [MMS settings](../apps/android/app/src/main/java/dev/peppy/mobile/mms/MmsSettings.kt).
 - Android own-number access is optional and per SIM route, for excluding this
   phone from group-MMS replies. Retain manual entry when access or detection is
-  unavailable. See [own-number settings](../apps/android/app/src/main/java/dev/peppy/mobile/OwnNumberSettings.kt).
+  unavailable. See [own-number settings](../apps/android/app/src/main/java/dev/peppy/mobile/telephony/OwnNumberSettings.kt).
 - iOS carrier, SMS/MMS, and notification-mirroring unavailable rows are status,
   not actionable toggles. Wake relay registration is explicit opt-in; hints may
   be delayed or missing and do not guarantee timely sync. See

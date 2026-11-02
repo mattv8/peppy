@@ -9,10 +9,12 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import dev.peppy.mobile.ui.SettingToggleRow
 import dev.peppy.mobile.ui.theme.PeppyTheme
+import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+
 
 class SettingToggleRowAccessibilityTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()

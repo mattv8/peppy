@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Draft, DraftInput } from "../bridge";
+import type { Draft, DraftInput } from "../bridge/bridge";
 import { DraftStore } from "./DraftStore";
 
 const draft = (overrides: Partial<Draft> = {}): Draft => ({

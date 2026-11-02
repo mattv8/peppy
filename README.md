@@ -1,215 +1,216 @@
 # Peppy
 
-[![CI](https://github.com/mattv8/peppy/actions/workflows/ci.yml/badge.svg?branch=production)](https://github.com/mattv8/peppy/actions/workflows/ci.yml)
+<div align="center">
+  <h1>Private messaging on a server you control.</h1>
+  <p><em>Connect browser, desktop, Android, and iOS clients to your self-hosted Peppy server.</em></p>
+</div>
 
-Peppy is a self-hosted messaging foundation for developer and operator evaluation. It includes an encrypted-envelope server, encrypted attachment storage, snapshots, explicit public image copies, a simulated gateway, native desktop client, Android SMS companion, and capability-gated Swift client.
+<p align="center">
+  <a href="https://github.com/mattv8/peppy/actions/workflows/ci.yml"><img src="https://github.com/mattv8/peppy/actions/workflows/ci.yml/badge.svg?branch=production" alt="CI" /></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0" /></a>
+</p>
 
-## Status
+<p align="center"><a href="CONTRIBUTING.md">Contributing Guide</a></p>
 
-Development remains in progress. The simulator exercises synthetic messages, not a carrier. CI builds development artifacts on pushes to `staging`; a production push rebuilds trusted artifacts only when stable signing is ready. Staging publishes prerelease artifacts automatically, and each green production push with ready signing automatically publishes a stable release. The "Release" workflow remains available from `production` for a selected version bump, explicit version override, or a `dry_run` test. Download prerelease and CI artifacts from [GitHub Releases](https://github.com/mattv8/peppy/releases) and [CI runs](https://github.com/mattv8/peppy/actions/workflows/ci.yml). All artifacts provide build evidence only:
+## Table of Contents
 
-- Android development artifacts contain only an automatically debug-signed APK;
-  they are not release artifacts.
-- macOS bundles and DMGs, Windows installers, and Linux packages are development outputs. macOS bundles are development bundles, not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources.
-- The iOS simulator app and unsigned device archive do not establish signing, store, or device eligibility. The archive is not an installable IPA.
+- [Overview](#overview)
+- [Quick Start](#quick-start)
+- [Clients](#clients)
+- [Post-install and first run](#post-install-and-first-run)
+- [Concepts](#concepts)
+- [Operations](#operations)
+- [Contributing](#contributing)
+- [License](#license)
 
-Official desktop update releases are separate protected artifacts. Stable releases
-run only for `production` dispatches or green `production` pushes; staging updates run only from pushes to
-`staging`. They use protected signing environments, version-bound updater
-signatures, signed checksums, and an explicit per-platform signing policy.
-Development artifacts and direct artifact dispatches are never update feeds and
-must not be treated as signed installers. Provisioning, key rotation, rescue
-bootstrap, Linux package version mapping, and repository-key trust requirements
-are documented in [`infra/release/README-updates.md`](infra/release/README-updates.md).
+## Overview
 
-The desktop provides unread/tray updates, native notification banners and an in-app feed for mirrored Android notifications. Android emulators can receive synthetic SMS. iOS has no carrier executor or third-party notification listener in this build. Native banner delivery depends on OS permission, system notification settings and platform installation requirements; browser previews cannot verify it.
+Peppy stores encrypted vault data on a server you run. Use the browser client at your server address, install the desktop client, or connect Android and iOS clients. Android can act as a companion gateway for supported SMS and experimental MMS; iOS does not provide carrier messaging in this build.
 
-## Breaking rename boundary
+### Features
 
-Peppy is a clean-install boundary with no compatibility or migration path for previous identities, encrypted data, or backups. Existing databases fail the altered migration checksum checks. App IDs install separately, and the Peppy Compose project creates separate volumes. Production requires an explicit `PEPPY_ENV=production`; an old environment variable is ignored and the default remains development. The production image is `peppy-server`.
+- Encrypted vault envelopes, private attachments, snapshots, and device synchronization.
+- Browser messaging served at the Community server's public root by default.
+- Native desktop, Android, and iOS clients.
+- Android companion features for supported SMS, opt-in experimental MMS, contacts, and notification mirroring.
+- Optional push-relay wake hints for supported mobile platforms.
 
-## Components
+### Status
 
-- **Server:** device authentication, ordered encrypted envelopes, encrypted attachments, snapshots, and public image-copy endpoints.
-- **Browser client:** the shared messaging UI with Rust/WASM, encrypted browser storage, and a single SharedWorker session across tabs. The server image bundles its assets and Community serves it at the public root by default. See the [browser build and hosting guide](apps/web/README.md).
-- **Gateway simulator:** synthetic SMS and carrier-effect exercise for local development.
-- **Native clients:** Tauri desktop, Android SMS companion with opt-in experimental MMS, and capability-gated Swift client.
+Development remains in progress. The gateway simulator uses synthetic messages and does not represent a carrier. CI and release downloads are build evidence, not proof of carrier support, store readiness, installer trust, or production readiness. Peppy has not received an external security audit.
 
-Read the [Android](apps/android/README.md), [iOS](apps/ios/README.md), [mobile bindings](crates/mobile-bindings/README.md), and [desktop](apps/desktop/README.md) guides for component limits and native details.
+SMS and MMS travel outside Peppy's encryption boundary. Keep private originals private: a public image link publishes a separately supplied plaintext derivative.
 
-## Contacts
+### Components
 
-Android and iOS can publish their address books to the encrypted vault. Enable
-contact sync on each phone; each phone owns its book and applies edit requests
-from other devices. The desktop Contacts view browses and edits those books.
-New-contact destination and Auto / Confirm / Off edit policy are configured on
-the owning phone. Large deletions require approval there.
+| Component | Use |
+| --- | --- |
+| Peppy server | Authenticates devices and stores encrypted envelopes, attachments, and snapshots. |
+| Browser client | Messaging UI served with the Community server image. |
+| Desktop client | Native Tauri client for macOS and Windows; Linux packages ship as stable release artifacts. |
+| Android gateway | Companion for supported SMS, experimental MMS, contacts, and notification mirroring. |
+| iOS client | Sync, contacts, device management, and optional wake enrollment. Carrier messaging and notification listening are unavailable. |
+| Gateway simulator | Synthetic SMS and carrier-effect exercise for local development only. |
 
-Contacts include structured names, nickname, labeled phones/emails,
-organization/title, postal addresses, birthday, Android notes and normalized
-avatars. Photos are private encrypted 256×256 JPEG attachments, at most 64 KiB.
-Deleted contacts retain restore data for 90 days; restoring requests a new OS
-contact on the owning phone. Shared numbers remain distinct contacts, and
-ambiguous name matches fall back to the address.
+See [Clients](#clients) for installation, setup, permissions, and platform limits. Advanced operators and contributors can use the [agent references](.agents/AGENTS.md).
 
-Contact writes require a request from the phone's active encryption epoch.
-Rotating keys rejects older requests that have not received a write permit;
-already-issued uncertain attempts remain reconcilable and are never reissued.
+### Architecture
 
-Phone permissions, locked keys and OS scheduling affect freshness. Android uses
-bounded WorkManager passes; iOS also uses discretionary background refresh and
-processing. Neither promises immediate remote edits. See the platform guides for
-field restrictions and verification limits.
+```mermaid
+flowchart LR
+  subgraph Boundary[Peppy encryption boundary]
+    direction LR
+    Desktop[Desktop]
+    Browser[Browser]
+    Android[Android]
+    IOS[iOS]
+    API[Peppy server API]
+    Postgres[(Postgres)]
+    Seaweed[SeaweedFS S3]
+  end
+  Desktop <--> API
+  Browser <--> API
+  Android <--> API
+  IOS <--> API
+  API <--> Postgres
+  API <--> Seaweed
+  API <--> Relay[Optional push relay]
+  Relay --> APNS[APNs]
+  Relay --> FCM[FCM]
+  Android <--> Gateway[Android gateway]
+  Gateway <--> Carrier[Carrier SMS/MMS]
+  Simulator[Gateway simulator<br/>development only] <--> Gateway
+  style Carrier stroke-dasharray: 5 5
+  style Gateway stroke-dasharray: 5 5
+```
 
-## Notification mirroring
+Carrier SMS/MMS is outside the encryption boundary. Push relays carry content-free wake hints and provide best-effort wake-up, not message delivery evidence.
 
-Upgrade all participating clients before enabling mirroring on Android. Older builds quarantine unfamiliar notification records and do not retry them automatically after upgrade.
+## Clients
 
-Mirroring requires Android notification access and an enabled mirroring switch. Apps are allowed by default; per-phone app filters can be changed on the companion or desktop. Peppy's own notifications, the default SMS app's duplicate notifications, group summaries, ongoing/progress notifications and empty notifications are excluded. Locked sync does not collect a plaintext notification backlog.
+All clients can connect with the server address and vault shared secret. An authorized browser or desktop owner can also show **Connect your phone**: scan it on the phone, compare the locally computed verification codes, then approve encrypted key transfer or enter the shared secret. The server receives neither the QR secret nor plaintext vault keys.
 
-The desktop's Notifications view provides the feed, app mute controls and dismissal. Phone dismissals propagate through sync. Desktop dismissal requests reach the phone at its next sync; Android background scheduling can delay this by 15 minutes or longer. This is not an immediate remote-control channel. Group summaries may remain on the phone after their children are dismissed.
+### Android gateway
 
-The feed shows up to 1,000 active notifications, newest first; bulk dismissal handles up to 100 per action. The Android companion's **Refresh app list** reloads observed apps and synchronized filter choices.
+Install the Android APK from the matching `android-v*` release. It is a companion to the default messaging app, not a replacement. After enrollment and unlock, use **Mirroring**, **SMS**, **Contacts**, **Account**, and Settings. Conversation and composition stay in the shared product interface.
 
-Desktop Settings controls message banners, mirrored-notification banners, and full or hidden banner previews. These preferences are local to each desktop. Use the in-app feed for navigation and dismissal; native banner activation and notification-center interactions vary by OS.
+Android can be the first owner of a self-hosted server. The setup wizard shows whether first claim is open or token-protected. Open claim needs no setup code. Token-protected claim needs the operator code and an administrator password, then generates the vault shared secret. The setup code authorizes only the initial claim; the password manages the server; the secret protects vault data. A phone that joins an existing vault is a gateway. Phones do not show a pairing QR, **Add a computer**, or a QR in Settings. See [Recover from an unwanted first claim](#recover-from-an-unwanted-first-claim) if someone else claims the server.
 
-### Storage and trust boundaries
+For Peppy Hosted, use native Google sign-in to create or access an account. Billing opens Peppy's website and can require the same Google account. The app checks the server entitlement before creating a vault. Android keeps passphrase generation and confirmation in the native interface; it resumes interrupted setup with protected material. Native Apple authentication is unavailable.
 
-Notification titles, text and app metadata travel inside encrypted envelopes. The server's replay log defaults to 30 days. Compatible clients can explicitly supersede notification state for compaction after it leaves replay retention; dismissal does not immediately erase previously synced ciphertext. Muting cannot recall an upload already in flight. Filters changed remotely take effect on the phone after it syncs.
+The Account tab shows the server-reported role and device list. Any device can disconnect itself. Only an owner can remove another device or access the typed-`ERASE` vault-delete control. Disconnect archives local encrypted state; it does not reset the device or prove a revoked credential can sync again.
 
-Notification state shares the existing 100,000-record snapshot import limit. Coalescing and compaction reduce superseded state, but legacy records and immutable message history still consume storage and bootstrap capacity. Compaction does not remove this vault-wide limit.
+Android can capture supported SMS broadcasts and submit permitted SMS commands. It requests `RECEIVE_SMS` and `SEND_SMS`. Experimental MMS capture also needs `READ_SMS` and `RECEIVE_MMS`; notification mirroring needs Android notification-listener access. Peppy does not request `WRITE_SMS`, the default-SMS role, or hidden carrier APIs. Default-SMS status and SIM availability do not grant RCS access.
 
-Every passphrase holder retains the same authority within the vault, including the ability to request a phone notification's dismissal. Notification mirroring does not change carrier SMS/MMS encryption or add forward secrecy.
+SMS/MMS synchronization, silent-message skipping, and Wi-Fi-only media are permission and capability gated. Wi-Fi-only means an active Wi-Fi transport, not an unmetered connection. New notification mirroring is off by default. It excludes Peppy's own notifications, duplicate default-SMS notifications, group summaries, ongoing/progress notifications, and empty notifications. Enable it only after updating participating clients; older builds quarantine unfamiliar records without retrying them after an upgrade.
 
-### Compaction and recovery
+**Sync read status with phone** is off by default. It reads the provider read flag for captured inbound SMS and downloaded MMS, then marks that exact message read in Peppy and on authorized devices. It never changes phone messages or marks messages unread. It needs SMS sync and `READ_SMS`; MMS also needs MMS sync. It does not need notification access and works on Android 8. Each pass considers up to 500 unread candidates per transport and catches up after later provider changes, foreground/read-permission recovery, or 15-minute periodic work. Android may delay background work, so catch-up has no strict delivery time.
 
-The server can compact a vault only after every non-revoked device declares
-support for generation-fenced snapshots. Upgrade participating clients together;
-an older device blocks compaction. Declaring support is a build-level promise:
-downgrading a declared client can make that client unable to restore a compacted
-snapshot.
+The optional SMS-only Peppy-to-phone read action needs Android 9+ and notification access. It uses the exposed mark-read action of the current default messaging app only after strict, unambiguous captured-SMS evidence, and never retries a consumed, expired, cancelled, crashed, or uncertain attempt. It cannot retract an action already handed to Android. It may wait for an unlocked phone. RCS remains unavailable, and a conversation-wide app action can include RCS or another simultaneous message.
 
-Contact producers require a compatible server and the active epoch's compaction
-key. An upgraded device with an older cached-key format must unlock once with
-the shared passphrase. Existing message decryption can still work while contact
-sync waits for that unlock. Local history is indexed in bounded passes before
-contact production resumes. Missing historical epoch keys also pause contact
-production: unlocking the current epoch cannot recover lost older keys. Keep
-historical key material needed to read retained history. A device that has not declared snapshot support
-pauses vault-wide cleanup even when the other devices can sync contacts.
+Commands use the current default-SMS subscription. Commands for a changed or missing route stay pending rather than moving to another SIM. MMS never downgrades to SMS. Carrier behavior, restricted-permission approval, and physical SMS/MMS delivery require a device and carrier test; an emulator does not establish them.
 
-Compaction follows explicit references to superseded records, rather than treating
-the last upload as the latest state. A change to the retained snapshot set advances
-its generation, causing an affected import to restart. Carrier commands are not
-compaction targets. Unmarked legacy records are retained unless an eligible
-replacement explicitly supersedes them.
+Enable contact sync separately. The phone publishes and owns its address book and applies remote edits under its local Auto, Confirm, or Off policy. Permission loss and incomplete scans do not delete contacts. Photos are private encrypted 256×256 JPEG attachments limited to 64 KiB. Doze, force-stop, provider behavior, and background scheduling can delay sync.
 
-Compaction exposes opaque grouping keys, supersession relationships and deletion
-timing to the server. Reference-tracked private attachments additionally expose
-their association with opaque envelope identities so the server can check whether
-reclamation is safe. These metadata do not contain contact fields, photo plaintext
-or encryption keys. Public image copies remain separate plaintext objects with
-their own lifecycle.
+Experimental MMS needs clients that support content version 2+. The default messaging app downloads carrier MMS; Peppy scans provider parts and uploads completed encrypted records. It uses the carrier-reported size limit or a conservative 300 KiB fallback. Confirmed send differs from delivery, and uncertain sends do not retry automatically. Enabling capture starts resumable history capture for downloaded sent and received MMS, not RCS or undownloaded attachments. Turning capture off keeps its checkpoint. Version-3 captures add encrypted image previews and supported-video posters/duration; a preview failure keeps the original. Desktop and browser clients can browse previews and request originals. Group replies use the default-SMS SIM's own number, read with `READ_PHONE_NUMBERS` on Android 13+ or existing `READ_SMS` on earlier releases; enter it manually when the carrier does not provide it.
 
-Device bearer credentials authorize storage writes and retention operations.
-Encryption protects contents; it does not protect ciphertext availability from
-a compromised authorized credential. Revocation and operator backups remain
-separate controls. Superseded ciphertext is not removed immediately, and retained
-duplicate-detection identities continue to consume server storage after compaction.
+For eligible Peppy Hosted enrollment, Background updates register automatically when the hosted server advertises FCM support. You can pause or resume the setting in Account. Community relays retain manual origin and enable controls. Registration can be delayed by connectivity, process death, quota, or locked keys. Wakes contain no message content, do not authorize carrier work, and do not promise immediate delivery. The repository does not claim a live signed FCM delivery path.
 
-## Security boundaries
+Diagnostics are off by default. On a test phone, enable **Settings → Diagnostics** to record bounded numeric timing and counters locally, then turn it off after collecting a trace. **Share log** creates a bounded private snapshot. Peppy does not collect logcat, message bodies, phone or provider IDs, URLs, credentials, response bodies, or exception text. Emulator tests and APK builds do not establish carrier, FCM, store, physical-network, latency, or battery behavior.
 
-Each vault has a generated shared secret. Clients derive vault keys locally. A new phone can receive keys through an explicitly approved, encrypted QR pairing exchange or enter the shared secret manually. The server API never receives the shared secret or plaintext transferred keys. The protocol does not claim forward secrecy. Public verification material permits offline guessing, so retain the generated random multiword secret.
+### Desktop
 
-Every passphrase holder has the same cryptographic authority. Credential revocation does not remove access from a passphrase holder. Rotate the passphrase, activate the new epoch on each participating client, and keep historical epoch material needed to read history. A gateway blocks commands from a retired epoch. The composed protocol has not received an external security audit.
+Install stable macOS, Windows, or Linux release artifacts from [GitHub Releases](https://github.com/mattv8/peppy/releases). Enter the server address to discover its setup state. The desktop client can make the first self-hosted claim, sign in as an administrator, or enroll with a shared secret. It keeps passwords and vault secrets in native dialogs. The setup and recovery rules match [First-run setup and device connections](#first-run-setup-and-device-connections) and [Recover from an unwanted first claim](#recover-from-an-unwanted-first-claim).
 
-SMS and MMS move in plaintext outside Peppy's encryption boundary. A gateway records carrier attempts durably and does not resend an attempt with an unknown carrier outcome. Snapshot history cannot execute carrier work. Copying a client database back behind the application is not detectable. Public attachment copies are separately supplied PNG, JPEG, or WebP plaintext derivatives. Their share tokens and expiry/revocation controls do not encrypt them; never upload private originals as public copies.
+An enrolled owner uses **Add phone** to show one **Connect your phone** QR. Settings does not show QR codes. App lock is off by default. When enabled, it takes effect at the next start and uses a local native password separate from the server password and vault secret.
 
-### Attachment storage encryption
+MMS needs an enabled, permission-ready Android gateway with MMS content version 2+. Upgrade paired clients together. Groups and attachments select MMS; replies in an MMS conversation keep that transport, and a missing capability preserves the editable draft. Retry controls retry the encrypted file transfer, not the carrier message. The client downloads version-3 previews for browsing and requests originals on demand. Legacy originals up to 2 MiB download automatically. It groups consecutive images from the same known sender within three minutes, preserves each message's status, and provides a paged **Media** view with a keyboard-navigable viewer. Video and audio start only after user action; unsupported formats retain **Save**. **Save** uses a native dialog and never exposes filesystem paths or encryption keys to the webview. Media viewing or saving does not create a public link. Carrier limits include encoded headers, so the displayed estimate is only a lower bound; a fallback limit is labeled as an application limit, and gateway validation can reject it. Unknown carrier outcomes do not retry automatically. Incomplete phone acquisition remains in the phone health view until all parts arrive; after that, the event remains in the outbox until upload, and upload failures appear in transfer health. Android MMS remains experimental pending physical-carrier acceptance; RCS is unavailable.
 
-Private attachment ciphertext and explicitly published plaintext image derivatives are encrypted at rest. Peppy requests automatic, backend-managed S3 SSE-S3 encryption; operators do not create, enter, or configure a separate Peppy storage-encryption key. SeaweedFS Compose deployments generate a hidden machine key once in the `seaweed-filer-data` volume and retain filer metadata and volume data in `seaweed-volume-data`. S3 volume chunks store SSE ciphertext, and `-filer.encryptVolumeData` protects filer-originated writes. Do not enable `-s3.encryptVolumeData` with SSE-S3 on the pinned SeaweedFS image: that interaction corrupts reads. Back up and restore both volumes together. A container or host administrator can read the key from the process environment or persisted filer state, and filer backups contain it. This protects stored data from disk or object access without that state; it does not protect against compromise of the complete host or filer state.
+Enable contact sync on each phone before using **Contacts**. You can search, edit supported fields, crop a photo, create or delete a contact, and inspect the owning phone's result. A request stays pending until that phone applies it. iOS notes are read-only. Names and avatars resolve for messaging and recipient discovery without changing stored delivery addresses; ambiguous shared numbers fall back to the number. Unsaved edits remain when you switch contacts, books, or the main rail until you save or discard them. **Recently deleted** retains contacts for 90 days. **Forget** permanently hides a book and its name/avatar matches on this desktop but does not delete phone contacts. **Repair** rebuilds the desktop cache from a fenced server snapshot, preserves phone-owned state and pending effects, and cannot recover an upload that never reached the server. It reports missing keys, incomplete repair, and paused retention. See [Compaction and recovery](#compaction-and-recovery).
 
-Published derivatives remain plaintext when delivered through their existing `public/` prefix and retain their expiry and revocation behavior. This does not make those derivatives end-to-end encrypted and does not add forward secrecy.
+On macOS and Windows, closing the main window keeps Peppy in the menu bar or system tray. Use **Open Peppy** to return or **Quit Peppy** to exit; quit waits for draft saves. The tray badge shows unread totals from `1` through `99+`, and its tooltip shows the exact total. An app or vault-key lock shows a lock badge, while an unavailable or revoked account restores the plain Peppy icon. Peppy keeps its tray status item for the process lifetime. Windows refreshes DPI rasterization when the badge changes or a failed apply retries; an unchanged state does not recreate the icon. **Start at login** is off by default. If the tray cannot start, Peppy opens the main window.
 
-SSE response metadata and ciphertext framing are backend and format assertions, not independent proof that stored bytes are encrypted. Peppy fails startup when a custom S3 backend does not confirm the required SSE-S3 behavior; its initial multichunk storage probe is bounded at 360 seconds, while recurring readiness uses the configured shorter timeout. On versioned backends (Backblaze B2 and versioned AWS), deletion removes every version of an object; the S3 access key needs ListObjectVersions and DeleteObjectVersion (B2: listFiles and deleteFiles), which startup checks, and changing versioning requires a restart. Crash-orphaned probes can be expired with a lifecycle rule scoped to the `peppy-storage-probe-` and `peppy-readiness-check-` prefixes. Hosted-provider support and its image-pin rollout are unverified in this repository and require follow-up in the private deployment repository.
+You can pin up to eight floating conversations. Use the popout button to open one, **–** to collapse it, **×** to save its draft and close it, and **Dismiss head** to unpin it. Peppy remembers each conversation's size and position and restores saved pins collapsed when the local account is available. Floating conversations work offline and do not require unlocked device sync. Native circle input, focus, and multi-monitor behavior require testing on each target OS.
 
-## Local server and TLS experiments
+### iPhone and iPad
+
+This SwiftUI client can enroll, unlock, sync, manage its device account and contacts, and opt into wake updates. It has Mirroring, SMS, Account, and Settings surfaces, while conversation, composition, and feeds stay in the shared product interface. It cannot execute or listen for carrier SMS/MMS, listen to system notifications, or use RCS. It reports those functions as unavailable.
+
+The client can make a first claim or join a vault with a shared secret or approved phone QR. It uses device-only Keychain storage; backup does not restore or synchronize those records. Only owners can remove another device or see vault deletion. Disconnect archives the encrypted database, keys, and queued work; it does not reset the device or prove a revoked credential can sync.
+
+For Peppy Hosted, native Google sign-in uses the app's account session and the server's entitlement checks. Billing opens Peppy's website and can require signing in again with the same Google account. Native Apple authentication is unavailable.
+
+Foreground sync stops when the app leaves the foreground. Contacts can request bounded background work, but iOS decides when it runs. Background execution does not promise immediate remote edits. For eligible Hosted enrollment, APNs registration and wake updates are automatic unless you had turned the relay setting off. The toggle stops registration and local wake processing. Community relays remain an optional manual setup. Hints have no message body, only start bounded sync or contact work, and never authorize carrier work. APNs and background scheduling do not prove delivery or immediate locked-phone work.
+
+### Browser
+
+Open your server's HTTPS address in a desktop browser. The client requires SharedWorker, WebAssembly, IndexedDB, Web Locks, and same-origin HTTPS. It starts with 512 MiB of Emscripten memory; insufficient allocation prevents startup. IndexedDB stores encrypted checkpoints and notification preferences, subject to browser storage limits. Constrained and mobile browsers can show an unsupported message.
+
+The browser client uses the server's canonical API origin for enrollment and gets the QR origin from `/web/config.json`. It handles passphrases and credential imports outside React state, and does not return device tokens or encryption keys to the page. Browser storage retention remains platform-dependent. Browser operation does not prove production deployment, phone enrollment, carrier execution, or native integration.
+
+## Quick Start
+
+### Prerequisites
+
+- Docker Engine with Docker Compose v2.24 or newer.
+- The Community image, `hub.docker.visnovsky.us/library/peppy-server`, pinned to an immutable digest.
+- For public HTTPS, a hostname that resolves to the server and allows ports 80 and 443.
+
+### Setup
+
+1. Create your environment file.
+
+   ```sh
+   cp .env.example .env
+   ```
+
+    Set strong, unique values for `POSTGRES_PASSWORD`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY`. Set `PEPPY_SERVER_IMAGE` in your shell or `.env` to the release's immutable `hub.docker.visnovsky.us/library/peppy-server@sha256:...` reference. The Community overlay requires that variable. The [Community image guide](.agents/ops/backup-restore.md#prebuilt-community-edition) covers image verification. `.env.example` defaults to development; set `PEPPY_ENV=production` for production.
+
+2. Start the Community server.
+
+   ```sh
+   docker compose -f docker-compose.yml -f infra/compose/compose.community.yml up -d
+   ```
+
+   The default listener is `http://127.0.0.1:7000`. PostgreSQL and SeaweedFS do not publish host ports. The server serves the browser UI at its public root unless `WEB_UI_ENABLED=false`.
+
+3. Optional: add the supplied Caddy TLS overlay. Set `PUBLIC_HOST` to the externally reachable HTTPS hostname. Set `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` to that external HTTPS origin, then run:
+
+   ```sh
+   docker compose -f docker-compose.yml -f infra/compose/compose.community.yml -f infra/compose/compose.caddy.yml up -d
+   ```
+
+   Caddy publishes ports 80 and 443. If you use another reverse proxy, set `TRUSTED_PROXY_CIDRS` only to its direct peer addresses or narrow CIDRs. The Caddy overlay is a starting configuration, not production-readiness evidence.
+
+4. Open the server address in a browser or enter it in a desktop or mobile client.
+
+For a source-based local development stack, use `just dev-setup` and `just dev-up`. Run `just smoke-infra` to start the root stack, check `/healthz` and `/readyz`, and run the storage check.
+
+## Post-install and first run
 
 ### First-run setup and device connections
 
-Open the server's HTTPS address in the web app, or connect a desktop or phone to
-that address. The setup screen identifies whether the unclaimed community server
-is **open** or **token-protected**. On an open server, the first device that
-completes setup becomes the administrator and creates the first vault. On a
-token-protected server, that device must also enter the operator setup code.
-Opening a page or fetching discovery data does not claim the server.
+An unclaimed server is either **open** or **token-protected**. On an open server, the first device that completes setup becomes the administrator and creates the first vault. A token-protected server also requires the operator's setup code. Opening a page or fetching discovery data does not claim the server.
 
-Set `PEPPY_SETUP_TOKEN` to a nonempty operator code of at least 32 UTF-8 bytes
-to require that code for the first claim. Configure the same token on every
-replica. Leave it absent or empty for open first claim; the server does not
-generate, log, or provide a fallback token. An existing unclaimed deployment
-upgraded without `PEPPY_SETUP_TOKEN` becomes open. Set the token before upgrading
-when token-protected first claim is required.
+Set `PEPPY_SETUP_TOKEN` to a nonempty value of at least 32 UTF-8 bytes to require a setup code. Configure the same value on every replica. An absent or empty value allows open first claim. Peppy does not generate, log, or recover a fallback token. An unclaimed installation upgraded without the setting becomes open, so set the token before upgrading when you need protected first claim.
 
-Use a current client for open first claim. A current client treats an older
-generated-code server that does not advertise this policy conservatively and
-requests a setup code. A legacy client may unnecessarily show or require a
-setup-code field for an open server; that prompt does not mean the server is
-token-protected.
+Use a current client for open first claim. A current client asks for a code when an older generated-code server does not advertise its setup policy. A legacy client can show or require a setup-code field for an open server; that prompt does not mean the server is token-protected.
 
-The setup code authorizes only the initial claim. The owner username and password
-authorize management of that owner's vault; the administrator owner can also
-manage the server. The generated vault shared secret protects vault data and
-admission to that vault. Keep the username/password and the vault secret
-separate, and save the generated secret when prompted. None of these values can
-be recovered by looking in server logs.
+The setup code authorizes only the initial claim. The administrator username and password authorize management; the generated vault shared secret protects vault data and admits devices. Keep the three credentials separate and save the generated vault secret when prompted. Server logs cannot recover them.
 
-#### Add family vaults
+Use **Add phone** in the browser or desktop workbench to show **Connect your phone**. Compare the verification codes and approve the connection. Choose encrypted key transfer or enter the shared secret on the new device. You can also enter the server address and shared secret directly. Connecting a device cannot grant OS permissions or enable unsupported RCS access.
 
-After the first claim, the administrator uses **Manage server** to create a
-one-time invite link. Send that link to the intended requester. The requester
-opens the link, provides a display name, and waits for the administrator to
-approve or deny the request in the live **Manage server** view. After approval,
-the requester chooses a distinct owner username and password, creates a new vault
-shared secret, and finishes setup as that vault's owner. The owner can then
-manage that vault's devices and storage; they do not gain administrator access or
-access to other vaults.
+An administrator can create a one-time family-vault invite in **Manage server**. Send it only to the intended requester. After the administrator approves the request, the requester creates a separate owner login and vault secret. That owner can manage only that vault's devices and storage; they do not gain administrator access or access to other vaults. Invite links authorize one vault request; they do not grant access to an existing vault or its secret. Vaults do not appear on public setup screens. Browser invite requests exist only in the current page memory, so a reload consumes the invite but loses the request checkpoint.
 
-Do not publish invite links. An invite token authorizes one vault request, not
-access to an existing vault or its shared secret. Vaults are not listed on public
-setup screens.
+Existing installations that migrate to this model name their administrator owner `admin`. That administrator can sign in with an empty username or with `admin`; additional owners use their own usernames and passwords. The live administrator view uses SSE and permits at most four streams per administrator session and 32 per server process. Replicas weaken that effective deployment-wide limit because the limits are per process.
 
-Existing installations that migrate to this model name their existing
-administrator owner `admin`. Sign-in accepts an empty username for that
-administrator, but entering `admin` explicitly is equivalent. Each additional
-owner signs in with their own username and password.
-
-On the browser, a pending invite request exists only in the current page's
-memory. Reloading that page loses the request checkpoint while leaving the invite
-consumed. The administrator must deny the orphaned request or let it expire, then
-issue a new invite.
-
-Live administrator updates use server-sent events (SSE). The server permits at
-most four SSE streams for an administrator session and 32 streams in one server
-process. These limits are per process, so running replicas weakens the effective
-deployment-wide limit.
+The Manage server view lists devices, gateway status, and storage usage, and supports device revocation. Quota and retention values are read-only. It is not a backup or restore interface.
 
 ### Recover from an unwanted first claim
 
-If a stranger completes the first claim, there is no password-reset or automatic
-reclaim path. For an affected self-hosted deployment, stop it and remove only its
-Peppy database and attachment state, then start it again and complete setup
-privately. This permanently destroys the server's vault data and attachment
-ciphertext, along with all other state in those volumes; it is not general
-password recovery.
+If someone else completes the first claim, Peppy cannot reset the password or reclaim the server. Stop the affected deployment, remove only its dedicated Peppy database and attachment state, then start it and complete setup privately. This permanently destroys vault data and attachment ciphertext; it is not password recovery.
 
-The root Compose file defines the three state volumes as `postgres-data`,
-`seaweed-volume-data`, and `seaweed-filer-data`. Docker prefixes those names with
-the Compose project name. Before removal, inspect the exact project-prefixed
-names and Compose labels. Set the project name and every `--env-file` and `-f`
-option to the actual affected installation, including its community-image and TLS
-overlays where used. Do not use `docker compose down -v`, and never delete volumes
-from another project or shared storage.
+For the root Compose project, inspect the project-prefixed `postgres-data`, `seaweed-volume-data`, and `seaweed-filer-data` volumes before removal. Keep the same Compose project, environment file, and overlays when you stop and restart the affected deployment. Do not run `docker compose down -v`, and never remove volumes from another project. For external storage, clear only Peppy's dedicated database and attachment state. Read the [backup and restore guidance](.agents/ops/backup-restore.md) before any recovery.
 
 ```sh
 # Set these to the affected deployment only. Do not use the persistent dev stack.
@@ -243,43 +244,17 @@ docker volume rm "${VOLUMES[@]}"
 compose up -d
 ```
 
-For an external PostgreSQL database or object store, clear only the dedicated
-Peppy database and dedicated Peppy attachment state for the affected deployment.
-Do not delete a shared database service, bucket, or object store wholesale.
-
 #### Downgrade warning
 
-The multi-vault database down migration is lossy for secondary web logins. It
-preserves each secondary vault and its data, but removes the secondary owner's
-server login. Downgrade only with a recovery plan for the affected owners; it is
-not a way to remove their vault data.
+The multi-vault database down migration preserves secondary vaults and their data, but removes each secondary owner's server login. Downgrade only with a recovery plan for affected owners; it cannot remove their vault data.
 
-The web app's **Manage server** page lists devices, gateway status and storage
-usage, and supports device revocation. Quota and retention values are read-only.
-It is not a database backup/restore interface.
+### Breaking install boundary
 
-Use **Add phone** in the web or desktop workbench. There is one QR format:
-**Connect your phone**. Compare the verification codes and approve the connection.
-Choose encrypted key transfer or manual shared-secret entry. Alternatively,
-enter the server address and shared secret on the new device without using a QR.
-Hosted enrollment additionally requires the account's available Apple/Google
-sign-in and entitlement checks. No QR appears in Settings, and there is no
-credential-file onboarding or reversed **Add a computer** flow.
+Peppy uses a clean-install boundary. It has no compatibility or migration path for previous identities, encrypted data, or backups. Existing databases fail altered migration checksum checks. Peppy app IDs install separately, and its Compose project creates separate volumes. Production requires `PEPPY_ENV=production`; the default is development. The production image is `peppy-server`.
 
-After enrollment, grant the supported mirroring permissions on the phone.
-Connecting a device cannot grant OS permissions or enable unsupported RCS access.
-Desktop application locking is optional and disabled by default; its local
-password is separate from the server password and vault secret.
+Hosted enrollment also requires the account's available Apple or Google sign-in and entitlement checks. Settings shows no QR code, and Peppy has no credential-file onboarding or reversed **Add a computer** flow. Desktop **App lock** is optional and off by default; its local password is separate from the server password and vault secret.
 
-This enrollment redesign is a breaking foundation change, not an upgrade path
-for older pairing deployments. The application does not erase existing databases
-or client profiles automatically.
-
-The local API publishes on `127.0.0.1:7000`; PostgreSQL and SeaweedFS have no host ports. `/healthz` reports whether the process can serve requests. `/readyz` also checks PostgreSQL, migrations, and, when configured, a bounded attachment-store probe. `just smoke-infra` starts the stack, checks both routes, and runs the storage contract check.
-
-To use another local API port, keep all three override values aligned:
-
-If your `.env` predates the 7000 default, update `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` (and `API_HOST_PORT`, if set) to the same port, or set `API_HOST_PORT=8080` to keep the old port.
+The local API publishes on `127.0.0.1:7000`; PostgreSQL and SeaweedFS have no host ports. If `.env` predates the 7000 default, align `PUBLIC_API_URL`, `PUBLIC_ATTACHMENT_URL`, and `API_HOST_PORT`, or set `API_HOST_PORT=8080` to retain the old port. For another local port:
 
 ```sh
 export API_HOST_PORT=18080
@@ -288,39 +263,58 @@ export PUBLIC_ATTACHMENT_URL=http://127.0.0.1:18080
 docker compose --env-file .env -f docker-compose.yml up
 ```
 
-For a public TLS experiment, set `PUBLIC_HOST` and add `-f infra/compose/compose.caddy.yml` to the Compose command. Community serves the browser UI and API together at `https://PUBLIC_HOST/`; set `WEB_UI_ENABLED=false` to opt out of the UI. Keep `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` as external HTTPS origins, and keep `S3_INTERNAL_ENDPOINT` internal. Set `TRUSTED_PROXY_CIDRS` to only the direct reverse proxy's IP addresses or narrow CIDRs and keep it aligned with the proxy topology. If it is empty, forwarded addresses are ignored and clients behind one proxy share that proxy's rate-limit bucket. The Caddy overlay is the only supplied configuration that publishes ports 80 and 443. It is not production-readiness evidence.
+## Concepts
 
-## Develop and contribute
+### Contacts
 
-Start with [CONTRIBUTING.md](CONTRIBUTING.md) for container, Android, and native desktop workflows.
+Enable contact sync on each phone. Each phone owns its address book and applies edit requests from other devices under its local Auto, Confirm, or Off policy. Desktop can browse and request edits. Large deletions require approval on the owning phone, and phone permissions, locked keys, and OS scheduling can delay changes.
 
-Operators must read [backup and restore guidance](infra/compose/README.md) before recovery. A restore rewinds revocations and cursors and requires reconciliation and client resynchronization before service access resumes.
+Contacts support structured names, nicknames, labeled phone numbers and emails, organization and title, postal addresses, birthdays, Android notes, and normalized avatars. Photos are private encrypted 256×256 JPEG attachments capped at 64 KiB. Deleted contacts retain restore data for 90 days. Shared numbers remain separate contacts; ambiguous names fall back to the address.
 
-## Release boundary
+### Notification mirroring
 
-Releases are git tags; checked-in manifests keep development placeholder versions and CI stamps the computed version into each build.
+Update participating clients before you enable Android notification mirroring. Older builds quarantine unfamiliar notification records and do not retry them automatically after an upgrade. Android requires notification access and the mirroring switch; apps are allowed by default, with per-phone filters available on the companion or desktop. Peppy's own notifications, duplicate default-SMS notifications, group summaries, ongoing or progress notifications, and empty notifications are excluded. Locked sync does not collect a plaintext notification backlog.
 
-- **Staging prereleases (`v*`):** when CI passes for a push to `staging`, it publishes the GitHub prerelease `vX.Y.Z-staging.N` with desktop assets, where `X.Y.Z` is the next version predicted from Conventional Commits and `N` counts commits since the last stable tag. The WiX version code retains the monotonic prerelease sequence. The newest 10 prereleases per stream are kept. The server and relay images are pushed only after the same SHA's `gate` job succeeds, as `hub.docker.visnovsky.us/library/peppy-server:staging` and `hub.docker.visnovsky.us/library/peppy-push-relay:staging`, plus immutable `sha-<commit>` tags. The web app ships inside the server image and has no separate release.
-- **Production edge and stable:** after CI's gate and both production `:edge` image publishers succeed for a `production` push, the same SHA automatically creates the next `v*` stable release and publishes both Harbor images as `X.Y.Z`, `X.Y`, `latest`, and `X` from `1.0.0`; the immutable SHA tags are promoted rather than rebuilt. Conventional Commits choose the automatic major/minor/patch bump; pushes with no releasable commits use a patch fallback. A stale or duplicate automatic release no-ops. When all stable signing inputs are unconfigured, an automatic release visibly skips with a warning until they are provisioned; partial configuration fails, and manual releases remain fail-closed. CI and stable-release concurrency each retain only one pending run, so a burst can cancel an intermediate whole CI run before it gets a gate or edge image; a pending manual or automatic stable release can likewise replace the other and is shown as cancelled. The **Release** workflow remains available from `production` with inputs for `bump` (`auto`, `patch`, `minor`, `major`), an optional explicit `version` (`X.Y.Z`, for example `1.0.0`), and `dry_run` (build without publishing); these manual controls preserve their existing behavior. Every stable release requires a successful CI push run for its exact production commit.
-- **Android stream (`android-v*`):** Android has its own tags, releases, and version numbers, which can drift from desktop. The stream starts from `v0.17.1`, the last shared release that shipped an APK. Android publishes only when Android-relevant paths changed since its last tag, or when the version-code sequence passes 500 commits since the last Android stable, which forces a stable refresh. Those paths are listed in `infra/release/components/android.paths` and include the Android app, shared Rust crates, `Cargo.lock`, and the toolchain pin. A staging push publishes `android-vX.Y.Z-staging.N`; a stable release publishes `android-vX.Y.Z` from a `production` push or the Release workflow. Android releases are never marked latest; `latest.json` and the GitHub latest flag stay on `v*`.
-- **Pull requests:** CI runs only the jobs for apps affected by the change. Desktop macOS and Windows builds run only for desktop or shared-Rust changes. Pushes still run full validation.
-- **Desktop assets (`v*`):** Linux AppImage, deb, and rpm (stable only); macOS DMG and app archive; Windows MSI and NSIS installer; `latest.json`; `SHA256SUMS`; generated release notes. iOS is unpublished; its artifacts stay in CI runs.
-- **Android assets (`android-v*`):** certificate-verified `peppy-<version>-android.apk` and `.aab`; GPG-signed `SHA256SUMS`; generated Android release notes. The APK is suitable for direct sideloading; the AAB is store tooling input and is not installable.
-- On Windows, uninstall a prerelease MSI before installing the stable MSI of the same `X.Y.Z`.
+The desktop shows a notification feed, app mutes, and dismissals. Phone dismissals sync through the vault. Desktop dismissal requests wait for the phone's next sync and Android background scheduling can delay them by 15 minutes or more; this is not an immediate remote-control channel. Group summaries can remain on the phone after their children are dismissed. The feed keeps up to 1,000 active notifications; bulk dismissal handles up to 100 at a time. Native banner behavior depends on OS permissions and settings.
 
-Trusted desktop releases always include Tauri updater signatures, GPG-signed
-checksums, and GPG-signed RPM packages. Their protected environments select
-macOS `developer-id` (the strict default) or explicit free `adhoc`, and Windows
-`authenticode` (the strict default) or explicit free `none`; strict modes fail
-closed rather than silently downgrading. Ad-hoc macOS builds are not notarized
-or Gatekeeper-approved, and Windows `none` installers have no Authenticode
-publisher signature. Android (`android-v*`) assets use a persistent protected-environment
-release certificate and fail closed without its keystore, access inputs, and
-pinned SHA-256 certificate fingerprint; the iOS archive remains unsigned.
-These are GitHub Release artifacts, not store submissions. Keep signing
-credentials only in protected CI environment secrets; never generate or commit
-them in this repository. See
-[`infra/release/README-updates.md`](infra/release/README-updates.md) for Android
-keystore backup, key-continuity, and OAuth certificate-registration requirements.
+### Compaction and recovery
 
-Preview the next version with `just version --channel prerelease`. Run `just release-test` after changing `infra/release/` or the release workflows; it needs git-cliff 2.14.2 on `PATH`, which `infra/release/install-git-cliff.sh <dir>` installs; it also needs `JAVA_HOME` set to a JDK 17 and `ANDROID_HOME` or `ANDROID_SDK_ROOT` pointing to an Android SDK with build-tools `35.0.0` and `platforms/android-35` installed. Harbor publication requires protected `staging` and `production` environments with `HARBOR_USERNAME`, `HARBOR_PASSWORD`, `COSIGN_PRIVATE_KEY`, and `COSIGN_PASSWORD`; no billing capability is included in these public images.
+Compaction can run only after every non-revoked device supports generation-fenced snapshots. Upgrade clients together: an older device blocks compaction, and downgrading a device that declared support can leave it unable to restore a compacted snapshot. Keep historical key material needed to read retained history.
+
+Snapshot history never executes carrier work. See [backup and restore guidance](.agents/ops/backup-restore.md) before restoring: recovery can revive revoked credentials and public links, reuse cursor ranges, and require client resynchronization and carrier-outcome reconciliation.
+
+## Operations
+
+### Security
+
+Each vault uses a generated shared secret; clients derive vault keys locally. A new phone can receive keys through an approved encrypted QR exchange or through manual shared-secret entry. The server API never receives the shared secret or plaintext transferred keys. Peppy does not claim forward secrecy.
+
+Every holder of a vault secret has equal cryptographic authority. Revoking a device credential does not remove a secret holder's access. Rotate the secret, activate the new epoch on participating clients, and retain historical material needed for existing history. A copied client database is not detectable after the fact.
+
+Private attachments and explicit public image derivatives use storage encryption at rest. Host or container administrators can access the storage key material, so this protection does not cover a compromised host or filer state. Public derivatives remain plaintext when served and have their own expiry and revocation controls.
+
+### Updating
+
+Pin `PEPPY_SERVER_IMAGE` to an immutable release digest and verify the operator-published signature before upgrading. Back up first. Keep the same Compose overlays for backup and restore. Peppy is a single-node foundation, not an HA deployment. See [release update guidance](.agents/ops/release-updates.md) for provisioning, key rotation, rescue bootstrap, Linux package mapping, and Android keystore backup, key continuity, and OAuth certificate registration.
+
+### Release channels
+
+Download releases from [GitHub Releases](https://github.com/mattv8/peppy/releases). Staging builds are prerelease evidence. Stable desktop releases are protected artifacts with per-platform signing policies. Android `android-v*` releases have a separate version stream; their APK is for direct sideloading and their AAB is store tooling input, not an installable app. iOS artifacts remain CI evidence and the device archive is not an installable IPA.
+
+Development APKs use automatic debug signing. Development macOS bundles and DMGs and Windows installers are not trusted production installers. Linux packages ship only as stable release artifacts. Direct CI artifacts and dispatch builds are never update feeds.
+
+### Troubleshooting
+
+- Check `/healthz` for process service and `/readyz` for PostgreSQL, migrations, and configured attachment storage readiness.
+- Keep `PUBLIC_API_URL`, `PUBLIC_ATTACHMENT_URL`, and `API_HOST_PORT` aligned when you change the local port.
+- Configure reverse proxies to pass the administrator SSE endpoint without buffering.
+- On Windows, uninstall a prerelease MSI before installing a stable MSI with the same version.
+- For client-specific setup and capability limits, see [Clients](#clients). Contributors can use the [agent references](.agents/AGENTS.md).
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for development workflows, checks, and supported toolchains.
+
+## License
+
+Peppy is licensed under [Apache-2.0](Cargo.toml), as declared in the workspace manifest.

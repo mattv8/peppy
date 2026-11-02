@@ -1,12 +1,14 @@
 package dev.peppy.mobile.mms.pdu
 
+import java.io.File
+import java.nio.file.Files
+import org.junit.Assert.*
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
-import java.nio.file.Files
+
 
 /** Goldens are hand-derived WSP/OMA-MMS-ENC vectors, not a decoder of this codec. */
 class MmsPduComposerTest {

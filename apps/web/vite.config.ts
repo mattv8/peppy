@@ -1,12 +1,24 @@
 import { resolve } from "node:path";
-import { defineConfig } from "vite";
+import { realpathSync } from "node:fs";
+import { defineConfig, normalizePath } from "vite";
 import react from "@vitejs/plugin-react";
 
+const desktopBridgePath = normalizePath(realpathSync(resolve(__dirname, "../desktop/src/bridge/bridge.ts")));
+const webBridgePath = normalizePath(resolve(__dirname, "src/ui-bridge.ts"));
+
 export default defineConfig({
-  plugins: [react()],
-  resolve: {
-    alias: [{ find: "./bridge", replacement: resolve(__dirname, "src/ui-bridge.ts") }],
-  },
+  plugins: [
+    react(),
+    {
+      name: "replace-desktop-bridge",
+      enforce: "pre",
+      async resolveId(source, importer, options) {
+        const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+        const resolvedPath = resolved && normalizePath(resolved.id.split("?")[0]);
+        return resolvedPath === desktopBridgePath ? webBridgePath : null;
+      },
+    },
+  ],
   server: { fs: { allow: [resolve(__dirname, "../..") ] } },
   build: {
     rollupOptions: {

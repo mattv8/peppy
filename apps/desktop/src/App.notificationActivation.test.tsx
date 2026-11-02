@@ -4,20 +4,20 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { NotificationActivation } from "@peppy/generated/notification-activation";
 import type { ComponentProps } from "react";
 import { App } from "./App";
-import { bridge, fixtureBridge, type DesktopSnapshot } from "./bridge";
-import { nativeNotificationActivation } from "./notificationActivation";
+import { bridge, fixtureBridge, type DesktopSnapshot } from "./bridge/bridge";
+import { nativeNotificationActivation } from "./notifications/notificationActivation";
 
 const native = vi.hoisted(() => ({ pending: null as NotificationActivation | null, hint: () => {}, ack: vi.fn() }));
 const feed = vi.hoisted(() => ({ result: undefined as ((requestId: string, found: boolean) => void) | undefined }));
-vi.mock("./Notifications", async importOriginal => {
-  const original = await importOriginal<typeof import("./Notifications")>();
+vi.mock("./notifications/Notifications", async importOriginal => {
+  const original = await importOriginal<typeof import("./notifications/Notifications")>();
   return { ...original, NotificationsView: (props: ComponentProps<typeof original.NotificationsView>) => {
     feed.result = props.onFocusResult;
     return <original.NotificationsView {...props} />;
   } };
 });
-vi.mock("./notificationActivation", async importOriginal => {
-  const original = await importOriginal<typeof import("./notificationActivation")>();
+vi.mock("./notifications/notificationActivation", async importOriginal => {
+  const original = await importOriginal<typeof import("./notifications/notificationActivation")>();
   return { ...original, nativeNotificationActivation: {
     subscribe: async (listener: () => void) => { native.hint = listener; return () => {}; },
     peek: async () => native.pending,
