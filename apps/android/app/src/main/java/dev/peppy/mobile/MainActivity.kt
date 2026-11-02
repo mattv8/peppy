@@ -548,6 +548,7 @@ internal fun Section(
     title: String,
     showDivider: Boolean = true,
     helpBody: String? = null,
+    headerAction: (@Composable () -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().testTag(tag), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -555,6 +556,7 @@ internal fun Section(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
             helpBody?.let { InfoButton(title, title, it, "info-$tag") }
+            headerAction?.invoke()
         }
         content()
     }

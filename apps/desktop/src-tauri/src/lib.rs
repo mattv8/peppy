@@ -1459,20 +1459,6 @@ async fn attachment_retention_status(
 }
 
 #[tauri::command]
-async fn acknowledge_attachment_retention_notice(
-    window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
-    input: peppy_desktop_api::attachment_retention::AttachmentRetentionNoticeAcknowledgementInput,
-) -> BridgeResult<
-    peppy_desktop_api::attachment_retention::AttachmentRetentionNoticeAcknowledgementResult,
-> {
-    require_main(window.label())?;
-    let operation = admit_update_operation(&state)?;
-    let session = state.require_session_admitted(&operation).await?;
-    attachment_retention::acknowledge(session, input).await
-}
-
-#[tauri::command]
 async fn attachment_retention_state(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
@@ -5690,7 +5676,6 @@ pub fn run() {
             hosted::hosted_provision,
             account_access,
             attachment_retention_status,
-            acknowledge_attachment_retention_notice,
             attachment_retention_state,
             enrollment::enrollment_discover,
             enrollment::enrollment_start_over,

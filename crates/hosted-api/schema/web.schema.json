@@ -1,17 +1,5 @@
 {
   "$defs": {
-    "AcknowledgeRetentionNoticeRequest": {
-      "additionalProperties": false,
-      "properties": {
-        "policy_version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "policy_version"
-      ],
-      "type": "object"
-    },
     "AddTesterRequest": {
       "additionalProperties": false,
       "properties": {
@@ -49,7 +37,6 @@
       "type": "object"
     },
     "AttachmentStorageStatusResponse": {
-      "additionalProperties": false,
       "properties": {
         "base_bytes": {
           "format": "int64",
@@ -71,9 +58,6 @@
         "limit_bytes": {
           "format": "int64",
           "type": "integer"
-        },
-        "notice": {
-          "$ref": "#/$defs/RetentionNoticeResponse"
         },
         "pack_bytes": {
           "format": "int64",
@@ -99,7 +83,6 @@
         "pack_bytes",
         "protected_bytes",
         "removed_bytes",
-        "notice",
         "cleanup_state"
       ],
       "type": "object"
@@ -768,53 +751,6 @@
       ],
       "type": "object"
     },
-    "RetentionNoticeResponse": {
-      "additionalProperties": false,
-      "properties": {
-        "acknowledged_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "activation_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "policy_version": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "presented_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "state": {
-          "$ref": "#/$defs/RetentionNoticeState"
-        }
-      },
-      "required": [
-        "state"
-      ],
-      "type": "object"
-    },
-    "RetentionNoticeState": {
-      "enum": [
-        "not_presented",
-        "grace_period",
-        "eligible"
-      ],
-      "type": "string"
-    },
     "SessionRenewalResponse": {
       "additionalProperties": false,
       "description": "Response confirming that an authenticated session remains active.",
@@ -846,13 +782,13 @@
     },
     "StorageCleanupUnavailableReason": {
       "enum": [
-        "notice_not_eligible",
         "device_not_ready",
         "read_only",
         "entitlement_unavailable",
         "provider_reconciliation_pending",
         "billing_mutation_pending",
-        "cleanup_disabled"
+        "cleanup_disabled",
+        "unknown"
       ],
       "type": "string"
     },
@@ -1520,9 +1456,6 @@
     "plan_catalog": {
       "$ref": "#/$defs/BillingPlans"
     },
-    "retention_notice_acknowledgement": {
-      "$ref": "#/$defs/AcknowledgeRetentionNoticeRequest"
-    },
     "session": {
       "$ref": "#/$defs/WebSessionResponse"
     },
@@ -1618,8 +1551,7 @@
     "storage_pack_request",
     "payment_method_confirm",
     "payment_method_setup",
-    "attachment_storage_status",
-    "retention_notice_acknowledgement"
+    "attachment_storage_status"
   ],
   "title": "HostedWebContracts",
   "type": "object",
@@ -1640,7 +1572,6 @@
     "plans": "/hosted/v1/web/billing/plans",
     "reconcile": "/hosted/v1/web/billing/reconcile",
     "resume": "/hosted/v1/web/billing/resume",
-    "retentionNoticeAcknowledgement": "/hosted/v1/attachment-storage/notice/acknowledgement",
     "session": "/hosted/v1/web/session",
     "sessionRenew": "/hosted/v1/web/session/renew",
     "storagePack": "/hosted/v1/web/billing/storage-pack",

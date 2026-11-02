@@ -1484,7 +1484,7 @@ async fn concurrent_cleanup_admissions_select_one_stable_prefix() {
 }
 
 #[tokio::test]
-async fn community_device_attachment_notice_routes_are_explicitly_unsupported() {
+async fn community_device_attachment_storage_status_is_explicitly_unsupported() {
     let server =
         TestServer::start_with_policy(Arc::new(peppy_server::api::CommunityAccessPolicy), 5).await;
     let device = server.owner().await;
@@ -1501,23 +1501,12 @@ async fn community_device_attachment_notice_routes_are_explicitly_unsupported() 
         get_body["code"],
         peppy_hosted_api::attachments::error_codes::UNSUPPORTED
     );
-    let (post_status, post_body) = server
-        .request(
-            "POST",
-            "/v1/attachments/storage/notice/acknowledgement",
-            &device.device_token,
-            json!({"policy_version": "hosted_attachment_retention_v1"}),
-        )
-        .await;
-    assert_eq!(post_status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(
-        post_body["code"],
-        peppy_hosted_api::attachments::error_codes::UNSUPPORTED
-    );
     server.shutdown().await;
 }
 
-struct DeviceRetentionErrorPolicy;
+struct DeviceRetentionErrorPolicy {
+    error: peppy_server::api::DeviceAttachmentRetentionError,
+}
 
 impl AccessPolicy for DeviceRetentionErrorPolicy {
     fn authorize(
@@ -1538,49 +1527,39 @@ impl AccessPolicy for DeviceRetentionErrorPolicy {
             peppy_server::api::DeviceAttachmentRetentionError,
         >,
     > {
-        Box::pin(async { Err(peppy_server::api::DeviceAttachmentRetentionError::Forbidden) })
-    }
-
-    fn acknowledge_device_attachment_retention(
-        &self,
-        _principal: AccessPrincipal,
-        _request: peppy_hosted_api::attachments::AcknowledgeRetentionNoticeRequest,
-    ) -> PolicyFuture<'_, Result<(), peppy_server::api::DeviceAttachmentRetentionError>> {
-        Box::pin(async { Err(peppy_server::api::DeviceAttachmentRetentionError::Unavailable) })
+        Box::pin(async move { Err(self.error) })
     }
 }
 
 #[tokio::test]
-async fn device_attachment_notice_http_errors_use_canonical_forbidden_and_unavailable_codes() {
-    let server = TestServer::start_with_policy(Arc::new(DeviceRetentionErrorPolicy), 5).await;
-    let device = server.owner().await;
-    let (get_status, get_body) = server
-        .request(
-            "GET",
-            "/v1/attachments/storage/status",
-            &device.device_token,
-            json!(null),
-        )
-        .await;
-    assert_eq!(get_status, StatusCode::FORBIDDEN);
-    assert_eq!(
-        get_body["code"],
-        peppy_hosted_api::attachments::error_codes::FORBIDDEN
-    );
-    let (post_status, post_body) = server
-        .request(
-            "POST",
-            "/v1/attachments/storage/notice/acknowledgement",
-            &device.device_token,
-            json!({"policy_version": "hosted_attachment_retention_v1"}),
-        )
-        .await;
-    assert_eq!(post_status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        post_body["code"],
-        peppy_hosted_api::attachments::error_codes::UNAVAILABLE
-    );
-    server.shutdown().await;
+async fn device_attachment_storage_status_http_errors_use_canonical_codes() {
+    for (error, expected_status, expected_code) in [
+        (
+            peppy_server::api::DeviceAttachmentRetentionError::Forbidden,
+            StatusCode::FORBIDDEN,
+            peppy_hosted_api::attachments::error_codes::FORBIDDEN,
+        ),
+        (
+            peppy_server::api::DeviceAttachmentRetentionError::Unavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            peppy_hosted_api::attachments::error_codes::UNAVAILABLE,
+        ),
+    ] {
+        let server =
+            TestServer::start_with_policy(Arc::new(DeviceRetentionErrorPolicy { error }), 5).await;
+        let device = server.owner().await;
+        let (status, body) = server
+            .request(
+                "GET",
+                "/v1/attachments/storage/status",
+                &device.device_token,
+                json!(null),
+            )
+            .await;
+        assert_eq!(status, expected_status, "{error:?}");
+        assert_eq!(body["code"], expected_code, "{error:?}");
+        server.shutdown().await;
+    }
 }
 
 #[tokio::test]

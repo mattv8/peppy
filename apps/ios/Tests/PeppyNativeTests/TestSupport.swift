@@ -143,14 +143,7 @@ final class FakeServer: HTTPTransport, @unchecked Sendable {
                 "used_bytes": 1, "limit_bytes": 2, "base_bytes": 2, "pack_bytes": 0,
                 "protected_bytes": 1, "removed_bytes": 0, "cleanup_state": "blocked",
                 "cleanup_unavailable_reason": "device_not_ready",
-                "notice": ["state": "not_presented", "policy_version": attachmentRetentionSupportedNoticePolicyVersion(),
-                           "presented_at": 1, "acknowledged_at": NSNull(), "activation_at": 2],
             ])
-        case ("POST", 5, "acknowledgement"):
-            guard request.headers["Content-Type"] == "application/json",
-                  json["policy_version"] as? String == attachmentRetentionSupportedNoticePolicyVersion()
-            else { return reply(request, 400, ["code": "invalid_notice_acknowledgement"]) }
-            return HTTPResponse(status: 204, url: request.url, body: Data())
         case ("POST", 4, "retention-uses"):
             guard let use = json["use_id"] as? String, let attachment = json["attachment_id"] as? String,
                   let device = json["device_id"] as? String, let kind = json["kind"] as? String

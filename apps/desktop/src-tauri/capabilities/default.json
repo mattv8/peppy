@@ -16,7 +16,6 @@
     "allow-load-state",
     "allow-account-access",
     "allow-attachment-retention-status",
-    "allow-acknowledge-attachment-retention-notice",
     "allow-attachment-retention-state",
     "allow-load-history",
     "allow-search-local",

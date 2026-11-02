@@ -7,19 +7,54 @@ internal data class AttachmentStorageSnapshot(
     val baseBytes: Long,
     val cleanup: AttachmentStorageCleanup,
     val unavailableReason: AttachmentStorageUnavailableReason?,
-    val notice: AttachmentStorageNotice,
-    val noticeCopySupported: Boolean,
-)
-
-internal data class AttachmentStorageNotice(
-    val policyVersion: String?,
-    val state: AttachmentStorageNoticeState,
-    val activationAtSeconds: Long?,
 )
 
 internal enum class AttachmentStorageCleanup { DISABLED, BLOCKED, PENDING, AVAILABLE }
-internal enum class AttachmentStorageUnavailableReason { NOTICE_NOT_ELIGIBLE, DEVICE_NOT_READY, READ_ONLY, ENTITLEMENT_UNAVAILABLE, PROVIDER_RECONCILIATION_PENDING, BILLING_MUTATION_PENDING, CLEANUP_DISABLED }
-internal enum class AttachmentStorageNoticeState { NOT_PRESENTED, GRACE_PERIOD, ELIGIBLE }
+internal enum class AttachmentStorageUnavailableReason { UNKNOWN, DEVICE_NOT_READY, READ_ONLY, ENTITLEMENT_UNAVAILABLE, PROVIDER_RECONCILIATION_PENDING, BILLING_MUTATION_PENDING, CLEANUP_DISABLED }
+
+internal sealed interface AttachmentStorageCapacityNotice {
+    data object None : AttachmentStorageCapacityNotice
+    data object NearFull : AttachmentStorageCapacityNotice
+    data object FullCleanup : AttachmentStorageCapacityNotice
+    data class NearFullBlocked(val causeKey: String) : AttachmentStorageCapacityNotice
+    data class Cause(val key: String) : AttachmentStorageCapacityNotice
+}
+
+internal fun attachmentStorageCapacityNotice(status: AttachmentStorageSnapshot): AttachmentStorageCapacityNotice {
+    if (status.cleanup == AttachmentStorageCleanup.PENDING) {
+        return AttachmentStorageCapacityNotice.Cause("peppy.attachment_storage_cleanup_pending")
+    }
+    if (status.limitBytes <= 0 || status.usedBytes < 0) {
+        return if (status.cleanup == AttachmentStorageCleanup.AVAILABLE) AttachmentStorageCapacityNotice.None
+        else AttachmentStorageCapacityNotice.Cause(status.cleanupCauseKey())
+    }
+    val full = status.usedBytes >= status.limitBytes
+    val nearFull = !full && status.usedBytes >= status.limitBytes - (status.limitBytes / 10)
+    val cause = status.cleanupCauseKey()
+    return when (status.cleanup) {
+        AttachmentStorageCleanup.AVAILABLE -> when {
+            full -> AttachmentStorageCapacityNotice.FullCleanup
+            nearFull -> AttachmentStorageCapacityNotice.NearFull
+            else -> AttachmentStorageCapacityNotice.None
+        }
+        AttachmentStorageCleanup.PENDING -> AttachmentStorageCapacityNotice.Cause("peppy.attachment_storage_cleanup_pending")
+        AttachmentStorageCleanup.DISABLED, AttachmentStorageCleanup.BLOCKED -> when {
+            full -> AttachmentStorageCapacityNotice.Cause(cause)
+            nearFull -> AttachmentStorageCapacityNotice.NearFullBlocked(cause)
+            else -> AttachmentStorageCapacityNotice.Cause(cause)
+        }
+    }
+}
+
+private fun AttachmentStorageSnapshot.cleanupCauseKey() = when (unavailableReason) {
+    AttachmentStorageUnavailableReason.DEVICE_NOT_READY -> "peppy.attachment_storage_device_update_required"
+    AttachmentStorageUnavailableReason.READ_ONLY -> "peppy.attachment_storage_read_only"
+    AttachmentStorageUnavailableReason.BILLING_MUTATION_PENDING -> "peppy.attachment_storage_billing_pending"
+    AttachmentStorageUnavailableReason.ENTITLEMENT_UNAVAILABLE,
+    AttachmentStorageUnavailableReason.PROVIDER_RECONCILIATION_PENDING -> "peppy.attachment_storage_billing_unavailable"
+    AttachmentStorageUnavailableReason.CLEANUP_DISABLED -> "peppy.attachment_storage_disabled"
+    AttachmentStorageUnavailableReason.UNKNOWN, null -> "peppy.attachment_storage_unavailable"
+}
 
 internal sealed interface AttachmentStorageLoad {
     data class Available(val status: AttachmentStorageSnapshot) : AttachmentStorageLoad
@@ -41,12 +76,10 @@ internal class AttachmentStorageSettingsController {
     var state: AttachmentStorageUiState = AttachmentStorageUiState.Loading
         private set
     private var scope: String? = null
-    private var acknowledgement: AcknowledgementState = AcknowledgementState.NONE
 
     fun begin(scope: String) {
         if (scope == this.scope) return
         this.scope = scope
-        acknowledgement = AcknowledgementState.NONE
         state = AttachmentStorageUiState.Loading
     }
 
@@ -60,29 +93,6 @@ internal class AttachmentStorageSettingsController {
         }
         return true
     }
-
-    /** Call only after the complete disclosure is visible in the detail screen. */
-    fun claimDisclosureRendered(scope: String): Boolean {
-        val status = (state as? AttachmentStorageUiState.Available)?.status ?: return false
-        if (scope != this.scope || !status.noticeCopySupported || status.notice.state != AttachmentStorageNoticeState.NOT_PRESENTED || acknowledgement != AcknowledgementState.NONE) return false
-        acknowledgement = AcknowledgementState.IN_FLIGHT
-        return true
-    }
-
-    fun acknowledgeResult(scope: String, succeeded: Boolean): Boolean {
-        if (scope != this.scope || acknowledgement != AcknowledgementState.IN_FLIGHT) return false
-        acknowledgement = if (succeeded) AcknowledgementState.SUCCEEDED else AcknowledgementState.FAILED
-        return succeeded
-    }
-
-    fun retryFailedAcknowledgement(scope: String): Boolean {
-        val status = (state as? AttachmentStorageUiState.Available)?.status
-        if (scope != this.scope || acknowledgement != AcknowledgementState.FAILED || status?.let { !it.noticeCopySupported || it.notice.state != AttachmentStorageNoticeState.NOT_PRESENTED } != false) return false
-        acknowledgement = AcknowledgementState.IN_FLIGHT
-        return true
-    }
-
-    private enum class AcknowledgementState { NONE, IN_FLIGHT, FAILED, SUCCEEDED }
 
     private fun AttachmentStorageUiState.lastKnown() = when (this) {
         is AttachmentStorageUiState.Available -> status

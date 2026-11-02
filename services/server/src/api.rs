@@ -37,7 +37,6 @@ pub struct AccessPrincipal {
 pub enum DeviceAttachmentRetentionError {
     Unsupported,
     Forbidden,
-    InvalidPolicyVersion,
     Unavailable,
 }
 
@@ -87,13 +86,6 @@ pub trait AccessPolicy: Send + Sync {
             DeviceAttachmentRetentionError,
         >,
     > {
-        Box::pin(async { Err(DeviceAttachmentRetentionError::Unsupported) })
-    }
-    fn acknowledge_device_attachment_retention(
-        &self,
-        _principal: AccessPrincipal,
-        _request: peppy_hosted_api::attachments::AcknowledgeRetentionNoticeRequest,
-    ) -> PolicyFuture<'_, Result<(), DeviceAttachmentRetentionError>> {
         Box::pin(async { Err(DeviceAttachmentRetentionError::Unsupported) })
     }
     /// Owns authorization for this read. The handler authenticates the device only.
@@ -592,10 +584,6 @@ pub(crate) fn build_router(
         .route(
             peppy_hosted_api::account_access::routes::DEVICE_ACCOUNT_ACCESS,
             get(account_access::device_account_access),
-        )
-        .route(
-            peppy_hosted_api::attachments::routes::DEVICE_RETENTION_NOTICE_ACKNOWLEDGEMENT,
-            post(attachments::acknowledge_device_attachment_retention),
         )
         .route(
             "/v1/attachments/{attachment_id}/upload",

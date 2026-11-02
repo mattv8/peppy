@@ -4706,7 +4706,6 @@ describe("host state display", () => {
         removedBytes: 0,
         cleanupState: "disabled",
         cleanupUnavailableReason: "cleanup_disabled",
-        notice: { state: "grace_period", policyVersion: "hosted_attachment_retention_v1", presentedAtSeconds: 1, acknowledgedAtSeconds: 2, activationAtSeconds: 1_800_000_000 },
       },
     });
     render(<App hostKind="browser" fixedOrigin="https://app.example.com" accountUrl="https://account.example.com/account" />);

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AttachmentRetentionRequestDto } from "@peppy/generated/attachment-retention";
-import { AttachmentRetentionDriver } from "./attachment-retention.js";
+import { AttachmentRetentionDriver, AttachmentRetentionStatusFacade } from "./attachment-retention.js";
 import { TransportError } from "./transport.js";
 
 const capability = (cleanupReady: boolean): AttachmentRetentionRequestDto => ({
@@ -174,30 +174,39 @@ describe("AttachmentRetentionDriver", () => {
 
 });
 
-describe("AttachmentRetentionNoticeFacade", () => {
-  it("rejects missing, stale, and unknown-policy acknowledgements before HTTP", async () => {
-    const { AttachmentRetentionNoticeFacade } = await import("./attachment-retention.js");
+describe("AttachmentRetentionStatusFacade", () => {
+  it("returns the scoped status only while the session generation and device binding remain current", async () => {
     let generation = 1;
+    let binding = { vaultId: "vault-a", deviceId: "device-a" };
+    let release: (() => void) | undefined;
     const session = {
       query: vi.fn(async (command: string) => {
-        if (command === "_worker_identity_metadata") return { vaultId: "v", deviceId: "d" };
-        if (command === "_worker_attachment_retention_status_request") return { method: "GET", relativePath: "/v1/devices/self/attachment-storage", jsonBody: null, protocolHeader: null, expectedSuccessStatus: 200 };
-        if (command === "_worker_attachment_retention_parse_status") return { usedBytes: 0 };
-        if (command === "_worker_attachment_retention_notice_acknowledgement_request") return { method: "POST", relativePath: "/v1/devices/self/attachment-retention-notice", jsonBody: "{}", protocolHeader: null, expectedSuccessStatus: 204 };
+        if (command === "_worker_identity_metadata") return binding;
+        if (command === "_worker_attachment_retention_status_request") return { method: "GET", relativePath: "/v1/attachments/storage/status", jsonBody: null, protocolHeader: null, expectedSuccessStatus: 200 };
+        if (command === "_worker_attachment_retention_parse_status") {
+          await new Promise<void>(resolve => { release = resolve; });
+          return { usedBytes: 1, limitBytes: 2 };
+        }
         throw new Error(command);
       }),
       mutate: vi.fn(),
     };
-    const retention = vi.fn(async () => "{}");
-    const facade = new AttachmentRetentionNoticeFacade(session, { retention }, () => generation, () => new AbortController().signal);
+    const facade = new AttachmentRetentionStatusFacade(session, { retention: async () => "{}" }, () => generation, () => new AbortController().signal);
 
-    await expect(facade.acknowledge({ scopeId: "", policyVersion: "hosted_attachment_retention_v1" })).resolves.toBe("stale_scope");
-    const available = await facade.status();
-    if (available.kind !== "available") throw new Error("expected available");
-    await expect(facade.acknowledge({ scopeId: available.scopeId, policyVersion: "future" })).resolves.toBe("unsupported_policy_version");
+    release = undefined;
+    const staleGeneration = facade.status();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
     generation = 2;
-    await expect(facade.acknowledge({ scopeId: available.scopeId, policyVersion: "hosted_attachment_retention_v1" })).resolves.toBe("stale_scope");
-    expect(retention).toHaveBeenCalledTimes(1);
+    release!();
+    await expect(staleGeneration).resolves.toEqual({ kind: "temporarily_unavailable" });
+
+    generation = 3;
+    release = undefined;
+    const staleBinding = facade.status();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    binding = { vaultId: "vault-b", deviceId: "device-b" };
+    release!();
+    await expect(staleBinding).resolves.toEqual({ kind: "temporarily_unavailable" });
   });
 });
 

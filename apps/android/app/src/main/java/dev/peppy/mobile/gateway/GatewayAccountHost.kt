@@ -3,8 +3,6 @@ package dev.peppy.mobile.gateway
 import android.content.Context
 import dev.peppy.mobile.attachments.AttachmentStorageCleanup
 import dev.peppy.mobile.attachments.AttachmentStorageLoad
-import dev.peppy.mobile.attachments.AttachmentStorageNotice
-import dev.peppy.mobile.attachments.AttachmentStorageNoticeState
 import dev.peppy.mobile.attachments.AttachmentStorageSnapshot
 import dev.peppy.mobile.attachments.AttachmentStorageUnavailableReason
 import java.net.HttpURLConnection
@@ -13,14 +11,10 @@ import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.NativeDeviceRetentionAvailability
-import uniffi.peppy_mobile_bindings.NativeRetentionNoticeState
 import uniffi.peppy_mobile_bindings.NativeStorageCleanupState
 import uniffi.peppy_mobile_bindings.NativeStorageCleanupUnavailableReason
-import uniffi.peppy_mobile_bindings.attachmentRetentionNoticeAcknowledgementRequest
-import uniffi.peppy_mobile_bindings.attachmentRetentionNoticeCopySupported
 import uniffi.peppy_mobile_bindings.attachmentRetentionResponseReadLimitBytes
 import uniffi.peppy_mobile_bindings.attachmentRetentionStatusRequest
-import uniffi.peppy_mobile_bindings.attachmentRetentionSupportedNoticePolicyVersion
 import uniffi.peppy_mobile_bindings.classifyDeviceRetentionAvailability
 import uniffi.peppy_mobile_bindings.parseAttachmentRetentionStatus
 
@@ -53,9 +47,7 @@ internal object GatewayAccountHost {
         if (result.code == request.expectedSuccessStatus.toInt()) {
             val status = try { parseAttachmentRetentionStatus(result.body ?: return AttachmentStorageLoad.TemporarilyUnavailable) } catch (_: Exception) { return AttachmentStorageLoad.TemporarilyUnavailable }
             return AttachmentStorageLoad.Available(
-                AttachmentStorageSnapshot(status.usedBytes, status.limitBytes, status.baseBytes, status.cleanupState.toUiCleanup(), status.cleanupUnavailableReason?.toUiUnavailableReason(),
-                    AttachmentStorageNotice(status.notice.policyVersion, status.notice.state.toUiNoticeState(), status.notice.activationAtSeconds),
-                    attachmentRetentionNoticeCopySupported(status.notice.policyVersion)),
+                AttachmentStorageSnapshot(status.usedBytes, status.limitBytes, status.baseBytes, status.cleanupState.toUiCleanup(), status.cleanupUnavailableReason?.toUiUnavailableReason()),
             )
         }
         if (result.code == 401) return AttachmentStorageLoad.AuthorizationFailure
@@ -64,16 +56,6 @@ internal object GatewayAccountHost {
             NativeDeviceRetentionAvailability.TEMPORARILY_UNAVAILABLE -> AttachmentStorageLoad.TemporarilyUnavailable
             NativeDeviceRetentionAvailability.OTHER -> AttachmentStorageLoad.OrdinaryFailure
         }
-    }
-
-    /** Builds only the frozen supported-v1 request and rechecks the captured account around HTTP. */
-    fun acknowledgeAttachmentStorageNotice(context: Context, scope: AttachmentStorageScope): Boolean {
-        val policyVersion = attachmentRetentionSupportedNoticePolicyVersion()
-        if (!attachmentRetentionNoticeCopySupported(policyVersion)) return false
-        val request = try { attachmentRetentionNoticeAcknowledgementRequest(policyVersion) } catch (_: Exception) { return false }
-        val credential = NativeGateway.currentAccountCredential(context, scope.identity) ?: return false
-        val result = try { GatewayHttp(credential.origin, credential.bearerToken).retentionRequest(request, attachmentRetentionResponseReadLimitBytes()) } catch (_: Exception) { return false }
-        return NativeGateway.isCurrentAccountIdentity(context, scope.identity) && result.code == request.expectedSuccessStatus.toInt()
     }
 
     fun pushConfig(context: Context): HttpResult {
@@ -165,14 +147,8 @@ private fun NativeStorageCleanupState.toUiCleanup() = when (this) {
     NativeStorageCleanupState.AVAILABLE -> AttachmentStorageCleanup.AVAILABLE
 }
 
-private fun NativeRetentionNoticeState.toUiNoticeState() = when (this) {
-    NativeRetentionNoticeState.NOT_PRESENTED -> AttachmentStorageNoticeState.NOT_PRESENTED
-    NativeRetentionNoticeState.GRACE_PERIOD -> AttachmentStorageNoticeState.GRACE_PERIOD
-    NativeRetentionNoticeState.ELIGIBLE -> AttachmentStorageNoticeState.ELIGIBLE
-}
-
 private fun NativeStorageCleanupUnavailableReason.toUiUnavailableReason() = when (this) {
-    NativeStorageCleanupUnavailableReason.NOTICE_NOT_ELIGIBLE -> AttachmentStorageUnavailableReason.NOTICE_NOT_ELIGIBLE
+    NativeStorageCleanupUnavailableReason.UNKNOWN -> AttachmentStorageUnavailableReason.UNKNOWN
     NativeStorageCleanupUnavailableReason.DEVICE_NOT_READY -> AttachmentStorageUnavailableReason.DEVICE_NOT_READY
     NativeStorageCleanupUnavailableReason.READ_ONLY -> AttachmentStorageUnavailableReason.READ_ONLY
     NativeStorageCleanupUnavailableReason.ENTITLEMENT_UNAVAILABLE -> AttachmentStorageUnavailableReason.ENTITLEMENT_UNAVAILABLE

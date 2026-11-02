@@ -6,10 +6,9 @@
 
 use peppy_hosted_api::attachments::{
     ATTACHMENT_RETENTION_PROTOCOL_HEADER, ATTACHMENT_RETENTION_PROTOCOL_VERSION,
-    AcknowledgeRetentionNoticeRequest, AttachmentRetentionErrorCode,
-    AttachmentStorageStatusResponse, AttachmentUseResponse,
-    CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION, RegisterAttachmentUseRequest,
-    ReleaseAttachmentUseRequest, RetentionCapabilityRequest, error_codes, routes,
+    AttachmentRetentionErrorCode, AttachmentStorageStatusResponse, AttachmentUseResponse,
+    RegisterAttachmentUseRequest, ReleaseAttachmentUseRequest, RetentionCapabilityRequest,
+    error_codes, routes,
 };
 use serde::Deserialize;
 
@@ -103,7 +102,7 @@ pub fn build_retention_capability_request(
 }
 
 /// Builds the provider-backed device status GET. Hosts fetch it only on settings
-/// open, explicit refresh, or once while presenting a notice—not during sync.
+/// open or explicit refresh—not during sync.
 pub fn build_device_attachment_storage_status_request() -> AttachmentRetentionRequest {
     AttachmentRetentionRequest {
         method: "GET",
@@ -112,32 +111,6 @@ pub fn build_device_attachment_storage_status_request() -> AttachmentRetentionRe
         protocol_header: None,
         expected_success_status: 200,
     }
-}
-
-/// Builds the device display acknowledgement. This metadata write intentionally
-/// has no retention-protocol header and does not depend on cleanup readiness.
-pub fn build_device_retention_notice_acknowledgement_request(
-    request: AcknowledgeRetentionNoticeRequest,
-) -> Result<AttachmentRetentionRequest, AttachmentRetentionCodecError> {
-    request
-        .validate()
-        .map_err(|_| AttachmentRetentionCodecError::InvalidRequest)?;
-    json_request(
-        "POST",
-        routes::DEVICE_RETENTION_NOTICE_ACKNOWLEDGEMENT.into(),
-        request,
-        false,
-        204,
-    )
-}
-
-/// Builds an acknowledgement only for the reviewed copy bundled with this client.
-/// Server-advertised future versions must remain visible but cannot be acknowledged.
-pub fn build_client_supported_device_retention_notice_acknowledgement_request()
--> Result<AttachmentRetentionRequest, AttachmentRetentionCodecError> {
-    build_device_retention_notice_acknowledgement_request(AcknowledgeRetentionNoticeRequest {
-        policy_version: CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION.into(),
-    })
 }
 
 pub fn parse_attachment_use_response(
@@ -166,14 +139,6 @@ pub fn parse_attachment_storage_status_response(
     ]
     .into_iter()
     .any(|bytes| bytes < 0)
-        || [
-            response.notice.presented_at,
-            response.notice.acknowledged_at,
-            response.notice.activation_at,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|timestamp| timestamp < 0)
     {
         return Err(AttachmentRetentionCodecError::InvalidResponse);
     }
@@ -261,7 +226,7 @@ fn attachment_retention_error_code(response_json: &str) -> Option<AttachmentRete
 mod tests {
     use super::*;
     use peppy_hosted_api::attachments::{
-        AttachmentUseKind, AttachmentUseState, RetentionNoticeState, StorageCleanupState,
+        AttachmentUseKind, AttachmentUseState, StorageCleanupState,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -270,8 +235,7 @@ mod tests {
         json!({
             "used_bytes": 1, "limit_bytes": 2, "base_bytes": 2, "pack_bytes": 0,
             "protected_bytes": 1, "removed_bytes": 0, "cleanup_state": "blocked",
-            "cleanup_unavailable_reason": "device_not_ready",
-            "notice": {"state": "grace_period", "policy_version": "future_policy_v9", "presented_at": 1, "acknowledged_at": null, "activation_at": 2}
+            "cleanup_unavailable_reason": "device_not_ready"
         })
     }
 
@@ -338,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_status_and_notice_follow_the_device_contract() {
+    fn capability_and_status_follow_the_device_contract() {
         let capability = build_retention_capability_request(RetentionCapabilityRequest {
             protocol_version: 1,
             cleanup_ready: false,
@@ -360,39 +324,10 @@ mod tests {
         assert_eq!(status.relative_path, "/v1/attachments/storage/status");
         assert!(status.json_body.is_none());
         assert!(status.protocol_header.is_none());
-        let notice = build_device_retention_notice_acknowledgement_request(
-            AcknowledgeRetentionNoticeRequest {
-                policy_version: "hosted_attachment_retention_v1".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            notice.relative_path,
-            "/v1/attachments/storage/notice/acknowledgement"
-        );
-        assert!(notice.protocol_header.is_none());
-        assert_eq!(notice.method, "POST");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(notice.json_body.as_deref().unwrap())
-                .unwrap(),
-            json!({"policy_version": "hosted_attachment_retention_v1"})
-        );
     }
 
     #[test]
-    fn client_supported_notice_builder_uses_only_the_reviewed_copy_version() {
-        let notice =
-            build_client_supported_device_retention_notice_acknowledgement_request().unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(notice.json_body.as_deref().unwrap())
-                .unwrap(),
-            json!({"policy_version": "hosted_attachment_retention_v1"})
-        );
-        assert!(notice.protocol_header.is_none());
-    }
-
-    #[test]
-    fn builders_reject_nil_ids_unknown_versions_and_invalid_notice() {
+    fn builders_reject_nil_ids_and_unknown_versions() {
         assert!(
             build_register_attachment_use_request(RegisterAttachmentUseRequest {
                 use_id: Uuid::nil(),
@@ -409,25 +344,12 @@ mod tests {
             })
             .is_err()
         );
-        assert!(
-            build_device_retention_notice_acknowledgement_request(
-                AcknowledgeRetentionNoticeRequest {
-                    policy_version: String::new()
-                }
-            )
-            .is_err()
-        );
     }
 
     #[test]
-    fn response_parsers_are_bounded_strict_and_preserve_unknown_policy_versions() {
+    fn status_response_parser_is_bounded_and_tolerates_extra_fields() {
         let status = valid_status();
         let parsed = parse_attachment_storage_status_response(&status.to_string()).unwrap();
-        assert_eq!(
-            parsed.notice.policy_version.as_deref(),
-            Some("future_policy_v9")
-        );
-        assert_eq!(parsed.notice.state, RetentionNoticeState::GracePeriod);
         assert_eq!(parsed.cleanup_state, StorageCleanupState::Blocked);
         for field in [
             "used_bytes",
@@ -441,17 +363,9 @@ mod tests {
             invalid[field] = json!(-1);
             assert!(parse_attachment_storage_status_response(&invalid.to_string()).is_err());
         }
-        for field in ["presented_at", "acknowledged_at", "activation_at"] {
-            let mut invalid = valid_status();
-            invalid["notice"][field] = json!(-1);
-            assert!(parse_attachment_storage_status_response(&invalid.to_string()).is_err());
-        }
         let mut unknown_root = valid_status();
         unknown_root["extra"] = json!(true);
-        assert!(parse_attachment_storage_status_response(&unknown_root.to_string()).is_err());
-        let mut unknown_notice = valid_status();
-        unknown_notice["notice"]["extra"] = json!(true);
-        assert!(parse_attachment_storage_status_response(&unknown_notice.to_string()).is_err());
+        assert!(parse_attachment_storage_status_response(&unknown_root.to_string()).is_ok());
 
         let mut padded = status.to_string();
         padded.push_str(&" ".repeat(MAX_ATTACHMENT_RETENTION_RESPONSE_JSON - padded.len()));

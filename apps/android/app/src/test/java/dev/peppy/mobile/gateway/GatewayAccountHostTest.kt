@@ -5,7 +5,6 @@ import dev.peppy.mobile.attachments.AttachmentStorageLoad
 import dev.peppy.mobile.security.CredentialParser
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -56,40 +55,10 @@ class GatewayAccountHostTest : GatewayTestBase() {
         }
     }
 
-    @Test fun rotatedCredentialAbortsAcknowledgementAfterTheRequest() {
-        var requests = 0
-        LoopbackHttpServer {
-            requests++
-            val rotated = checkNotNull(CredentialParser.parse(credentialJson(serverOrigin, vaultId, deviceId, "ef".repeat(48)).toByteArray(), allowDebugLoopback = true))
-            assertEquals(ImportResult.UPDATED, NativeGateway.persistVerified(context, rotated, vaultMaterial()))
-            LoopbackHttpServer.Response(204)
-        }.use { server ->
-            serverOrigin = server.origin
-            enrollLoopback(server.origin)
-            val scope = checkNotNull(GatewayAccountHost.attachmentStorageScope(context))
-            assertFalse(GatewayAccountHost.acknowledgeAttachmentStorageNotice(context, scope))
-            assertEquals(1, requests)
-        }
-    }
-
-    @Test fun closedSessionAbortsAcknowledgementAfterTheRequest() {
-        LoopbackHttpServer {
-            NativeGateway.closeForTest()
-            LoopbackHttpServer.Response(204)
-        }.use { server ->
-            enrollLoopback(server.origin)
-            val scope = checkNotNull(GatewayAccountHost.attachmentStorageScope(context))
-
-            assertFalse(GatewayAccountHost.acknowledgeAttachmentStorageNotice(context, scope))
-        }
-    }
-
-    private lateinit var serverOrigin: String
-
     private fun enrollLoopback(origin: String) {
         val credential = checkNotNull(CredentialParser.parse(credentialJson(origin, vaultId, deviceId).toByteArray(), allowDebugLoopback = true))
         assertEquals(ImportResult.IMPORTED, NativeGateway.persistVerified(context, credential, vaultMaterial()))
     }
 
-    private fun statusBody() = """{"used_bytes":12345,"limit_bytes":23456,"base_bytes":10000,"pack_bytes":2345,"protected_bytes":8765,"removed_bytes":1234,"cleanup_state":"blocked","cleanup_unavailable_reason":"device_not_ready","notice":{"state":"grace_period","policy_version":"hosted_attachment_retention_v1","presented_at":1700000000,"acknowledged_at":null,"activation_at":1702592000}}"""
+    private fun statusBody() = """{"used_bytes":12345,"limit_bytes":23456,"base_bytes":10000,"pack_bytes":2345,"protected_bytes":8765,"removed_bytes":1234,"cleanup_state":"blocked","cleanup_unavailable_reason":"device_not_ready"}"""
 }

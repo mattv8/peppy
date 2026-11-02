@@ -6,8 +6,7 @@ use peppy_client_core::{
     DeviceId, PendingAttachmentUseOperation, RemoteAttachmentState,
 };
 use peppy_hosted_api::attachments::{
-    AttachmentStorageStatusResponse, RetentionNoticeState, StorageCleanupState,
-    StorageCleanupUnavailableReason,
+    AttachmentStorageStatusResponse, StorageCleanupState, StorageCleanupUnavailableReason,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -133,12 +132,6 @@ pub struct AttachmentRetentionResponseBodyInput {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AttachmentRetentionNoticeRequestInput {
-    pub policy_version: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AttachmentRetentionReleaseInput {
     pub use_id: String,
 }
@@ -165,14 +158,6 @@ pub struct AttachmentRetentionReadyDto {
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentRetentionPreparationPendingDto {
     pub pending: bool,
-}
-
-pub fn client_supported_attachment_retention_notice_acknowledgement_request_dto() -> Result<
-    AttachmentRetentionRequestDto,
-    peppy_hosted_client::attachment_retention::AttachmentRetentionCodecError,
-> {
-    peppy_hosted_client::attachment_retention::build_client_supported_device_retention_notice_acknowledgement_request()
-        .map(attachment_retention_request_dto)
 }
 
 pub fn attachment_retention_request_dto(
@@ -308,7 +293,7 @@ pub fn attachment_retention_state_dto(
 
 /// Display-safe storage-policy status. Byte fields are bytes; timestamps are
 /// Unix seconds. Hosts preserve these values and do not derive cleanup
-/// readiness or notice eligibility themselves.
+/// readiness themselves.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentStorageStatusDto {
@@ -326,7 +311,6 @@ pub struct AttachmentStorageStatusDto {
     pub removed_bytes: i64,
     pub cleanup_state: StorageCleanupStateDto,
     pub cleanup_unavailable_reason: Option<StorageCleanupUnavailableReasonDto>,
-    pub notice: RetentionNoticeDto,
 }
 
 /// Host-local status binding and typed availability. `scope_id` is opaque
@@ -346,46 +330,6 @@ pub enum AttachmentRetentionStatusResult {
     TemporarilyUnavailable,
 }
 
-/// Renderer acknowledgement input. Hosts compare `scope_id` with the active
-/// captured binding before selecting credentials or issuing HTTP.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AttachmentRetentionNoticeAcknowledgementInput {
-    pub scope_id: String,
-    pub policy_version: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum AttachmentRetentionNoticeAcknowledgementResult {
-    Acknowledged,
-    Unsupported,
-    TemporarilyUnavailable,
-    StaleScope,
-    UnsupportedPolicyVersion,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct RetentionNoticeDto {
-    pub state: RetentionNoticeStateDto,
-    pub policy_version: Option<String>,
-    #[ts(type = "number | null")]
-    pub presented_at_seconds: Option<i64>,
-    #[ts(type = "number | null")]
-    pub acknowledged_at_seconds: Option<i64>,
-    #[ts(type = "number | null")]
-    pub activation_at_seconds: Option<i64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum RetentionNoticeStateDto {
-    NotPresented,
-    GracePeriod,
-    Eligible,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageCleanupStateDto {
@@ -398,13 +342,13 @@ pub enum StorageCleanupStateDto {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageCleanupUnavailableReasonDto {
-    NoticeNotEligible,
     DeviceNotReady,
     ReadOnly,
     EntitlementUnavailable,
     ProviderReconciliationPending,
     BillingMutationPending,
     CleanupDisabled,
+    Unknown,
 }
 
 pub fn attachment_storage_status_dto(
@@ -421,21 +365,6 @@ pub fn attachment_storage_status_dto(
         cleanup_unavailable_reason: value
             .cleanup_unavailable_reason
             .map(storage_cleanup_unavailable_reason_dto),
-        notice: RetentionNoticeDto {
-            state: retention_notice_state_dto(value.notice.state),
-            policy_version: value.notice.policy_version,
-            presented_at_seconds: value.notice.presented_at,
-            acknowledged_at_seconds: value.notice.acknowledged_at,
-            activation_at_seconds: value.notice.activation_at,
-        },
-    }
-}
-
-fn retention_notice_state_dto(value: RetentionNoticeState) -> RetentionNoticeStateDto {
-    match value {
-        RetentionNoticeState::NotPresented => RetentionNoticeStateDto::NotPresented,
-        RetentionNoticeState::GracePeriod => RetentionNoticeStateDto::GracePeriod,
-        RetentionNoticeState::Eligible => RetentionNoticeStateDto::Eligible,
     }
 }
 
@@ -452,9 +381,6 @@ fn storage_cleanup_unavailable_reason_dto(
     value: StorageCleanupUnavailableReason,
 ) -> StorageCleanupUnavailableReasonDto {
     match value {
-        StorageCleanupUnavailableReason::NoticeNotEligible => {
-            StorageCleanupUnavailableReasonDto::NoticeNotEligible
-        }
         StorageCleanupUnavailableReason::DeviceNotReady => {
             StorageCleanupUnavailableReasonDto::DeviceNotReady
         }
@@ -471,6 +397,7 @@ fn storage_cleanup_unavailable_reason_dto(
         StorageCleanupUnavailableReason::CleanupDisabled => {
             StorageCleanupUnavailableReasonDto::CleanupDisabled
         }
+        StorageCleanupUnavailableReason::Unknown => StorageCleanupUnavailableReasonDto::Unknown,
     }
 }
 
@@ -478,7 +405,6 @@ fn storage_cleanup_unavailable_reason_dto(
 mod tests {
     use super::*;
     use peppy_client_core::{AttachmentId, DeviceId};
-    use peppy_hosted_api::attachments::RetentionNoticeResponse;
 
     #[test]
     fn strict_transport_inputs_reject_extra_fields_on_otherwise_valid_payloads() {
@@ -501,18 +427,6 @@ mod tests {
             "extra": true,
         });
         assert!(serde_json::from_value::<AttachmentUseResponseDto>(response).is_err());
-
-        let acknowledgement = serde_json::json!({
-            "scopeId": "vault-device-origin-generation",
-            "policyVersion": "hosted_attachment_retention_v1",
-            "extra": true,
-        });
-        assert!(
-            serde_json::from_value::<AttachmentRetentionNoticeAcknowledgementInput>(
-                acknowledgement,
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -544,19 +458,6 @@ mod tests {
 
     #[test]
     fn generated_worker_transport_dtos_have_one_canonical_json_shape() {
-        let request =
-            client_supported_attachment_retention_notice_acknowledgement_request_dto().unwrap();
-        assert_eq!(
-            serde_json::to_value(request).unwrap(),
-            serde_json::json!({
-                "method": "POST",
-                "relativePath": "/v1/attachments/storage/notice/acknowledgement",
-                "jsonBody": "{\"policy_version\":\"hosted_attachment_retention_v1\"}",
-                "protocolHeader": null,
-                "expectedSuccessStatus": 204,
-            })
-        );
-
         let response = AttachmentUseResponseDto {
             use_id: uuid::Uuid::new_v4().to_string(),
             attachment_id: AttachmentId::new().to_string(),
@@ -583,13 +484,6 @@ mod tests {
                 removed_bytes: 0,
                 cleanup_state: StorageCleanupState::Blocked,
                 cleanup_unavailable_reason: Some(StorageCleanupUnavailableReason::DeviceNotReady),
-                notice: RetentionNoticeResponse {
-                    state: RetentionNoticeState::NotPresented,
-                    policy_version: None,
-                    presented_at: None,
-                    acknowledged_at: None,
-                    activation_at: None,
-                },
             }),
         };
         let available = serde_json::to_value(available).unwrap();
@@ -608,9 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn status_dto_serializes_epoch_seconds_and_thirty_day_notice_interval() {
-        const ACTIVATION_EPOCH_SECONDS: i64 = 1_700_000_000;
-        const NOTICE_INTERVAL_SECONDS: i64 = 30 * 24 * 60 * 60;
+    fn status_dto_serializes_storage_fields() {
         let status = AttachmentStorageStatusResponse {
             used_bytes: 12_345,
             limit_bytes: 23_456,
@@ -620,25 +512,11 @@ mod tests {
             removed_bytes: 1_234,
             cleanup_state: StorageCleanupState::Blocked,
             cleanup_unavailable_reason: Some(StorageCleanupUnavailableReason::DeviceNotReady),
-            notice: RetentionNoticeResponse {
-                state: RetentionNoticeState::GracePeriod,
-                policy_version: Some("hosted_attachment_retention_v1".into()),
-                presented_at: Some(ACTIVATION_EPOCH_SECONDS),
-                acknowledged_at: None,
-                activation_at: Some(ACTIVATION_EPOCH_SECONDS + NOTICE_INTERVAL_SECONDS),
-            },
         };
 
         let dto = attachment_storage_status_dto(status);
         let serialized = serde_json::to_value(dto).unwrap();
         assert_eq!(serialized["usedBytes"], 12_345);
-        assert_eq!(
-            serialized["notice"]["presentedAtSeconds"],
-            ACTIVATION_EPOCH_SECONDS
-        );
-        assert_eq!(
-            serialized["notice"]["activationAtSeconds"],
-            ACTIVATION_EPOCH_SECONDS + NOTICE_INTERVAL_SECONDS
-        );
+        assert_eq!(serialized["cleanupUnavailableReason"], "device_not_ready");
     }
 }

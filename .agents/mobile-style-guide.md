@@ -27,6 +27,10 @@ semantic Kotlin and Swift names.
   `nativeCatalog`; desktop uses `desktopCatalog`. A key present in the shared
   source is not necessarily shipped on mobile: preview/store-only keys are
   intentionally excluded.
+- Separate values with semantic native layout, not concatenated dot, bullet,
+  pipe, or dash separators. Use distinct `Text` views in stacks for separate
+  values; use prose or commas for plain-text-only labels, options, and
+  notifications.
 - [The canonical mark](../apps/desktop/public/peppy-logo.svg) owns
   Peppy's brand geometry. Do not hand-edit generated logo, launcher, or asset
   output. Binary icons use `pnpm --dir packages/mobile-design icons`, which

@@ -37,14 +37,6 @@ final class AppModel {
     private(set) var attachmentStorage: AttachmentStorageStatusResult?
     private(set) var attachmentStorageRefreshing = false
     private(set) var attachmentStorageIsStale = false
-    enum AttachmentStorageAcknowledgement: Equatable {
-        case idle
-        case inFlight(scopeId: String)
-        case failed(scopeId: String)
-        case succeeded(scopeId: String)
-    }
-    private(set) var attachmentStorageAcknowledgement = AttachmentStorageAcknowledgement.idle
-    @ObservationIgnored private var acknowledgedAttachmentStoragePolicy: (identity: EnrollmentIdentity, version: String)?
     private(set) var devices: [DeviceRosterItem] = []
     private(set) var devicesLoaded = false
     private(set) var relay: RelayWakeClient?
@@ -181,44 +173,10 @@ final class AppModel {
         }
     }
 
-    func attachmentStorageNoticeRendered(scopeId: String, status visibleStatus: NativeAttachmentStorageStatus) async {
-        guard let identity = status.identity,
-              case .available(let activeScope, let activeStatus) = attachmentStorage,
-              activeScope == scopeId, activeStatus == visibleStatus,
-              AttachmentStoragePresentation(status: visibleStatus).shouldAcknowledgeVisibleCopy,
-              let policyVersion = visibleStatus.notice.policyVersion,
-              acknowledgedAttachmentStoragePolicy?.identity != identity
-                  || acknowledgedAttachmentStoragePolicy?.version != policyVersion
-        else { return }
-        if case .inFlight(let activeScope) = attachmentStorageAcknowledgement, activeScope == scopeId { return }
-        attachmentStorageAcknowledgement = .inFlight(scopeId: scopeId)
-        do {
-            try await session.acknowledgeAttachmentStorageNotice(scopeId: scopeId, policyVersion: policyVersion)
-            guard self.status.identity == identity else { return }
-            acknowledgedAttachmentStoragePolicy = (identity, policyVersion)
-            attachmentStorageAcknowledgement = .succeeded(scopeId: scopeId)
-            await refreshAttachmentStorage()
-            if case .available(let refreshedScope, let refreshedStatus) = attachmentStorage,
-               refreshedStatus.notice.state == .notPresented {
-                acknowledgedAttachmentStoragePolicy = nil
-                attachmentStorageAcknowledgement = .failed(scopeId: refreshedScope)
-            }
-        } catch is CancellationError {
-            if self.status.identity == identity { attachmentStorageAcknowledgement = .idle }
-        } catch ClientError.canceled {
-            if self.status.identity == identity { attachmentStorageAcknowledgement = .idle }
-        } catch {
-            guard self.status.identity == identity else { return }
-            attachmentStorageAcknowledgement = .failed(scopeId: scopeId)
-        }
-    }
-
     private func clearAttachmentStorage() {
         attachmentStorage = nil
         attachmentStorageRefreshing = false
         attachmentStorageIsStale = false
-        attachmentStorageAcknowledgement = .idle
-        acknowledgedAttachmentStoragePolicy = nil
     }
 
     /// Non-destructive: the encrypted database, keys and queued work stay archived on this device.

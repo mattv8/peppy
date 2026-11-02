@@ -12,12 +12,18 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -38,7 +44,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import dev.peppy.mobile.R
 import dev.peppy.mobile.RelayWakePreference
@@ -54,25 +60,21 @@ import dev.peppy.mobile.account.AccountAccessState
 import dev.peppy.mobile.account.AccountSettingsPolicy
 import dev.peppy.mobile.attachments.AttachmentStorageCleanup
 import dev.peppy.mobile.attachments.AttachmentStorageLoad
-import dev.peppy.mobile.attachments.AttachmentStorageNoticeState
 import dev.peppy.mobile.attachments.AttachmentStorageSettingsController
 import dev.peppy.mobile.attachments.AttachmentStorageSnapshot
 import dev.peppy.mobile.attachments.AttachmentStorageUiState
 import dev.peppy.mobile.attachments.AttachmentStorageUnavailableReason
 import dev.peppy.mobile.security.CredentialParser
+import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.ui.ConsentSheet
 import dev.peppy.mobile.ui.HeroBanner
 import dev.peppy.mobile.ui.InfoButton
 import dev.peppy.mobile.ui.ScreenBody
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.time.format.FormatStyle
-import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import uniffi.peppy_mobile_bindings.hostedWakeRelayUrl
 
 /** Drop-in Account destination; parent calls GatewayAccountSettings(onChanged). */
@@ -91,7 +93,6 @@ internal fun GatewayAccountSettings(
     gatewayStatusLoader: (Context) -> GatewayStatus = NativeGateway::status,
     attachmentStorageScopeLoader: (Context) -> GatewayAccountHost.AttachmentStorageScope? = GatewayAccountHost::attachmentStorageScope,
     attachmentStorageLoader: (Context, GatewayAccountHost.AttachmentStorageScope) -> AttachmentStorageLoad? = GatewayAccountHost::loadAttachmentStorage,
-    attachmentStorageAcknowledger: (Context, GatewayAccountHost.AttachmentStorageScope) -> Boolean = GatewayAccountHost::acknowledgeAttachmentStorageNotice,
 ) {
     val context = LocalContext.current
     var state by remember { mutableStateOf<GatewayAccountState?>(null) }
@@ -104,8 +105,6 @@ internal fun GatewayAccountSettings(
     var devicesOpen by remember { mutableStateOf(false) }
     var storageOpen by remember { mutableStateOf(false) }
     var storageBusy by remember { mutableStateOf(false) }
-    var storageAcknowledgementInFlight by remember { mutableStateOf(false) }
-    var storageAcknowledgementFailed by remember { mutableStateOf(false) }
     var notificationConsentOpen by remember { mutableStateOf(false) }
     val relayPrefs = remember { context.getSharedPreferences("peppy-relay", 0) }
     var relayEnabled by remember { mutableStateOf(relayPrefs.getBoolean("relay-enabled.v1", false)) }
@@ -142,10 +141,8 @@ internal fun GatewayAccountSettings(
                 attachmentStorageState = AttachmentStorageUiState.Unavailable(null)
                 return
             }
-            val changedScope = attachmentStorageScope?.value != storageScope.value
             attachmentStorageScope = storageScope
             attachmentStorageController.begin(storageScope.value)
-            if (changedScope) storageAcknowledgementFailed = false
             attachmentStorageState = attachmentStorageController.state
             val storage = withContext(Dispatchers.IO) { attachmentStorageLoader(context, storageScope) }
             if (storage != null && attachmentStorageController.apply(storageScope.value, storage)) {
@@ -157,27 +154,11 @@ internal fun GatewayAccountSettings(
             storageBusy = false
         }
     }
-    suspend fun acknowledgeStorage(visibleScope: String) {
-        val binding = attachmentStorageScope ?: return
-        try {
-            val acknowledged = withContext(Dispatchers.IO) { attachmentStorageAcknowledger(context, binding) }
-            if (attachmentStorageController.acknowledgeResult(visibleScope, acknowledged)) {
-                storageAcknowledgementFailed = false
-                refreshStorage()
-            } else if (attachmentStorageScope?.value == visibleScope) {
-                storageAcknowledgementFailed = true
-            }
-        } finally {
-            if (attachmentStorageScope?.value == visibleScope) storageAcknowledgementInFlight = false
-        }
-    }
     fun closeStorageDetail() {
         storageOpen = false
         attachmentStorageScope = null
         attachmentStorageController.begin("")
         attachmentStorageState = AttachmentStorageUiState.Loading
-        storageAcknowledgementInFlight = false
-        storageAcknowledgementFailed = false
     }
     suspend fun refresh() {
         val loaded = withContext(Dispatchers.IO) { accountLoader(context) }
@@ -280,25 +261,9 @@ internal fun GatewayAccountSettings(
                     AttachmentStorageSettings(
                         state = attachmentStorageState,
                         scope = attachmentStorageScope?.value,
-                        busy = storageBusy || storageAcknowledgementInFlight,
-                        acknowledgementFailed = storageAcknowledgementFailed,
-                        onRefresh = {
-                            val visibleScope = attachmentStorageScope?.value
-                            if (storageAcknowledgementFailed && visibleScope != null && attachmentStorageController.retryFailedAcknowledgement(visibleScope)) {
-                                storageAcknowledgementInFlight = true
-                                scope.launch { acknowledgeStorage(visibleScope) }
-                            } else {
-                                scope.launch { refreshStorage() }
-                            }
-                        },
-                        onAcknowledge = { visibleScope ->
-                            if (attachmentStorageController.claimDisclosureRendered(visibleScope)) {
-                                storageAcknowledgementInFlight = true
-                                scope.launch { acknowledgeStorage(visibleScope) }
-                            }
-                        },
+                        busy = storageBusy,
+                        onRefresh = { scope.launch { refreshStorage() } },
                         onManage = { origin -> openUri(context, "$origin/account", failureSetter = { failure = it }) },
-                        onPrivacy = { origin -> openUri(context, "$origin/privacy", failureSetter = { failure = it }) },
                     )
                 }
             }
@@ -462,11 +427,8 @@ internal fun AttachmentStorageSettings(
     state: AttachmentStorageUiState,
     scope: String?,
     busy: Boolean,
-    acknowledgementFailed: Boolean,
     onRefresh: () -> Unit,
-    onAcknowledge: (String) -> Unit,
     onManage: (String) -> Unit,
-    onPrivacy: (String) -> Unit,
 ) {
     when (state) {
         AttachmentStorageUiState.Loading -> Section("attachment-storage-section", stringResource(R.string.peppy_attachment_storage_section_title)) {
@@ -477,7 +439,7 @@ internal fun AttachmentStorageSettings(
             Text(stringResource(R.string.peppy_attachment_storage_unavailable), Modifier.testTag("attachment-storage-unavailable"))
             TextButton(onClick = onRefresh, enabled = !busy, modifier = Modifier.testTag("attachment-storage-refresh")) { Text(stringResource(R.string.peppy_attachment_storage_reload_cta)) }
         }
-        is AttachmentStorageUiState.Unavailable -> Section("attachment-storage-section", stringResource(R.string.peppy_attachment_storage_section_title)) {
+        is AttachmentStorageUiState.Unavailable -> StorageSection(scope, showsInfo = false) {
             Text(stringResource(R.string.peppy_attachment_storage_unavailable), Modifier.testTag("attachment-storage-unavailable"))
             state.lastKnown?.let { stale ->
                 Text(stringResource(R.string.peppy_attachment_storage_stale_usage), Modifier.testTag("attachment-storage-stale-label"))
@@ -487,45 +449,100 @@ internal fun AttachmentStorageSettings(
         }
         is AttachmentStorageUiState.Available -> {
             val status = state.status
-            Section("attachment-storage-section", stringResource(R.string.peppy_attachment_storage_section_title)) {
+            StorageSection(scope) { onLearnMore ->
                 StorageValues(status, "attachment-storage-values")
-                Column(Modifier.testTag("attachment-storage-disclosure")) {
-                    Text(stringResource(R.string.peppy_attachment_storage_notice))
-                    Text(stringResource(R.string.peppy_attachment_storage_protected))
-                    Text(stringResource(R.string.peppy_attachment_storage_device_copies))
-                    if (status.notice.state == AttachmentStorageNoticeState.NOT_PRESENTED || status.notice.state == AttachmentStorageNoticeState.GRACE_PERIOD) {
-                        Text(stringResource(R.string.peppy_attachment_storage_grace))
-                        status.notice.activationAtSeconds?.let { seconds ->
-                            val announcement = "${stringResource(R.string.peppy_attachment_storage_activation_label)} ${storageDate(seconds)}"
-                            Text(announcement, Modifier.semantics { contentDescription = announcement }.testTag("attachment-storage-activation"))
-                        }
-                    }
-                    Text(stringResource(R.string.peppy_attachment_storage_purchase))
-                    scope?.let { visibleScope ->
-                        if (status.notice.state == AttachmentStorageNoticeState.NOT_PRESENTED && status.noticeCopySupported) {
-                            LaunchedEffect(visibleScope, status.notice.policyVersion) { onAcknowledge(visibleScope) }
-                        }
-                    }
-                }
-                when {
-                    status.cleanup == AttachmentStorageCleanup.DISABLED || status.unavailableReason == AttachmentStorageUnavailableReason.CLEANUP_DISABLED -> Text(stringResource(R.string.peppy_attachment_storage_disabled), Modifier.testTag("attachment-storage-disabled"))
-                    status.cleanup == AttachmentStorageCleanup.PENDING -> Text(stringResource(R.string.peppy_attachment_storage_cleanup_pending), Modifier.testTag("attachment-storage-pending"))
-                    status.notice.state == AttachmentStorageNoticeState.GRACE_PERIOD && status.usedBytes >= status.limitBytes -> Text(stringResource(R.string.peppy_attachment_storage_grace_full), Modifier.testTag("attachment-storage-grace-full"))
-                    status.notice.state == AttachmentStorageNoticeState.GRACE_PERIOD -> Text(stringResource(R.string.peppy_attachment_storage_grace_paused), Modifier.testTag("attachment-storage-grace"))
-                    status.unavailableReason == AttachmentStorageUnavailableReason.DEVICE_NOT_READY -> Text(stringResource(R.string.peppy_attachment_storage_readiness), Modifier.testTag("attachment-storage-readiness"))
-                }
-                if (status.unavailableReason == AttachmentStorageUnavailableReason.READ_ONLY) Text(stringResource(R.string.peppy_attachment_storage_read_only), Modifier.testTag("attachment-storage-read-only"))
-                if (status.unavailableReason == AttachmentStorageUnavailableReason.DEVICE_NOT_READY) Text(stringResource(R.string.peppy_attachment_storage_device_update_required), Modifier.testTag("attachment-storage-readiness-caveat"))
-                if (status.unavailableReason == AttachmentStorageUnavailableReason.BILLING_MUTATION_PENDING) Text(stringResource(R.string.peppy_attachment_storage_billing_pending), Modifier.testTag("attachment-storage-billing-pending"))
-                if (status.unavailableReason == AttachmentStorageUnavailableReason.ENTITLEMENT_UNAVAILABLE || status.unavailableReason == AttachmentStorageUnavailableReason.PROVIDER_RECONCILIATION_PENDING) Text(stringResource(R.string.peppy_attachment_storage_billing_unavailable), Modifier.testTag("attachment-storage-billing-unavailable"))
+                CapacityNotice(attachmentStorageCapacityNotice(status), onLearnMore)
                 Text(stringResource(R.string.peppy_attachment_storage_billing_handoff))
                 TextButton(onClick = { onManage("https://peppy.pro") }, modifier = Modifier.testTag("attachment-storage-manage")) { Text(stringResource(R.string.peppy_attachment_storage_manage_cta)) }
-                TextButton(onClick = { onPrivacy("https://peppy.pro") }, modifier = Modifier.testTag("attachment-storage-privacy")) { Text(stringResource(R.string.peppy_privacy_policy)) }
-                if (acknowledgementFailed) Text(stringResource(R.string.peppy_attachment_storage_notice_save_failed), Modifier.testTag("attachment-storage-ack-failed"))
                 TextButton(onClick = onRefresh, enabled = !busy, modifier = Modifier.testTag("attachment-storage-refresh")) { Text(stringResource(R.string.peppy_attachment_storage_reload_cta)) }
             }
         }
     }
+}
+
+@Composable
+private fun StorageSection(
+    scope: String?,
+    showsInfo: Boolean = true,
+    content: @Composable (onLearnMore: () -> Unit) -> Unit,
+) {
+    var infoOpen by remember(scope) { mutableStateOf(false) }
+    Section(
+        "attachment-storage-section",
+        stringResource(R.string.peppy_attachment_storage_section_title),
+        headerAction = if (showsInfo) {
+            {
+                IconButton(
+                    onClick = { infoOpen = true },
+                    modifier = Modifier.testTag("attachment-storage-info-button"),
+                ) {
+                    Icon(Icons.Default.Info, stringResource(R.string.peppy_attachment_storage_info_label))
+                }
+            }
+        } else {
+            null
+        },
+    ) { content { infoOpen = true } }
+    if (infoOpen) StorageInfoDialog(onDismiss = { infoOpen = false })
+}
+
+@Composable
+private fun StorageInfoDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.peppy_attachment_storage_info_title), Modifier.semantics { heading() }) },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(stringResource(R.string.peppy_attachment_storage_info_body_cleanup), style = MaterialTheme.typography.bodyMedium)
+                Text(stringResource(R.string.peppy_attachment_storage_info_body_protected), style = MaterialTheme.typography.bodyMedium)
+                Text(stringResource(R.string.peppy_attachment_storage_info_body_purchase), style = MaterialTheme.typography.bodyMedium)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.heightIn(min = 48.dp).testTag("attachment-storage-info-dismiss"),
+            ) { Text(stringResource(R.string.peppy_attachment_storage_info_dismiss)) }
+        },
+        modifier = Modifier.testTag("attachment-storage-info-dialog"),
+    )
+}
+
+@Composable
+private fun CapacityNotice(notice: AttachmentStorageCapacityNotice, onLearnMore: () -> Unit) {
+    Column(Modifier.testTag("attachment-storage-notice")) {
+        when (notice) {
+            AttachmentStorageCapacityNotice.None -> Unit
+            AttachmentStorageCapacityNotice.NearFull -> CapacityNoticeText(R.string.peppy_attachment_storage_near_full, onLearnMore)
+            AttachmentStorageCapacityNotice.FullCleanup -> CapacityNoticeText(R.string.peppy_attachment_storage_full_cleanup, onLearnMore)
+            is AttachmentStorageCapacityNotice.NearFullBlocked -> {
+                CapacityNoticeText(R.string.peppy_attachment_storage_near_full, onLearnMore)
+                Text(stringResource(notice.causeKey.resourceId()), Modifier.testTag("attachment-storage-cause"))
+            }
+            is AttachmentStorageCapacityNotice.Cause -> Text(stringResource(notice.key.resourceId()), Modifier.testTag("attachment-storage-cause"))
+        }
+    }
+}
+
+@Composable
+private fun CapacityNoticeText(key: Int, onLearnMore: () -> Unit) {
+    Text(stringResource(key), Modifier.testTag("attachment-storage-capacity-notice"))
+    TextButton(onClick = onLearnMore, modifier = Modifier.heightIn(min = 48.dp).testTag("attachment-storage-learn-more")) {
+        Text(stringResource(R.string.peppy_attachment_storage_learn_more))
+    }
+}
+
+private fun String.resourceId() = when (this) {
+    "peppy.attachment_storage_cleanup_pending" -> R.string.peppy_attachment_storage_cleanup_pending
+    "peppy.attachment_storage_device_update_required" -> R.string.peppy_attachment_storage_device_update_required
+    "peppy.attachment_storage_read_only" -> R.string.peppy_attachment_storage_read_only
+    "peppy.attachment_storage_billing_pending" -> R.string.peppy_attachment_storage_billing_pending
+    "peppy.attachment_storage_billing_unavailable" -> R.string.peppy_attachment_storage_billing_unavailable
+    "peppy.attachment_storage_disabled" -> R.string.peppy_attachment_storage_disabled
+    else -> R.string.peppy_attachment_storage_unavailable
 }
 
 @Composable
@@ -542,7 +559,6 @@ private fun storageBytes(bytes: Long) = when {
     bytes < 1_000_000_000L -> "%.1f MB".format(Locale.getDefault(), bytes / 1_000_000.0)
     else -> "%.1f GB".format(Locale.getDefault(), bytes / 1_000_000_000.0)
 }
-private fun storageDate(seconds: Long) = DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).withLocale(Locale.getDefault()).withZone(ZoneId.systemDefault()).format(Instant.ofEpochSecond(seconds))
 
 private fun openUri(context: Context, uri: String, failureSetter: (String) -> Unit) {
     try {
