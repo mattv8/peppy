@@ -11,12 +11,21 @@ import android.service.notification.NotificationListenerService.Ranking
 import android.service.notification.NotificationListenerService.RankingMap
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationManagerCompat
-import uniffi.peppy_mobile_bindings.MobileBindingsException
-import uniffi.peppy_mobile_bindings.NativeNotificationCapture
-import uniffi.peppy_mobile_bindings.NativeNotificationCaptureOutcome
-import uniffi.peppy_mobile_bindings.NativeClientInterface
+import dev.peppy.mobile.diagnostics.BackgroundDiagnostics
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
+import dev.peppy.mobile.gateway.GatewayPolicyHost
+import dev.peppy.mobile.gateway.NativeGateway
+import dev.peppy.mobile.notifications.NotificationAppMetadata
+import dev.peppy.mobile.phoneread.AndroidPhoneReadNotifications
+import dev.peppy.mobile.phoneread.AndroidPhoneReadProvider
+import dev.peppy.mobile.phoneread.NativePhoneReadCore
+import dev.peppy.mobile.phoneread.PhoneReadEffects
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import uniffi.peppy_mobile_bindings.MobileBindingsException
+import uniffi.peppy_mobile_bindings.NativeClientInterface
+import uniffi.peppy_mobile_bindings.NativeNotificationCapture
+import uniffi.peppy_mobile_bindings.NativeNotificationCaptureOutcome
 
 /** Local Android capture choices. Core remains the durable synchronized filter authority. */
 object NotificationMirrorPreferences {

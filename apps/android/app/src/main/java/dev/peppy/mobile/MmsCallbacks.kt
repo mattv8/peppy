@@ -8,14 +8,15 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
-import org.json.JSONObject
-import uniffi.peppy_mobile_bindings.MobileBindingsException
-import uniffi.peppy_mobile_bindings.NativeClientInterface
-import uniffi.peppy_mobile_bindings.NativeSendResult
+import dev.peppy.mobile.gateway.NativeGateway
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.util.concurrent.TimeUnit
+import org.json.JSONObject
+import uniffi.peppy_mobile_bindings.MobileBindingsException
+import uniffi.peppy_mobile_bindings.NativeClientInterface
+import uniffi.peppy_mobile_bindings.NativeSendResult
 
 /** Durable, content-free evidence for one MMS platform callback. */
 class MmsCallbackStore(context: Context, private val now: () -> Long = System::currentTimeMillis) {

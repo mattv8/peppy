@@ -17,8 +17,10 @@ import androidx.compose.ui.test.waitUntilDoesNotExist
 import androidx.compose.ui.test.waitUntilExactlyOneExists
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import dev.peppy.mobile.notifications.NotificationMirroringSettings
 import dev.peppy.mobile.ui.theme.PeppyTheme
 import org.junit.After
+import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assume.assumeFalse
@@ -26,6 +28,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+
 
 /**
  * Real Mirroring tab wiring: master switch -> required consent sheet -> (agree) exact notification

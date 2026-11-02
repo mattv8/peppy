@@ -6,7 +6,12 @@ import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.gateway.GatewayPolicyHost
+import dev.peppy.mobile.gateway.GatewayTestBase
+import dev.peppy.mobile.gateway.NativeGateway
+import dev.peppy.mobile.gateway.TestKeyHolder
 import org.junit.After
+import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -22,6 +27,7 @@ import org.robolectric.annotation.Implements
 import org.robolectric.shadows.ShadowNotificationListenerService
 import uniffi.peppy_mobile_bindings.NativeNotificationCapture
 import uniffi.peppy_mobile_bindings.NativeNotificationCaptureOutcome
+
 
 private const val LISTENER_ACCESS_SETTING = "enabled_notification_listeners"
 

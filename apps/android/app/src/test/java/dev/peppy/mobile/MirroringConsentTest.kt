@@ -1,7 +1,11 @@
 package dev.peppy.mobile
 
+import dev.peppy.mobile.enrollment.ConsentEffect
+import dev.peppy.mobile.enrollment.ConsentGatedToggle
+import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Test
+
 
 class MirroringConsentTest {
     @Test fun disclosureDeclineAndLateAccessResultDoNotApply() {

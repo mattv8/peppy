@@ -13,6 +13,11 @@ import android.net.Network
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import dev.peppy.mobile.diagnostics.BackgroundDiagnostics
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
+import dev.peppy.mobile.gateway.GatewayHttp
+import dev.peppy.mobile.gateway.GatewaySession
+import dev.peppy.mobile.gateway.NativeGateway
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit

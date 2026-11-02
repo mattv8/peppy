@@ -2,6 +2,8 @@ package dev.peppy.mobile
 
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import java.util.UUID
+import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -11,12 +13,12 @@ import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionInput
 import uniffi.peppy_mobile_bindings.NativeMmsSource
-import uniffi.peppy_mobile_bindings.NativeOpenConfig
 import uniffi.peppy_mobile_bindings.NativeNotificationCapture
 import uniffi.peppy_mobile_bindings.NativeNotificationCaptureOutcome
+import uniffi.peppy_mobile_bindings.NativeOpenConfig
 import uniffi.peppy_mobile_bindings.createVaultMaterial
 import uniffi.peppy_mobile_bindings.openNativeClient
-import java.util.UUID
+
 
 @RunWith(AndroidJUnit4::class)
 class NativeArm64SmokeTest {

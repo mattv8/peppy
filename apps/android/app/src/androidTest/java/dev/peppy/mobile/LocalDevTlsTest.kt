@@ -2,16 +2,18 @@ package dev.peppy.mobile
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URL
+import javax.net.ssl.HttpsURLConnection
+import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.net.HttpURLConnection
-import java.net.URI
-import java.net.URL
-import javax.net.ssl.HttpsURLConnection
+
 
 /**
  * Live TLS check for the debug development origin. It runs only when the operator passes

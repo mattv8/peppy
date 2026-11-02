@@ -4,13 +4,15 @@ import android.app.Notification
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
-import androidx.core.content.pm.PackageInfoCompat
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
-import android.util.Base64
 import android.service.notification.StatusBarNotification
+import android.util.Base64
+import androidx.core.content.pm.PackageInfoCompat
 import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.notifications.NotificationAppMetadata
+import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -19,6 +21,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])

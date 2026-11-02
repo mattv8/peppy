@@ -1,6 +1,11 @@
 package dev.peppy.mobile
 
 import android.app.Application
+import dev.peppy.mobile.diagnostics.DiagnosticsController
+import dev.peppy.mobile.sms.MmsCaptureLifecycle
+import dev.peppy.mobile.sms.SmsCaptureLifecycle
+import dev.peppy.mobile.sms.SmsNativeCapture
+
 
 /** Restores optional content-free relay handling before FCM delivers a restart wake. */
 class PeppyApplication : Application() {
