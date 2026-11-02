@@ -44,7 +44,6 @@ struct HostedWebContracts {
     payment_method_confirm: billing::PaymentMethodConfirmRequest,
     payment_method_setup: billing::PaymentMethodSetupResponse,
     attachment_storage_status: attachments::AttachmentStorageStatusResponse,
-    retention_notice_acknowledgement: attachments::AcknowledgeRetentionNoticeRequest,
 }
 
 /// Returns the exact bytes printed by the default mode, including the trailing newline.
@@ -66,7 +65,6 @@ fn render() -> String {
         "invoices": billing::routes::INVOICES,
         "storagePack": billing::routes::STORAGE_PACK,
         "attachmentStorageStatus": billing::routes::ATTACHMENT_STORAGE_STATUS,
-        "retentionNoticeAcknowledgement": billing::routes::RETENTION_NOTICE_ACKNOWLEDGEMENT,
         "testerCapabilities": auth::routes::CAPABILITIES,
         "billingContext": billing::routes::CONTEXT,
         "testerRegistry": testers::routes::REGISTRY,

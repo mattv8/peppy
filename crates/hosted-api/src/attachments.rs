@@ -22,14 +22,6 @@ pub enum HostedAttachmentState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum RetentionNoticeState {
-    NotPresented,
-    GracePeriod,
-    Eligible,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
 pub enum AttachmentUseKind {
     MessageHistory,
     PendingSend,
@@ -49,13 +41,14 @@ pub enum StorageCleanupState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageCleanupUnavailableReason {
-    NoticeNotEligible,
     DeviceNotReady,
     ReadOnly,
     EntitlementUnavailable,
     ProviderReconciliationPending,
     BillingMutationPending,
     CleanupDisabled,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -70,11 +63,6 @@ pub enum AttachmentRetentionErrorCode {
 /// Header required on retention-sensitive mutations by a ready device.
 pub const ATTACHMENT_RETENTION_PROTOCOL_HEADER: &str = "Peppy-Attachment-Retention-Protocol";
 pub const ATTACHMENT_RETENTION_PROTOCOL_VERSION: &str = "1";
-/// The only notice copy shipped by current clients. This intentionally does
-/// not track the server's current policy version: an unknown server version
-/// remains visible to the UI but cannot be acknowledged with older copy.
-pub const CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION: &str =
-    "hosted_attachment_retention_v1";
 
 /// Mutation families that must carry the current retention-protocol header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,7 +207,6 @@ impl RetentionCapabilityRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct AttachmentStorageStatusResponse {
     pub used_bytes: i64,
     pub limit_bytes: i64,
@@ -227,40 +214,14 @@ pub struct AttachmentStorageStatusResponse {
     pub pack_bytes: i64,
     pub protected_bytes: i64,
     pub removed_bytes: i64,
-    pub notice: RetentionNoticeResponse,
     pub cleanup_state: StorageCleanupState,
     pub cleanup_unavailable_reason: Option<StorageCleanupUnavailableReason>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RetentionNoticeResponse {
-    pub state: RetentionNoticeState,
-    pub policy_version: Option<String>,
-    pub presented_at: Option<i64>,
-    pub acknowledged_at: Option<i64>,
-    pub activation_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AcknowledgeRetentionNoticeRequest {
-    pub policy_version: String,
-}
-
-impl AcknowledgeRetentionNoticeRequest {
-    pub fn validate(&self) -> Result<(), AttachmentRetentionErrorCode> {
-        (!self.policy_version.is_empty() && self.policy_version.len() <= 128)
-            .then_some(())
-            .ok_or(AttachmentRetentionErrorCode::RetentionProtocolRequired)
-    }
 }
 
 pub mod error_codes {
     pub const UNSUPPORTED: &str = "attachment_retention_unsupported";
     pub const FORBIDDEN: &str = "attachment_retention_forbidden";
     pub const UNAVAILABLE: &str = "attachment_retention_unavailable";
-    pub const INVALID_POLICY_VERSION: &str = "invalid_retention_policy_version";
 }
 
 pub mod routes {
@@ -269,16 +230,9 @@ pub mod routes {
         "/v1/attachments/{attachment_id}/retention-uses/{use_id}/release";
     pub const RETENTION_CAPABILITY: &str = "/v1/devices/self/retention-capability";
     pub const ATTACHMENT_STORAGE_STATUS: &str = "/hosted/v1/attachment-storage/status";
-    /// Device-bearer policy status. Hosts fetch this on settings open, explicit
-    /// refresh, or once when presenting the notice; it is not a sync-poll route.
+    /// Device-bearer policy status. Hosts fetch this on settings open or explicit
+    /// refresh; it is not a sync-poll route.
     pub const DEVICE_ATTACHMENT_STORAGE_STATUS: &str = "/v1/attachments/storage/status";
-    pub const RETENTION_NOTICE_ACKNOWLEDGEMENT: &str =
-        "/hosted/v1/attachment-storage/notice/acknowledgement";
-    /// Device-bearer display acknowledgement. This metadata-only write does
-    /// not require the attachment-retention protocol header or device cleanup
-    /// readiness and is intentionally outside `RetentionProtocolMutation`.
-    pub const DEVICE_RETENTION_NOTICE_ACKNOWLEDGEMENT: &str =
-        "/v1/attachments/storage/notice/acknowledgement";
 }
 
 #[cfg(test)]
@@ -357,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn notice_and_capability_validation_fail_closed() {
+    fn capability_validation_fails_closed() {
         assert!(
             RetentionCapabilityRequest {
                 protocol_version: 2,
@@ -373,13 +327,6 @@ mod tests {
             }
             .validate()
             .is_ok()
-        );
-        assert!(
-            AcknowledgeRetentionNoticeRequest {
-                policy_version: String::new()
-            }
-            .validate()
-            .is_err()
         );
     }
 
@@ -401,30 +348,25 @@ mod tests {
         assert_eq!(error_codes::UNSUPPORTED, "attachment_retention_unsupported");
         assert_eq!(error_codes::FORBIDDEN, "attachment_retention_forbidden");
         assert_eq!(error_codes::UNAVAILABLE, "attachment_retention_unavailable");
-        assert_eq!(
-            error_codes::INVALID_POLICY_VERSION,
-            "invalid_retention_policy_version"
-        );
     }
 
     #[test]
-    fn device_and_account_notice_routes_are_distinct() {
+    fn storage_status_routes_are_canonical() {
         assert_eq!(
             routes::DEVICE_ATTACHMENT_STORAGE_STATUS,
             "/v1/attachments/storage/status"
         );
         assert_eq!(
-            routes::DEVICE_RETENTION_NOTICE_ACKNOWLEDGEMENT,
-            "/v1/attachments/storage/notice/acknowledgement"
-        );
-        assert_eq!(
             routes::ATTACHMENT_STORAGE_STATUS,
             "/hosted/v1/attachment-storage/status"
         );
-        assert_eq!(
-            routes::RETENTION_NOTICE_ACKNOWLEDGEMENT,
-            "/hosted/v1/attachment-storage/notice/acknowledgement"
-        );
+    }
+
+    #[test]
+    fn unknown_cleanup_reason_falls_back_conservatively() {
+        let reason: StorageCleanupUnavailableReason =
+            serde_json::from_value(json!("legacy_cleanup_block")).unwrap();
+        assert_eq!(reason, StorageCleanupUnavailableReason::Unknown);
     }
 
     #[test]

@@ -145,6 +145,35 @@ test("server offline copy is generated for desktop and native clients", () => {
   }
 });
 
+test("storage cleanup disclosure copy is generated for desktop and native clients", () => {
+  const copy = {
+    attachment_storage_info_label: "About storage cleanup",
+    attachment_storage_info_title: "How storage cleanup works",
+    attachment_storage_info_body_cleanup: "When storage is full, Peppy may remove the oldest eligible hosted message media to make room for new uploads. Messages, phone originals, and downloaded copies are not actively deleted by cleanup; normal device cache limits still apply.",
+    attachment_storage_info_body_protected: "Attachments stored before this policy, and other protected attachments, are not removed automatically.",
+    attachment_storage_info_body_purchase: "More storage can reduce future removals. It cannot restore files already removed.",
+    attachment_storage_info_dismiss: "Got it",
+    attachment_storage_near_full: "Hosted attachment storage is almost full.",
+    attachment_storage_full_cleanup: "Hosted attachment storage is full. Peppy may remove the oldest eligible hosted message media to make room for new uploads.",
+    attachment_storage_learn_more: "Learn more",
+  };
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const ios = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
+  const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
+
+  for (const [key, value] of Object.entries(copy)) {
+    assert.equal(catalog[key], value);
+    assert.equal(nativeCatalog[key], value);
+    assert.match(android, new RegExp(`<string name="peppy_${key}">${value}</string>`));
+    assert.equal(ios.strings[`peppy.${key}`].localizations.en.stringUnit.value, value);
+    assert.ok(desktop.includes(`${key}: ${JSON.stringify(value)},`));
+  }
+
+  for (const key of ["attachment_storage_notice", "attachment_storage_protected", "attachment_storage_device_copies", "attachment_storage_grace", "attachment_storage_grace_paused", "attachment_storage_grace_full", "attachment_storage_readiness", "attachment_storage_purchase", "attachment_storage_activation_label", "attachment_storage_notice_save_failed", "attachment_storage_privacy_open_failed"]) {
+    assert.ok(!(key in catalog), `removed storage key ${key} must be absent`);
+  }
+});
+
 test("account access copy and placeholders are generated for every client", () => {
   const keys = [
     "system_banner_dismiss", "system_banner_opens_in_browser", "system_banner_more", "system_banner_less",

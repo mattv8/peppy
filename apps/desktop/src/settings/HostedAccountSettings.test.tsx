@@ -190,11 +190,9 @@ describe("AttachmentStorageSettingsHost", () => {
   beforeEach(() => {
     vi.mocked(bridge.attachment_retention_status!).mockReset();
     vi.mocked(bridge.attachment_retention_status!).mockResolvedValue({ kind: "unsupported" });
-    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockReset();
-    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockResolvedValue("unsupported");
   });
 
-  const status = (): import("../bridge/bridge").AttachmentRetentionStatusResult => ({
+  const status = (overrides: Record<string, unknown> = {}): import("../bridge/bridge").AttachmentRetentionStatusResult => ({
     kind: "available",
     scopeId: "scope-one",
     status: {
@@ -206,9 +204,9 @@ describe("AttachmentStorageSettingsHost", () => {
       removedBytes: 0,
       cleanupState: "disabled",
       cleanupUnavailableReason: "cleanup_disabled",
-      notice: { state: "grace_period", policyVersion: "hosted_attachment_retention_v1", presentedAtSeconds: 1, acknowledgedAtSeconds: 2, activationAtSeconds: 1_800_000_000 },
+      ...overrides,
     },
-  });
+  } as unknown as import("../bridge/bridge").AttachmentRetentionStatusResult);
 
   it("preserves known usage as stale when an explicit refresh is temporarily unavailable", async () => {
     vi.mocked(bridge.attachment_retention_status!)
@@ -223,70 +221,22 @@ describe("AttachmentStorageSettingsHost", () => {
     expect(screen.getByText("20 GB")).toBeInTheDocument();
   });
 
-  it("keeps the disclosure visible and reports a failed notice record", async () => {
-    const notPresented = status();
-    if (notPresented.kind === "available") notPresented.status.notice.state = "not_presented";
-    vi.mocked(bridge.attachment_retention_status!).mockResolvedValue(notPresented);
-    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockResolvedValue("temporarily_unavailable");
-    render(<AttachmentStorageSettingsHost />);
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("The notice could not be recorded");
-    expect(screen.getByText(/When automatic cleanup is enabled/)).toBeInTheDocument();
-  });
-
-  it("retries a failed acknowledgement on explicit Refresh and reloads after success", async () => {
-    const notPresented = status();
-    if (notPresented.kind === "available") notPresented.status.notice.state = "not_presented";
-    const acknowledged = status();
-    if (acknowledged.kind === "available") acknowledged.status.notice.state = "grace_period";
+  it("keeps a late device-a status from replacing device-b storage", async () => {
+    const deviceA = deferred<import("../bridge/bridge").AttachmentRetentionStatusResult>();
+    const deviceB = deferred<import("../bridge/bridge").AttachmentRetentionStatusResult>();
     vi.mocked(bridge.attachment_retention_status!)
-      .mockResolvedValueOnce(notPresented)
-      .mockResolvedValueOnce(notPresented)
-      .mockResolvedValueOnce(acknowledged);
-    vi.mocked(bridge.acknowledge_attachment_retention_notice!)
-      .mockResolvedValueOnce("temporarily_unavailable")
-      .mockResolvedValueOnce("acknowledged");
-
-    render(<AttachmentStorageSettingsHost />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("The notice could not be recorded");
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-
-    await waitFor(() => expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(3));
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("ignores an old device scope acknowledgement and hides its usage immediately", async () => {
-    const firstStatus = deferred<import("../bridge/bridge").AttachmentRetentionStatusResult>();
-    const acknowledgement = deferred<"acknowledged" | "stale_scope" | "temporarily_unavailable" | "unsupported">();
-    const unacknowledged = status();
-    if (unacknowledged.kind === "available") unacknowledged.status.notice.state = "not_presented";
-    vi.mocked(bridge.attachment_retention_status!).mockReturnValueOnce(firstStatus.promise).mockResolvedValueOnce(status());
-    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockReturnValueOnce(acknowledgement.promise);
+      .mockReturnValueOnce(deviceA.promise)
+      .mockReturnValueOnce(deviceB.promise);
     const { rerender } = render(<AttachmentStorageSettingsHost sessionScopeId="device-a" />);
 
-    await act(async () => firstStatus.resolve(unacknowledged));
-    await waitFor(() => expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledOnce());
     rerender(<AttachmentStorageSettingsHost sessionScopeId="device-b" />);
     expect(screen.queryByText("20 GB")).not.toBeInTheDocument();
 
-    await act(async () => acknowledgement.resolve("acknowledged"));
-    await waitFor(() => expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(2));
-    expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(2);
-  });
-
-  it("recovers a stale scope once until a fresh Refresh re-arms acknowledgement", async () => {
-    const unacknowledged = status();
-    if (unacknowledged.kind === "available") unacknowledged.status.notice.state = "not_presented";
-    vi.mocked(bridge.attachment_retention_status!).mockResolvedValue(unacknowledged);
-    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockResolvedValue("stale_scope");
-    render(<AttachmentStorageSettingsHost />);
-
-    await waitFor(() => expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(2));
-    expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(bridge.attachment_retention_status).toHaveBeenCalledTimes(3));
-    await waitFor(() => expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledTimes(2));
+    await act(async () => deviceB.resolve(status({ usedBytes: 30_000_000_000 })));
+    expect(await screen.findByText("30 GB")).toBeInTheDocument();
+    await act(async () => deviceA.resolve(status({ usedBytes: 20_000_000_000 })));
+    expect(screen.getByText("30 GB")).toBeInTheDocument();
+    expect(screen.queryByText("20 GB")).not.toBeInTheDocument();
   });
 
   it("keeps the billing handoff after an unsupported retention response", async () => {
@@ -298,7 +248,7 @@ describe("AttachmentStorageSettingsHost", () => {
     expect(screen.queryByText("When automatic cleanup is enabled")).not.toBeInTheDocument();
 
     cleanup();
-    render(<AttachmentStorageSettingsHost hostKind="browser" manageStorageUrl="https://account.example.test/billing" />);
+    render(<AttachmentStorageSettingsHost manageStorageUrl="https://account.example.test/billing" />);
     await waitFor(() => expect(document.getElementById("attachment-storage-loading")).not.toBeInTheDocument());
     expect(screen.getByRole("link", { name: /manage storage on the website/i })).toHaveAttribute("href", "https://account.example.test/billing");
   });
@@ -311,24 +261,5 @@ describe("AttachmentStorageSettingsHost", () => {
     expect(screen.queryByText("Storage policy status is unavailable")).not.toBeInTheDocument();
   });
 
-  it("renders the activation date only after acknowledgement reloads it", async () => {
-    const notPresented = status();
-    const acknowledged = status();
-    if (notPresented.kind === "available") {
-      notPresented.status.notice = { ...notPresented.status.notice, state: "not_presented", activationAtSeconds: null };
-    }
-    if (acknowledged.kind === "available") {
-      acknowledged.status.notice = { ...acknowledged.status.notice, state: "grace_period", activationAtSeconds: 1_800_000_000 };
-    }
-    const acknowledgement = deferred<"acknowledged" | "stale_scope" | "temporarily_unavailable" | "unsupported">();
-    vi.mocked(bridge.attachment_retention_status!).mockResolvedValueOnce(notPresented).mockResolvedValueOnce(acknowledged);
-    vi.mocked(bridge.acknowledge_attachment_retention_notice!).mockReturnValueOnce(acknowledgement.promise);
-    render(<AttachmentStorageSettingsHost />);
-
-    await waitFor(() => expect(bridge.acknowledge_attachment_retention_notice).toHaveBeenCalledOnce());
-    expect(screen.queryByText(/Cleanup will not begin before January/)).not.toBeInTheDocument();
-    await act(async () => acknowledgement.resolve("acknowledged"));
-    expect(await screen.findByText(/Cleanup will not begin before January/)).toBeInTheDocument();
-  });
 
 });

@@ -215,7 +215,6 @@ describe("bridge subscriptions", () => {
     await tauriBridge.start_history_search({ operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2", query: "must not cross the bridge" } as never);
     await tauriBridge.cancel_history_search({ attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2", query: "must not cross the bridge" } as never);
     await tauriBridge.attachment_retention_status?.();
-    await tauriBridge.acknowledge_attachment_retention_notice?.({ scopeId: "scope-1", policyVersion: "hosted_attachment_retention_v1" });
     await tauriBridge.attachment_retention_state?.("attachment-id");
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_devices", undefined);
@@ -234,8 +233,7 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(14, "start_history_search", { input: { operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
     expect(invokeMock).toHaveBeenNthCalledWith(15, "cancel_history_search", { input: { attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
     expect(invokeMock).toHaveBeenNthCalledWith(16, "attachment_retention_status", undefined);
-    expect(invokeMock).toHaveBeenNthCalledWith(17, "acknowledge_attachment_retention_notice", { input: { scopeId: "scope-1", policyVersion: "hosted_attachment_retention_v1" } });
-    expect(invokeMock).toHaveBeenNthCalledWith(18, "attachment_retention_state", { attachmentId: "attachment-id" });
+    expect(invokeMock).toHaveBeenNthCalledWith(17, "attachment_retention_state", { attachmentId: "attachment-id" });
   });
 
   it("opens a media viewer with its conversation, attachment, and message", async () => {

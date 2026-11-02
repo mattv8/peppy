@@ -4930,14 +4930,13 @@ public struct NativeAttachmentStorageStatus: Equatable, Hashable {
     public var removedBytes: Int64
     public var cleanupState: NativeStorageCleanupState
     public var cleanupUnavailableReason: NativeStorageCleanupUnavailableReason?
-    public var notice: NativeRetentionNotice
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * All size fields are bytes.
-         */usedBytes: Int64, limitBytes: Int64, baseBytes: Int64, packBytes: Int64, protectedBytes: Int64, removedBytes: Int64, cleanupState: NativeStorageCleanupState, cleanupUnavailableReason: NativeStorageCleanupUnavailableReason?, notice: NativeRetentionNotice) {
+         */usedBytes: Int64, limitBytes: Int64, baseBytes: Int64, packBytes: Int64, protectedBytes: Int64, removedBytes: Int64, cleanupState: NativeStorageCleanupState, cleanupUnavailableReason: NativeStorageCleanupUnavailableReason?) {
         self.usedBytes = usedBytes
         self.limitBytes = limitBytes
         self.baseBytes = baseBytes
@@ -4946,7 +4945,6 @@ public struct NativeAttachmentStorageStatus: Equatable, Hashable {
         self.removedBytes = removedBytes
         self.cleanupState = cleanupState
         self.cleanupUnavailableReason = cleanupUnavailableReason
-        self.notice = notice
     }
 
     
@@ -4972,8 +4970,7 @@ public struct FfiConverterTypeNativeAttachmentStorageStatus: FfiConverterRustBuf
                 protectedBytes: FfiConverterInt64.read(from: &buf), 
                 removedBytes: FfiConverterInt64.read(from: &buf), 
                 cleanupState: FfiConverterTypeNativeStorageCleanupState.read(from: &buf), 
-                cleanupUnavailableReason: FfiConverterOptionTypeNativeStorageCleanupUnavailableReason.read(from: &buf), 
-                notice: FfiConverterTypeNativeRetentionNotice.read(from: &buf)
+                cleanupUnavailableReason: FfiConverterOptionTypeNativeStorageCleanupUnavailableReason.read(from: &buf)
         )
     }
 
@@ -4986,7 +4983,6 @@ public struct FfiConverterTypeNativeAttachmentStorageStatus: FfiConverterRustBuf
         FfiConverterInt64.write(value.removedBytes, into: &buf)
         FfiConverterTypeNativeStorageCleanupState.write(value.cleanupState, into: &buf)
         FfiConverterOptionTypeNativeStorageCleanupUnavailableReason.write(value.cleanupUnavailableReason, into: &buf)
-        FfiConverterTypeNativeRetentionNotice.write(value.notice, into: &buf)
     }
 }
 
@@ -8418,90 +8414,6 @@ public func FfiConverterTypeNativeRawSnapshotRecord_lower(_ value: NativeRawSnap
 }
 
 
-public struct NativeRetentionNotice: Equatable, Hashable {
-    public var state: NativeRetentionNoticeState
-    public var policyVersion: String?
-    /**
-     * Unix seconds supplied by the server.
-     */
-    public var presentedAtSeconds: Int64?
-    /**
-     * Unix seconds supplied by the server.
-     */
-    public var acknowledgedAtSeconds: Int64?
-    /**
-     * Unix seconds supplied by the server.
-     */
-    public var activationAtSeconds: Int64?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(state: NativeRetentionNoticeState, policyVersion: String?, 
-        /**
-         * Unix seconds supplied by the server.
-         */presentedAtSeconds: Int64?, 
-        /**
-         * Unix seconds supplied by the server.
-         */acknowledgedAtSeconds: Int64?, 
-        /**
-         * Unix seconds supplied by the server.
-         */activationAtSeconds: Int64?) {
-        self.state = state
-        self.policyVersion = policyVersion
-        self.presentedAtSeconds = presentedAtSeconds
-        self.acknowledgedAtSeconds = acknowledgedAtSeconds
-        self.activationAtSeconds = activationAtSeconds
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension NativeRetentionNotice: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeNativeRetentionNotice: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRetentionNotice {
-        return
-            try NativeRetentionNotice(
-                state: FfiConverterTypeNativeRetentionNoticeState.read(from: &buf), 
-                policyVersion: FfiConverterOptionString.read(from: &buf), 
-                presentedAtSeconds: FfiConverterOptionInt64.read(from: &buf), 
-                acknowledgedAtSeconds: FfiConverterOptionInt64.read(from: &buf), 
-                activationAtSeconds: FfiConverterOptionInt64.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: NativeRetentionNotice, into buf: inout [UInt8]) {
-        FfiConverterTypeNativeRetentionNoticeState.write(value.state, into: &buf)
-        FfiConverterOptionString.write(value.policyVersion, into: &buf)
-        FfiConverterOptionInt64.write(value.presentedAtSeconds, into: &buf)
-        FfiConverterOptionInt64.write(value.acknowledgedAtSeconds, into: &buf)
-        FfiConverterOptionInt64.write(value.activationAtSeconds, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeNativeRetentionNotice_lift(_ buf: RustBuffer) throws -> NativeRetentionNotice {
-    return try FfiConverterTypeNativeRetentionNotice.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeNativeRetentionNotice_lower(_ value: NativeRetentionNotice) -> RustBuffer {
-    return FfiConverterTypeNativeRetentionNotice.lower(value)
-}
-
-
 public struct NativeSmsAcquisition: Equatable, Hashable {
     public var acquisitionId: String
     public var conversationId: String
@@ -11742,79 +11654,6 @@ public func FfiConverterTypeNativeRemoteAttachmentState_lower(_ value: NativeRem
 
 
 
-public enum NativeRetentionNoticeState: Equatable, Hashable {
-    
-    case notPresented
-    case gracePeriod
-    case eligible
-
-
-
-
-
-}
-
-#if compiler(>=6)
-extension NativeRetentionNoticeState: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeNativeRetentionNoticeState: FfiConverterRustBuffer {
-    typealias SwiftType = NativeRetentionNoticeState
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRetentionNoticeState {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        
-        case 1: return .notPresented
-        
-        case 2: return .gracePeriod
-        
-        case 3: return .eligible
-        
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: NativeRetentionNoticeState, into buf: inout [UInt8]) {
-        switch value {
-        
-        
-        case .notPresented:
-            writeInt(&buf, Int32(1))
-        
-        
-        case .gracePeriod:
-            writeInt(&buf, Int32(2))
-        
-        
-        case .eligible:
-            writeInt(&buf, Int32(3))
-        
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeNativeRetentionNoticeState_lift(_ buf: RustBuffer) throws -> NativeRetentionNoticeState {
-    return try FfiConverterTypeNativeRetentionNoticeState.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeNativeRetentionNoticeState_lower(_ value: NativeRetentionNoticeState) -> RustBuffer {
-    return FfiConverterTypeNativeRetentionNoticeState.lower(value)
-}
-
-
-
-
 public enum NativeSendResult: Equatable, Hashable {
     
     case submitted
@@ -12216,13 +12055,13 @@ public func FfiConverterTypeNativeStorageCleanupState_lower(_ value: NativeStora
 
 public enum NativeStorageCleanupUnavailableReason: Equatable, Hashable {
     
-    case noticeNotEligible
     case deviceNotReady
     case readOnly
     case entitlementUnavailable
     case providerReconciliationPending
     case billingMutationPending
     case cleanupDisabled
+    case unknown
 
 
 
@@ -12244,19 +12083,19 @@ public struct FfiConverterTypeNativeStorageCleanupUnavailableReason: FfiConverte
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .noticeNotEligible
+        case 1: return .deviceNotReady
         
-        case 2: return .deviceNotReady
+        case 2: return .readOnly
         
-        case 3: return .readOnly
+        case 3: return .entitlementUnavailable
         
-        case 4: return .entitlementUnavailable
+        case 4: return .providerReconciliationPending
         
-        case 5: return .providerReconciliationPending
+        case 5: return .billingMutationPending
         
-        case 6: return .billingMutationPending
+        case 6: return .cleanupDisabled
         
-        case 7: return .cleanupDisabled
+        case 7: return .unknown
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -12266,31 +12105,31 @@ public struct FfiConverterTypeNativeStorageCleanupUnavailableReason: FfiConverte
         switch value {
         
         
-        case .noticeNotEligible:
+        case .deviceNotReady:
             writeInt(&buf, Int32(1))
         
         
-        case .deviceNotReady:
+        case .readOnly:
             writeInt(&buf, Int32(2))
         
         
-        case .readOnly:
+        case .entitlementUnavailable:
             writeInt(&buf, Int32(3))
         
         
-        case .entitlementUnavailable:
+        case .providerReconciliationPending:
             writeInt(&buf, Int32(4))
         
         
-        case .providerReconciliationPending:
+        case .billingMutationPending:
             writeInt(&buf, Int32(5))
         
         
-        case .billingMutationPending:
+        case .cleanupDisabled:
             writeInt(&buf, Int32(6))
         
         
-        case .cleanupDisabled:
+        case .unknown:
             writeInt(&buf, Int32(7))
         
         }
@@ -13324,22 +13163,6 @@ public func attachmentRetentionCapabilityRequest(cleanupReady: Bool)throws  -> N
     )
 })
 }
-public func attachmentRetentionNoticeAcknowledgementRequest(policyVersion: String)throws  -> NativeAttachmentRetentionRequest  {
-    return try  FfiConverterTypeNativeAttachmentRetentionRequest_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_acknowledgement_request(
-        FfiConverterString.lower(policyVersion),uniffiCallStatus
-    )
-})
-}
-public func attachmentRetentionNoticeCopySupported(policyVersion: String?) -> Bool  {
-    return try!  FfiConverterBool.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_copy_supported(
-        FfiConverterOptionString.lower(policyVersion),uniffiCallStatus
-    )
-})
-}
 public func attachmentRetentionPrepareLimitMax() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
         uniffiCallStatus in
@@ -13388,13 +13211,6 @@ public func attachmentRetentionStatusRequest() -> NativeAttachmentRetentionReque
     return try!  FfiConverterTypeNativeAttachmentRetentionRequest_lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_attachment_retention_status_request(uniffiCallStatus
-    )
-})
-}
-public func attachmentRetentionSupportedNoticePolicyVersion() -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_attachment_retention_supported_notice_policy_version(uniffiCallStatus
     )
 })
 }
@@ -13643,12 +13459,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_capability_request() != 23970) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_acknowledgement_request() != 22360) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_copy_supported() != 6598) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_prepare_limit_max() != 51910) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13668,9 +13478,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_status_request() != 16652) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_supported_notice_policy_version() != 57264) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_classify_attachment_retention_error() != 9883) {

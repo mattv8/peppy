@@ -5,10 +5,7 @@ use crate::{
     sync::blocking,
 };
 use peppy_desktop_api::attachment_retention::{
-    attachment_storage_status_dto,
-    client_supported_attachment_retention_notice_acknowledgement_request_dto,
-    AttachmentRetentionNoticeAcknowledgementInput, AttachmentRetentionNoticeAcknowledgementResult,
-    AttachmentRetentionStatusResult,
+    attachment_storage_status_dto, AttachmentRetentionStatusResult,
 };
 use peppy_hosted_api::attachments::{
     AttachmentUseKind, RegisterAttachmentUseRequest, ReleaseAttachmentUseRequest,
@@ -403,77 +400,6 @@ pub async fn status(session: Arc<Session>) -> BridgeResult<AttachmentRetentionSt
     })
 }
 
-pub async fn acknowledge(
-    session: Arc<Session>,
-    input: AttachmentRetentionNoticeAcknowledgementInput,
-) -> BridgeResult<AttachmentRetentionNoticeAcknowledgementResult> {
-    let epoch = session.attachment_retention_epoch.load(Ordering::Acquire);
-    if input.scope_id != session.generation || session.cancel.is_cancelled() {
-        return Ok(AttachmentRetentionNoticeAcknowledgementResult::StaleScope);
-    }
-    if input.policy_version
-        != peppy_hosted_api::attachments::CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION
-    {
-        return Ok(AttachmentRetentionNoticeAcknowledgementResult::UnsupportedPolicyVersion);
-    }
-    let request = client_supported_attachment_retention_notice_acknowledgement_request_dto()
-        .map_err(|_| BridgeError::host_state())?;
-    let (status, body) = session
-        .api
-        .retention_request(
-            &request.method,
-            &request.relative_path,
-            request.json_body.as_deref(),
-            request
-                .protocol_header
-                .as_ref()
-                .map(|header| (header.name.as_str(), header.value.as_str())),
-            MAX_ATTACHMENT_RETENTION_RESPONSE_JSON + 1,
-        )
-        .await?;
-    if status == 401 {
-        return Err(BridgeError::new(
-            "revoked",
-            "The server rejected this device credential (revoked or invalid).",
-        ));
-    }
-    if body.len() > MAX_ATTACHMENT_RETENTION_RESPONSE_JSON {
-        return Err(BridgeError::new(
-            "response-too-large",
-            "A server response exceeded the native safety limit.",
-        ));
-    }
-    let body = String::from_utf8(body).map_err(|_| {
-        BridgeError::new(
-            "server-response",
-            "The server returned an invalid response.",
-        )
-    })?;
-    if !active(&session, &input.scope_id, epoch) {
-        return Ok(AttachmentRetentionNoticeAcknowledgementResult::StaleScope);
-    }
-    Ok(
-        if status == request.expected_success_status && body.is_empty() {
-            AttachmentRetentionNoticeAcknowledgementResult::Acknowledged
-        } else {
-            match codec::classify_device_retention_availability(status, &body) {
-                DeviceRetentionAvailability::Unsupported => {
-                    AttachmentRetentionNoticeAcknowledgementResult::Unsupported
-                }
-                DeviceRetentionAvailability::TemporarilyUnavailable => {
-                    AttachmentRetentionNoticeAcknowledgementResult::TemporarilyUnavailable
-                }
-                DeviceRetentionAvailability::Other => {
-                    return Err(BridgeError::new(
-                        "server-rejected",
-                        "The server rejected the notice acknowledgement.",
-                    ));
-                }
-            }
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,30 +505,6 @@ mod tests {
             .expect("unauthorized capability negotiation should revoke the session");
         assert!(session.status.lock().unwrap().revoked);
         assert!(crate::sync::drain(&session, Duration::from_secs(1)).await);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stale_notice_acknowledgement_never_reaches_the_transport() {
-        let (origin, seen) = mock_server(|_, _, _| (500, "unexpected".into())).await;
-        let fixture = fixture_at(&origin);
-        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
-
-        let result = acknowledge(
-            session,
-            AttachmentRetentionNoticeAcknowledgementInput {
-                scope_id: "different-open".into(),
-                policy_version:
-                    peppy_hosted_api::attachments::CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION.into(),
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            result,
-            AttachmentRetentionNoticeAcknowledgementResult::StaleScope
-        );
-        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -243,21 +243,26 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([]);
   });
 
-  it("validates the retention presentation facade before invoking network methods", async () => {
+  it("serves attachment storage status through the ready host RPC without acknowledgement input", async () => {
     const session = new FakeSession();
-    const acknowledge = vi.fn(async () => "acknowledged" as const);
+    const attachmentRetentionStatus = vi.fn(async () => ({
+      kind: "available" as const,
+      scopeId: "scope-a",
+      status: { usedBytes: 1, limitBytes: 2 },
+    }));
     const host = new BrowserWorkerHost({
-      locks: locks(), boot: async () => session,
-      network: { start: async () => undefined, stop: async () => undefined, acknowledgeAttachmentRetentionNotice: acknowledge } as unknown as import("./host.js").BrowserNetwork,
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, attachmentRetentionStatus } as unknown as import("./host.js").BrowserNetwork,
     });
     const attached = port();
     await host.attach(attached);
 
-    attached.emit({ id: 1, command: "acknowledge_attachment_retention_notice", args: { scopeId: "", policyVersion: "hosted_attachment_retention_v1" } });
+    attached.emit({ id: 1, command: "attachment_retention_status", args: {} });
     await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
 
-    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: expect.objectContaining({ code: "invalid-request" }) });
-    expect(acknowledge).not.toHaveBeenCalled();
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: expect.objectContaining({ kind: "available", scopeId: "scope-a" }) });
+    expect(attachmentRetentionStatus).toHaveBeenCalledOnce();
   });
 
   it("passes remembered unlock only for an explicit true RPC argument", async () => {
@@ -606,11 +611,10 @@ describe("browser host RPC", () => {
       if (command === "contact_snapshot") return {};
       return { command };
     };
-    const attachmentRetentionStatus = vi.fn(async () => ({ kind: "temporarily_unavailable" as const }));
     const host = new BrowserWorkerHost({
       locks: locks(),
       boot: async () => session,
-      network: { start: async () => true, stop: async () => undefined, attachmentRetentionStatus } as unknown as import("./host.js").BrowserNetwork,
+      network: { start: async () => true, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork,
     });
     const attached = port();
     await host.attach(attached);
@@ -631,7 +635,6 @@ describe("browser host RPC", () => {
     expect(first.sessionScopeId).toEqual(expect.any(String));
     expect(second.sessionScopeId).toBe(first.sessionScopeId);
     expect(switched.sessionScopeId).not.toBe(first.sessionScopeId);
-    expect(attachmentRetentionStatus).not.toHaveBeenCalled();
     expect(session.calls.every(call => call.mutation === false)).toBe(true);
     const payload = JSON.stringify(attached.messages);
     for (const privateValue of [firstVaultId, firstDeviceId, nextVaultId, nextDeviceId, "do-not-expose"]) expect(payload).not.toContain(privateValue);

@@ -21,15 +21,15 @@ use std::{
 use axum::{
     Json,
     body::Body,
-    extract::{FromRequest, Path, Request, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::Response,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
 use peppy_hosted_api::attachments::{
-    AcknowledgeRetentionNoticeRequest, AttachmentRetentionClass, AttachmentStorageStatusResponse,
-    AttachmentUseKind, AttachmentUseResponse, AttachmentUseState, RegisterAttachmentUseRequest,
+    AttachmentRetentionClass, AttachmentStorageStatusResponse, AttachmentUseKind,
+    AttachmentUseResponse, AttachmentUseState, RegisterAttachmentUseRequest,
     ReleaseAttachmentUseRequest, ReserveAttachmentRequest, ReservedAttachmentResponse,
     RetentionCapabilityRequest, error_codes,
 };
@@ -71,9 +71,6 @@ fn device_retention_error(error: DeviceAttachmentRetentionError, route: &'static
         DeviceAttachmentRetentionError::Forbidden => {
             ApiError(StatusCode::FORBIDDEN, error_codes::FORBIDDEN)
         }
-        DeviceAttachmentRetentionError::InvalidPolicyVersion => {
-            ApiError(StatusCode::BAD_REQUEST, error_codes::INVALID_POLICY_VERSION)
-        }
         DeviceAttachmentRetentionError::Unavailable => {
             tracing::warn!(
                 route,
@@ -106,38 +103,6 @@ pub(super) async fn device_attachment_storage_status(
                 peppy_hosted_api::attachments::routes::DEVICE_ATTACHMENT_STORAGE_STATUS,
             )
         })
-}
-
-pub(super) async fn acknowledge_device_attachment_retention(
-    State(state): State<ApiState>,
-    request: Request,
-) -> ApiResult<StatusCode> {
-    let principal = auth_with_mode(&state, request.headers()).await?;
-    authorize(&state, &principal, Operation::Read).await?;
-    let Json(request) = Json::<AcknowledgeRetentionNoticeRequest>::from_request(request, &state)
-        .await
-        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, error_codes::INVALID_POLICY_VERSION))?;
-    request
-        .validate()
-        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, error_codes::INVALID_POLICY_VERSION))?;
-    state
-        .policy
-        .acknowledge_device_attachment_retention(
-            AccessPrincipal {
-                vault_id: principal.vault,
-                device_id: principal.device,
-                role: principal.role,
-            },
-            request,
-        )
-        .await
-        .map_err(|error| {
-            device_retention_error(
-                error,
-                peppy_hosted_api::attachments::routes::DEVICE_RETENTION_NOTICE_ACKNOWLEDGEMENT,
-            )
-        })?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn validate_private_spool(path: PathBuf) -> ApiResult<()> {

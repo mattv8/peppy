@@ -16,20 +16,13 @@ import androidx.compose.ui.test.performSemanticsAction
 import dev.peppy.mobile.LoopbackHttpServer
 import dev.peppy.mobile.attachments.AttachmentStorageCleanup
 import dev.peppy.mobile.attachments.AttachmentStorageLoad
-import dev.peppy.mobile.attachments.AttachmentStorageNotice
-import dev.peppy.mobile.attachments.AttachmentStorageNoticeState
 import dev.peppy.mobile.attachments.AttachmentStorageSnapshot
 import dev.peppy.mobile.attachments.AttachmentStorageUnavailableReason
 import dev.peppy.mobile.security.CredentialParser
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
-import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -78,19 +71,14 @@ class GatewayAccountSettingsShellTest : GatewayTestBase() {
         }
     }
 
-    @Test fun openingHostedStorageUsesProductionGetAndAcknowledgementOnce() {
+    @Test fun openingHostedStorageUsesOnlyTheStatusRequest() {
         val statusRequests = AtomicInteger()
-        val acknowledgementRequests = AtomicInteger()
         val unexpectedRequest = AtomicReference<String?>(null)
         LoopbackHttpServer { request ->
             when (request.target) {
                 "/v1/attachments/storage/status" -> {
                     statusRequests.incrementAndGet()
-                    LoopbackHttpServer.Response(200, notPresentedStatusBody())
-                }
-                "/v1/attachments/storage/notice/acknowledgement" -> {
-                    acknowledgementRequests.incrementAndGet()
-                    LoopbackHttpServer.Response(204)
+                    LoopbackHttpServer.Response(200, statusBody())
                 }
                 else -> {
                     unexpectedRequest.set("${request.method} ${request.target}")
@@ -103,11 +91,39 @@ class GatewayAccountSettingsShellTest : GatewayTestBase() {
 
             compose.waitUntil { compose.onAllNodesWithTag("attachment-storage-row").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("attachment-storage-row").performClick()
-            compose.waitUntil(10_000) { statusRequests.get() >= 2 && acknowledgementRequests.get() == 1 }
+            compose.waitUntil(10_000) { statusRequests.get() == 1 }
 
             assertEquals(null, unexpectedRequest.get())
-            assertEquals(2, statusRequests.get())
-            assertEquals(1, acknowledgementRequests.get())
+            assertEquals(1, statusRequests.get())
+        }
+    }
+
+    @Test fun blockedNearFullLearnMoreDoesNotMakeAnotherStorageRequest() {
+        val statusRequests = AtomicInteger()
+        val unexpectedRequest = AtomicReference<String?>(null)
+        LoopbackHttpServer { request ->
+            when (request.target) {
+                "/v1/attachments/storage/status" -> {
+                    statusRequests.incrementAndGet()
+                    LoopbackHttpServer.Response(200, nearFullBlockedStatusBody())
+                }
+                else -> {
+                    unexpectedRequest.set("${request.method} ${request.target}")
+                    LoopbackHttpServer.Response(500)
+                }
+            }
+        }.use { server ->
+            enrollLoopback(server.origin)
+            renderShell(server.origin)
+
+            compose.waitUntil { compose.onAllNodesWithTag("attachment-storage-row").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithTag("attachment-storage-row").performClick()
+            compose.waitUntil(10_000) { statusRequests.get() == 1 }
+            compose.onNodeWithTag("attachment-storage-learn-more").performClick()
+            compose.onNodeWithTag("attachment-storage-info-dialog").fetchSemanticsNode()
+
+            assertEquals(null, unexpectedRequest.get())
+            assertEquals(1, statusRequests.get())
         }
     }
 
@@ -118,7 +134,7 @@ class GatewayAccountSettingsShellTest : GatewayTestBase() {
             TEST_ORIGIN,
             attachmentStorageScopeLoader = { storageScope },
             attachmentStorageLoader = { _, _ ->
-                if (loadRequests.incrementAndGet() == 1) availableLoad(AttachmentStorageNoticeState.ELIGIBLE)
+                if (loadRequests.incrementAndGet() == 1) availableLoad()
                 else AttachmentStorageLoad.TemporarilyUnavailable
             },
         )
@@ -132,45 +148,6 @@ class GatewayAccountSettingsShellTest : GatewayTestBase() {
         compose.waitUntil(10_000) { loadRequests.get() == 2 }
         compose.onNodeWithTag("attachment-storage-stale-label").fetchSemanticsNode()
         compose.onNodeWithTag("attachment-storage-stale-values").fetchSemanticsNode()
-    }
-
-    @Test fun acknowledgementFinishingAfterNavigationHasNoUiOrRefreshEffects() {
-        val loadRequests = AtomicInteger()
-        val acknowledgementRequests = AtomicInteger()
-        val acknowledgementStarted = CountDownLatch(1)
-        val releaseAcknowledgement = CountDownLatch(1)
-        val acknowledgementCompleted = AtomicBoolean(false)
-        val storageScope = enrolledScope()
-        renderShell(
-            TEST_ORIGIN,
-            attachmentStorageScopeLoader = { storageScope },
-            attachmentStorageLoader = { _, _ ->
-                if (loadRequests.incrementAndGet() == 1) availableLoad(AttachmentStorageNoticeState.NOT_PRESENTED)
-                else availableLoad(AttachmentStorageNoticeState.ELIGIBLE)
-            },
-            attachmentStorageAcknowledger = { _, _ ->
-                acknowledgementRequests.incrementAndGet()
-                acknowledgementStarted.countDown()
-                assertTrue(releaseAcknowledgement.await(10, TimeUnit.SECONDS))
-                acknowledgementCompleted.set(true)
-                true
-            },
-        )
-        compose.waitUntil { compose.onAllNodesWithTag("attachment-storage-row").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("attachment-storage-row").performClick()
-        compose.waitUntil(10_000) { acknowledgementStarted.count == 0L }
-        compose.onNodeWithTag("attachment-storage-refresh").assertIsNotEnabled()
-
-        compose.onNodeWithTag("attachment-storage-back").performClick()
-        releaseAcknowledgement.countDown()
-        compose.waitUntil(10_000) { acknowledgementCompleted.get() }
-        compose.runOnIdle {}
-        assertEquals(1, loadRequests.get())
-        assertEquals(1, acknowledgementRequests.get())
-
-        compose.onNodeWithTag("attachment-storage-row").performClick()
-        compose.waitUntil(10_000) { loadRequests.get() == 2 }
-        assertEquals(1, acknowledgementRequests.get())
     }
 
     @Test fun refreshWithNoCurrentStorageScopeShowsRecoverableUnavailableStateWithoutHttp() {
@@ -193,7 +170,6 @@ class GatewayAccountSettingsShellTest : GatewayTestBase() {
         origin: String,
         attachmentStorageScopeLoader: (android.content.Context) -> GatewayAccountHost.AttachmentStorageScope? = GatewayAccountHost::attachmentStorageScope,
         attachmentStorageLoader: (android.content.Context, GatewayAccountHost.AttachmentStorageScope) -> AttachmentStorageLoad? = GatewayAccountHost::loadAttachmentStorage,
-        attachmentStorageAcknowledger: (android.content.Context, GatewayAccountHost.AttachmentStorageScope) -> Boolean = GatewayAccountHost::acknowledgeAttachmentStorageNotice,
     ) {
         compose.setContent {
             MaterialTheme {
@@ -204,7 +180,6 @@ class GatewayAccountSettingsShellTest : GatewayTestBase() {
                     gatewayStatusLoader = { shellStatus(origin) },
                     attachmentStorageScopeLoader = attachmentStorageScopeLoader,
                     attachmentStorageLoader = attachmentStorageLoader,
-                    attachmentStorageAcknowledger = attachmentStorageAcknowledger,
                 )
             }
         }
@@ -215,15 +190,13 @@ class GatewayAccountSettingsShellTest : GatewayTestBase() {
         return checkNotNull(GatewayAccountHost.attachmentStorageScope(context))
     }
 
-    private fun availableLoad(noticeState: AttachmentStorageNoticeState) = AttachmentStorageLoad.Available(
+    private fun availableLoad() = AttachmentStorageLoad.Available(
         AttachmentStorageSnapshot(
             usedBytes = 12_345,
             limitBytes = 23_456,
             baseBytes = 10_000,
             cleanup = AttachmentStorageCleanup.BLOCKED,
             unavailableReason = AttachmentStorageUnavailableReason.DEVICE_NOT_READY,
-            notice = AttachmentStorageNotice("hosted_attachment_retention_v1", noticeState, 1_702_592_000),
-            noticeCopySupported = true,
         ),
     )
 
@@ -237,8 +210,7 @@ class GatewayAccountSettingsShellTest : GatewayTestBase() {
         assertNotNull(GatewayAccountHost.attachmentStorageScope(context))
     }
 
-    private fun notPresentedStatusBody() = statusBody("not_presented")
+    private fun statusBody() = """{"used_bytes":12345,"limit_bytes":23456,"base_bytes":10000,"pack_bytes":2345,"protected_bytes":8765,"removed_bytes":1234,"cleanup_state":"blocked","cleanup_unavailable_reason":"device_not_ready"}"""
 
-
-    private fun statusBody(noticeState: String) = """{"used_bytes":12345,"limit_bytes":23456,"base_bytes":10000,"pack_bytes":2345,"protected_bytes":8765,"removed_bytes":1234,"cleanup_state":"blocked","cleanup_unavailable_reason":"device_not_ready","notice":{"state":"$noticeState","policy_version":"hosted_attachment_retention_v1","presented_at":null,"acknowledged_at":null,"activation_at":1702592000}}"""
+    private fun nearFullBlockedStatusBody() = """{"used_bytes":90,"limit_bytes":100,"base_bytes":50,"pack_bytes":50,"protected_bytes":0,"removed_bytes":0,"cleanup_state":"blocked","cleanup_unavailable_reason":"device_not_ready"}"""
 }

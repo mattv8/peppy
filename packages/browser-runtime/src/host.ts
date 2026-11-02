@@ -9,10 +9,10 @@ import { OriginTransport, TransportError } from "./transport.js";
 import { BannerPresenter, BrowserNotificationAdapter, CoreNotificationSettings, DEFAULT_NOTIFICATION_PREFERENCES, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationPreferences, type NotificationSettings } from "./presentation.js";
 import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
-import { AttachmentRetentionDriver, AttachmentRetentionNoticeFacade } from "./attachment-retention.js";
+import { AttachmentRetentionDriver, AttachmentRetentionStatusFacade } from "./attachment-retention.js";
 import { AccountAccessDriver } from "./account-access.js";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
-import type { AttachmentRetentionNoticeAcknowledgementInput, AttachmentRetentionNoticeAcknowledgementResult, AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
+import type { AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
 
 const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
@@ -106,7 +106,6 @@ export interface BrowserNetwork {
   syncProgress?(): SchedulerSyncProgress | undefined;
   producerReady?(): boolean;
   attachmentRetentionStatus?(): Promise<AttachmentRetentionStatusResult>;
-  acknowledgeAttachmentRetentionNotice?(input: AttachmentRetentionNoticeAcknowledgementInput): Promise<AttachmentRetentionNoticeAcknowledgementResult>;
   accountAccess?(): Promise<AccountAccessResult>;
 }
 
@@ -718,13 +717,6 @@ function producerCommand(request: RpcRequest): boolean {
   return false;
 }
 
-function retentionAcknowledgement(request: RpcRequest): AttachmentRetentionNoticeAcknowledgementInput | undefined {
-  if (request.command !== "acknowledge_attachment_retention_notice") return undefined;
-  const { scopeId, policyVersion } = request.args;
-  if (Object.keys(request.args).length !== 2 || typeof scopeId !== "string" || scopeId.length === 0 || typeof policyVersion !== "string" || policyVersion.length === 0) return undefined;
-  return { scopeId, policyVersion };
-}
-
 /** SharedWorker coordinator: all renderer ports share the same session and serialized checkpoint owner. */
 export class BrowserWorkerHost {
   private readonly ports = new Set<BrowserPort>();
@@ -872,15 +864,11 @@ export class BrowserWorkerHost {
       try { await this.presenter?.acknowledgeDisplayed(ids); port.postMessage({ id: request.id, ok: true, value: undefined }); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
       return;
     }
-    if (request.command === "attachment_retention_status" || request.command === "acknowledge_attachment_retention_notice") {
+    if (request.command === "attachment_retention_status") {
       if (this.owner.owner.phase !== "ready") { port.postMessage({ id: request.id, ok: false, error: { code: "locked", message: "Browser session is not ready." } }); return; }
-      const acknowledgement = retentionAcknowledgement(request);
-      if (request.command === "acknowledge_attachment_retention_notice" && !acknowledgement) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
-      if (request.command === "attachment_retention_status" && Object.keys(request.args).length !== 0) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      if (Object.keys(request.args).length !== 0) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
       try {
-        const value = request.command === "attachment_retention_status"
-          ? await this.dependencies.network?.attachmentRetentionStatus?.()
-          : await this.dependencies.network?.acknowledgeAttachmentRetentionNotice?.(acknowledgement!);
+        const value = await this.dependencies.network?.attachmentRetentionStatus?.();
         if (value === undefined) throw { code: "unsupported" };
         port.postMessage({ id: request.id, ok: true, value });
       } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
@@ -1422,7 +1410,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let scheduler: BrowserScheduler | undefined;
   let publicTransport: OriginTransport | undefined;
   let retention: AttachmentRetentionDriver | undefined;
-  let retentionNotice: AttachmentRetentionNoticeFacade | undefined;
+  let retentionStatus: AttachmentRetentionStatusFacade | undefined;
   let accountAccess: AccountAccessDriver | undefined;
   let retentionGeneration = 0;
   let retentionAbort: AbortController | undefined;
@@ -1440,7 +1428,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     scheduler?.stop();
     enrollmentAbort?.abort();
     retentionAbort?.abort();
-    retentionNotice?.clear();
+    retentionStatus?.clear();
     await pollPromise?.catch(() => undefined);
   };
   const schedulePoll = () => {
@@ -1473,6 +1461,9 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       epochStatus() { const state = scheduler?.epochStatus?.state; return state === "epoch-mismatch" || state === "needs-unlock" ? state : undefined; },
       syncProgress() { return syncProgress; },
       producerReady() { return scheduler?.producersReady ?? false; },
+      async attachmentRetentionStatus() {
+        return retentionStatus?.status() ?? { kind: "temporarily_unavailable" };
+      },
       stop: stopNetwork,
       subscribeChanges(listener) { changeListeners.add(listener); return () => changeListeners.delete(listener); },
       async enrollmentDiscover(origin) { return enrollment?.discover(origin) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
@@ -1505,12 +1496,6 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
         async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
         async listDevices() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/devices", { method: "GET" }); },
        async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
-       async attachmentRetentionStatus() {
-         return retentionNotice?.status() ?? { kind: "temporarily_unavailable" };
-       },
-       async acknowledgeAttachmentRetentionNotice(input) {
-         return retentionNotice?.acknowledge(input) ?? "temporarily_unavailable";
-       },
        async accountAccess() {
          return accountAccess?.status() ?? { kind: "temporarily_unavailable" };
        },
@@ -1528,7 +1513,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        retentionGeneration += 1;
        retentionAbort = new AbortController();
        retention = new AttachmentRetentionDriver(session, { retention: (request, signal) => publicTransport!.retention(request, signal) });
-       retentionNotice = new AttachmentRetentionNoticeFacade(session, { retention: (request, signal) => publicTransport!.retention(request, signal) }, () => retentionGeneration, () => retentionAbort!.signal);
+       retentionStatus = new AttachmentRetentionStatusFacade(session, { retention: (request, signal) => publicTransport!.retention(request, signal) }, () => retentionGeneration, () => retentionAbort!.signal);
        accountAccess = new AccountAccessDriver(session, { retention: (request, signal) => publicTransport!.retention(request, signal) }, () => [origins.logicalOrigin, origins.accountOrigin].filter((origin): origin is string => origin !== undefined), () => retentionGeneration, () => retentionAbort!.signal);
        scheduler = new BrowserScheduler(
         session,

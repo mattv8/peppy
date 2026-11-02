@@ -1,9 +1,14 @@
-# Peppy desktop frontend style guide
+# Peppy desktop and account website frontend style guide
 
 Reference for the Tauri desktop UI: a dense, bounded workbench in the VS Code
 Modern palette, with a coral accent and locally bundled Droid Sans. Ragtime is
 visual intent only; do not import from it. Keep the compact 4px rhythm.
 Security, data, and evidence rules live in [domain guidance](AGENTS.md).
+
+Use semantic elements and layout to separate values rather than concatenated
+dot, bullet, pipe, or dash separators. Use a `dl` for term/value pairs, a `ul`
+for lists, and spaced spans or badges for inline facts. Plain-text-only
+labels, options, and notifications use prose or commas.
 
 ## Source ownership
 
@@ -297,7 +302,7 @@ unverified until the runtime checks in [Native and fixture limits](#native-and-f
 
 ## Native and fixture limits
 
-- The browser fixture uses realistic data. ` · Simulated` marks a simulated native
+- The browser fixture uses realistic data. A `Simulated` badge marks a simulated native
   gateway only. The fixture cannot prove banner delivery or activation, and
   preview preferences stay distinct from encrypted-sync state.
 - Floating-head behavior needs native input-region and focus integration. Keep

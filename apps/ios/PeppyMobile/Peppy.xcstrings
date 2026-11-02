@@ -4821,17 +4821,37 @@
         }
       }
     },
-    "peppy.attachment_storage_notice": {
+    "peppy.attachment_storage_info_label": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "When automatic cleanup is enabled and a new upload needs space, Peppy Hosted may remove the oldest eligible hosted message attachments. Message history remains."
+            "value": "About storage cleanup"
           }
         }
       }
     },
-    "peppy.attachment_storage_protected": {
+    "peppy.attachment_storage_info_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "How storage cleanup works"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_info_body_cleanup": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When storage is full, Peppy may remove the oldest eligible hosted message media to make room for new uploads. Messages, phone originals, and downloaded copies are not actively deleted by cleanup; normal device cache limits still apply."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_info_body_protected": {
       "localizations": {
         "en": {
           "stringUnit": {
@@ -4841,57 +4861,7 @@
         }
       }
     },
-    "peppy.attachment_storage_device_copies": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cleanup does not actively delete downloaded copies on your devices or original SMS and MMS on your phone. Normal device cache limits still apply."
-          }
-        }
-      }
-    },
-    "peppy.attachment_storage_grace": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Automatic cleanup will not begin until at least 30 days after this notice is first shown."
-          }
-        }
-      }
-    },
-    "peppy.attachment_storage_grace_paused": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Automatic cleanup is paused during the notice period."
-          }
-        }
-      }
-    },
-    "peppy.attachment_storage_grace_full": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hosted storage is full. New uploads are paused. You can add storage; cleanup remains subject to the notice period and other requirements."
-          }
-        }
-      }
-    },
-    "peppy.attachment_storage_readiness": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cleanup also requires compatible devices and service readiness."
-          }
-        }
-      }
-    },
-    "peppy.attachment_storage_purchase": {
+    "peppy.attachment_storage_info_body_purchase": {
       "localizations": {
         "en": {
           "stringUnit": {
@@ -4901,12 +4871,42 @@
         }
       }
     },
-    "peppy.attachment_storage_activation_label": {
+    "peppy.attachment_storage_info_dismiss": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Cleanup will not begin before"
+            "value": "Got it"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_near_full": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hosted attachment storage is almost full."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_full_cleanup": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hosted attachment storage is full. Peppy may remove the oldest eligible hosted message media to make room for new uploads."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_learn_more": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Learn more"
           }
         }
       }
@@ -5011,16 +5011,6 @@
         }
       }
     },
-    "peppy.attachment_storage_notice_save_failed": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The notice could not be recorded. Refresh to try again."
-          }
-        }
-      }
-    },
     "peppy.attachment_storage_stale_usage": {
       "localizations": {
         "en": {
@@ -5107,16 +5097,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "The account and billing page could not be opened. Try again."
-          }
-        }
-      }
-    },
-    "peppy.attachment_storage_privacy_open_failed": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The Privacy Policy could not be opened. Try again."
           }
         }
       }

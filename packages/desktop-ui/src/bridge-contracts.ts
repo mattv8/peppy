@@ -16,12 +16,9 @@ import type {
 } from "@peppy/generated/local-search";
 import type {
   AttachmentRetentionStateDto,
-  AttachmentRetentionNoticeAcknowledgementInput,
-  AttachmentRetentionNoticeAcknowledgementResult,
   AttachmentStorageStatusDto,
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
-import { SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION } from "@peppy/generated/attachment-retention";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
 export type {
   HistorySearchAttemptInput,
@@ -40,12 +37,9 @@ export type {
 } from "@peppy/generated/local-search";
 export type {
   AttachmentRetentionStateDto,
-  AttachmentRetentionNoticeAcknowledgementInput,
-  AttachmentRetentionNoticeAcknowledgementResult,
   AttachmentStorageStatusDto,
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
-export { SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION } from "@peppy/generated/attachment-retention";
 export type { AccountAccessResult, AccountNoticeDto, AccountNoticeKindDto, AccountNoticeSeverityDto } from "@peppy/generated/account-access";
 
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
@@ -151,9 +145,6 @@ export type HostedPreviewView = {
 /** App-open password state; no password or verifier crosses this boundary. */
 export type AppLockStatus = { enabled: boolean; locked: boolean; storageAvailable: boolean };
 export type MaximizeButtonRegion = { x: number; y: number; width: number; height: number };
-export const attachmentRetentionNoticeCopySupported = (policyVersion: string | null | undefined): boolean =>
-  policyVersion === SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION;
-
 /** A host without `account_access` reports `unsupported`; a thrown host error never shows a notice. */
 export const readAccountAccess = async (bridge: { account_access?(): Promise<AccountAccessResult> }): Promise<AccountAccessResult> => {
   if (!bridge.account_access) return { kind: "unsupported" };
@@ -258,10 +249,8 @@ export interface DesktopBridge {
   hosted_sign_out(): Promise<void>;
   hosted_open_billing(): Promise<void>;
   hosted_provision(): Promise<void>;
-  /** Optional while older fixture hosts do not implement device retention status. Fetch only on settings open, explicit refresh, or one notice presentation. */
+  /** Optional while older fixture hosts do not implement device retention status. Fetch only on settings open or explicit refresh. */
   attachment_retention_status?(): Promise<AttachmentRetentionStatusResult>;
-  /** Optional device-authenticated acknowledgement. The host rejects a stale scope before credential selection or HTTP. */
-  acknowledge_attachment_retention_notice?(input: AttachmentRetentionNoticeAcknowledgementInput): Promise<AttachmentRetentionNoticeAcknowledgementResult>;
   /** Optional host read of one attachment's core-owned remote/local availability. */
   attachment_retention_state?(attachmentId: string): Promise<AttachmentRetentionStateDto>;
   /** Optional account-access notice. A missing method is treated as `unsupported`. */

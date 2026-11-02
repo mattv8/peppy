@@ -10,8 +10,7 @@ use super::{
 };
 use peppy_hosted_api::attachments::{
     ATTACHMENT_RETENTION_PROTOCOL_HEADER, ATTACHMENT_RETENTION_PROTOCOL_VERSION, AttachmentUseKind,
-    CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION, RegisterAttachmentUseRequest,
-    ReleaseAttachmentUseRequest, RetentionCapabilityRequest,
+    RegisterAttachmentUseRequest, ReleaseAttachmentUseRequest, RetentionCapabilityRequest,
 };
 use peppy_hosted_client::attachment_retention as codec;
 
@@ -67,13 +66,6 @@ pub enum NativeDeviceRetentionAvailability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum NativeRetentionNoticeState {
-    NotPresented,
-    GracePeriod,
-    Eligible,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum NativeStorageCleanupState {
     Disabled,
     Blocked,
@@ -83,25 +75,13 @@ pub enum NativeStorageCleanupState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum NativeStorageCleanupUnavailableReason {
-    NoticeNotEligible,
     DeviceNotReady,
     ReadOnly,
     EntitlementUnavailable,
     ProviderReconciliationPending,
     BillingMutationPending,
     CleanupDisabled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct NativeRetentionNotice {
-    pub state: NativeRetentionNoticeState,
-    pub policy_version: Option<String>,
-    /// Unix seconds supplied by the server.
-    pub presented_at_seconds: Option<i64>,
-    /// Unix seconds supplied by the server.
-    pub acknowledged_at_seconds: Option<i64>,
-    /// Unix seconds supplied by the server.
-    pub activation_at_seconds: Option<i64>,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -115,7 +95,6 @@ pub struct NativeAttachmentStorageStatus {
     pub removed_bytes: i64,
     pub cleanup_state: NativeStorageCleanupState,
     pub cleanup_unavailable_reason: Option<NativeStorageCleanupUnavailableReason>,
-    pub notice: NativeRetentionNotice,
 }
 
 #[uniffi::export]
@@ -162,28 +141,6 @@ pub fn attachment_retention_capability_request(
 #[uniffi::export]
 pub fn attachment_retention_status_request() -> NativeAttachmentRetentionRequest {
     request_view(codec::build_device_attachment_storage_status_request())
-}
-
-#[uniffi::export]
-pub fn attachment_retention_notice_acknowledgement_request(
-    policy_version: String,
-) -> Result<NativeAttachmentRetentionRequest, MobileBindingsError> {
-    if !notice_copy_supported(Some(&policy_version)) {
-        return Err(MobileBindingsError::InvalidRequest);
-    }
-    codec::build_client_supported_device_retention_notice_acknowledgement_request()
-        .map(request_view)
-        .map_err(codec_error)
-}
-
-#[uniffi::export]
-pub fn attachment_retention_supported_notice_policy_version() -> String {
-    CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION.into()
-}
-
-#[uniffi::export]
-pub fn attachment_retention_notice_copy_supported(policy_version: Option<String>) -> bool {
-    notice_copy_supported(policy_version.as_deref())
 }
 
 #[uniffi::export]
@@ -251,10 +208,6 @@ fn parse_uuid(value: &str) -> Result<uuid::Uuid, MobileBindingsError> {
     uuid::Uuid::parse_str(value).map_err(|_| MobileBindingsError::InvalidRequest)
 }
 
-fn notice_copy_supported(policy_version: Option<&str>) -> bool {
-    policy_version == Some(CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION)
-}
-
 fn attachment_use_kind(value: NativeAttachmentUseKind) -> AttachmentUseKind {
     match value {
         NativeAttachmentUseKind::MessageHistory => AttachmentUseKind::MessageHistory,
@@ -304,23 +257,6 @@ fn status_view(
         cleanup_unavailable_reason: value
             .cleanup_unavailable_reason
             .map(native_cleanup_unavailable_reason),
-        notice: NativeRetentionNotice {
-            state: match value.notice.state {
-                peppy_hosted_api::attachments::RetentionNoticeState::NotPresented => {
-                    NativeRetentionNoticeState::NotPresented
-                }
-                peppy_hosted_api::attachments::RetentionNoticeState::GracePeriod => {
-                    NativeRetentionNoticeState::GracePeriod
-                }
-                peppy_hosted_api::attachments::RetentionNoticeState::Eligible => {
-                    NativeRetentionNoticeState::Eligible
-                }
-            },
-            policy_version: value.notice.policy_version,
-            presented_at_seconds: value.notice.presented_at,
-            acknowledged_at_seconds: value.notice.acknowledged_at,
-            activation_at_seconds: value.notice.activation_at,
-        },
     }
 }
 
@@ -347,13 +283,13 @@ fn native_cleanup_unavailable_reason(
     value: peppy_hosted_api::attachments::StorageCleanupUnavailableReason,
 ) -> NativeStorageCleanupUnavailableReason {
     match value {
-        peppy_hosted_api::attachments::StorageCleanupUnavailableReason::NoticeNotEligible => NativeStorageCleanupUnavailableReason::NoticeNotEligible,
         peppy_hosted_api::attachments::StorageCleanupUnavailableReason::DeviceNotReady => NativeStorageCleanupUnavailableReason::DeviceNotReady,
         peppy_hosted_api::attachments::StorageCleanupUnavailableReason::ReadOnly => NativeStorageCleanupUnavailableReason::ReadOnly,
         peppy_hosted_api::attachments::StorageCleanupUnavailableReason::EntitlementUnavailable => NativeStorageCleanupUnavailableReason::EntitlementUnavailable,
         peppy_hosted_api::attachments::StorageCleanupUnavailableReason::ProviderReconciliationPending => NativeStorageCleanupUnavailableReason::ProviderReconciliationPending,
         peppy_hosted_api::attachments::StorageCleanupUnavailableReason::BillingMutationPending => NativeStorageCleanupUnavailableReason::BillingMutationPending,
         peppy_hosted_api::attachments::StorageCleanupUnavailableReason::CleanupDisabled => NativeStorageCleanupUnavailableReason::CleanupDisabled,
+        peppy_hosted_api::attachments::StorageCleanupUnavailableReason::Unknown => NativeStorageCleanupUnavailableReason::Unknown,
     }
 }
 
@@ -387,26 +323,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_status_with_typed_cleanup_and_epoch_second_notice_fields() {
-        const ACTIVATION_EPOCH_SECONDS: i64 = 1_700_000_000;
-        const THIRTY_DAYS_SECONDS: i64 = 30 * 24 * 60 * 60;
+    fn parses_status_with_typed_cleanup_fields() {
         let status = parse_attachment_retention_status(
-            format!(r#"{{"used_bytes":12345,"limit_bytes":23456,"base_bytes":10000,"pack_bytes":2345,"protected_bytes":8765,"removed_bytes":1234,"cleanup_state":"blocked","cleanup_unavailable_reason":"device_not_ready","notice":{{"state":"grace_period","policy_version":"hosted_attachment_retention_v1","presented_at":{ACTIVATION_EPOCH_SECONDS},"acknowledged_at":null,"activation_at":{}}}}}"#, ACTIVATION_EPOCH_SECONDS + THIRTY_DAYS_SECONDS),
+            r#"{"used_bytes":12345,"limit_bytes":23456,"base_bytes":10000,"pack_bytes":2345,"protected_bytes":8765,"removed_bytes":1234,"cleanup_state":"blocked","cleanup_unavailable_reason":"device_not_ready"}"#.into(),
         )
         .unwrap();
         assert_eq!(status.used_bytes, 12_345);
-        assert_eq!(
-            status.notice.presented_at_seconds,
-            Some(ACTIVATION_EPOCH_SECONDS)
-        );
-        assert_eq!(
-            status.notice.activation_at_seconds,
-            Some(ACTIVATION_EPOCH_SECONDS + THIRTY_DAYS_SECONDS)
-        );
-        assert_eq!(
-            status.notice.policy_version.as_deref(),
-            Some("hosted_attachment_retention_v1")
-        );
     }
 
     #[test]
@@ -456,19 +378,6 @@ mod tests {
             attachment_retention_register_request(invalid),
             Err(MobileBindingsError::InvalidRequest)
         ));
-
-        let notice = attachment_retention_notice_acknowledgement_request(
-            CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION.into(),
-        )
-        .unwrap();
-        assert_eq!(notice.expected_success_status, 204);
-        assert!(notice.protocol_header.is_none());
-        assert!(
-            attachment_retention_notice_acknowledgement_request(
-                "hosted_attachment_retention_v2".into()
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -498,12 +407,5 @@ mod tests {
             classify_device_retention_availability(403, String::new()),
             NativeDeviceRetentionAvailability::TemporarilyUnavailable
         );
-    }
-
-    #[test]
-    fn future_server_notice_is_not_supported_for_acknowledgement() {
-        assert!(!attachment_retention_notice_copy_supported(Some(
-            "hosted_attachment_retention_v2".into()
-        )));
     }
 }

@@ -1,17 +1,15 @@
 use super::*;
 use peppy_desktop_api::{
     AttachmentRetentionAttachmentInput, AttachmentRetentionBeginInput,
-    AttachmentRetentionCapabilityInput, AttachmentRetentionNoticeRequestInput,
-    AttachmentRetentionOperationsDto, AttachmentRetentionPreparationPendingDto,
-    AttachmentRetentionPrepareInput, AttachmentRetentionProtocolConfigurationInput,
-    AttachmentRetentionProtocolStatusDto, AttachmentRetentionReadyDto,
-    AttachmentRetentionReleaseInput, AttachmentRetentionResponseBodyInput, AttachmentUseKindDto,
-    AttachmentUseOperationKindDto, PendingAttachmentUseOperationDto,
-    account_access::account_access_result_from_response, attachment_retention_request_dto,
-    attachment_retention_state_dto, attachment_storage_status_dto, attachment_upload_retention_dto,
-    attachment_use_response, attachment_use_response_dto,
-    client_supported_attachment_retention_notice_acknowledgement_request_dto,
-    pending_attachment_use_operation_dto,
+    AttachmentRetentionCapabilityInput, AttachmentRetentionOperationsDto,
+    AttachmentRetentionPreparationPendingDto, AttachmentRetentionPrepareInput,
+    AttachmentRetentionProtocolConfigurationInput, AttachmentRetentionProtocolStatusDto,
+    AttachmentRetentionReadyDto, AttachmentRetentionReleaseInput,
+    AttachmentRetentionResponseBodyInput, AttachmentUseKindDto, AttachmentUseOperationKindDto,
+    PendingAttachmentUseOperationDto, account_access::account_access_result_from_response,
+    attachment_retention_request_dto, attachment_retention_state_dto,
+    attachment_storage_status_dto, attachment_upload_retention_dto, attachment_use_response,
+    attachment_use_response_dto, pending_attachment_use_operation_dto,
 };
 use peppy_hosted_api::attachments::{
     RegisterAttachmentUseRequest, ReleaseAttachmentUseRequest, RetentionCapabilityRequest,
@@ -33,7 +31,6 @@ pub(super) fn handles(command: &str) -> bool {
             | "_worker_attachment_retention_upload_classification"
             | "_worker_attachment_retention_status_request"
             | "_worker_attachment_retention_parse_status"
-            | "_worker_attachment_retention_notice_acknowledgement_request"
             | "_worker_attachment_retention_operation_request"
             | "_worker_attachment_retention_parse_operation_response"
             | "_worker_attachment_retention_apply_response"
@@ -49,7 +46,7 @@ pub(super) fn handles(command: &str) -> bool {
 }
 
 /// Browser transport hands the core the HTTP status and body it received, plus the
-/// clock and trusted origins. The core owns classification and the notice decision.
+/// clock and trusted origins. The core owns classification.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AccountAccessParseInput {
@@ -131,19 +128,6 @@ impl BrowserCore {
                     .map_err(|_| invalid())?;
                 serde_json::to_value(attachment_storage_status_dto(status))
                     .map_err(|_| core(CoreError::Database))
-            }
-            "_worker_attachment_retention_notice_acknowledgement_request" => {
-                let input: AttachmentRetentionNoticeRequestInput =
-                    serde_json::from_value(args).map_err(|_| invalid())?;
-                if input.policy_version
-                    != peppy_hosted_api::attachments::CLIENT_SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION
-                {
-                    return Err(invalid());
-                }
-                let request =
-                    client_supported_attachment_retention_notice_acknowledgement_request_dto()
-                        .map_err(|_| invalid())?;
-                serialize(request)
             }
             "_worker_attachment_retention_operation_request" => {
                 let input: PendingAttachmentUseOperationDto =
@@ -520,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_rejects_future_notice_ack_and_response_identity_mismatch() {
+    fn worker_rejects_response_identity_mismatch() {
         let root = tempfile::tempdir().unwrap();
         let mut browser = BrowserCore::new(root.path().to_owned());
         let device_id = DeviceId::new();
@@ -535,13 +519,6 @@ mod tests {
             )
             .unwrap(),
         );
-        let future = dispatch(
-            &mut browser,
-            "_worker_attachment_retention_notice_acknowledgement_request",
-            json!({"policyVersion": "hosted_attachment_retention_v2"}),
-        );
-        assert_eq!(future["error"]["code"], "invalid-request");
-
         browser
             .client()
             .unwrap()
@@ -657,26 +634,11 @@ mod tests {
                     "removed_bytes": 1234,
                     "cleanup_state": "blocked",
                     "cleanup_unavailable_reason": "device_not_ready",
-                    "notice": {
-                        "state": "grace_period",
-                        "policy_version": "hosted_attachment_retention_v1",
-                        "presented_at": 1700000000,
-                        "acknowledged_at": null,
-                        "activation_at": 1702592000,
-                    },
                 }).to_string(),
             }),
         );
         assert_eq!(parsed["value"]["usedBytes"], 12345);
         assert_eq!(parsed["value"]["cleanupState"], "blocked");
-        assert_eq!(
-            parsed["value"]["notice"]["presentedAtSeconds"],
-            1700000000_i64
-        );
-        assert_eq!(
-            parsed["value"]["notice"]["activationAtSeconds"],
-            1702592000_i64
-        );
     }
 
     #[test]

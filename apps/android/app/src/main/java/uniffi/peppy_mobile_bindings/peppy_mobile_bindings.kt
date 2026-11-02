@@ -687,10 +687,6 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_capability_request(
     ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_acknowledgement_request(
-    ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_copy_supported(
-    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_prepare_limit_max(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_protocol_header(
@@ -704,8 +700,6 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_response_read_limit_bytes(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_status_request(
-    ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_supported_notice_policy_version(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_classify_attachment_retention_error(
     ): Int
@@ -1697,10 +1691,6 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_capability_request(`cleanupReady`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_acknowledgement_request(`policyVersion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_copy_supported(`policyVersion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_prepare_limit_max(uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_protocol_header(uniffi_out_err: UniffiRustCallStatus, 
@@ -1714,8 +1704,6 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_response_read_limit_bytes(uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_status_request(uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_attachment_retention_supported_notice_policy_version(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_classify_attachment_retention_error(`status`: Short,`responseJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1900,12 +1888,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_capability_request() and 0xFFFF) != 23970) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_acknowledgement_request() and 0xFFFF) != 22360) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_notice_copy_supported() and 0xFFFF) != 6598) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_prepare_limit_max() and 0xFFFF) != 51910) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1925,9 +1907,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_status_request() and 0xFFFF) != 16652) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_attachment_retention_supported_notice_policy_version() and 0xFFFF) != 57264) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_classify_attachment_retention_error() and 0xFFFF) != 9883) {
@@ -9240,8 +9219,6 @@ data class NativeAttachmentStorageStatus (
     var `cleanupState`: NativeStorageCleanupState
     , 
     var `cleanupUnavailableReason`: NativeStorageCleanupUnavailableReason?
-    , 
-    var `notice`: NativeRetentionNotice
     
 ){
     
@@ -9266,7 +9243,6 @@ public object FfiConverterTypeNativeAttachmentStorageStatus: FfiConverterRustBuf
             FfiConverterLong.read(buf),
             FfiConverterTypeNativeStorageCleanupState.read(buf),
             FfiConverterOptionalTypeNativeStorageCleanupUnavailableReason.read(buf),
-            FfiConverterTypeNativeRetentionNotice.read(buf),
         )
     }
 
@@ -9278,8 +9254,7 @@ public object FfiConverterTypeNativeAttachmentStorageStatus: FfiConverterRustBuf
             FfiConverterLong.allocationSize(value.`protectedBytes`) +
             FfiConverterLong.allocationSize(value.`removedBytes`) +
             FfiConverterTypeNativeStorageCleanupState.allocationSize(value.`cleanupState`) +
-            FfiConverterOptionalTypeNativeStorageCleanupUnavailableReason.allocationSize(value.`cleanupUnavailableReason`) +
-            FfiConverterTypeNativeRetentionNotice.allocationSize(value.`notice`)
+            FfiConverterOptionalTypeNativeStorageCleanupUnavailableReason.allocationSize(value.`cleanupUnavailableReason`)
     )
 
     override fun write(value: NativeAttachmentStorageStatus, buf: ByteBuffer) {
@@ -9291,7 +9266,6 @@ public object FfiConverterTypeNativeAttachmentStorageStatus: FfiConverterRustBuf
             FfiConverterLong.write(value.`removedBytes`, buf)
             FfiConverterTypeNativeStorageCleanupState.write(value.`cleanupState`, buf)
             FfiConverterOptionalTypeNativeStorageCleanupUnavailableReason.write(value.`cleanupUnavailableReason`, buf)
-            FfiConverterTypeNativeRetentionNotice.write(value.`notice`, buf)
     }
 }
 
@@ -12007,68 +11981,6 @@ public object FfiConverterTypeNativeRawSnapshotRecord: FfiConverterRustBuffer<Na
 
 
 
-data class NativeRetentionNotice (
-    var `state`: NativeRetentionNoticeState
-    , 
-    var `policyVersion`: kotlin.String?
-    , 
-    /**
-     * Unix seconds supplied by the server.
-     */
-    var `presentedAtSeconds`: kotlin.Long?
-    , 
-    /**
-     * Unix seconds supplied by the server.
-     */
-    var `acknowledgedAtSeconds`: kotlin.Long?
-    , 
-    /**
-     * Unix seconds supplied by the server.
-     */
-    var `activationAtSeconds`: kotlin.Long?
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeNativeRetentionNotice: FfiConverterRustBuffer<NativeRetentionNotice> {
-    override fun read(buf: ByteBuffer): NativeRetentionNotice {
-        return NativeRetentionNotice(
-            FfiConverterTypeNativeRetentionNoticeState.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalLong.read(buf),
-            FfiConverterOptionalLong.read(buf),
-            FfiConverterOptionalLong.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: NativeRetentionNotice) = (
-            FfiConverterTypeNativeRetentionNoticeState.allocationSize(value.`state`) +
-            FfiConverterOptionalString.allocationSize(value.`policyVersion`) +
-            FfiConverterOptionalLong.allocationSize(value.`presentedAtSeconds`) +
-            FfiConverterOptionalLong.allocationSize(value.`acknowledgedAtSeconds`) +
-            FfiConverterOptionalLong.allocationSize(value.`activationAtSeconds`)
-    )
-
-    override fun write(value: NativeRetentionNotice, buf: ByteBuffer) {
-            FfiConverterTypeNativeRetentionNoticeState.write(value.`state`, buf)
-            FfiConverterOptionalString.write(value.`policyVersion`, buf)
-            FfiConverterOptionalLong.write(value.`presentedAtSeconds`, buf)
-            FfiConverterOptionalLong.write(value.`acknowledgedAtSeconds`, buf)
-            FfiConverterOptionalLong.write(value.`activationAtSeconds`, buf)
-    }
-}
-
-
-
 data class NativeSmsAcquisition (
     var `acquisitionId`: kotlin.String
     , 
@@ -14240,41 +14152,6 @@ public object FfiConverterTypeNativeRemoteAttachmentState: FfiConverterRustBuffe
 
 
 
-enum class NativeRetentionNoticeState {
-    
-    NOT_PRESENTED,
-    GRACE_PERIOD,
-    ELIGIBLE;
-
-    
-
-
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeNativeRetentionNoticeState: FfiConverterRustBuffer<NativeRetentionNoticeState> {
-    override fun read(buf: ByteBuffer) = try {
-        NativeRetentionNoticeState.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: NativeRetentionNoticeState) = 4UL
-
-    override fun write(value: NativeRetentionNoticeState, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
 enum class NativeSendResult {
     
     SUBMITTED,
@@ -14462,13 +14339,13 @@ public object FfiConverterTypeNativeStorageCleanupState: FfiConverterRustBuffer<
 
 enum class NativeStorageCleanupUnavailableReason {
     
-    NOTICE_NOT_ELIGIBLE,
     DEVICE_NOT_READY,
     READ_ONLY,
     ENTITLEMENT_UNAVAILABLE,
     PROVIDER_RECONCILIATION_PENDING,
     BILLING_MUTATION_PENDING,
-    CLEANUP_DISABLED;
+    CLEANUP_DISABLED,
+    UNKNOWN;
 
     
 
@@ -15673,29 +15550,6 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
     )
     }
     
-
-    @Throws(MobileBindingsException::class) fun `attachmentRetentionNoticeAcknowledgementRequest`(`policyVersion`: kotlin.String): NativeAttachmentRetentionRequest {
-            return FfiConverterTypeNativeAttachmentRetentionRequest.lift(
-    uniffiRustCallWithError(MobileBindingsException) { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_acknowledgement_request(
-    
-        
-        FfiConverterString.lower(`policyVersion`),_status)
-}
-    )
-    }
-    
- fun `attachmentRetentionNoticeCopySupported`(`policyVersion`: kotlin.String?): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_notice_copy_supported(
-    
-        
-        FfiConverterOptionalString.lower(`policyVersion`),_status)
-}
-    )
-    }
-    
  fun `attachmentRetentionPrepareLimitMax`(): kotlin.ULong {
             return FfiConverterULong.lift(
     uniffiRustCall() { _status ->
@@ -15764,16 +15618,6 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
             return FfiConverterTypeNativeAttachmentRetentionRequest.lift(
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_status_request(
-    
-        _status)
-}
-    )
-    }
-    
- fun `attachmentRetentionSupportedNoticePolicyVersion`(): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_attachment_retention_supported_notice_policy_version(
     
         _status)
 }

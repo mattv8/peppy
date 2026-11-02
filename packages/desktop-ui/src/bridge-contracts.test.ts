@@ -1,24 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION,
-  attachmentRetentionNoticeCopySupported,
-  readAccountAccess,
-  type AccountAccessResult,
-} from "./bridge-contracts";
-
-describe("attachment retention bridge contracts", () => {
-  it("acknowledges only the policy version with reviewed client copy", () => {
-    expect(
-      attachmentRetentionNoticeCopySupported(
-        SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION,
-      ),
-    ).toBe(true);
-    expect(
-      attachmentRetentionNoticeCopySupported("hosted_attachment_retention_v2"),
-    ).toBe(false);
-    expect(attachmentRetentionNoticeCopySupported(null)).toBe(false);
-  });
-});
+import { readAccountAccess, type AccountAccessResult } from "./bridge-contracts";
 
 describe("account access bridge contract", () => {
   const notice: AccountAccessResult = {

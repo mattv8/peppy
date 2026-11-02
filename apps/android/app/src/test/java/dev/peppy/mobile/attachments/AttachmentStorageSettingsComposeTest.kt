@@ -4,8 +4,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import dev.peppy.mobile.gateway.AttachmentStorageSettings
-import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -19,41 +19,63 @@ import org.robolectric.annotation.Config
 class AttachmentStorageSettingsComposeTest {
     @get:Rule val compose = createComposeRule()
 
-    @Test fun acknowledgementIsOnlyRequestedForRenderedSupportedNotPresentedDetail() {
-        var acknowledgements = 0
+    @Test fun infoDialogOpensAndDismissesWithoutRefreshingStorage() {
+        var refreshes = 0
         compose.setContent {
             MaterialTheme {
-                AttachmentStorageSettings(available(AttachmentStorageNoticeState.NOT_PRESENTED), "scope", false, false, {}, { acknowledgements++ }, {}, {})
+                AttachmentStorageSettings(available(), "scope", false, { refreshes++ }, {})
             }
         }
-        compose.onNodeWithTag("attachment-storage-disclosure").fetchSemanticsNode()
-        compose.runOnIdle { assertEquals(1, acknowledgements) }
+
+        compose.onNodeWithTag("attachment-storage-info-button").performClick()
+        compose.onNodeWithTag("attachment-storage-info-dialog").fetchSemanticsNode()
+        compose.onNodeWithTag("attachment-storage-info-dismiss").performClick()
+        assertEquals(0, compose.onAllNodesWithTag("attachment-storage-info-dialog").fetchSemanticsNodes().size)
+        compose.runOnIdle { assertEquals(0, refreshes) }
     }
 
-    @Test fun noEligibleOrUnknownPolicyDetailNeverAcknowledges() {
-        var acknowledgements = 0
+    @Test fun activeNearFullStorageOffersLearnMore() {
         compose.setContent {
             MaterialTheme {
-                AttachmentStorageSettings(available(AttachmentStorageNoticeState.ELIGIBLE, supported = false), "scope", false, false, {}, { acknowledgements++ }, {}, {})
+                AttachmentStorageSettings(available(usedBytes = 90), "scope", false, {}, {})
             }
         }
-        compose.onNodeWithTag("attachment-storage-disclosure").fetchSemanticsNode()
-        compose.runOnIdle { assertEquals(0, acknowledgements) }
+
+        compose.onNodeWithTag("attachment-storage-capacity-notice").fetchSemanticsNode()
+        compose.onNodeWithTag("attachment-storage-learn-more").performClick()
+        compose.onNodeWithTag("attachment-storage-info-dialog").fetchSemanticsNode()
     }
 
-    @Test fun unavailableDetailKeepsRefreshButDoesNotAcknowledge() {
-        var acknowledgements = 0
+    @Test fun blockedNearFullStorageOffersLearnMoreWithoutRefreshingStorage() {
+        var refreshes = 0
         compose.setContent {
             MaterialTheme {
-                AttachmentStorageSettings(AttachmentStorageUiState.Unavailable(null), "scope", false, false, {}, { acknowledgements++ }, {}, {})
+                AttachmentStorageSettings(blockedNearFull(), "scope", false, { refreshes++ }, {})
             }
         }
-        compose.onNodeWithTag("attachment-storage-refresh").fetchSemanticsNode()
-        assertEquals(0, compose.onAllNodesWithTag("attachment-storage-disclosure").fetchSemanticsNodes().size)
-        compose.runOnIdle { assertEquals(0, acknowledgements) }
+
+        compose.onNodeWithTag("attachment-storage-capacity-notice").fetchSemanticsNode()
+        compose.onNodeWithTag("attachment-storage-cause").fetchSemanticsNode()
+        compose.onNodeWithTag("attachment-storage-learn-more").performClick()
+        compose.onNodeWithTag("attachment-storage-info-dialog").fetchSemanticsNode()
+        compose.runOnIdle { assertEquals(0, refreshes) }
     }
 
-    private fun available(state: AttachmentStorageNoticeState, supported: Boolean = true) = AttachmentStorageUiState.Available(
-        AttachmentStorageSnapshot(1, 2, 1, AttachmentStorageCleanup.DISABLED, null, AttachmentStorageNotice(if (supported) "v1" else "v2", state, null), supported),
+    @Test fun unavailableStorageHidesTheInformationAction() {
+        compose.setContent {
+            MaterialTheme {
+                AttachmentStorageSettings(AttachmentStorageUiState.Unavailable(null), "scope", false, {}, {})
+            }
+        }
+
+        assertEquals(0, compose.onAllNodesWithTag("attachment-storage-info-button").fetchSemanticsNodes().size)
+    }
+
+    private fun available(usedBytes: Long = 1) = AttachmentStorageUiState.Available(
+        AttachmentStorageSnapshot(usedBytes, 100, 1, AttachmentStorageCleanup.AVAILABLE, null),
+    )
+
+    private fun blockedNearFull() = AttachmentStorageUiState.Available(
+        AttachmentStorageSnapshot(90, 100, 1, AttachmentStorageCleanup.BLOCKED, AttachmentStorageUnavailableReason.DEVICE_NOT_READY),
     )
 }

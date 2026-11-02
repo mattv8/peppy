@@ -1,8 +1,5 @@
 import {
   MAX_PREPARED_ATTACHMENT_RETENTION_OPERATIONS,
-  SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION,
-  type AttachmentRetentionNoticeAcknowledgementInput,
-  type AttachmentRetentionNoticeAcknowledgementResult,
   type AttachmentRetentionRequestDto,
   type AttachmentRetentionStatusResult,
   type AttachmentStorageStatusDto,
@@ -188,10 +185,8 @@ export class AttachmentRetentionDriver {
   }
 }
 
-interface NoticeScope { id: string; generation: number; binding: string; }
-
-export class AttachmentRetentionNoticeFacade {
-  private scope?: NoticeScope;
+export class AttachmentRetentionStatusFacade {
+  private requestEpoch = 0;
 
   public constructor(
     private readonly session: RetentionSession,
@@ -200,11 +195,12 @@ export class AttachmentRetentionNoticeFacade {
     private readonly signal: () => AbortSignal,
   ) {}
 
-  public clear(): void { this.scope = undefined; }
+  public clear(): void { this.requestEpoch += 1; }
 
   public async status(): Promise<AttachmentRetentionStatusResult> {
     const generation = this.generation();
     const signal = this.signal();
+    const requestEpoch = this.requestEpoch;
     try {
       const binding = await this.activeBinding(signal, generation);
       const request = requestDto(await this.session.query("_worker_attachment_retention_status_request", {}));
@@ -213,31 +209,10 @@ export class AttachmentRetentionNoticeFacade {
       assertActive(signal, generation, this.generation());
       const status = record(await this.session.query("_worker_attachment_retention_parse_status", { body })) as AttachmentStorageStatusDto;
       assertActive(signal, generation, this.generation());
-      const scope = { id: crypto.randomUUID(), generation, binding };
-      this.scope = scope;
-      return { kind: "available", scopeId: scope.id, status };
+      if (this.requestEpoch !== requestEpoch || await this.activeBinding(signal, generation) !== binding) throw new TransportError("cancelled");
+      return { kind: "available", scopeId: crypto.randomUUID(), status };
     } catch (error) {
       return statusFailure(error);
-    }
-  }
-
-  public async acknowledge(input: AttachmentRetentionNoticeAcknowledgementInput): Promise<AttachmentRetentionNoticeAcknowledgementResult> {
-    if (!validText(input.scopeId) || !validText(input.policyVersion)) return "stale_scope";
-    if (input.policyVersion !== SUPPORTED_ATTACHMENT_RETENTION_NOTICE_POLICY_VERSION) return "unsupported_policy_version";
-    const scope = this.scope;
-    const signal = this.signal();
-    if (!scope || scope.id !== input.scopeId || scope.generation !== this.generation() || signal.aborted) return "stale_scope";
-    try {
-      if (await this.activeBinding(signal, scope.generation) !== scope.binding) return "stale_scope";
-      const request = requestDto(await this.session.query("_worker_attachment_retention_notice_acknowledgement_request", { policyVersion: input.policyVersion }));
-      if (this.scope !== scope) return "stale_scope";
-      assertActive(signal, scope.generation, this.generation());
-      await this.transport.retention(request, signal);
-      assertActive(signal, scope.generation, this.generation());
-      return "acknowledged";
-    } catch (error) {
-      const failure = statusFailure(error);
-      return failure.kind === "unsupported" ? "unsupported" : failure.kind === "temporarily_unavailable" ? "temporarily_unavailable" : "stale_scope";
     }
   }
 
@@ -274,6 +249,8 @@ function record(value: unknown): Record<string, unknown> {
   return value;
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function validText(value: unknown): value is string { return typeof value === "string" && value.length > 0; }
+function requiredText(value: unknown): string { if (!validText(value)) throw new TransportError("invalid"); return value; }
 function isOldServer(error: unknown): boolean { return error instanceof TransportError && error.kind === "status" && (error.status === 404 || error.status === 405); }
 function isDeferredTransportFailure(error: unknown): boolean { return error instanceof TransportError && error.kind !== "cancelled" && error.kind !== "revoked" && error.kind !== "invalid"; }
 function statusFailure(error: unknown): Exclude<AttachmentRetentionStatusResult, { kind: "available" }> {
@@ -282,7 +259,5 @@ function statusFailure(error: unknown): Exclude<AttachmentRetentionStatusResult,
   if (error instanceof TransportError && (error.kind === "offline" || error.kind === "cancelled")) return { kind: "temporarily_unavailable" };
   throw error;
 }
-function validText(value: unknown): value is string { return typeof value === "string" && value.length > 0; }
-function requiredText(value: unknown): string { if (!validText(value)) throw new TransportError("invalid"); return value; }
 function assertActive(signal: AbortSignal, expected: number, actual: number): void { if (signal.aborted || expected !== actual) throw new TransportError("cancelled"); }
 function throwIfAborted(signal: AbortSignal): void { if (signal.aborted) throw new TransportError("cancelled"); }

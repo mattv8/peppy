@@ -7,7 +7,6 @@ const COMMANDS: &[&str] = &[
     "load_state",
     "account_access",
     "attachment_retention_status",
-    "acknowledge_attachment_retention_notice",
     "attachment_retention_state",
     "load_history",
     "search_local",

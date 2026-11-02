@@ -4,32 +4,24 @@ import Testing
 
 @Suite struct AttachmentStoragePresentationTests {
     private func status(
-        cleanup: NativeStorageCleanupState,
+        cleanup: NativeStorageCleanupState = .available,
         reason: NativeStorageCleanupUnavailableReason? = nil,
-        notice: NativeRetentionNoticeState = .eligible,
         used: Int64 = 1,
         limit: Int64 = 2
     ) -> NativeAttachmentStorageStatus {
         NativeAttachmentStorageStatus(
             usedBytes: used, limitBytes: limit, baseBytes: 1, packBytes: 1,
             protectedBytes: 0, removedBytes: 0, cleanupState: cleanup,
-            cleanupUnavailableReason: reason,
-            notice: NativeRetentionNotice(
-                state: notice, policyVersion: attachmentRetentionSupportedNoticePolicyVersion(),
-                presentedAtSeconds: nil, acknowledgedAtSeconds: nil, activationAtSeconds: 2
-            )
+            cleanupUnavailableReason: reason
         )
     }
 
-    @Test func fullDisclosureAndAcknowledgementDependOnNoticeStateNotCleanupState() {
-        let disabled = AttachmentStoragePresentation(status: status(cleanup: .disabled, notice: .notPresented))
-        #expect(disabled.showsThirtyDayDisclosure)
-        #expect(disabled.shouldAcknowledgeVisibleCopy)
-        #expect(disabled.stateMessageKeys.contains("peppy.attachment_storage_disabled"))
-
-        let eligible = AttachmentStoragePresentation(status: status(cleanup: .available, notice: .eligible))
-        #expect(!eligible.showsThirtyDayDisclosure)
-        #expect(!eligible.shouldAcknowledgeVisibleCopy)
+    @Test func capacityNoticeUsesNinetyPercentThresholdAndSuppressesInvalidCapacity() {
+        #expect(AttachmentStoragePresentation(status: status(used: 89, limit: 100)).capacityNotice == .none)
+        #expect(AttachmentStoragePresentation(status: status(used: 90, limit: 100)).capacityNotice == .nearFull)
+        #expect(AttachmentStoragePresentation(status: status(used: 99, limit: 100)).capacityNotice == .nearFull)
+        #expect(AttachmentStoragePresentation(status: status(used: 100, limit: 100)).capacityNotice == .fullCleanup)
+        #expect(AttachmentStoragePresentation(status: status(used: 0, limit: 0)).capacityNotice == .none)
     }
 
     @Test func typedCleanupReasonsMapToDistinctSharedFacts() {
@@ -47,29 +39,20 @@ import Testing
         }
     }
 
-    @Test func globalOffSuppressesRedundantGraceAndDeviceReadinessCopy() {
-        let paused = AttachmentStoragePresentation(
-            status: status(cleanup: .disabled, notice: .gracePeriod)
+    @Test func blockedFullCapacityShowsTheCauseWithoutADeletionClaim() {
+        let presentation = AttachmentStoragePresentation(
+            status: status(cleanup: .blocked, reason: .deviceNotReady, used: 2, limit: 2)
         )
-        #expect(paused.stateMessageKeys == ["peppy.attachment_storage_disabled"])
-
-        let full = AttachmentStoragePresentation(
-            status: status(cleanup: .disabled, notice: .gracePeriod, used: 2, limit: 2)
-        )
-        #expect(full.stateMessageKeys == [
-            "peppy.attachment_storage_disabled", "peppy.attachment_storage_grace_full",
-        ])
-
-        let device = AttachmentStoragePresentation(
-            status: status(cleanup: .blocked, reason: .deviceNotReady)
-        )
-        #expect(device.stateMessageKeys == ["peppy.attachment_storage_device_update_required"])
+        #expect(presentation.capacityNotice == .cause("peppy.attachment_storage_device_update_required"))
     }
 
-    @Test func fullGraceUsesTheSpecificPausedUploadMessage() {
+    @Test func blockedNearFullKeepsItsCauseAndOffersTheSharedInformationSheet() {
         let presentation = AttachmentStoragePresentation(
-            status: status(cleanup: .blocked, reason: .noticeNotEligible, notice: .gracePeriod, used: 2, limit: 2)
+            status: status(cleanup: .blocked, reason: .deviceNotReady, used: 90, limit: 100)
         )
-        #expect(presentation.stateMessageKeys == ["peppy.attachment_storage_grace_full"])
+
+        #expect(presentation.capacityNotice == .nearFullBlocked("peppy.attachment_storage_device_update_required"))
+        #expect(presentation.capacityNotice.showsLearnMore)
+        #expect(presentation.stateMessageKeys == ["peppy.attachment_storage_device_update_required"])
     }
 }

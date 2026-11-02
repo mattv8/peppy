@@ -1147,6 +1147,29 @@ select:focus-visible {
 .peppy-modal-panel p { margin: 0; }
 .peppy-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
+#attachment-storage-heading-row { display: flex; align-items: center; gap: 4px; }
+.attachment-storage-info-button {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--peppy-radius-sm, 4px);
+  background: transparent;
+  color: var(--peppy-text-secondary);
+}
+.attachment-storage-info-button:hover { background: var(--peppy-surface-hover); }
+.attachment-storage-info-button:focus-visible { outline: 2px solid var(--peppy-focus-ring, var(--peppy-accent)); outline-offset: 2px; }
+#attachment-storage-info-body { display: grid; gap: 12px; }
+[data-attachment-storage-capacity-row] { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.attachment-storage-learn-more { padding: 0; border: 0; background: transparent; color: var(--peppy-accent); text-decoration: underline; }
+.attachment-storage-learn-more:focus-visible { outline: 2px solid var(--peppy-focus-ring, var(--peppy-accent)); outline-offset: 2px; }
+
+@media (pointer: coarse) {
+  .attachment-storage-info-button { width: 44px; height: 44px; }
+}
+
 :where(.theme-system, .theme-light, .theme-dark)[data-bridge-mode="native"][data-platform="linux"] {
   --peppy-glass-surface: var(--peppy-glass-fallback);
   --peppy-glass-backdrop-filter: none;
@@ -1170,5 +1193,6 @@ select:focus-visible {
   [data-conversation-actions]::before { background: Canvas; }
   .conversation-pin, .conversation-popout, .conversation-delete { color: ButtonText; }
   .conversation-delete.confirming { background: Highlight; color: HighlightText; }
+  .attachment-storage-info-button:focus-visible, .attachment-storage-learn-more:focus-visible { outline-color: Highlight; }
   .conversation-copy .conversation-delete-warning { color: CanvasText; }
 }

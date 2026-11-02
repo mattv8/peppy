@@ -5,7 +5,7 @@ import type {
   HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MaximizeButtonRegion, MediaCursor, MediaOpen, MediaPage, MessageWindow,
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
-  AccountAccessResult, AttachmentRetentionNoticeAcknowledgementInput, AttachmentRetentionNoticeAcknowledgementResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult,
+  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
@@ -538,7 +538,6 @@ export class BrowserBridge implements DesktopBridge {
   public attachment_retention_state(attachmentId: string): Promise<AttachmentRetentionStateDto> { return this.call("attachment_retention_state", { attachmentId }); }
   public attachment_retention_status(): Promise<AttachmentRetentionStatusResult> { return this.call("attachment_retention_status"); }
   public account_access(): Promise<AccountAccessResult> { return this.call("account_access"); }
-  public acknowledge_attachment_retention_notice(input: AttachmentRetentionNoticeAcknowledgementInput): Promise<AttachmentRetentionNoticeAcknowledgementResult> { return this.call("acknowledge_attachment_retention_notice", input); }
   public request_attachment_download(id: string): Promise<void> { return this.call("request_attachment_download", { id }); }
   public media_sync_request(attachmentIds: string[]): Promise<void> { return this.call("media_sync_request", { attachmentIds }); }
   public media_page(conversationId: string, cursor?: MediaCursor, limit?: number): Promise<MediaPage> { return this.call("media_page", { conversationId, cursor, limit }); }

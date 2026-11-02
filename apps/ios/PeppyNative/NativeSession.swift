@@ -43,56 +43,75 @@ public struct HostedWakeConfiguration: Equatable, Sendable {
 
 /// Pure, host-owned mapping from the typed server status to portable copy keys.
 public struct AttachmentStoragePresentation: Equatable, Sendable {
-    public let showsThirtyDayDisclosure: Bool
-    public let shouldAcknowledgeVisibleCopy: Bool
+    public enum CapacityNotice: Equatable, Sendable {
+        case none
+        case nearFull
+        case fullCleanup
+        case nearFullBlocked(String)
+        case cause(String)
+
+        public var showsLearnMore: Bool {
+            switch self {
+            case .nearFull, .fullCleanup, .nearFullBlocked:
+                true
+            case .none, .cause:
+                false
+            }
+        }
+    }
+
+    public let capacityNotice: CapacityNotice
     public let stateMessageKeys: [String]
 
     public init(status: NativeAttachmentStorageStatus) {
-        showsThirtyDayDisclosure = status.notice.state != .eligible
-        shouldAcknowledgeVisibleCopy = status.notice.state == .notPresented
-            && attachmentRetentionNoticeCopySupported(policyVersion: status.notice.policyVersion)
-
-        var messages: [String] = []
+        let cause = Self.causeKey(status)
+        if status.cleanupState == .pending {
+            capacityNotice = .cause("peppy.attachment_storage_cleanup_pending")
+            stateMessageKeys = ["peppy.attachment_storage_cleanup_pending"]
+            return
+        }
+        guard status.limitBytes > 0, status.usedBytes >= 0 else {
+            if status.cleanupState == .available {
+                capacityNotice = .none
+                stateMessageKeys = []
+            } else {
+                let blockedCause = cause ?? "peppy.attachment_storage_unavailable"
+                capacityNotice = .cause(blockedCause)
+                stateMessageKeys = [blockedCause]
+            }
+            return
+        }
+        let full = status.usedBytes >= status.limitBytes
+        let nearFull = !full && status.usedBytes >= status.limitBytes - (status.limitBytes / 10)
         switch status.cleanupState {
-        case .disabled:
-            messages.append("peppy.attachment_storage_disabled")
+        case .available:
+            capacityNotice = full ? .fullCleanup : nearFull ? .nearFull : .none
+            stateMessageKeys = []
         case .pending:
-            messages.append("peppy.attachment_storage_cleanup_pending")
-        case .blocked, .available:
-            break
+            capacityNotice = .cause("peppy.attachment_storage_cleanup_pending")
+            stateMessageKeys = ["peppy.attachment_storage_cleanup_pending"]
+        case .disabled, .blocked:
+            let blockedCause = cause ?? "peppy.attachment_storage_unavailable"
+            capacityNotice = full ? .cause(blockedCause) : nearFull ? .nearFullBlocked(blockedCause) : .cause(blockedCause)
+            stateMessageKeys = [blockedCause]
         }
+    }
 
-        let cleanupDisabled = status.cleanupState == .disabled || status.cleanupUnavailableReason == .cleanupDisabled
-        if status.notice.state == .gracePeriod {
-            if status.usedBytes >= status.limitBytes {
-                messages.append("peppy.attachment_storage_grace_full")
-            } else if !cleanupDisabled {
-                messages.append("peppy.attachment_storage_grace_paused")
-            }
-        }
-
+    private static func causeKey(_ status: NativeAttachmentStorageStatus) -> String? {
         switch status.cleanupUnavailableReason {
-        case .deviceNotReady:
-            messages.append("peppy.attachment_storage_device_update_required")
-        case .readOnly:
-            messages.append("peppy.attachment_storage_read_only")
-        case .billingMutationPending:
-            messages.append("peppy.attachment_storage_billing_pending")
-        case .entitlementUnavailable, .providerReconciliationPending:
-            messages.append("peppy.attachment_storage_billing_unavailable")
-        case .cleanupDisabled:
-            if !messages.contains("peppy.attachment_storage_disabled") {
-                messages.append("peppy.attachment_storage_disabled")
-            }
-        case .noticeNotEligible, nil:
-            break
+        case .deviceNotReady: return "peppy.attachment_storage_device_update_required"
+        case .readOnly: return "peppy.attachment_storage_read_only"
+        case .billingMutationPending: return "peppy.attachment_storage_billing_pending"
+        case .entitlementUnavailable, .providerReconciliationPending: return "peppy.attachment_storage_billing_unavailable"
+        case .cleanupDisabled: return "peppy.attachment_storage_disabled"
+        case .unknown: return "peppy.attachment_storage_unavailable"
+        case nil: return status.cleanupState == .disabled ? "peppy.attachment_storage_disabled" : nil
         }
-        stateMessageKeys = messages
     }
 }
 
 public enum AttachmentStorageStatusResult: Sendable {
-    case available(scopeId: String, status: NativeAttachmentStorageStatus)
+    case available(status: NativeAttachmentStorageStatus)
     case unsupported
     case temporarilyUnavailable
 }
@@ -148,12 +167,6 @@ public actor NativeSession {
     private let attachmentRetentionHTTP = AttachmentRetentionHTTPState()
     private var syncing = false
     private var changingEnrollment = false
-    private struct AttachmentStorageScope: Equatable, Sendable {
-        let identity: EnrollmentIdentity
-        let policyVersion: String?
-        let noticeState: NativeRetentionNoticeState
-    }
-    private var attachmentStorageScopes: [String: AttachmentStorageScope] = [:]
     private struct PhoneClaimContext: Sendable {
         let origin: String
         let invitationID: String
@@ -1192,11 +1205,7 @@ public actor NativeSession {
                 throw ClientError.server(status: response.status, code: nil)
             }
             let status = try parseAttachmentRetentionStatus(responseJson: text)
-            let scopeId = UUID().uuidString.lowercased()
-            attachmentStorageScopes = [scopeId: AttachmentStorageScope(
-                identity: identity, policyVersion: status.notice.policyVersion, noticeState: status.notice.state
-            )]
-            return .available(scopeId: scopeId, status: status)
+            return .available(status: status)
         }
     }
 
@@ -1216,25 +1225,6 @@ public actor NativeSession {
         return (UInt16(clamping: response.status), text)
     }
 
-    public func acknowledgeAttachmentStorageNotice(scopeId: String, policyVersion: String?) async throws {
-        guard attachmentRetentionNoticeCopySupported(policyVersion: policyVersion),
-              let policyVersion, let scope = attachmentStorageScopes[scopeId],
-              scope.noticeState == .notPresented, scope.policyVersion == policyVersion,
-              record?.identity == scope.identity else { throw ClientError.identityMismatch }
-        let identity = scope.identity
-        let request = try attachmentRetentionNoticeAcknowledgementRequest(policyVersion: policyVersion)
-        var meter = RequestMeter(limit: 1)
-        let response = try await authenticatedServer(identity).exchange(
-            request.method, request.relativePath, body: request.jsonBody.map { Data($0.utf8) },
-            contentType: "application/json", limit: Int(attachmentRetentionResponseReadLimitBytes()), meter: &meter
-        )
-        guard record?.identity == identity, attachmentStorageScopes[scopeId] == scope, !Task.isCancelled else {
-            throw ClientError.canceled
-        }
-        guard response.status == request.expectedSuccessStatus, response.body.isEmpty else {
-            throw ClientError.server(status: response.status, code: nil)
-        }
-    }
 
     // MARK: Contacts
 
@@ -1476,7 +1466,6 @@ public actor NativeSession {
         status = SessionStatus()
         reachability.bind(nil)
         attachmentRetentionHTTP.reset()
-        attachmentStorageScopes.removeAll()
     }
 
     private func refreshCount() {

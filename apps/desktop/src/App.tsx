@@ -1366,7 +1366,7 @@ function SettingsView({
       {hasAccount && <section id="settings-account-billing" className="settings-card" data-settings-section="account-billing">
         <h2>Account &amp; billing</h2>
         <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
-        {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} hostKind="browser" manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} />}
+        {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} />}
       </section>}
       <PrivacySettings browserHost={browserHost} />
       </div>

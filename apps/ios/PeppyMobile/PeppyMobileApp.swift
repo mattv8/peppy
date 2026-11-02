@@ -636,7 +636,7 @@ struct SettingsView: View {
     @ViewBuilder private var attachmentStorageSummary: some View {
         if !model.attachmentStorageRefreshing {
             switch model.attachmentStorage {
-            case .available(_, let status):
+            case .available(let status):
                 let presentation = AttachmentStoragePresentation(status: status)
                 if let stateKey = presentation.stateMessageKeys.first, !model.attachmentStorageIsStale {
                     Text(localizedAttachmentStorage(stateKey))
@@ -661,15 +661,41 @@ struct SettingsView: View {
 
 private struct AttachmentStorageDetailView: View {
     @Bindable var model: AppModel
+    @State private var infoPresented = false
 
     var body: some View {
         Form {
-            Section { attachmentStorageRows }
+            Section {
+                attachmentStorageRows
+            } header: {
+                HStack {
+                    Text("peppy.attachment_storage_section_title", tableName: "Peppy")
+                    if showsStorageInfo {
+                        Button {
+                            infoPresented = true
+                        } label: {
+                            Image(systemName: "info.circle")
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .accessibilityLabel(Text("peppy.attachment_storage_info_label", tableName: "Peppy"))
+                        .accessibilityIdentifier("attachment-storage-info-button")
+                    }
+                }
+            }
                 .accessibilityIdentifier("attachment-storage-detail-section")
         }
         .formStyle(.grouped)
         .navigationTitle(Text("peppy.attachment_storage_section_title", tableName: "Peppy"))
         .task(id: model.status.identity) { await model.refreshAttachmentStorage() }
+        .onChange(of: model.status.identity) { _, _ in infoPresented = false }
+        .onChange(of: showsStorageInfo) { _, shown in if !shown { infoPresented = false } }
+        .sheet(isPresented: $infoPresented) { AttachmentStorageInfoSheet(isPresented: $infoPresented) }
+    }
+
+    private var showsStorageInfo: Bool {
+        if case .available = model.attachmentStorage { return true }
+        return false
     }
 
     @ViewBuilder private var attachmentStorageRows: some View {
@@ -678,7 +704,7 @@ private struct AttachmentStorageDetailView: View {
                 .accessibilityIdentifier("attachment-storage-refreshing")
         }
         switch model.attachmentStorage {
-        case .available(let scopeId, let status):
+        case .available(let status):
             let presentation = AttachmentStoragePresentation(status: status)
             if model.attachmentStorageIsStale {
                 Text("peppy.attachment_storage_stale_usage", tableName: "Peppy")
@@ -687,8 +713,7 @@ private struct AttachmentStorageDetailView: View {
                     .accessibilityIdentifier("attachment-storage-stale-unavailable")
             }
             storageValues(status)
-            acknowledgementFeedback(scopeId: scopeId)
-            disclosure(scopeId: scopeId, status: status, presentation: presentation)
+            capacityNotice(presentation.capacityNotice)
             Link(destination: URL(string: "https://peppy.pro/account")!) {
                 Text("peppy.attachment_storage_manage_cta", tableName: "Peppy")
             }
@@ -729,50 +754,35 @@ private struct AttachmentStorageDetailView: View {
         .accessibilityIdentifier("attachment-storage-base")
     }
 
-    private func disclosure(
-        scopeId: String, status: NativeAttachmentStorageStatus, presentation: AttachmentStoragePresentation
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+    @ViewBuilder private func capacityNotice(_ notice: AttachmentStoragePresentation.CapacityNotice) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             if !model.attachmentStorageIsStale {
-                ForEach(presentation.stateMessageKeys, id: \.self) { key in
-                    Text(localized(key))
-                        .accessibilityIdentifier("attachment-storage-state-\(key)")
+                switch notice {
+                case .none:
+                    EmptyView()
+                case .nearFull:
+                    capacityNoticeText("peppy.attachment_storage_near_full", showsLearnMore: notice.showsLearnMore)
+                case .fullCleanup:
+                    capacityNoticeText("peppy.attachment_storage_full_cleanup", showsLearnMore: notice.showsLearnMore)
+                case .nearFullBlocked(let cause):
+                    capacityNoticeText("peppy.attachment_storage_near_full", showsLearnMore: notice.showsLearnMore)
+                    Text(localized(cause)).accessibilityIdentifier("attachment-storage-cause")
+                case .cause(let cause):
+                    Text(localized(cause)).accessibilityIdentifier("attachment-storage-cause")
                 }
             }
-            Text("peppy.attachment_storage_allowance", tableName: "Peppy")
-            Text("peppy.attachment_storage_notice", tableName: "Peppy")
-            Text("peppy.attachment_storage_protected", tableName: "Peppy")
-            Text("peppy.attachment_storage_device_copies", tableName: "Peppy")
-            if presentation.showsThirtyDayDisclosure {
-                Text("peppy.attachment_storage_grace", tableName: "Peppy")
-                if let activation = status.notice.activationAtSeconds {
-                    let label = String(localized: "peppy.attachment_storage_activation_label", table: "Peppy")
-                    Text("\(label) \(Date(timeIntervalSince1970: TimeInterval(activation)).formatted(date: .long, time: .omitted))")
-                        .accessibilityIdentifier("attachment-storage-activation-date")
-                }
-            }
-            Text("peppy.attachment_storage_purchase", tableName: "Peppy")
-            Link(destination: URL(string: "https://peppy.pro/privacy")!) {
-                Text("peppy.privacy_policy", tableName: "Peppy")
-            }
-            .accessibilityIdentifier("attachment-storage-privacy-link")
         }
-        .accessibilityIdentifier("attachment-storage-disclosure")
-        .task(id: presentation.shouldAcknowledgeVisibleCopy && !model.attachmentStorageIsStale ? scopeId : nil) {
-            guard presentation.shouldAcknowledgeVisibleCopy, !model.attachmentStorageIsStale else { return }
-            await model.attachmentStorageNoticeRendered(scopeId: scopeId, status: status)
-        }
+        .accessibilityIdentifier("attachment-storage-notice")
     }
 
-    @ViewBuilder private func acknowledgementFeedback(scopeId: String) -> some View {
-        switch model.attachmentStorageAcknowledgement {
-        case .inFlight(let activeScope) where activeScope == scopeId:
-            ProgressView().accessibilityIdentifier("attachment-storage-ack-inflight")
-        case .failed(let activeScope) where activeScope == scopeId:
-            Text("peppy.attachment_storage_notice_save_failed", tableName: "Peppy")
-                .accessibilityIdentifier("attachment-storage-ack-failed")
-        default:
-            EmptyView()
+    @ViewBuilder private func capacityNoticeText(_ key: String, showsLearnMore: Bool) -> some View {
+        Text(localized(key)).accessibilityIdentifier("attachment-storage-capacity-notice")
+        if showsLearnMore {
+            Button(String(localized: "peppy.attachment_storage_learn_more", table: "Peppy")) {
+                infoPresented = true
+            }
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("attachment-storage-learn-more")
         }
     }
 
@@ -786,6 +796,39 @@ private struct AttachmentStorageDetailView: View {
 
     private func localized(_ key: String) -> String {
         String(localized: String.LocalizationValue(key), table: "Peppy")
+    }
+}
+
+private struct AttachmentStorageInfoSheet: View {
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("peppy.attachment_storage_info_title", tableName: "Peppy")
+                        .font(.title3)
+                        .accessibilityAddTraits(.isHeader)
+                    Text("peppy.attachment_storage_info_body_cleanup", tableName: "Peppy")
+                    Text("peppy.attachment_storage_info_body_protected", tableName: "Peppy")
+                    Text("peppy.attachment_storage_info_body_purchase", tableName: "Peppy")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .accessibilityIdentifier("attachment-storage-info-sheet")
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button(String(localized: "peppy.attachment_storage_info_dismiss", table: "Peppy")) {
+                    isPresented = false
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .padding()
+                .accessibilityIdentifier("attachment-storage-info-dismiss")
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 
