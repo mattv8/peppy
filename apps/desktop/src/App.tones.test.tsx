@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { conversationAvatar, incomingToneSeed, paletteIndex, seedKey } from "@peppy/desktop-ui";
 import { App } from "./App";
-import { bridge, fixtureBridge, type DesktopSnapshot, type MessageView } from "./bridge";
+import { bridge, fixtureBridge, type DesktopSnapshot, type MessageView } from "./bridge/bridge";
 
 let currentSnapshot: DesktopSnapshot;
 let stateHint: (() => void) | undefined;

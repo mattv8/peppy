@@ -1,4 +1,4 @@
-//! Sanitized UI view models (the Rust side of `src/bridge.ts`). Only display data is
+//! Sanitized UI view models (the Rust side of `src/bridge/bridge.ts`). Only display data is
 //! serialized: no credentials, tokens, keys, file keys, raw paths or core records.
 use peppy_client_core::{
     AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft,

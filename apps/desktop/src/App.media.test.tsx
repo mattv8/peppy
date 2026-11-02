@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatDateTime } from "@peppy/desktop-ui";
 import { App } from "./App";
-import { bridge, type AttachmentView, type DesktopSnapshot, type MediaOpen, type MediaPageItem, type MessageView } from "./bridge";
+import { bridge, type AttachmentView, type DesktopSnapshot, type MediaOpen, type MediaPageItem, type MessageView } from "./bridge/bridge";
 
 const preview = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 

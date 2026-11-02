@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { bridge, fixtureBridge } from "./bridge";
+import { bridge, fixtureBridge } from "./bridge/bridge";
 
 beforeEach(async () => {
   const values = new Map<string, string>();

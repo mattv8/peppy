@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { bridge, fixtureBridge, type DesktopSnapshot } from "./bridge";
+import { bridge, fixtureBridge, type DesktopSnapshot } from "./bridge/bridge";
 
 let snapshot: DesktopSnapshot;
 

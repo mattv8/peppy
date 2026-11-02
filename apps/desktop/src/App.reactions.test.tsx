@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, REACTION_HIGHLIGHT_MS } from "./App";
-import { bridge, fixtureBridge, type DesktopSnapshot, type MessageView } from "./bridge";
+import { bridge, fixtureBridge, type DesktopSnapshot, type MessageView } from "./bridge/bridge";
 
 let snapshot: DesktopSnapshot;
 let reactionStorage: Storage;

@@ -1,5 +1,5 @@
-import type { Draft, DraftInput } from "../bridge";
-import { errorCode, errorDetail, errorText } from "../bridgeErrors";
+import type { Draft, DraftInput } from "../bridge/bridge";
+import { errorCode, errorDetail, errorText } from "../bridge/bridgeErrors";
 
 export type DraftContent = Pick<
   Draft,

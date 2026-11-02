@@ -70,8 +70,8 @@ import {
   toneStyle,
   paletteIndex,
 } from "@peppy/desktop-ui";
-import "./settings.css";
-import "./vibrancy.css";
+import "./settings/settings.css";
+import "./shell/vibrancy.css";
 import {
   bridge,
   renewHostedSession,
@@ -89,28 +89,28 @@ import {
   type ContactResolutionMap,
   type AppLockStatus,
   type Draft,
-} from "./bridge";
-import { useMaximizeButtonRegion } from "./useMaximizeButtonRegion";
-import { dismissibleNotifications, notificationMuteKey, NotificationsView } from "./Notifications";
-import { createNotificationActivationDrain, nativeNotificationActivation, type ActivationContext } from "./notificationActivation";
+} from "./bridge/bridge";
+import { useMaximizeButtonRegion } from "./shell/useMaximizeButtonRegion";
+import { dismissibleNotifications, notificationMuteKey, NotificationsView } from "./notifications/Notifications";
+import { createNotificationActivationDrain, nativeNotificationActivation, type ActivationContext } from "./notifications/notificationActivation";
 import type { NotificationActivation, NotificationActivationTarget } from "@peppy/generated/notification-activation";
-import { NotificationSettings } from "./NotificationSettings";
-import { ContactsView, type ContactNavigationGuard, type ContactTarget } from "./Contacts";
-import { findContactTarget } from "./contact-target";
-import { useHistorySearch } from "./useHistorySearch";
-import { DevicesSettings } from "./DevicesSettings";
-import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./HostedAccountSettings";
-import { PrivacySettings } from "./PrivacySettings";
-import { SetupLanding, savedSetupMode } from "./SetupLanding";
-import { AppLockScreen, AppLockSettings } from "./AppLock";
-import { UpdatesSettings } from "./UpdatesSettings";
-import { isTauriUpdateHost, useUpdateActivity } from "./updates";
-import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
-import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./SystemRibbon";
-import { openAccountManageUrl, resolveSystemRibbon } from "./systemRibbonModel";
-import { useAccountNotice } from "./useAccountNotice";
-import { AppNoticeBanner, type AppNotice } from "./AppNoticeBanner";
-import { MarkAllReadAction } from "./MarkAllReadAction";
+import { NotificationSettings } from "./notifications/NotificationSettings";
+import { ContactsView, type ContactNavigationGuard, type ContactTarget } from "./contacts/Contacts";
+import { findContactTarget } from "./contacts/contact-target";
+import { useHistorySearch } from "./search/useHistorySearch";
+import { DevicesSettings } from "./settings/DevicesSettings";
+import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./settings/HostedAccountSettings";
+import { PrivacySettings } from "./settings/PrivacySettings";
+import { SetupLanding, savedSetupMode } from "./setup/SetupLanding";
+import { AppLockScreen, AppLockSettings } from "./shell/AppLock";
+import { UpdatesSettings } from "./updates/UpdatesSettings";
+import { isTauriUpdateHost, useUpdateActivity } from "./updates/updates";
+import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
+import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./notices/SystemRibbon";
+import { openAccountManageUrl, resolveSystemRibbon } from "./notices/systemRibbonModel";
+import { useAccountNotice } from "./notices/useAccountNotice";
+import { AppNoticeBanner, type AppNotice } from "./notices/AppNoticeBanner";
+import { MarkAllReadAction } from "./conversation/MarkAllReadAction";
 import { peppyCopy } from "./generated/peppyCopy";
 import { MediaLightbox } from "./media/MediaLightbox";
 import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/MediaPanel";
@@ -124,15 +124,15 @@ import { MessageText } from "./message-links";
 import { groupMessages } from "./media/grouping";
 import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, searchSessionKey as createSearchSessionKey, type DetachedHistory } from "./search/detachedHistory";
 
-import { GatewayPicker } from "./GatewayPicker";
-import { installHostedSessionRenewal } from "./hostedSessionRenewal";
-import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars } from "./layout-persistence";
+import { GatewayPicker } from "./setup/GatewayPicker";
+import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
+import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars } from "./shell/layout-persistence";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
-import { conversationContactAddress } from "./conversation-contact";
-import { hiddenTimeIds } from "./timestamp-bursts";
+import { conversationContactAddress } from "./contacts/conversation-contact";
+import { hiddenTimeIds } from "./conversation/timestamp-bursts";
 import { createSeenReactionLedger, linkReactions, locateReactionTarget, NO_REACTIONS, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
 import { normalizeReactionText, quoteMatches } from "./reactions/parse";
-import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
+import { FALLBACK_ERROR, errorCode, errorText } from "./bridge/bridgeErrors";
 import {
   DraftStore,
   blankContent,
@@ -146,7 +146,7 @@ import {
 } from "./drafts/DraftStore";
 import { DraftNotice } from "./drafts/DraftNotice";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
-import { measureComposerChrome } from "./composerChrome";
+import { measureComposerChrome } from "./conversation/composerChrome";
 
 type RefreshRequest = {
   conversationId?: string;
@@ -164,7 +164,7 @@ type PinFocusRestoreIntent = {
   dispose(): void;
 };
 
-export { errorText } from "./bridgeErrors";
+export { errorText } from "./bridge/bridgeErrors";
 export {
   DraftStore,
   shouldConfirmPostFlushDelete,
