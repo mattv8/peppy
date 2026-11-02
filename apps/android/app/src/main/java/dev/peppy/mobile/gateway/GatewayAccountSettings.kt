@@ -46,6 +46,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.R
 import dev.peppy.mobile.RelayWakePreference
 import dev.peppy.mobile.RelayWakeRuntime
@@ -58,23 +59,22 @@ import dev.peppy.mobile.Section
 import dev.peppy.mobile.StatusRow
 import dev.peppy.mobile.account.AccountAccessState
 import dev.peppy.mobile.account.AccountSettingsPolicy
-import dev.peppy.mobile.attachments.AttachmentStorageCleanup
+import dev.peppy.mobile.attachments.AttachmentStorageCapacityNotice
 import dev.peppy.mobile.attachments.AttachmentStorageLoad
 import dev.peppy.mobile.attachments.AttachmentStorageSettingsController
 import dev.peppy.mobile.attachments.AttachmentStorageSnapshot
 import dev.peppy.mobile.attachments.AttachmentStorageUiState
-import dev.peppy.mobile.attachments.AttachmentStorageUnavailableReason
+import dev.peppy.mobile.attachments.attachmentStorageCapacityNotice
 import dev.peppy.mobile.security.CredentialParser
-import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.ui.ConsentSheet
 import dev.peppy.mobile.ui.HeroBanner
 import dev.peppy.mobile.ui.InfoButton
 import dev.peppy.mobile.ui.ScreenBody
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Locale
 import uniffi.peppy_mobile_bindings.hostedWakeRelayUrl
 
 /** Drop-in Account destination; parent calls GatewayAccountSettings(onChanged). */
