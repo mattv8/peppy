@@ -2,12 +2,13 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{ConnectInfo, Extension, Path, State},
     http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ipnet::IpNet;
 use peppy_crypto::enrollment::{
     EnrollmentContext, EnrollmentPurpose, EnrollmentRole as CryptoRole, verify_admission_signature,
     verify_device_proof,
@@ -21,11 +22,7 @@ use peppy_hosted_api::enrollment::{
 };
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{net::SocketAddr, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
@@ -39,9 +36,6 @@ use crate::{
 };
 
 const INVITATION_TTL_SECONDS: i64 = 300;
-const CLAIM_LIMIT: u8 = 10;
-const CLAIM_WINDOW: Duration = Duration::from_secs(60);
-const CLAIM_BUCKET_CAP: usize = 4096;
 const MAX_HANDOFF_BYTES: usize = 16 * 1024 + 16;
 
 #[derive(Clone)]
@@ -50,14 +44,10 @@ pub struct InvitationRouterState {
     pub authorization: Arc<dyn EnrollmentAuthorization>,
     /// Hosted deployments require the supplied account policy for token consumers.
     pub hosted: bool,
+    pub rls_enforced: bool,
     canonical_origin: String,
-    claims: Arc<tokio::sync::Mutex<HashMap<String, ClaimBucket>>>,
-}
-
-#[derive(Clone, Copy)]
-struct ClaimBucket {
-    window: SystemTime,
-    count: u8,
+    claims: Arc<tokio::sync::Mutex<crate::api::admission::LocalAdmissions>>,
+    trusted_proxy_cidrs: Arc<Vec<IpNet>>,
 }
 
 impl InvitationRouterState {
@@ -71,9 +61,23 @@ impl InvitationRouterState {
             db,
             authorization,
             hosted,
+            rls_enforced: false,
             canonical_origin: canonical_configured_origin(&configured_origin)?,
-            claims: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            claims: Arc::new(tokio::sync::Mutex::new(
+                crate::api::admission::LocalAdmissions::new(),
+            )),
+            trusted_proxy_cidrs: Arc::new(Vec::new()),
         })
+    }
+
+    pub fn with_rls_enforced(mut self, enabled: bool) -> Self {
+        self.rls_enforced = enabled;
+        self
+    }
+
+    pub fn with_trusted_proxy_cidrs(mut self, trusted_proxy_cidrs: Vec<IpNet>) -> Self {
+        self.trusted_proxy_cidrs = Arc::new(trusted_proxy_cidrs);
+        self
     }
 }
 
@@ -140,6 +144,7 @@ async fn create_invitation(
 
 async fn claim_invitation(
     State(state): State<InvitationRouterState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Json(request): Json<ClaimInvitationRequest>,
 ) -> Result<Json<InvitationClaim>, InvitationError> {
@@ -161,13 +166,61 @@ async fn claim_invitation(
         .map_err(|_| bad("invalid_invitation_token_digest"))?;
     let claim_authenticator = decode_base64url::<32>(&request.claim_authenticator)
         .map_err(|_| bad("invalid_claim_authenticator"))?;
-    claim_rate_limit(&state, token_digest).await?;
+    let source = claim_rate_limit(
+        &state,
+        peer,
+        &headers,
+        hosted.as_ref().map(|context| context.vault_id),
+    )
+    .await?;
+    let community_vault = if hosted.is_none() && state.rls_enforced {
+        sqlx::query_scalar::<_, Uuid>("SELECT vault_id FROM community_resolve_phone_invitation($1)")
+            .bind(token_digest.as_slice())
+            .fetch_optional(&state.db)
+            .await
+            .map_err(database)?
+    } else {
+        None
+    };
+    let invitation_exists = if let Some(context) = hosted.as_ref() {
+        let mut tx = scope::begin(&state.db, context.vault_id)
+            .await
+            .map_err(database)?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM phone_invitations WHERE token_digest=$1 AND vault_id=$2)",
+        )
+        .bind(token_digest.as_slice())
+        .bind(context.vault_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database)?;
+        tx.commit().await.map_err(database)?;
+        exists
+    } else if state.rls_enforced {
+        community_vault.is_some()
+    } else {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM phone_invitations WHERE token_digest=$1)",
+        )
+        .bind(token_digest.as_slice())
+        .fetch_one(&state.db)
+        .await
+        .map_err(database)?
+    };
+    if invitation_exists {
+        claim_token_rate_limit(&state, token_digest).await?;
+        durable_claim_rate_limit(&state, source, token_digest).await?;
+    }
     let signing_key = validate_device(&request.device)?;
     let transfer_key = decode_base64url::<32>(&request.transfer_public_key)
         .map_err(|_| bad("invalid_transfer_key"))?;
     let credential_digest = credential_digest(&request.credential_digest)?;
-    let mut tx = match hosted.as_ref() {
-        Some(context) => scope::begin(&state.db, context.vault_id).await,
+    let mut tx = match hosted
+        .as_ref()
+        .map(|context| context.vault_id)
+        .or(community_vault)
+    {
+        Some(vault_id) => scope::begin(&state.db, vault_id).await,
         None => state.db.begin().await,
     }
     .map_err(database)?;
@@ -252,10 +305,28 @@ async fn invitation_status(
         return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
     }
     request_origin(&state, &headers)?;
-    let mut tx = match (owner.as_ref(), hosted.as_ref()) {
-        (Some(owner), _) => scope::begin(&state.db, owner.vault_id).await,
-        (None, Some(context)) => scope::begin(&state.db, context.vault_id).await,
-        (None, None) => state.db.begin().await,
+    let community_vault = if owner.is_none() && hosted.is_none() && state.rls_enforced {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT vault_id FROM community_resolve_phone_invitation_claim($1, $2)",
+        )
+        .bind(invitation_id)
+        .bind(
+            claim_digest
+                .as_ref()
+                .expect("claimant digest was resolved")
+                .as_slice(),
+        )
+        .fetch_optional(&state.db)
+        .await
+        .map_err(database)?
+    } else {
+        None
+    };
+    let mut tx = match (owner.as_ref(), hosted.as_ref(), community_vault) {
+        (Some(owner), _, _) => scope::begin(&state.db, owner.vault_id).await,
+        (None, Some(context), _) => scope::begin(&state.db, context.vault_id).await,
+        (None, None, Some(vault_id)) => scope::begin(&state.db, vault_id).await,
+        (None, None, None) => state.db.begin().await,
     }
     .map_err(database)?;
     let row = sqlx::query("SELECT p.*,v.public_key_profile,p.expires_at > now() AS expires_valid,GREATEST(0,floor(extract(epoch FROM p.expires_at-now())))::bigint AS expires_remaining FROM phone_invitations p JOIN vaults v ON v.vault_id=p.vault_id WHERE p.id=$1")
@@ -365,8 +436,24 @@ async fn confirm_invitation(
         .map_err(|_| unauthorized("invalid_admission_proof"))?;
     let device_signature = decode_base64url::<64>(&request.device_signature)
         .map_err(|_| unauthorized("invalid_device_proof"))?;
-    let mut tx = match hosted.as_ref() {
-        Some(context) => scope::begin(&state.db, context.vault_id).await,
+    let community_vault = if hosted.is_none() && state.rls_enforced {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT vault_id FROM community_resolve_phone_invitation_claim($1, $2)",
+        )
+        .bind(invitation_id)
+        .bind(secret.as_slice())
+        .fetch_optional(&state.db)
+        .await
+        .map_err(database)?
+    } else {
+        None
+    };
+    let mut tx = match hosted
+        .as_ref()
+        .map(|context| context.vault_id)
+        .or(community_vault)
+    {
+        Some(vault_id) => scope::begin(&state.db, vault_id).await,
         None => state.db.begin().await,
     }
     .map_err(database)?;
@@ -499,7 +586,7 @@ async fn owner(
     state: &InvitationRouterState,
     headers: &HeaderMap,
 ) -> Result<Owner, InvitationError> {
-    resolve_owner_credential(&state.db, state.hosted, headers)
+    resolve_owner_credential(&state.db, state.rls_enforced, state.hosted, headers)
         .await
         .map_err(owner_authorization)
 }
@@ -604,40 +691,76 @@ async fn expire(
 }
 async fn claim_rate_limit(
     state: &InvitationRouterState,
-    key: [u8; 32],
-) -> Result<(), InvitationError> {
-    let now = SystemTime::now();
-    let mut buckets = state.claims.lock().await;
-    buckets
-        .retain(|_, bucket| now.duration_since(bucket.window).unwrap_or_default() < CLAIM_WINDOW);
-    let key = hex::encode(key);
-    if buckets.len() >= CLAIM_BUCKET_CAP
-        && !buckets.contains_key(&key)
-        && let Some(oldest) = buckets
-            .iter()
-            .min_by_key(|(_, value)| value.window)
-            .map(|(key, _)| key.clone())
-    {
-        buckets.remove(&oldest);
-    }
-    let bucket = buckets.entry(key).or_insert(ClaimBucket {
-        window: now,
-        count: 0,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
+    authority: Option<Uuid>,
+) -> Result<[u8; 32], InvitationError> {
+    let peer = peer.map(|Extension(ConnectInfo(peer))| {
+        crate::enrollment::manual::resolve_client_ip(peer, headers, &state.trusted_proxy_cidrs)
     });
-    if now.duration_since(bucket.window).unwrap_or_default() >= CLAIM_WINDOW {
-        *bucket = ClaimBucket {
-            window: now,
-            count: 0,
-        };
-    }
-    if bucket.count >= CLAIM_LIMIT {
+    let source = authority.map_or_else(
+        || crate::api::admission::source_digest(b"phone-claim", peer),
+        |vault_id| {
+            crate::api::admission::authority_source_digest(
+                b"phone-claim",
+                vault_id.as_bytes(),
+                peer,
+            )
+        },
+    );
+    if !state.claims.lock().await.admit(source) {
         return Err(InvitationError(
             StatusCode::TOO_MANY_REQUESTS,
             "claim_rate_limited",
         ));
     }
-    bucket.count += 1;
-    Ok(())
+    Ok(source)
+}
+
+async fn claim_token_rate_limit(
+    state: &InvitationRouterState,
+    token_digest: [u8; 32],
+) -> Result<(), InvitationError> {
+    let token = crate::api::admission::targeted_source_digest(b"phone-claim", None, &token_digest);
+    if state.claims.lock().await.admit(token) {
+        Ok(())
+    } else {
+        Err(InvitationError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "claim_rate_limited",
+        ))
+    }
+}
+
+async fn durable_claim_rate_limit(
+    state: &InvitationRouterState,
+    source: [u8; 32],
+    token_digest: [u8; 32],
+) -> Result<(), InvitationError> {
+    crate::api::admission::admit_durably(
+        &state.db,
+        crate::api::admission::AdmissionOperation::PhoneClaim,
+        source,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::api::admission::AdmissionError::Limited => {
+            InvitationError(StatusCode::TOO_MANY_REQUESTS, "claim_rate_limited")
+        }
+        crate::api::admission::AdmissionError::Database(error) => database(error),
+    })?;
+    crate::api::admission::admit_durably(
+        &state.db,
+        crate::api::admission::AdmissionOperation::PhoneClaim,
+        crate::api::admission::targeted_source_digest(b"phone-claim", None, &token_digest),
+    )
+    .await
+    .map_err(|error| match error {
+        crate::api::admission::AdmissionError::Limited => {
+            InvitationError(StatusCode::TOO_MANY_REQUESTS, "claim_rate_limited")
+        }
+        crate::api::admission::AdmissionError::Database(error) => database(error),
+    })
 }
 fn validate_device(device: &ProposedDevice) -> Result<[u8; 32], InvitationError> {
     validate_device_name(&device.name).map_err(|_| bad("invalid_device_name"))?;

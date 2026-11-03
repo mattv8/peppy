@@ -18,6 +18,7 @@ pub enum OwnerAuthorizationError {
 
 pub async fn resolve_owner_credential(
     db: &PgPool,
+    rls_enforced: bool,
     hosted: bool,
     headers: &HeaderMap,
 ) -> Result<OwnerCredential, OwnerAuthorizationError> {
@@ -29,6 +30,8 @@ pub async fn resolve_owner_credential(
         .ok_or(OwnerAuthorizationError::InvalidBearer)?;
     let query = if hosted {
         "SELECT vault_id,device_id,token_digest FROM peppy.resolve_device_credential($1) WHERE role='owner'"
+    } else if rls_enforced {
+        "SELECT vault_id,device_id,token_digest FROM community_resolve_device_credential($1) WHERE role='owner'"
     } else {
         "SELECT c.vault_id,c.device_id,c.token_digest FROM device_credentials c JOIN devices d ON d.vault_id=c.vault_id AND d.device_id=c.device_id WHERE c.token_digest=$1 AND c.revoked_at IS NULL AND d.revoked_at IS NULL AND d.role='owner'"
     };

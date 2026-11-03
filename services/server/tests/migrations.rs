@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 19] = [
+const UP: [&str; 21] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -23,9 +23,11 @@ const UP: [&str; 19] = [
     include_str!("../migrations/0017_device_presence.sql"),
     include_str!("../migrations/0018_computer_enrollment.sql"),
     include_str!("../migrations/0019_attachment_retention.sql"),
+    include_str!("../migrations/0020_admission.sql"),
+    include_str!("../migrations/0021_community_rls.sql"),
 ];
 
-const DOWN: [&str; 19] = [
+const DOWN: [&str; 21] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -45,6 +47,8 @@ const DOWN: [&str; 19] = [
     include_str!("../migrations/down/0017_device_presence.down.sql"),
     include_str!("../migrations/down/0018_computer_enrollment.down.sql"),
     include_str!("../migrations/down/0019_attachment_retention.down.sql"),
+    include_str!("../migrations/down/0020_admission.down.sql"),
+    include_str!("../migrations/down/0021_community_rls.down.sql"),
 ];
 
 #[tokio::test]
@@ -80,11 +84,7 @@ async fn migrations_round_trip_in_an_isolated_schema() {
 
     run(&mut database, "BEGIN").await;
     run(&mut database, "INSERT INTO attachment_removals(vault_id,attachment_id,object_key,ciphertext_bytes) VALUES ('00000000-0000-0000-0000-000000000020','00000000-0000-0000-0000-000000000099','private/unsafe',1)").await;
-    assert!(
-        run_result(&mut database, DOWN.last().unwrap())
-            .await
-            .is_err()
-    );
+    assert!(run_result(&mut database, DOWN[18]).await.is_err());
     run(&mut database, "ROLLBACK").await;
     assert_eq!(
         schema_fingerprint(&mut database, &schema).await,

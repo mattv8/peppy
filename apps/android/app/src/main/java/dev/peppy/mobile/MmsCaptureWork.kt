@@ -63,6 +63,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
+import java.util.Properties
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlinx.coroutines.CancellationException
@@ -570,6 +571,8 @@ internal object MmsCapture {
             val routeId = SimRoutes.routeId(subscriptionId)
             val outcome = try {
                 process(core, provider, tempDirectory, generation, routeId, record, imported, null)
+            } catch (error: CancellationException) {
+                throw error
             } catch (_: Exception) {
                 ProcessResult(durable = false)
             }
@@ -689,6 +692,7 @@ internal object MmsCapture {
     private fun copyParts(core: MmsCaptureCore, provider: MmsCaptureProvider, tempDirectory: File, acquisition: NativeMmsAcquisition, record: MmsProviderRecord): ProcessResult {
         val existing = try { core.mappedParts(acquisition.acquisitionId) } catch (_: Exception) { return ProcessResult(true, pending = 1) }
         val previewStates = try { core.previewStates(acquisition.acquisitionId) } catch (_: Exception) { return ProcessResult(true, pending = 1) }
+        val previewAttempts = PreviewDecodeAttempts(tempDirectory)
         var binary = 0
         var hasDeferredPreview = false
         for (part in ordered(record.parts)) {
@@ -698,8 +702,12 @@ internal object MmsCapture {
                 return ProcessResult(true, pending = 1)
             }
             val providerPartId = part.providerPartId.toString()
+            val previewAttemptKey = "${acquisition.acquisitionId}:${part.providerPartId}"
             val mappedAttachmentId = existing[providerPartId]
-            if (mappedAttachmentId != null && previewStates[providerPartId] != NativeMmsPreviewState.DEFERRED) continue
+            if (mappedAttachmentId != null && previewStates[providerPartId] != NativeMmsPreviewState.DEFERRED) {
+                previewAttempts.clear(previewAttemptKey)
+                continue
+            }
             val remaining = PENDING_MEDIA_LIMIT - core.pendingMediaBytes()
             if (mappedAttachmentId == null && remaining <= 0) {
                 core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "media_quota")
@@ -719,7 +727,16 @@ internal object MmsCapture {
                     createdAttachment = true
                     core.mapPart(acquisition.acquisitionId, providerPartId, requireNotNull(attachmentId))
                 }
-                val preview = provider.inspectMedia(temp, part.mediaType)
+                if (!previewAttempts.begin(previewAttemptKey)) {
+                    core.setPartPreviewState(acquisition.acquisitionId, providerPartId, NativeMmsPreviewState.PERMANENTLY_UNAVAILABLE)
+                    previewAttempts.clear(previewAttemptKey)
+                    continue
+                }
+                val preview = try {
+                    provider.inspectMedia(temp, part.mediaType)
+                } finally {
+                    previewAttempts.finish(previewAttemptKey)
+                }
                 var thumbnailId: String? = null
                 var previewState = when {
                     preview.jpegPreview != null -> NativeMmsPreviewState.READY
@@ -759,6 +776,8 @@ internal object MmsCapture {
                     return ProcessResult(true, pending = 1)
                 }
                 if (previewState == NativeMmsPreviewState.DEFERRED) hasDeferredPreview = true
+            } catch (error: CancellationException) {
+                throw error
             } catch (_: Exception) {
                 if (createdAttachment && attachmentId != null) try { core.discardAttachment(attachmentId) } catch (_: Exception) { }
                 if (mappedAttachmentId != null) {
@@ -865,6 +884,65 @@ internal object MmsCapture {
         rowsQueried, processed, captured, pending, unavailable,
         budgetExhausted = budgetExhausted,
     )
+}
+
+/** Records only interrupted preview decodes; copied originals remain mapped regardless of outcome. */
+internal class PreviewDecodeAttempts(private val directory: File) {
+    fun begin(partKey: String): Boolean = safely(true) {
+        val attempts = load()
+        val key = digest(partKey)
+        val interrupted = attempts.getProperty(key)?.toIntOrNull() ?: 0
+        if (interrupted >= MAX_INTERRUPTED_DECODES) return@safely false
+        if (!attempts.containsKey(key) && attempts.size >= MAX_TRACKED_PARTS) return@safely true
+        attempts.setProperty(key, (interrupted + 1).toString())
+        save(attempts)
+        true
+    }
+
+    fun finish(partKey: String) = clear(partKey)
+
+    fun clear(partKey: String) {
+        safely(Unit) {
+            val attempts = load()
+            if (attempts.remove(digest(partKey)) != null) save(attempts)
+        }
+    }
+
+    private fun load(): Properties = Properties().also { attempts ->
+        try {
+            if (state.exists()) state.inputStream().use(attempts::load)
+        } catch (_: Exception) {
+            state.delete()
+            attempts.clear()
+        }
+    }
+
+    private fun save(attempts: Properties) {
+        directory.mkdirs()
+        val temporary = File(directory, ".${state.name}.part")
+        FileOutputStream(temporary).use { output ->
+            attempts.store(output, null)
+            output.fd.sync()
+        }
+        if (!temporary.renameTo(state)) throw IOException("preview attempt state write failed")
+    }
+
+    private fun <T> safely(default: T, block: () -> T): T = synchronized(LOCK) {
+        try { block() } catch (_: Exception) { default }
+    }
+
+    private fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
+    private val state get() = File(directory, STATE_FILE)
+
+    private companion object {
+        const val MAX_INTERRUPTED_DECODES = 3
+        const val MAX_TRACKED_PARTS = 256
+        const val STATE_FILE = "mms-preview-interrupted-decodes"
+        val LOCK = Any()
+    }
 }
 
 private class NativeCore(internal val client: NativeClientInterface) : MmsCaptureCore {

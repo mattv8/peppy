@@ -117,10 +117,10 @@ public actor HostedAccountClient {
         if let existing = try await pendingProvisioning() {
             try Task.checkCancellation()
             guard expected == generation else { throw CancellationError() }
-            guard existing.view().accountId == account.accountId else { throw HostedAccountClientError.wrongAccount }
+            guard try existing.view().accountId == account.accountId else { throw HostedAccountClientError.wrongAccount }
             guard try existing.passphraseMatches(passphrase: passphrase) else { throw HostedAccountClientError.wrongPassphrase }
             try retainPendingSecret(passphrase, accountID: account.accountId)
-            return existing.view()
+            return try existing.view()
         }
         guard account.access == "read_write" else { throw HostedAccountClientError.entitlementRequired }
         guard expected == generation else { throw CancellationError() }
@@ -140,7 +140,7 @@ public actor HostedAccountClient {
             try retainPendingSecretLocked(passphrase, accountID: account.accountId)
             try secureStore.upsert(checkpointKey, checkpoint)
         }
-        return item.view()
+        return try item.view()
     }
 
     public func completeVault(passphrase: String) async throws -> Data {
@@ -151,7 +151,7 @@ public actor HostedAccountClient {
         let session = try loadSession()
         guard try item.passphraseMatches(passphrase: passphrase) else { throw HostedAccountClientError.wrongPassphrase }
         try retainPendingSecret(passphrase, accountID: session.accountID)
-        let view = item.view()
+        let view = try item.view()
         guard view.accountId == session.accountID else { throw HostedAccountClientError.wrongAccount }
         func stillCurrent() throws {
             try Task.checkCancellation()
@@ -204,7 +204,7 @@ public actor HostedAccountClient {
         } catch {
             throw HostedAccountClientError.wrongAccount
         }
-        let view = item.view()
+        let view = try item.view()
         guard view.vaultId == identity.vaultId, view.deviceId == identity.deviceId,
               identity.origin == origin.serialized else { throw HostedAccountClientError.wrongAccount }
         try HostedProvisioningStorage.withLock {

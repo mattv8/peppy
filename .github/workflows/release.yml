@@ -254,6 +254,8 @@ jobs:
     needs: [prepare, signing, artifacts, publish-server-image, publish-relay-image]
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     uses: ./.github/workflows/publish-release.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -270,6 +272,8 @@ jobs:
     needs: [prepare, signing, artifacts, publish]
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     uses: ./.github/workflows/publish-release.yml
     with:
       component: android

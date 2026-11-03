@@ -796,6 +796,8 @@ pub enum MobileBindingsError {
     MmsMediaQuota,
     #[error("SMS acquisition capacity reached")]
     SmsCapacity,
+    #[error("internal native state is unavailable")]
+    LockPoisoned,
 }
 
 impl From<CoreError> for MobileBindingsError {

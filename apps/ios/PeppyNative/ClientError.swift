@@ -85,6 +85,7 @@ public enum ClientError: Error, Equatable, Sendable {
         case .InvalidKeyCache: "A stored key cache was rejected."
         case .UnsupportedSchema: "The local database was written by a newer version."
         case .Closed: "The local client is closed."
+        case .LockPoisoned: "The local client is unavailable. Reopen the app and try again."
         case .Conflict: "Local state conflicts with the server (snapshot or envelope conflict)."
         default: "Local client error: \(error)."
         }

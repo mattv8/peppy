@@ -11,6 +11,7 @@ import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
 import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
 import { appSessionRenewal } from "./app-session-renewal";
+import { inlineMediaType, safeSuggestedFilename } from "./attachment-safety";
 
 type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: BridgeError };
 type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string } };
@@ -550,15 +551,20 @@ export class BrowserBridge implements DesktopBridge {
     const bytes = result.bytes;
     const byteSize = result.byteSize;
     if (result.state !== "ready" || !(bytes instanceof ArrayBuffer) || typeof result.mediaType !== "string" || typeof byteSize !== "number" || !Number.isSafeInteger(byteSize) || byteSize <= 0 || byteSize !== bytes.byteLength || byteSize > MAX_FILE_BYTES) throw new BrowserBridgeError("unavailable", "The media response was invalid.");
+    const mediaType = inlineMediaType(result.mediaType);
+    if (!mediaType) {
+      await this.call("close_media", { id }).catch(() => undefined);
+      throw new BrowserBridgeError("unsupported", "Save this media to open it in another application.");
+    }
     while (this.mediaBlobUrls.size >= MAX_OPEN_MEDIA_URLS || [...this.mediaBlobUrls.values()].reduce((total, media) => total + media.byteSize, 0) + byteSize > MAX_OPEN_MEDIA_BYTES) {
       const oldest = this.mediaBlobUrls.keys().next().value as string | undefined;
       if (!oldest) break;
       await this.releaseMediaUrl(oldest);
     }
     if (this.stopped) throw new BrowserBridgeError("stopped", "Peppy locked or stopped. Reconnect to continue.");
-    const url = URL.createObjectURL(new Blob([bytes], { type: result.mediaType }));
+    const url = URL.createObjectURL(new Blob([bytes], { type: mediaType }));
     this.mediaBlobUrls.set(url, { attachmentId: id, byteSize });
-    return { state: "ready", url, mediaType: result.mediaType, byteSize };
+    return { state: "ready", url, mediaType, byteSize };
   }
   public open_media(id: string): Promise<MediaOpen> { return this.mediaOpen("open_media", id); }
   public load_media(id: string): Promise<MediaOpen> { return this.mediaOpen("load_media", id); }
@@ -572,7 +578,7 @@ export class BrowserBridge implements DesktopBridge {
     else [...this.mediaBlobUrls.entries()].filter(([, media]) => media.attachmentId === id).forEach(([ownedUrl]) => this.revokeMediaUrl(ownedUrl));
     await this.call("close_media", { id, ...(url ? { url } : {}) });
   }
-  public async save_attachment(id: string): Promise<boolean> { const file = await this.call<{ bytes: ArrayBuffer; displayName: string; mediaType: string }>("save_attachment", { id }); const url = URL.createObjectURL(new Blob([file.bytes], { type: file.mediaType })); this.blobUrls.add(url); const link = document.createElement("a"); link.href = url; link.download = file.displayName; link.click(); window.setTimeout(() => { URL.revokeObjectURL(url); this.blobUrls.delete(url); }, 0); return true; }
+  public async save_attachment(id: string): Promise<boolean> { const file = await this.call<{ bytes: ArrayBuffer; displayName: string; mediaType: string }>("save_attachment", { id }); const url = URL.createObjectURL(new Blob([file.bytes], { type: file.mediaType })); this.blobUrls.add(url); const link = document.createElement("a"); link.href = url; link.download = safeSuggestedFilename(file.displayName); link.click(); window.setTimeout(() => { URL.revokeObjectURL(url); this.blobUrls.delete(url); }, 0); return true; }
   public async publish_attachment(id: string): Promise<PublicCopy | null> { if (!window.confirm("Create a public plaintext copy of this attachment? Anyone with the link may access it.")) return null; return this.call("publish_attachment", { id, confirmed: true }); }
   public pick_contact_photo(): Promise<{ dataUrl: string; naturalWidth: number; naturalHeight: number } | null> { return readContactPhoto(); }
   public async enrollment_discover(): Promise<EnrollmentView> {

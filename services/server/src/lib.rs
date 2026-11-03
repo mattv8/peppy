@@ -5,7 +5,9 @@ pub mod enrollment;
 pub mod health;
 pub mod instance;
 pub mod presence;
+pub mod rls;
 pub mod scope;
+pub(crate) mod serving;
 pub mod storage;
 pub mod web_client;
 
@@ -20,25 +22,12 @@ pub async fn serve<S>(
 where
     S: std::future::Future<Output = ()> + Send + 'static,
 {
-    let (stream_shutdown, stream_shutdown_receiver) = tokio::sync::watch::channel(false);
-    let shutdown = async move {
-        shutdown.await;
-        let _ = stream_shutdown.send(true);
-    };
-    axum::serve(
-        listener,
-        router
-            .layer(axum::Extension(stream_shutdown_receiver))
-            .into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await
+    serving::serve(listener, router, shutdown).await
 }
 
 use axum::{Router, routing::get};
 use health::HealthState;
 use sqlx::PgPool;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -62,6 +51,7 @@ pub struct ServerBuilder {
     enrollment_authorization: Arc<dyn EnrollmentAuthorization>,
     setup_token: Option<String>,
     row_security: bool,
+    rls_enforced: bool,
     push_config: PushConfigAdvertisement,
     transport_options: Option<TransportOptions>,
 }
@@ -86,6 +76,7 @@ impl ServerBuilder {
             enrollment_authorization,
             setup_token: None,
             row_security: false,
+            rls_enforced: false,
             push_config: PushConfigAdvertisement::default(),
             transport_options: None,
         }
@@ -125,6 +116,13 @@ impl ServerBuilder {
         self
     }
 
+    /// Enables community tenant isolation while retaining community routes.
+    /// Production configuration cannot disable this mode.
+    pub fn rls_enforced(mut self, enabled: bool) -> Self {
+        self.rls_enforced = enabled;
+        self
+    }
+
     /// Advertises hosted push capability to enrolled devices.
     pub fn push_config(mut self, advertisement: PushConfigAdvertisement) -> Self {
         self.push_config = advertisement;
@@ -143,10 +141,11 @@ impl ServerBuilder {
     /// spawning maintenance workers. Call [`Server::start_maintenance`] after
     /// the process has completed its startup sequencing.
     pub async fn build(self) -> Result<Server, Box<dyn std::error::Error + Send + Sync>> {
-        if self.row_security && self.maintenance_db.is_none() {
+        let rls_enforced = self.rls_enforced || self.row_security;
+        if rls_enforced && self.maintenance_db.is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "row-security mode requires an explicit maintenance database",
+                "RLS mode requires an explicit maintenance database",
             )
             .into());
         }
@@ -163,6 +162,16 @@ impl ServerBuilder {
         }
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         let health = HealthState::from_database(&self.config, self.runtime_db.clone()).await?;
+        if rls_enforced {
+            let maintenance_db = self.maintenance_db.as_ref().expect("checked above");
+            if self.row_security {
+                rls::validate_admission_runtime_privileges(&self.runtime_db).await?;
+                rls::validate_admission_maintenance_privileges(maintenance_db).await?;
+            } else {
+                rls::validate_runtime_role(&self.runtime_db, true).await?;
+                rls::validate_maintenance_role(maintenance_db).await?;
+            }
+        }
         let maintenance_db = self
             .maintenance_db
             .unwrap_or_else(|| self.runtime_db.clone());
@@ -180,6 +189,7 @@ impl ServerBuilder {
                 enrollment: self.enrollment_authorization,
                 claim_policy,
                 row_security: self.row_security,
+                rls_enforced,
             },
         )
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
@@ -189,7 +199,10 @@ impl ServerBuilder {
             .route("/readyz", get(health::readiness))
             .route("/__release", get(health::release))
             .with_state(health)
-            .merge(api);
+            .merge(api)
+            // Axum's default is 2 MiB; declare it at the server boundary so JSON
+            // extractors retain that limit while attachment handlers keep streaming.
+            .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024));
         Ok(Server {
             router,
             maintenance: Some(maintenance),

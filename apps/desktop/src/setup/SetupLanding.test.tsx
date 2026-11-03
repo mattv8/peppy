@@ -1396,6 +1396,14 @@ describe("SetupLanding", () => {
       await waitFor(() => expect(bridge.enrollment_create_owner).toHaveBeenCalledTimes(2));
     });
 
+    it("shows the approved setup-window closure instruction in the existing error view", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "error", errorCode: "setup_window_closed" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Setup window closed. Restart the server to continue setup.");
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "setup_window_closed");
+    });
+
     it("shows the admin password length message and code without rendering a native password input", async () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "error", errorCode: "admin-password-length" }));
       renderLanding({ fixedOrigin: "https://community.example" });
@@ -2575,10 +2583,12 @@ describe("SetupLanding", () => {
     });
 
     it("explains the browser restart unlock as a visible notice, not a muted hint", async () => {
+      Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }) });
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
       vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_waiting", qrPayload: "computer-qr", awaitingOwner: true, computerClaimant: true });
       renderLanding({ fixedOrigin: "https://community.example", hostKind: "browser", newIdentity: true });
 
+      fireEvent.click(await screen.findByRole("button", { name: "Continue in this browser" }));
       fireEvent.click(await screen.findByRole("button", { name: "Connect this browser" }));
       const notice = await waitFor(() => {
         const element = document.getElementById("computer-browser-restart-notice");

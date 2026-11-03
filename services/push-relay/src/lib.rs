@@ -23,18 +23,20 @@ use ipnet::IpNet;
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 pub const CHALLENGE_TTL: Duration = Duration::from_secs(600);
-const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
+const ADMISSION_WINDOW_SECONDS: u64 = 60;
+const ADMISSION_WINDOW: Duration = Duration::from_secs(ADMISSION_WINDOW_SECONDS);
 const ADMISSION_LIMIT: u16 = 20;
 const WAKE_ADMISSION_LIMIT: u16 = 120;
 const MAX_WAKE_ADMISSION_LIMIT: u32 = 100_000;
 const ADMISSION_MAP_CAP: usize = 4096;
 const EXPIRED_REGISTRATION_CLEANUP_LIMIT: i64 = 100;
+const EXPIRED_ADMISSION_CLEANUP_LIMIT: i64 = 1000;
 pub const WAKE_DELIVERY_BATCH_LIMIT: usize = 32;
 const MAX_TOKEN_BYTES: usize = 4096;
 const MAX_IDENTITY_BYTES: usize = 4096;
@@ -57,6 +59,27 @@ pub struct AppState {
 struct Admission {
     window: SystemTime,
     count: u32,
+}
+
+#[derive(Clone, Copy)]
+enum AdmissionKind {
+    Registration,
+    Wake,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AdmissionError {
+    RateLimited,
+    DatabaseUnavailable,
+}
+
+impl AdmissionKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Registration => "registration",
+            Self::Wake => "wake",
+        }
+    }
 }
 
 /// Narrow outbound boundary: only provider token and opaque relay hints cross it.
@@ -224,67 +247,137 @@ impl AppState {
     pub fn provider_configured(&self) -> bool {
         self.provider.configured()
     }
-    async fn admit(&self, ip: SocketAddr) -> Result<(), ApiError> {
-        let now = SystemTime::now();
-        let key = ip.ip().to_string();
-        let mut entries = self.admissions.lock().await;
-        entries.retain(|_, value| {
-            now.duration_since(value.window).unwrap_or_default() <= ADMISSION_WINDOW
-        });
-        if entries.len() >= ADMISSION_MAP_CAP && !entries.contains_key(&key) {
-            return Err(ApiError {
-                code: "rate_limited",
-            });
+    async fn admit_registration(&self, ip: SocketAddr) -> Result<(), AdmissionError> {
+        let source = self
+            .prefilter_admit(AdmissionKind::Registration, ip)
+            .await?;
+        self.admit_durable(AdmissionKind::Registration, source)
+            .await
+    }
+    async fn admit_route_wake(
+        &self,
+        route_id: Uuid,
+        transaction: &mut Transaction<'_, Postgres>,
+    ) -> Result<(), AdmissionError> {
+        self.admit_durable_with(
+            AdmissionKind::Wake,
+            route_id.to_string(),
+            &mut **transaction,
+        )
+        .await
+    }
+    async fn admit_durable(
+        &self,
+        kind: AdmissionKind,
+        source: String,
+    ) -> Result<(), AdmissionError> {
+        self.admit_durable_with(kind, source, &self.pool).await
+    }
+    async fn admit_durable_with<'executor, E>(
+        &self,
+        kind: AdmissionKind,
+        source: String,
+        executor: E,
+    ) -> Result<(), AdmissionError>
+    where
+        E: Executor<'executor, Database = Postgres>,
+    {
+        let limit = match kind {
+            AdmissionKind::Registration => u32::from(ADMISSION_LIMIT),
+            AdmissionKind::Wake => self.wake_admission_limit,
+        };
+        let admitted: bool = sqlx::query_scalar(
+            "WITH admitted AS (INSERT INTO relay_admissions(admission_kind,source,window_started_at,attempts) VALUES($1,$2,date_trunc('minute', statement_timestamp()),1) ON CONFLICT(admission_kind,source,window_started_at) DO UPDATE SET attempts=relay_admissions.attempts+1 WHERE relay_admissions.attempts < $3 RETURNING attempts) SELECT EXISTS(SELECT 1 FROM admitted)",
+        )
+        .bind(kind.name())
+        .bind(source)
+        .bind(i32::try_from(limit).expect("admission limit fits i32"))
+        .fetch_one(executor)
+        .await
+        .map_err(|_| AdmissionError::DatabaseUnavailable)?;
+        if !admitted {
+            return Err(AdmissionError::RateLimited);
         }
-        let entry = entries.entry(key).or_insert(Admission {
-            window: now,
-            count: 0,
-        });
-        if entry.count >= u32::from(ADMISSION_LIMIT) {
-            return Err(ApiError {
-                code: "rate_limited",
-            });
-        }
-        entry.count += 1;
         Ok(())
     }
-    async fn admit_request(&self, peer: SocketAddr, headers: &HeaderMap) -> Result<(), ApiError> {
-        self.admit(self.client_ip(peer, headers)).await
-    }
-    async fn admit_wake(&self, ip: SocketAddr) -> Result<(), ApiError> {
+    async fn prefilter_admit(
+        &self,
+        kind: AdmissionKind,
+        ip: SocketAddr,
+    ) -> Result<String, AdmissionError> {
         let now = SystemTime::now();
-        let mut entries = self.wake_admissions.lock().await;
+        let window = admission_window(now);
+        let key = match kind {
+            AdmissionKind::Registration => admission_source(ip.ip()),
+            AdmissionKind::Wake => canonical_source(ip.ip()),
+        };
+        let (entries, limit) = match kind {
+            AdmissionKind::Registration => (&self.admissions, u32::from(ADMISSION_LIMIT)),
+            AdmissionKind::Wake => (&self.wake_admissions, self.wake_admission_limit),
+        };
+        let mut entries = entries.lock().await;
         entries.retain(|_, value| {
-            now.duration_since(value.window).unwrap_or_default() <= ADMISSION_WINDOW
+            window
+                .duration_since(value.window)
+                .map(|elapsed| elapsed < ADMISSION_WINDOW)
+                .unwrap_or(true)
         });
-        let key = ip.ip().to_string();
         if entries.len() >= ADMISSION_MAP_CAP && !entries.contains_key(&key) {
-            return Err(ApiError {
-                code: "rate_limited",
-            });
+            return Err(AdmissionError::RateLimited);
         }
-        let entry = entries.entry(key).or_insert(Admission {
-            window: now,
-            count: 0,
-        });
-        if entry.count >= self.wake_admission_limit {
-            return Err(ApiError {
-                code: "rate_limited",
-            });
+        let entry = entries
+            .entry(key.clone())
+            .or_insert(Admission { window, count: 0 });
+        if entry.count >= limit {
+            return Err(AdmissionError::RateLimited);
         }
         entry.count += 1;
-        Ok(())
+        Ok(key)
+    }
+    async fn admit_request(
+        &self,
+        peer: SocketAddr,
+        headers: &HeaderMap,
+    ) -> Result<(), AdmissionError> {
+        self.admit_registration(self.client_ip(peer, headers)).await
     }
     async fn admit_wake_request(
         &self,
         peer: SocketAddr,
         headers: &HeaderMap,
-    ) -> Result<(), ApiError> {
-        self.admit_wake(self.client_ip(peer, headers)).await
+    ) -> Result<(), AdmissionError> {
+        self.prefilter_admit(AdmissionKind::Wake, self.client_ip(peer, headers))
+            .await
+            .map(|_| ())
     }
     fn client_ip(&self, peer: SocketAddr, headers: &HeaderMap) -> SocketAddr {
         resolve_client_ip(peer, headers, &self.trusted_proxy_cidrs)
     }
+}
+
+fn admission_source(ip: IpAddr) -> String {
+    match ip.to_canonical() {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            format!(
+                "{:x}:{:x}:{:x}:{:x}::/64",
+                segments[0], segments[1], segments[2], segments[3]
+            )
+        }
+    }
+}
+
+fn canonical_source(ip: IpAddr) -> String {
+    ip.to_canonical().to_string()
+}
+
+fn admission_window(now: SystemTime) -> SystemTime {
+    let elapsed = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let window_seconds = elapsed.as_secs() / ADMISSION_WINDOW_SECONDS * ADMISSION_WINDOW_SECONDS;
+    SystemTime::UNIX_EPOCH + Duration::from_secs(window_seconds)
 }
 
 /// Parses the bounded per-IP wake admission budget. The default preserves the
@@ -460,7 +553,10 @@ async fn register(
         MAX_TOKEN_BYTES,
         "invalid_device_token",
     )?;
-    state.admit_request(peer, &headers).await.map_err(rate)?;
+    state
+        .admit_request(peer, &headers)
+        .await
+        .map_err(admission_error)?;
     if !state.provider.supports(request.provider) {
         return Err(unconfigured());
     }
@@ -507,7 +603,10 @@ async fn confirm(
         valid_nonempty(identity, MAX_IDENTITY_BYTES, "invalid_identity")?;
     }
     let candidate = confirmation_candidate(&request)?;
-    state.admit_request(peer, &headers).await.map_err(rate)?;
+    state
+        .admit_request(peer, &headers)
+        .await
+        .map_err(admission_error)?;
     if !state.provider.configured() {
         return Err(unconfigured());
     }
@@ -625,7 +724,7 @@ async fn wake(
     state
         .admit_wake_request(peer, &headers)
         .await
-        .map_err(rate)?;
+        .map_err(admission_error)?;
     if !state.provider.configured() {
         return Err(unconfigured());
     }
@@ -638,6 +737,10 @@ async fn wake(
     if !constant_time_eq(&stored, &digest(&request.wake_credential)) {
         return Err(unauthorized());
     }
+    state
+        .admit_route_wake(id, &mut tx)
+        .await
+        .map_err(admission_error)?;
     let Some(route_provider) = Provider::parse(&route_provider) else {
         return Err(db_error());
     };
@@ -734,6 +837,17 @@ pub async fn cleanup_expired_registrations(state: &AppState) -> Result<u64, sqlx
         .bind(EXPIRED_REGISTRATION_CLEANUP_LIMIT)
         .execute(&state.pool)
         .await?;
+    cleanup_expired_admissions(state).await?;
+    Ok(deleted.rows_affected())
+}
+
+async fn cleanup_expired_admissions(state: &AppState) -> Result<u64, sqlx::Error> {
+    let deleted = sqlx::query(
+        "WITH expired AS (SELECT admission_kind,source,window_started_at FROM relay_admissions WHERE window_started_at < date_trunc('minute', now()) ORDER BY window_started_at FOR UPDATE SKIP LOCKED LIMIT $1) DELETE FROM relay_admissions admission USING expired WHERE (admission.admission_kind,admission.source,admission.window_started_at)=(expired.admission_kind,expired.source,expired.window_started_at)",
+    )
+    .bind(EXPIRED_ADMISSION_CLEANUP_LIMIT)
+    .execute(&state.pool)
+    .await?;
     Ok(deleted.rows_affected())
 }
 
@@ -748,7 +862,7 @@ async fn revoke(
     state
         .admit_wake_request(peer, &headers)
         .await
-        .map_err(rate)?;
+        .map_err(admission_error)?;
     let mut tx = state.pool.begin().await.map_err(db)?;
     let row = sqlx::query_as::<_, (Uuid, Vec<u8>)>("SELECT registration_id,manage_digest FROM relay_routes WHERE id=$1 AND revoked_at IS NULL FOR UPDATE")
         .bind(id).fetch_optional(&mut *tx).await.map_err(db)?;
@@ -758,6 +872,10 @@ async fn revoke(
     if !constant_time_eq(&stored, &digest(&request.manage_credential)) {
         return Err(unauthorized());
     }
+    state
+        .admit_route_wake(id, &mut tx)
+        .await
+        .map_err(admission_error)?;
     sqlx::query("UPDATE relay_routes SET revoked_at=now(),token='' WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)
@@ -833,6 +951,14 @@ fn unconfigured() -> (StatusCode, Json<ApiError>) {
 }
 fn rate(error: ApiError) -> (StatusCode, Json<ApiError>) {
     (StatusCode::TOO_MANY_REQUESTS, Json(error))
+}
+fn admission_error(error: AdmissionError) -> (StatusCode, Json<ApiError>) {
+    match error {
+        AdmissionError::RateLimited => rate(ApiError {
+            code: "rate_limited",
+        }),
+        AdmissionError::DatabaseUnavailable => db_error(),
+    }
 }
 fn db(_: sqlx::Error) -> (StatusCode, Json<ApiError>) {
     db_error()
@@ -945,6 +1071,26 @@ mod tests {
             .execute(sqlx::query(&format!("DROP SCHEMA {schema} CASCADE")))
             .await
             .unwrap();
+    }
+    async fn database_window(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT extract(epoch FROM date_trunc('minute', statement_timestamp()))::bigint",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+    async fn admit_route_wake_in_transaction(
+        state: &AppState,
+        pool: &PgPool,
+        route_id: Uuid,
+    ) -> Result<(), AdmissionError> {
+        let mut transaction = pool.begin().await.unwrap();
+        let result = state.admit_route_wake(route_id, &mut transaction).await;
+        if result.is_ok() {
+            transaction.commit().await.unwrap();
+        }
+        result
     }
     async fn serve(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1363,6 +1509,14 @@ mod tests {
     }
 
     #[test]
+    fn admission_sources_canonicalize_ipv4_mapped_addresses() {
+        let mapped: IpAddr = "::ffff:198.51.100.9".parse().unwrap();
+        let ipv4: IpAddr = "198.51.100.9".parse().unwrap();
+        assert_eq!(admission_source(mapped), admission_source(ipv4));
+        assert_eq!(canonical_source(mapped), canonical_source(ipv4));
+    }
+
+    #[test]
     fn confirmation_candidates_must_be_all_or_none() {
         let request = ConfirmRequest {
             challenge: "f".repeat(64),
@@ -1396,6 +1550,173 @@ mod tests {
             assert!(state.admit_request(peer, &headers).await.is_err());
         }
         cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn admission_is_atomic_across_independent_relay_instances() {
+        let (pool, schema) = test_pool_with_connections(4).await;
+        let first = AppState::with_provider(pool.clone(), Arc::new(FakeProvider::default()));
+        let second = AppState::with_provider(pool.clone(), Arc::new(FakeProvider::default()));
+        let address: SocketAddr = "[2001:db8:1:2::1]:443".parse().unwrap();
+        for _ in 0..3 {
+            let before = database_window(&pool).await;
+            let attempts = u32::from(ADMISSION_LIMIT) * 2;
+            let mut tasks = Vec::new();
+            for attempt in 0..attempts {
+                let state = if attempt % 2 == 0 {
+                    first.clone()
+                } else {
+                    second.clone()
+                };
+                tasks.push(tokio::spawn(async move {
+                    state.admit_registration(address).await
+                }));
+            }
+            let mut admitted = 0;
+            for task in tasks {
+                admitted += task.await.unwrap().is_ok() as u32;
+            }
+            if before == database_window(&pool).await {
+                assert_eq!(admitted, u32::from(ADMISSION_LIMIT));
+                let stored: i32 = sqlx::query_scalar(
+                    "SELECT attempts FROM relay_admissions WHERE admission_kind='registration' ORDER BY window_started_at DESC LIMIT 1",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(stored, i32::from(ADMISSION_LIMIT));
+                cleanup(pool, schema).await;
+                return;
+            }
+        }
+        cleanup(pool, schema).await;
+        panic!("admission test crossed three database-minute boundaries");
+    }
+
+    #[tokio::test]
+    async fn admission_cleanup_removes_expired_ledger_rows_and_buckets_ipv6_by_64() {
+        let (pool, schema) = test_pool().await;
+        sqlx::query(
+            "INSERT INTO relay_admissions(admission_kind,source,window_started_at,attempts) VALUES('registration','expired',now()-interval '2 minutes',1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = AppState::with_provider(pool.clone(), Arc::new(FakeProvider::default()));
+        assert_eq!(cleanup_expired_admissions(&state).await.unwrap(), 1);
+        for attempt in 0..3 {
+            let before = database_window(&pool).await;
+            let first: SocketAddr = format!("[2001:db8:1:{}::1]:443", attempt + 2)
+                .parse()
+                .unwrap();
+            let second: SocketAddr = format!("[2001:db8:1:{}::2]:443", attempt + 2)
+                .parse()
+                .unwrap();
+            let different_prefix: SocketAddr = format!("[2001:db8:1:{}::1]:443", attempt + 10)
+                .parse()
+                .unwrap();
+            for _ in 0..ADMISSION_LIMIT {
+                state.admit_registration(first).await.unwrap();
+            }
+            let same_prefix_rejected = state.admit_registration(second).await.is_err();
+            let different_prefix_admitted =
+                state.admit_registration(different_prefix).await.is_ok();
+            if before == database_window(&pool).await {
+                assert!(same_prefix_rejected);
+                assert!(different_prefix_admitted);
+                break;
+            }
+            if attempt == 2 {
+                cleanup(pool, schema).await;
+                panic!("admission test crossed three database-minute boundaries");
+            }
+        }
+        let expired: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM relay_admissions WHERE source='expired')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!expired);
+        cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn wake_admission_is_atomic_across_independent_relay_instances() {
+        let (pool, schema) = test_pool_with_connections(2).await;
+        let first = AppState::with_provider_proxy_cidrs_and_wake_limit(
+            pool.clone(),
+            Arc::new(FakeProvider::default()),
+            Vec::new(),
+            "test-release".into(),
+            1,
+        );
+        let second = AppState::with_provider_proxy_cidrs_and_wake_limit(
+            pool.clone(),
+            Arc::new(FakeProvider::default()),
+            Vec::new(),
+            "test-release".into(),
+            1,
+        );
+        for _ in 0..3 {
+            let before = database_window(&pool).await;
+            let route_id = Uuid::new_v4();
+            let (first_result, second_result) = tokio::join!(
+                admit_route_wake_in_transaction(&first, &pool, route_id),
+                admit_route_wake_in_transaction(&second, &pool, route_id),
+            );
+            if before == database_window(&pool).await {
+                assert_eq!(
+                    first_result.is_ok() as usize + second_result.is_ok() as usize,
+                    1
+                );
+                cleanup(pool, schema).await;
+                return;
+            }
+        }
+        cleanup(pool, schema).await;
+        panic!("wake admission test crossed three database-minute boundaries");
+    }
+
+    #[tokio::test]
+    async fn invalid_wake_prefilter_does_not_spend_another_route_budget() {
+        let (pool, schema) = test_pool().await;
+        let state = AppState::with_provider_proxy_cidrs_and_wake_limit(
+            pool.clone(),
+            Arc::new(FakeProvider::default()),
+            Vec::new(),
+            "test-release".into(),
+            1,
+        );
+        let attacker: SocketAddr = "[2001:db8:1:2::1]:443".parse().unwrap();
+        let authorized: SocketAddr = "[2001:db8:1:2::2]:443".parse().unwrap();
+        state
+            .prefilter_admit(AdmissionKind::Wake, attacker)
+            .await
+            .unwrap();
+        state
+            .prefilter_admit(AdmissionKind::Wake, authorized)
+            .await
+            .unwrap();
+        admit_route_wake_in_transaction(&state, &pool, Uuid::new_v4())
+            .await
+            .unwrap();
+        cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn admission_database_failure_returns_coded_503() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost:1/unused")
+            .unwrap();
+        let state = AppState::with_provider(pool, Arc::new(FakeProvider::default()));
+        let error = state
+            .admit_registration("198.51.100.1:443".parse().unwrap())
+            .await
+            .unwrap_err();
+        let (status, Json(body)) = admission_error(error);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.code, "database_unavailable");
     }
 
     #[tokio::test]
@@ -1561,28 +1882,37 @@ mod tests {
         let state = AppState::with_provider(pool, Arc::new(FakeProvider::default()));
         for segment in 0..ADMISSION_MAP_CAP as u16 {
             state
-                .admit(SocketAddr::new(
-                    IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, segment)),
-                    1,
-                ))
+                .prefilter_admit(
+                    AdmissionKind::Registration,
+                    SocketAddr::new(
+                        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, segment, 0, 0, 0, 0, 0, 0)),
+                        1,
+                    ),
+                )
                 .await
                 .unwrap();
         }
         assert!(
             state
-                .admit(SocketAddr::new(
-                    IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0)),
-                    1,
-                ))
+                .prefilter_admit(
+                    AdmissionKind::Registration,
+                    SocketAddr::new(
+                        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0)),
+                        1,
+                    )
+                )
                 .await
                 .is_ok()
         );
         assert!(
             state
-                .admit(SocketAddr::new(
-                    IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 4096)),
-                    1,
-                ))
+                .prefilter_admit(
+                    AdmissionKind::Registration,
+                    SocketAddr::new(
+                        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 4096, 0, 0, 0, 0, 0, 0)),
+                        1,
+                    )
+                )
                 .await
                 .is_err()
         );

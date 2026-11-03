@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.ExifInterface
 import java.io.File
+import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
@@ -65,6 +66,27 @@ class MmsMediaPreviewTest {
         assertEquals(MmsMediaPreviewUnavailable.MALFORMED_MEDIA, result.unavailable)
     }
 
+    @Test fun sourceImageDimensionsAboveTheDecodeBudgetAreRejectedBeforeAllocation() {
+        val source = jpeg(MmsMediaPreview.MAX_SOURCE_EDGE + 1, 1)
+
+        val result = MmsMediaPreview().inspect(source, "image/jpeg")
+
+        assertNull(result.jpegPreview)
+        assertEquals(MmsMediaPreview.MAX_SOURCE_EDGE + 1, result.metadata.width)
+        assertEquals(1, result.metadata.height)
+        assertEquals(MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW, result.unavailable)
+    }
+
+    @Test fun sourceFileAboveTheCarrierMediaBudgetIsRejectedBeforeInspection() {
+        val source = File.createTempFile("mms-preview", ".jpg").also {
+            RandomAccessFile(it, "rw").use { file -> file.setLength(MmsMediaPreview.MAX_SOURCE_BYTES + 1) }
+        }
+
+        val result = MmsMediaPreview().inspect(source, "image/jpeg")
+
+        assertEquals(MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW, result.unavailable)
+    }
+
     @Test fun videoUsesInjectedRetrieverAndAlwaysReleasesIt() {
         val retriever = FakeRetriever(mapOf("18" to "1920", "19" to "1080", "9" to "1000"), Bitmap.createBitmap(20, 10, Bitmap.Config.ARGB_8888))
         val result = MmsMediaPreview { retriever }.inspect(File.createTempFile("mms-preview", ".mp4"), "video/mp4")
@@ -75,6 +97,16 @@ class MmsMediaPreviewTest {
         assertTrue(retriever.released)
         assertNull(result.unavailable)
         assertTrue(requireNotNull(result.jpegPreview).isNotEmpty())
+    }
+
+    @Test fun videoDimensionsAboveTheSourceBudgetDoNotRequestAPosterFrame() {
+        val retriever = FakeRetriever(mapOf("18" to "${MmsMediaPreview.MAX_SOURCE_EDGE + 1}", "19" to "1"), Bitmap.createBitmap(20, 10, Bitmap.Config.ARGB_8888))
+
+        val result = MmsMediaPreview { retriever }.inspect(File.createTempFile("mms-preview", ".mp4"), "video/mp4")
+
+        assertEquals(MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW, result.unavailable)
+        assertTrue(retriever.released)
+        assertEquals(0, retriever.frameRequests)
     }
 
     @Test fun audioReturnsDurationWithoutPosterAndReleasesRetriever() {
@@ -127,11 +159,13 @@ class MmsMediaPreviewTest {
         private val failOnFrame: Boolean = false,
     ) : MmsMediaMetadataRetriever {
         var released = false
+        var frameRequests = 0
         override fun setDataSource(file: File) {
             if (failOnSetDataSource) error("broken")
         }
         override fun metadata(key: Int) = values[key.toString()]
         override fun scaledFrameAtTime(edge: Int): Bitmap? {
+            frameRequests++
             if (failOnFrame) throw OutOfMemoryError("simulated oversized frame")
             return frame
         }

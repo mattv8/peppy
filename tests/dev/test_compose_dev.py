@@ -2,13 +2,22 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Synthetic fixture credentials only. They mirror the documented .env.example role
+# names but are distinct from the owner role so DSN tests prove role selection.
+RUNTIME_ROLE = "peppy_runtime_fixture"
+RUNTIME_PASSWORD = "synthetic-runtime-password"
+MAINTENANCE_ROLE = "peppy_maintenance_fixture"
+MAINTENANCE_PASSWORD = "synthetic-maintenance-password"
 
 
 class ComposeDevelopmentTests(unittest.TestCase):
@@ -20,6 +29,10 @@ class ComposeDevelopmentTests(unittest.TestCase):
             "POSTGRES_USER": "peppy",
             "POSTGRES_PASSWORD": "synthetic-password",
             "POSTGRES_DB": "peppy",
+            "PEPPY_RUNTIME_DB_USER": RUNTIME_ROLE,
+            "PEPPY_RUNTIME_DB_PASSWORD": RUNTIME_PASSWORD,
+            "PEPPY_MAINTENANCE_DB_USER": MAINTENANCE_ROLE,
+            "PEPPY_MAINTENANCE_DB_PASSWORD": MAINTENANCE_PASSWORD,
             "S3_ACCESS_KEY": "synthetic-access",
             "S3_SECRET_KEY": "synthetic-secret",
             "PUBLIC_API_URL": "http://127.0.0.1:7000",
@@ -139,6 +152,60 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertNotIn("PEPPY_SOURCE_TREE", android_service.get("environment", {}))
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_fresh_dev_setup_environment_renders_all_database_roles(self):
+        generated_names = {
+            "PEPPY_ENV",
+            "POSTGRES_DB",
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+            "PEPPY_RUNTIME_DB_USER",
+            "PEPPY_RUNTIME_DB_PASSWORD",
+            "PEPPY_MAINTENANCE_DB_USER",
+            "PEPPY_MAINTENANCE_DB_PASSWORD",
+            "S3_ACCESS_KEY",
+            "S3_SECRET_KEY",
+            "S3_BUCKET",
+            "PEPPY_REPLAY_RETENTION_DAYS",
+            "VAULT_ATTACHMENT_QUOTA_BYTES",
+            "API_HOST_PORT",
+            "PUBLIC_API_URL",
+            "PUBLIC_ATTACHMENT_URL",
+        }
+        environment = {
+            key: value for key, value in os.environ.items()
+            if key not in generated_names and not key.startswith("COMPOSE_")
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            dotenv = Path(directory) / ".env"
+            setup = subprocess.run(
+                [sys.executable, str(ROOT / "infra/dev/dev_port.py"), "write-setup", str(dotenv)],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            rendered = subprocess.run(
+                [
+                    "docker", "compose", "--env-file", str(dotenv),
+                    "-f", str(ROOT / "docker-compose.yml"),
+                    "-f", str(ROOT / "infra/compose/compose.dev.yml"),
+                    "config", "--format", "json",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        values = json.loads(rendered.stdout)["services"]["dev"]["environment"]
+        runtime = self.database_credentials(values["DATABASE_URL"])
+        maintenance = self.database_credentials(values["MAINTENANCE_DATABASE_URL"])
+        owner = self.database_credentials(values["DATABASE_MIGRATION_URL"])
+        self.assertNotEqual(owner[:2], runtime[:2])
+        self.assertNotEqual(owner[:2], maintenance[:2])
+        self.assertNotEqual(runtime[:2], maintenance[:2])
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_dev_overlay_honors_bind_and_server_environment_overrides(self):
         result = self.render(
             "docker-compose.yml", "infra/compose/compose.dev.yml",
@@ -198,6 +265,45 @@ class ComposeDevelopmentTests(unittest.TestCase):
         result = self.render("docker-compose.yml")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(set(json.loads(result.stdout)["services"]), {"postgres", "seaweedfs", "migrate", "api"})
+
+    @staticmethod
+    def database_credentials(url):
+        parts = urlsplit(url)
+        return parts.username, parts.password, parts.hostname, parts.path
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_base_services_select_owner_runtime_and_maintenance_database_roles(self):
+        result = self.render("docker-compose.yml")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        services = json.loads(result.stdout)["services"]
+        owner = ("peppy", "synthetic-password", "postgres", "/peppy")
+        runtime = (RUNTIME_ROLE, RUNTIME_PASSWORD, "postgres", "/peppy")
+        maintenance = (MAINTENANCE_ROLE, MAINTENANCE_PASSWORD, "postgres", "/peppy")
+
+        migrate = services["migrate"]["environment"]
+        self.assertEqual(self.database_credentials(migrate["DATABASE_URL"]), runtime)
+        self.assertEqual(self.database_credentials(migrate["DATABASE_MIGRATION_URL"]), owner)
+        self.assertEqual(self.database_credentials(migrate["MAINTENANCE_DATABASE_URL"]), maintenance)
+
+        api = services["api"]["environment"]
+        self.assertEqual(self.database_credentials(api["DATABASE_URL"]), runtime)
+        self.assertEqual(self.database_credentials(api["MAINTENANCE_DATABASE_URL"]), maintenance)
+        self.assertNotIn("DATABASE_MIGRATION_URL", api)
+        self.assertNotIn("synthetic-password", json.dumps(api))
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_dev_overlay_separates_runtime_and_owner_database_urls(self):
+        result = self.render("docker-compose.yml", "infra/compose/compose.dev.yml")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        dev = json.loads(result.stdout)["services"]["dev"]["environment"]
+        self.assertEqual(
+            self.database_credentials(dev["DATABASE_URL"]),
+            (RUNTIME_ROLE, RUNTIME_PASSWORD, "postgres", "/peppy"),
+        )
+        self.assertEqual(
+            self.database_credentials(dev["DATABASE_MIGRATION_URL"]),
+            ("peppy", "synthetic-password", "postgres", "/peppy"),
+        )
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_community_overlay_rendered_with_server_image(self):

@@ -277,16 +277,19 @@ impl NativeHostedSession {
 
 #[uniffi::export]
 impl NativeHostedProvisioning {
-    pub fn view(&self) -> NativeHostedProvisioningView {
-        let inner = self.inner.lock().expect("mutex poisoned");
+    pub fn view(&self) -> Result<NativeHostedProvisioningView, MobileBindingsError> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| MobileBindingsError::LockPoisoned)?;
         let v = inner.view();
-        NativeHostedProvisioningView {
+        Ok(NativeHostedProvisioningView {
             origin: v.origin,
             account_id: v.account_id,
             operation_id: v.operation_id,
             vault_id: v.vault_id,
             device_id: v.device_id,
-        }
+        })
     }
 
     pub fn checkpoint(&self) -> Result<Vec<u8>, MobileBindingsError> {
@@ -374,6 +377,27 @@ mod tests {
     }
 
     #[test]
+    fn poisoned_provisioning_view_lock_returns_a_typed_error() {
+        let prepared = prepare_hosted_provisioning(
+            ORIGIN.into(),
+            uuid::Uuid::new_v4().to_string(),
+            PASSPHRASE.into(),
+            NativeHostedClientKind::Android,
+            "test device".into(),
+        )
+        .expect("valid local preparation");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = prepared.inner.lock().expect("lock is initially available");
+            panic!("poison provisioning view lock");
+        }));
+
+        assert!(matches!(
+            prepared.view(),
+            Err(MobileBindingsError::LockPoisoned)
+        ));
+    }
+
+    #[test]
     fn session_and_account_contracts_fail_closed() {
         let account = uuid::Uuid::new_v4();
         assert!(parse_hosted_session(
@@ -436,7 +460,7 @@ mod tests {
             .unwrap();
         let complete = prepared.complete_request().unwrap();
 
-        let view = prepared.view();
+        let view = prepared.view().unwrap();
 
         // Test wrong operation_id
         let wrong_op = serde_json::json!({
@@ -510,7 +534,7 @@ mod tests {
             "test device".into(),
         )
         .expect("valid local preparation");
-        let view = prepared.view();
+        let view = prepared.view().unwrap();
         let checkpoint = prepared.checkpoint().unwrap();
 
         let restored = restore_hosted_provisioning_for_identity(
@@ -520,7 +544,7 @@ mod tests {
             view.device_id.clone(),
         )
         .expect("exact identity restores without an account session");
-        assert_eq!(restored.view(), view);
+        assert_eq!(restored.view().unwrap(), view);
         assert!(
             restore_hosted_provisioning_for_identity(
                 checkpoint,

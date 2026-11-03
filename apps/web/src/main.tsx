@@ -11,11 +11,11 @@ import { startBrowserApplication } from "./browser-startup";
 import type { HostedWebConfig } from "./newhosted-app-auth";
 import { createSingleFlightTrailingScheduler } from "./single-flight-scheduler";
 import { appSessionRenewal, armHostedSessionRenewal, restoreAfterPersistedPageShow } from "./app-session-renewal";
-import { UNSUPPORTED_DOWNLOADS_ID, renderAccountDownloadLink, unsupportedPageMarkup } from "./browser-unsupported";
+import { UNSUPPORTED_DOWNLOADS_ID, renderAccountDownloadLink, renderUnsupportedPage } from "./browser-unsupported";
 import { renderBrowserStopped } from "./browser-stopped";
 
 function unsupported(reasons: string[]): void {
-  document.getElementById("root")!.innerHTML = unsupportedPageMarkup(reasons);
+  renderUnsupportedPage(document.getElementById("root")!, reasons);
   document.getElementById("unsupported-heading")?.focus();
   void fetchHostedWebConfig().then((config) => {
     const container = document.getElementById(UNSUPPORTED_DOWNLOADS_ID);
@@ -34,16 +34,48 @@ function missingCapabilities(): string[] {
 }
 
 function showBooting(): void {
-  document.getElementById("root")!.innerHTML = '<main id="browser-booting" data-browser-screen="browser-booting"><span role="status" aria-live="polite" aria-label="Starting Peppy"><span class="browser-boot-spinner" aria-hidden="true"></span></span></main>';
+  const page = document.createElement("main");
+  page.id = "browser-booting";
+  page.dataset.browserScreen = "browser-booting";
+  const status = document.createElement("span");
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  status.setAttribute("aria-label", "Starting Peppy");
+  const spinner = document.createElement("span");
+  spinner.className = "browser-boot-spinner";
+  spinner.setAttribute("aria-hidden", "true");
+  status.append(spinner);
+  page.append(status);
+  document.getElementById("root")!.replaceChildren(page);
 }
 
 function showStartupFailure(reason: string): void {
   const memoryFailure = reason === "wasm-memory";
   const heading = memoryFailure ? "Not enough memory" : "Peppy could not start";
   const message = memoryFailure ? "Peppy could not allocate enough memory to start. Close other tabs and try again." : "Peppy could not start its secure browser worker. Check that this browser supports the required features, then reload.";
-  document.getElementById("root")!.innerHTML = `<main id="browser-startup-failure" data-browser-screen="${memoryFailure ? "browser-wasm-memory" : "browser-startup-failure"}" data-stop-reason="${reason}" role="main" aria-labelledby="browser-startup-failure-heading"><section><h1 id="browser-startup-failure-heading" tabindex="-1">${heading}</h1><p>${message}</p><button id="browser-startup-retry" class="primary-button" type="button">Try again</button></section></main>`;
-  document.getElementById("browser-startup-retry")?.addEventListener("click", () => location.reload());
-  document.getElementById("browser-startup-failure-heading")?.focus();
+  const page = document.createElement("main");
+  page.id = "browser-startup-failure";
+  page.dataset.browserScreen = memoryFailure ? "browser-wasm-memory" : "browser-startup-failure";
+  page.dataset.stopReason = reason;
+  page.setAttribute("role", "main");
+  page.setAttribute("aria-labelledby", "browser-startup-failure-heading");
+  const section = document.createElement("section");
+  const title = document.createElement("h1");
+  title.id = "browser-startup-failure-heading";
+  title.tabIndex = -1;
+  title.textContent = heading;
+  const detail = document.createElement("p");
+  detail.textContent = message;
+  const retry = document.createElement("button");
+  retry.id = "browser-startup-retry";
+  retry.className = "primary-button";
+  retry.type = "button";
+  retry.textContent = "Try again";
+  retry.addEventListener("click", () => location.reload());
+  section.append(title, detail, retry);
+  page.append(section);
+  document.getElementById("root")!.replaceChildren(page);
+  title.focus();
 }
 
 function BrowserApp({ bridge, config }: { bridge: BrowserBridge; config: HostedWebConfig | undefined }) {

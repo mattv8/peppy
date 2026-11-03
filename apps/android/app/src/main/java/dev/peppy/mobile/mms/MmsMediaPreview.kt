@@ -18,6 +18,7 @@ internal class MmsMediaPreview(
     private val retrieverFactory: MmsMediaMetadataRetrieverFactory = AndroidMmsMediaMetadataRetrieverFactory,
 ) {
     fun inspect(file: File, contentType: String?): MmsMediaPreviewResult {
+        if (file.length() > MAX_SOURCE_BYTES) return unavailable(MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW)
         val type = contentType?.lowercase().orEmpty()
         return when {
             type.startsWith("image/") -> inspectImage(file, type)
@@ -33,9 +34,9 @@ internal class MmsMediaPreview(
             if (!matchesDeclaredImageType(file, contentType)) return unavailable(MmsMediaPreviewUnavailable.MALFORMED_MEDIA)
             BitmapFactory.decodeFile(file.path, bounds)
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return unavailable(MmsMediaPreviewUnavailable.MALFORMED_MEDIA)
-
             val orientation = imageOrientation(file)
             val dimensions = orientedDimensions(bounds.outWidth, bounds.outHeight, orientation)
+            if (!withinSourceBounds(bounds.outWidth, bounds.outHeight)) return unavailable(MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW, dimensions)
             val options = BitmapFactory.Options().apply {
                 inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight)
                 inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -69,6 +70,9 @@ internal class MmsMediaPreview(
             val height = retriever.metadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toPositiveIntOrNull()
             val durationMs = retriever.metadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toPositiveLongOrNull()
             val metadata = MmsMediaMetadata(width, height, durationMs)
+            if (width != null && height != null && !withinSourceBounds(width, height)) {
+                return MmsMediaPreviewResult(metadata, null, MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW)
+            }
             if (!includePoster) return MmsMediaPreviewResult(metadata, null, null)
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
                 return MmsMediaPreviewResult(metadata, null, MmsMediaPreviewUnavailable.UNSUPPORTED_MEDIA)
@@ -157,6 +161,9 @@ internal class MmsMediaPreview(
         return sample
     }
 
+    private fun withinSourceBounds(width: Int, height: Int): Boolean =
+        width <= MAX_SOURCE_EDGE && height <= MAX_SOURCE_EDGE && width.toLong() * height <= MAX_SOURCE_PIXELS
+
     private fun orientedDimensions(width: Int, height: Int, orientation: Int): Pair<Int, Int> = when (orientation) {
         ExifInterface.ORIENTATION_ROTATE_90, ExifInterface.ORIENTATION_ROTATE_270,
         ExifInterface.ORIENTATION_TRANSPOSE, ExifInterface.ORIENTATION_TRANSVERSE -> height to width
@@ -181,6 +188,9 @@ internal class MmsMediaPreview(
         const val MAX_EDGE = 480
         const val MAX_DECODE_EDGE = 960
         const val MAX_DECODE_PIXELS = 2_000_000L
+        const val MAX_SOURCE_EDGE = 16_384
+        const val MAX_SOURCE_PIXELS = 64_000_000L
+        const val MAX_SOURCE_BYTES = 32L * 1024 * 1024
         const val JPEG_QUALITY = 82
         val JPEG_QUALITIES = listOf(JPEG_QUALITY, 60, 40)
         val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
