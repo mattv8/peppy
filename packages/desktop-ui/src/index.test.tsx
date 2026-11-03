@@ -656,6 +656,33 @@ describe("desktop UI controls", () => {
     expect(document.getElementById("titlebar-actions")).not.toBeInTheDocument();
   });
 
+  it("renders the view-switch slot in the composer", () => {
+    render(<AppTitlebar isComposer viewSwitch={<span id="view-switch-slot">Views</span>} onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} />);
+    const slot = document.getElementById("titlebar-view-switch");
+    expect(slot).toHaveClass("titlebar-view-switch");
+    expect(slot).toContainElement(document.getElementById("view-switch-slot"));
+  });
+
+  it("does not render the view-switch slot outside the composer", () => {
+    render(<AppTitlebar viewSwitch={<span id="view-switch-slot">Views</span>} onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} />);
+    expect(document.getElementById("titlebar-view-switch")).not.toBeInTheDocument();
+    expect(document.getElementById("view-switch-slot")).not.toBeInTheDocument();
+  });
+
+  it("keeps the view-switch wrapper out of the window drag region", () => {
+    render(<AppTitlebar isComposer viewSwitch={<span>Views</span>} />);
+    expect(document.getElementById("titlebar-view-switch")).not.toHaveAttribute("data-tauri-drag-region");
+  });
+
+  it("places the view-switch slot after the spacer and before the status", () => {
+    render(<AppTitlebar isComposer viewSwitch={<span>Views</span>} status={<span>Status node</span>} />);
+    const spacer = document.querySelector(".titlebar-spacer")!;
+    const slot = document.getElementById("titlebar-view-switch")!;
+    const status = document.getElementById("titlebar-status")!;
+    expect(spacer.nextElementSibling).toBe(slot);
+    expect(slot.nextElementSibling).toBe(status);
+  });
+
   it.each(["macos", "windows", "linux"] as const)("places the main search directly after the product on %s", (platform) => {
     render(<AppTitlebar platform={platform} search={<span id="search-slot">Search</span>} />);
     const product = document.querySelector(".titlebar-product")!;

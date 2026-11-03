@@ -87,10 +87,14 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .head-panel-shell { width: 100%; min-width: 0; }
 #head-panel-header { position: relative; z-index: 2; display: flex; min-height: 36px; align-items: center; gap: 6px; padding: 0 8px; background: var(--peppy-accent); color: var(--peppy-accent-text); }
 #head-panel-header::before { position: absolute; top: -7px; left: 20px; width: 14px; height: 14px; content: ""; background: var(--peppy-accent); transform: rotate(45deg); }
-#head-panel-header strong, #head-panel-header button, .head-panel-status { position: relative; z-index: 1; }
+#head-panel-header strong, #head-panel-header button, #head-panel-header #conversation-tabs, .head-panel-status { position: relative; z-index: 1; }
 #head-panel-header strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 #head-panel-header button { display: grid; width: 26px; height: 26px; place-items: center; border: 0; border-radius: 4px; background: transparent; color: inherit; font-size: 20px; }
 #head-panel-header button:hover { background: color-mix(in srgb, #000 14%, transparent); }
+#head-panel-header #conversation-tabs[data-variant="icons"] [role="tab"] { border-radius: 4px; font-size: inherit; }
+#head-panel-header #conversation-tabs[data-variant="icons"] [role="tab"]:hover { background: color-mix(in srgb, #000 14%, transparent); }
+#head-panel-header #conversation-tabs[data-variant="icons"] [role="tab"][aria-selected="true"] { background: color-mix(in srgb, #000 16%, transparent); }
+#head-panel-header #conversation-tabs[data-variant="icons"] [role="tab"]:focus-visible { outline-color: currentColor; }
 .head-panel-status { display: flex; flex: 0 0 auto; min-width: 0; }
 .head-panel-status [data-connection-state] { display: grid; width: 22px; height: 22px; place-items: center; }
 .head-panel-status .connection-dot { box-shadow: 0 0 0 1px var(--peppy-accent-text); }

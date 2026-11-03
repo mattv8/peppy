@@ -739,6 +739,7 @@ export function AppTitlebar({
   newMessageDisabled = false,
   navigation,
   search,
+  viewSwitch,
 }: {
   onMinimize?(): void;
   onMaximize?(): void;
@@ -756,6 +757,7 @@ export function AppTitlebar({
   newMessageDisabled?: boolean;
   navigation?: ReactNode;
   search?: ReactNode;
+  viewSwitch?: ReactNode;
 }) {
   const titlebarRef = useRef<HTMLElement>(null);
   const macos = (platform ?? detectPlatform()) === "macos";
@@ -862,6 +864,7 @@ export function AppTitlebar({
         ) : "Peppy"}
       </strong>}
       <div className="titlebar-spacer" data-tauri-drag-region />
+      {isComposer && viewSwitch && <div id="titlebar-view-switch" className="titlebar-view-switch">{viewSwitch}</div>}
       {status && <div id="titlebar-status" className="titlebar-status">{status}</div>}
       {!macos && (onClose || (!isComposer && (onMinimize || onMaximize))) && <div
         id="window-controls"

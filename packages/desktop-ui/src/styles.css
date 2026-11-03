@@ -223,6 +223,12 @@ select:focus-visible {
   flex-shrink: 1;
   overflow: hidden;
 }
+.titlebar-view-switch {
+  display: flex;
+  flex: none;
+  align-items: center;
+  margin-right: 4px;
+}
 .titlebar-status + .window-controls-windows {
   margin-left: 4px;
 }

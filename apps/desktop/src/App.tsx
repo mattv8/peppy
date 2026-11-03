@@ -117,6 +117,7 @@ import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/
 import { MediaGrid } from "./media/MediaGrid";
 import { MediaTile } from "./media/MediaTile";
 import { originalPending } from "./media/mediaState";
+import { ConversationViewTabs, type ConversationView as ConversationTab } from "./ConversationViewTabs";
 import { MediaActionsProvider, type SaveOutcome as GallerySaveOutcome } from "./media/MediaActionsContext";
 import { clipboardImageSupported } from "./media/clipboard";
 import { InlineMedia } from "./media/InlineMedia";
@@ -1428,7 +1429,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
-  const [conversationTab, setConversationTab] = useState<"messages" | "media">("messages");
+  const [conversationTab, setConversationTab] = useState<ConversationTab>("messages");
   const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);
   const [lightboxAttachmentId, setLightboxAttachmentId] = useState<string>();
   const [lightboxMessageId, setLightboxMessageId] = useState<string>();
@@ -4137,15 +4138,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const messages = (
     <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()} copyNativeImage={copyNativeImage} hydrateMediaPreview={hydrateMediaPreview}>
-      <div id="conversation-tabs" role="tablist" aria-label="Conversation views" onKeyDown={(event) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-        const next = conversationTab === "messages" ? "media" : "messages";
-        setConversationTab(next);
-        document.getElementById(next === "messages" ? "tab-messages" : "tab-media")?.focus();
-      }}>
-        <button id="tab-messages" type="button" role="tab" tabIndex={conversationTab === "messages" ? 0 : -1} aria-selected={conversationTab === "messages"} aria-controls="tabpanel-messages" onClick={() => setConversationTab("messages")}>Messages</button>
-        <button id="tab-media" type="button" role="tab" tabIndex={conversationTab === "media" ? 0 : -1} aria-selected={conversationTab === "media"} aria-controls="tabpanel-media" onClick={() => setConversationTab("media")}>Media</button>
-      </div>
+      {!composerConversation && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="text" />}
       <div id="tabpanel-messages" role="tabpanel" aria-labelledby="tab-messages" hidden={conversationTab !== "messages"}>
       <MessageList
       key={reactionScopeKey}
@@ -4288,11 +4281,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         >
           {!headPanel && <AppTitlebar
             isComposer platform={platform} title={title}
+            viewSwitch={<ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="icons" />}
             status={composerConnectionDot}
             onMinimize={browserHost ? undefined : () => {}} onMaximize={browserHost ? undefined : () => {}} onClose={browserHost ? undefined : handlers.current.close}
           />}
           {headPanel && <header id="head-panel-header" aria-label={`Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
             <strong data-tauri-drag-region>{title ?? "Conversation"}</strong>
+            <ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="icons" />
             <span className="head-panel-status">{composerConnectionDot}</span>
             <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}><Minus size={14} strokeWidth={1.75} aria-hidden /></button>
             <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} strokeWidth={1.75} aria-hidden /></button>

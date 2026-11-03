@@ -3993,6 +3993,42 @@ describe("draft durability", () => {
 });
 
 describe("composer window", () => {
+  it("keeps text conversation tabs outside the main window titlebar", async () => {
+    render(<App />);
+
+    const tabs = await screen.findByRole("tablist", { name: "Conversation views" });
+    expect(tabs).toHaveAttribute("data-variant", "text");
+    expect(tabs.closest("#desktop-titlebar")).not.toBeInTheDocument();
+  });
+
+  it("places icon conversation tabs in the head panel header and supports arrow navigation", async () => {
+    openComposerWindow("aurora", true);
+    render(<App />);
+
+    const tabs = await screen.findByRole("tablist", { name: "Conversation views" });
+    expect(tabs).toHaveAttribute("data-variant", "icons");
+    expect(tabs.closest("#head-panel-header")).toBeInTheDocument();
+
+    const messagesTab = screen.getByRole("tab", { name: "Messages" });
+    fireEvent.keyDown(messagesTab, { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "Media" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Media" })).toHaveFocus();
+  });
+
+  it("places icon conversation tabs in the composer titlebar", async () => {
+    openComposerWindow("aurora");
+    render(<App />);
+
+    const tabs = await screen.findByRole("tablist", { name: "Conversation views" });
+    expect(tabs).toHaveAttribute("data-variant", "icons");
+    expect(tabs.closest("#desktop-titlebar")).toBeInTheDocument();
+    expect(document.querySelectorAll("#conversation-tabs")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Media" }));
+    expect(screen.getByRole("tab", { name: "Media" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Messages" })).toHaveAttribute("tabindex", "-1");
+  });
+
   it("waits for the stored draft before mounting the composer editor", async () => {
     host.drafts.set("aurora", {
       id: "draft-aurora",
