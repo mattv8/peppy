@@ -61,6 +61,7 @@ import dev.peppy.mobile.telephony.SimRoute
 import dev.peppy.mobile.telephony.SimRoutes
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
@@ -364,7 +365,23 @@ internal object MmsCapture {
         var unavailable = 0
         var followup = false
         val diagnostics = MmsPassDiagnostics()
-        fun <T> providerRead(pageQuery: Boolean = false, block: () -> T): T {
+        fun recordProviderFailure(kind: ProviderReadKind, error: Exception) {
+            diagnostics.providerFailures++
+            when (kind) {
+                ProviderReadKind.HIGH_WATER_OR_PAGE -> diagnostics.providerFailureHighWaterPage++
+                ProviderReadKind.ROW_READ -> diagnostics.providerFailureRowRead++
+                ProviderReadKind.PART_TEXT_READ -> diagnostics.providerFailurePartTextRead++
+                ProviderReadKind.PART_COPY -> diagnostics.providerFailurePartCopy++
+            }
+            when (error) {
+                is SecurityException -> diagnostics.providerFailureSecurity++
+                is IOException -> diagnostics.providerFailureIo++
+                is MmsProviderException -> diagnostics.providerFailureProvider++
+                is IllegalStateException, is IllegalArgumentException -> diagnostics.providerFailureStateArgument++
+                else -> diagnostics.providerFailureOther++
+            }
+        }
+        fun <T> providerRead(kind: ProviderReadKind, pageQuery: Boolean = false, block: () -> T): T {
             diagnostics.providerReads++
             if (pageQuery) diagnostics.pageQueries++
             return SyncDiagnostics.measureProvider(
@@ -376,20 +393,20 @@ internal object MmsCapture {
                 try {
                     block()
                 } catch (error: Exception) {
-                    diagnostics.providerFailures++
+                    recordProviderFailure(kind, error)
                     throw error
                 }
             }
         }
         val diagnosticProvider = object : MmsCaptureProvider by provider {
-            override fun highWater() = providerRead { provider.highWater() }
-            override fun page(afterId: Long, limit: Int) = providerRead(pageQuery = true) { provider.page(afterId, limit) }
+            override fun highWater() = providerRead(ProviderReadKind.HIGH_WATER_OR_PAGE) { provider.highWater() }
+            override fun page(afterId: Long, limit: Int) = providerRead(ProviderReadKind.HIGH_WATER_OR_PAGE, pageQuery = true) { provider.page(afterId, limit) }
             override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int) =
-                providerRead(pageQuery = true) { provider.descendingPage(cursor, upperBound, floor, limit) }
-            override fun read(id: Long) = providerRead { provider.read(id) }
-            override fun readPartText(part: MmsProviderPart, byteLimit: Int) = providerRead { provider.readPartText(part, byteLimit) }
+                providerRead(ProviderReadKind.HIGH_WATER_OR_PAGE, pageQuery = true) { provider.descendingPage(cursor, upperBound, floor, limit) }
+            override fun read(id: Long) = providerRead(ProviderReadKind.ROW_READ) { provider.read(id) }
+            override fun readPartText(part: MmsProviderPart, byteLimit: Int) = providerRead(ProviderReadKind.PART_TEXT_READ) { provider.readPartText(part, byteLimit) }
             override fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long) =
-                providerRead { provider.copyPart(part, destination, byteLimit) }
+                providerRead(ProviderReadKind.PART_COPY) { provider.copyPart(part, destination, byteLimit) }
         }
         val deadline = System.nanoTime() + PASS_BUDGET_NANOS
         return captureMmsPass(diagnostics, { followup }) {
@@ -457,15 +474,19 @@ internal object MmsCapture {
                     )
                     },
                     recheck = recheck@{ request ->
+                    fun recordOutcome(value: MmsBackfillRecheckOutcome): MmsBackfillRecheckOutcome {
+                        diagnostics.recordRecheckOutcome(value)
+                        return value
+                    }
                     if (budgetExpired()) return@recheck null
-                    val providerId = request.providerMessageId.toLongOrNull() ?: return@recheck MmsBackfillRecheckOutcome.TRANSIENT_FAILURE
+                    val providerId = request.providerMessageId.toLongOrNull() ?: return@recheck recordOutcome(MmsBackfillRecheckOutcome.TRANSIENT_FAILURE)
                     val record = try { diagnosticProvider.read(providerId) } catch (_: Exception) {
-                        return@recheck MmsBackfillRecheckOutcome.TRANSIENT_FAILURE
-                    } ?: return@recheck MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE
+                        return@recheck recordOutcome(MmsBackfillRecheckOutcome.TRANSIENT_FAILURE)
+                    } ?: return@recheck recordOutcome(MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE)
                     val routeId = record.subscriptionId?.takeIf { it >= 0 }?.let(SimRoutes::routeId)
-                        ?: return@recheck MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE
+                        ?: return@recheck recordOutcome(MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE)
                     val incoming = record.messageType == RETRIEVE_CONF || record.messageType == NOTIFICATION_IND || record.messageBox == INBOX
-                    if (incoming != request.incoming) return@recheck MmsBackfillRecheckOutcome.PROVIDER_CHANGED
+                    if (incoming != request.incoming) return@recheck recordOutcome(MmsBackfillRecheckOutcome.PROVIDER_CHANGED)
                     val outcome = try {
                         process(core, diagnosticProvider, tempDirectory, plan.generation, routeId, record, imported = false, existing = null)
                     } catch (_: Exception) { ProcessResult(durable = true) }
@@ -476,7 +497,7 @@ internal object MmsCapture {
                     diagnostics.captured += outcome.captured
                     diagnostics.pending += outcome.pending
                     diagnostics.unavailable += outcome.unavailable
-                    when {
+                    recordOutcome(when {
                         outcome.verified -> MmsBackfillRecheckOutcome.VERIFIED
                         outcome.captured > 0 || outcome.followup -> MmsBackfillRecheckOutcome.PROGRESS
                         // Carrier content still arriving: the core keeps the fair order and bounded resting schedule.
@@ -484,7 +505,7 @@ internal object MmsCapture {
                         outcome.partUnavailable -> MmsBackfillRecheckOutcome.UNCHANGED_PART_UNAVAILABLE
                         outcome.unavailable > 0 -> MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE
                         else -> MmsBackfillRecheckOutcome.TRANSIENT_FAILURE
-                    }
+                    })
                     },
                     historyAdmission = history?.let { coordinator -> object : MmsHistoryCaptureAdmission {
                         override fun begin() = coordinator.begin(plan.generation, "mms")
@@ -817,6 +838,8 @@ internal object MmsCapture {
     private const val RETRIEVE_CONF = 132
     private const val UNKNOWN_PROVIDER_DATE_MS = 0L
     private const val UNKNOWN_SUBSCRIPTION = "android-mms-unknown-subscription"
+
+    private enum class ProviderReadKind { HIGH_WATER_OR_PAGE, ROW_READ, PART_TEXT_READ, PART_COPY }
 
     private data class ProcessResult(
         val durable: Boolean,

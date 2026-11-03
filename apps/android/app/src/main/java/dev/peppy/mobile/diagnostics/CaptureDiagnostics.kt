@@ -1,6 +1,7 @@
 package dev.peppy.mobile.diagnostics
 
 import dev.peppy.mobile.SmsCaptureSummary
+import dev.peppy.mobile.mms.MmsBackfillRecheckOutcome
 
 /** Measures a synchronous capture phase without extending trace context across suspensions. */
 internal fun <T> captureTimed(stage: Long, block: () -> T): T =
@@ -86,6 +87,34 @@ internal class MmsPassDiagnostics {
     var providerDurationMs = 0L
     var providerCpuMs = 0L
     var budgetExhausted = false
+    var providerFailureHighWaterPage = 0
+    var providerFailureRowRead = 0
+    var providerFailurePartTextRead = 0
+    var providerFailurePartCopy = 0
+    var providerFailureSecurity = 0
+    var providerFailureIo = 0
+    var providerFailureStateArgument = 0
+    var providerFailureProvider = 0
+    var providerFailureOther = 0
+    var recheckVerified = 0
+    var recheckProgress = 0
+    var recheckAwaitingProvider = 0
+    var recheckUnchangedUnavailable = 0
+    var recheckUnchangedPartUnavailable = 0
+    var recheckTransientFailure = 0
+    var recheckProviderChanged = 0
+
+    fun recordRecheckOutcome(outcome: MmsBackfillRecheckOutcome) {
+        when (outcome) {
+            MmsBackfillRecheckOutcome.VERIFIED -> recheckVerified++
+            MmsBackfillRecheckOutcome.PROGRESS -> recheckProgress++
+            MmsBackfillRecheckOutcome.AWAITING_PROVIDER -> recheckAwaitingProvider++
+            MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE -> recheckUnchangedUnavailable++
+            MmsBackfillRecheckOutcome.UNCHANGED_PART_UNAVAILABLE -> recheckUnchangedPartUnavailable++
+            MmsBackfillRecheckOutcome.TRANSIENT_FAILURE -> recheckTransientFailure++
+            MmsBackfillRecheckOutcome.PROVIDER_CHANGED -> recheckProviderChanged++
+        }
+    }
 
     fun add(result: MmsCaptureScanDiagnostics) {
         rows += result.rows
@@ -123,6 +152,22 @@ internal fun <T> captureMmsPass(diagnostics: MmsPassDiagnostics, more: () -> Boo
             SyncTraceField.PAGE_QUERIES to diagnostics.pageQueries.toLong(),
             SyncTraceField.PROVIDER_DURATION_MS to diagnostics.providerDurationMs,
             SyncTraceField.PROVIDER_CPU_MS to diagnostics.providerCpuMs,
+            SyncTraceField.PROVIDER_FAILURE_HIGH_WATER_PAGE to diagnostics.providerFailureHighWaterPage.toLong(),
+            SyncTraceField.PROVIDER_FAILURE_ROW_READ to diagnostics.providerFailureRowRead.toLong(),
+            SyncTraceField.PROVIDER_FAILURE_PART_TEXT_READ to diagnostics.providerFailurePartTextRead.toLong(),
+            SyncTraceField.PROVIDER_FAILURE_PART_COPY to diagnostics.providerFailurePartCopy.toLong(),
+            SyncTraceField.PROVIDER_FAILURE_SECURITY to diagnostics.providerFailureSecurity.toLong(),
+            SyncTraceField.PROVIDER_FAILURE_IO to diagnostics.providerFailureIo.toLong(),
+            SyncTraceField.PROVIDER_FAILURE_STATE_ARGUMENT to diagnostics.providerFailureStateArgument.toLong(),
+            SyncTraceField.PROVIDER_FAILURE_OTHER to diagnostics.providerFailureOther.toLong(),
+            SyncTraceField.PROVIDER_FAILURE_PROVIDER to diagnostics.providerFailureProvider.toLong(),
+            SyncTraceField.RECHECK_VERIFIED to diagnostics.recheckVerified.toLong(),
+            SyncTraceField.RECHECK_PROGRESS to diagnostics.recheckProgress.toLong(),
+            SyncTraceField.RECHECK_AWAITING_PROVIDER to diagnostics.recheckAwaitingProvider.toLong(),
+            SyncTraceField.RECHECK_UNCHANGED_UNAVAILABLE to diagnostics.recheckUnchangedUnavailable.toLong(),
+            SyncTraceField.RECHECK_UNCHANGED_PART_UNAVAILABLE to diagnostics.recheckUnchangedPartUnavailable.toLong(),
+            SyncTraceField.RECHECK_TRANSIENT_FAILURE to diagnostics.recheckTransientFailure.toLong(),
+            SyncTraceField.RECHECK_PROVIDER_CHANGED to diagnostics.recheckProviderChanged.toLong(),
             SyncTraceField.BUDGET_EXHAUSTED to if (diagnostics.budgetExhausted) 1 else 0,
             SyncTraceField.MORE to if (more()) 1 else 0,
             SyncTraceField.REASON to when {

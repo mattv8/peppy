@@ -12,6 +12,7 @@ import android.service.notification.NotificationListenerService.RankingMap
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationManagerCompat
 import dev.peppy.mobile.diagnostics.BackgroundDiagnostics
+import dev.peppy.mobile.diagnostics.PhoneReadDiagnostics
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.gateway.GatewayPolicyHost
 import dev.peppy.mobile.gateway.NativeGateway
@@ -20,6 +21,7 @@ import dev.peppy.mobile.phoneread.AndroidPhoneReadNotifications
 import dev.peppy.mobile.phoneread.AndroidPhoneReadProvider
 import dev.peppy.mobile.phoneread.NativePhoneReadCore
 import dev.peppy.mobile.phoneread.PhoneReadEffects
+import dev.peppy.mobile.phoneread.PhoneReadRun
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import uniffi.peppy_mobile_bindings.MobileBindingsException
@@ -170,6 +172,7 @@ class NotificationMirrorService : NotificationListenerService() {
     private val callbacks = ConcurrentHashMap<String, Runnable>()
     private val observed = ConcurrentHashMap<String, ObservedNotificationApp>()
     @Volatile private var phoneReadCallback: Runnable? = null
+    @Volatile private var phoneReadNotificationMemo: Set<PhoneReadNotificationInstance>? = null
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         handler.post { capturePosted(sbn, null) }
@@ -239,25 +242,44 @@ class NotificationMirrorService : NotificationListenerService() {
 
     private fun schedulePhoneReads() {
         phoneReadCallback?.let(handler::removeCallbacks)
-        Runnable { phoneReadCallback = null; runPhoneReadsNow() }.also {
+        Runnable { phoneReadCallback = null; runPhoneReadsNow(notificationTriggered = true) }.also {
             phoneReadCallback = it
             handler.postDelayed(it, COALESCE_MS)
         }
     }
 
-    private fun runPhoneReadsNow() {
+    private fun runPhoneReadsNow(notificationTriggered: Boolean = false) {
+        if (!notificationTriggered) phoneReadNotificationMemo = null
         if (connected !== this || !NotificationMirrorAccess.granted(this)) return
+        val notificationSet = if (notificationTriggered) phoneReadNotificationSet() else null
+        if (notificationTriggered && notificationSet != null && phoneReadNotificationMemo == notificationSet) {
+            PhoneReadDiagnostics.pass(PhoneReadDiagnostics.SKIPPED_UNCHANGED, PhoneReadDiagnostics.Counters())
+            return
+        }
         val session = NativeGateway.session(applicationContext) ?: return
         try {
-            phoneReadPendingHint = PhoneReadEffects(
+            val counters = PhoneReadDiagnostics.Counters()
+            val run = PhoneReadEffects(
                 applicationContext,
                 NativePhoneReadCore(applicationContext, session.client),
-                AndroidPhoneReadProvider(applicationContext),
+                AndroidPhoneReadProvider(applicationContext, counters),
                 AndroidPhoneReadNotifications(this),
+                counters = counters,
             ).run()
+            phoneReadPendingHint = run.pending
+            phoneReadNotificationMemo = PhoneReadNotificationMemo.next(notificationSet, run)
         } catch (_: RuntimeException) {
             // Provider/notification adapters and native calls are fail-closed; retain the wake hint.
             phoneReadPendingHint = true
+            phoneReadNotificationMemo = null
+        }
+    }
+
+    private fun phoneReadNotificationSet(): Set<PhoneReadNotificationInstance>? {
+        val packageName = defaultSmsPackage() ?: return null
+        val active = try { activeNotifications ?: return null } catch (_: SecurityException) { return null }
+        return active.filter { it.packageName == packageName }.mapTo(mutableSetOf()) {
+            PhoneReadNotificationInstance(it.key, it.postTime)
         }
     }
 
@@ -294,6 +316,7 @@ class NotificationMirrorService : NotificationListenerService() {
     private fun clearPending() {
         pending.clear(); callbacks.values.forEach(handler::removeCallbacks); callbacks.clear()
         phoneReadCallback?.let(handler::removeCallbacks); phoneReadCallback = null
+        phoneReadNotificationMemo = null
     }
     override fun onDestroy() { if (connected === this) { connected = null; phoneReadPendingHint = false }; clearPending(); worker.quitSafely(); super.onDestroy() }
 
@@ -355,4 +378,14 @@ class NotificationMirrorService : NotificationListenerService() {
     }
     override fun onListenerDisconnected() { clearPending(); connected = null; phoneReadPendingHint = false; super.onListenerDisconnected() }
     override fun onListenerConnected() { connected = this; super.onListenerConnected(); reconcile() }
+}
+
+internal data class PhoneReadNotificationInstance(val key: String, val postTime: Long)
+
+internal object PhoneReadNotificationMemo {
+    fun next(
+        notifications: Set<PhoneReadNotificationInstance>?,
+        run: PhoneReadRun,
+    ): Set<PhoneReadNotificationInstance>? =
+        notifications?.takeIf { run.evaluatedNotifications && !run.acted }
 }

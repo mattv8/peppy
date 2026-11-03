@@ -81,6 +81,58 @@ class MmsCaptureOrchestrationTest {
         assertTrue(events.none { it.contains("private subject") || it.contains("private body") || it.contains("991") || it.contains("77") })
     }
 
+    @Test fun diagnosticsClassifyPartCopySecurityFailuresAndRecheckOutcomes() {
+        val events = mutableListOf<String>()
+        val core = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)), initialReason = "preview_deferred")
+        val provider = FakeProvider(
+            listOf(record(1).copy(parts = listOf(pngPart(10)))),
+            copyError = SecurityException(),
+        )
+
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            MmsCapture.run(plan(), core, provider, temp())
+        }
+
+        val fields = traceFields(events.single { it.startsWith("event=${SyncTraceEvent.MMS_CAPTURE_PASS.code} ") })
+        assertEquals(1L, fields[SyncTraceField.PROVIDER_FAILURE_PART_COPY.code])
+        assertEquals(1L, fields[SyncTraceField.PROVIDER_FAILURE_SECURITY.code])
+        assertEquals(1L, fields[SyncTraceField.RECHECK_UNCHANGED_PART_UNAVAILABLE.code])
+    }
+
+    @Test fun diagnosticsClassifyPartTextIoFailuresAndRecheckOutcomes() {
+        val events = mutableListOf<String>()
+        val core = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)), initialReason = "preview_deferred")
+        val provider = FakeProvider(listOf(record(1)), textReadError = IOException())
+
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            MmsCapture.run(plan(), core, provider, temp())
+        }
+
+        val fields = traceFields(events.single { it.startsWith("event=${SyncTraceEvent.MMS_CAPTURE_PASS.code} ") })
+        assertEquals(1L, fields[SyncTraceField.PROVIDER_FAILURE_PART_TEXT_READ.code])
+        assertEquals(1L, fields[SyncTraceField.PROVIDER_FAILURE_IO.code])
+        assertEquals(1L, fields[SyncTraceField.RECHECK_TRANSIENT_FAILURE.code])
+    }
+
+    @Test fun diagnosticsBucketProviderExceptionsBeforeStateArgumentFailures() {
+        val events = mutableListOf<String>()
+        val core = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)), initialReason = "preview_deferred")
+        val provider = FakeProvider(
+            listOf(record(1)),
+            textReadError = MmsProviderException("part text unavailable"),
+        )
+
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            MmsCapture.run(plan(), core, provider, temp())
+        }
+
+        val fields = traceFields(events.single { it.startsWith("event=${SyncTraceEvent.MMS_CAPTURE_PASS.code} ") })
+        assertEquals(1L, fields[SyncTraceField.PROVIDER_FAILURE_PART_TEXT_READ.code])
+        assertEquals(1L, fields[SyncTraceField.PROVIDER_FAILURE_PROVIDER.code])
+        assertEquals(0L, fields[SyncTraceField.PROVIDER_FAILURE_STATE_ARGUMENT.code])
+        assertEquals(0L, fields[SyncTraceField.PROVIDER_FAILURE_OTHER.code])
+    }
+
     @Test fun nullHighWaterFailsBeforeTheCorePlansOrCheckpoints() {
         val core = FakeCore()
         val provider = FakeProvider(emptyList(), failHighWater = true)
@@ -621,11 +673,16 @@ class MmsCaptureOrchestrationTest {
         id, 4, 7, 1, 1_000, null, "subject", listOf("+15550001"), emptyList(), listOf("+15550002"), emptyList(),
         132, null, listOf(MmsProviderPart(id * 10, 0, "text/plain", null, 106, "body", Uri.parse("content://mms/part/$id"))), true, null,
     )
+    private fun traceFields(line: String): Map<Long, Long> = line.split(' ').mapNotNull { token ->
+        token.split('=', limit = 2).takeIf { it.size == 2 }?.let { (key, value) -> key.toLongOrNull()?.let { it to value.toLong() } }
+    }.toMap()
 
     private class FakeProvider(
         private val records: List<MmsProviderRecord>,
         private val imageBytes: ByteArray? = null,
         private val failCopy: Boolean = false,
+        private val copyError: Exception? = null,
+        private val textReadError: Exception? = null,
         private val previewLimit: Int = MmsMediaPreview.MAX_JPEG_BYTES,
         private val failHighWater: Boolean = false,
     ) : MmsCaptureProvider {
@@ -642,9 +699,13 @@ class MmsCaptureOrchestrationTest {
             return MmsProviderPage(page, page.lastOrNull()?.id ?: ceiling)
         }
         override fun read(id: Long) = records.firstOrNull { it.id == id }
-        override fun readPartText(part: MmsProviderPart, byteLimit: Int) = part.text
+        override fun readPartText(part: MmsProviderPart, byteLimit: Int): String? {
+            textReadError?.let { throw it }
+            return part.text
+        }
         override fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long): Long {
             copyCount++
+            copyError?.let { throw it }
             if (failCopy) error("provider read failed")
             val bytes = imageBytes ?: byteArrayOf()
             destination.writeBytes(bytes)

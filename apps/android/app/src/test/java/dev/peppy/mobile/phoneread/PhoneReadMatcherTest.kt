@@ -42,6 +42,12 @@ class PhoneReadMatcherTest {
         assertEquals(ReadMatch.NoCandidate, PhoneReadMatcher.match(thread, listOf(notification(summary = true))))
     }
 
+    @Test fun candidateTimesUnionsAllNonSummaryNotifications() {
+        assertEquals(setOf(100L, 200L), PhoneReadMatcher.candidateTimes(listOf(
+            notification("first", setOf(100L)), notification("second", setOf(200L)), notification(summary = true, times = setOf(300L)),
+        )))
+    }
+
     @Test fun requiresExactlyOneSafeSemanticActionAcrossSources() {
         assertEquals(ReadMatch.NoAction, PhoneReadMatcher.match(thread, listOf(notification(actions = listOf(ReadActionFacts(ActionSource.VISIBLE, 0, false, 0, false))))))
         assertEquals(ReadMatch.NoAction, PhoneReadMatcher.match(thread, listOf(notification(actions = listOf(ReadActionFacts(ActionSource.VISIBLE, 0, true, 1, false))))))
