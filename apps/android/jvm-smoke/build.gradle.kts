@@ -12,7 +12,7 @@ sourceSets {
 }
 
 dependencies {
-    implementation("net.java.dev.jna:jna:5.14.0")
+    implementation("net.java.dev.jna:jna:5.19.1")
 }
 
 application {
