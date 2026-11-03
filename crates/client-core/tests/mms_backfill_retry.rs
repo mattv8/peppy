@@ -237,6 +237,132 @@ fn explicit_refresh_and_provider_hint_reset_only_pending_due_work() {
     );
 }
 
+fn provider_changed() -> MmsBackfillRecheckConditions {
+    MmsBackfillRecheckConditions {
+        provider_changed: true,
+        ..Default::default()
+    }
+}
+
+fn due_count(client: &Client, now_ms: i64, conditions: MmsBackfillRecheckConditions) -> usize {
+    client
+        .mms_backfill_due_rechecks("phone-install", "sim-1", now_ms, conditions)
+        .unwrap()
+        .requests
+        .len()
+}
+
+#[test]
+fn provider_hints_preserve_transient_failure_backoff_after_two_failures() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let acquisition = client.begin_mms_acquisition(input("1")).unwrap();
+
+    assert_eq!(due_count(&client, 0, provider_changed()), 1);
+    client
+        .record_mms_backfill_recheck_outcome(
+            &acquisition.acquisition_id,
+            0,
+            MmsBackfillRecheckOutcome::TransientFailure,
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(due_count(&client, 1, provider_changed()), 1);
+    client
+        .record_mms_backfill_recheck_outcome(
+            &acquisition.acquisition_id,
+            1,
+            MmsBackfillRecheckOutcome::TransientFailure,
+            Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(due_count(&client, 2, provider_changed()), 0);
+    assert_eq!(due_count(&client, 1_800_001, Default::default()), 1);
+}
+
+#[test]
+fn provider_hints_preserve_unavailable_backoff_after_two_failures() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let acquisition = client.begin_mms_acquisition(input("1")).unwrap();
+
+    assert_eq!(due_count(&client, 0, provider_changed()), 1);
+    client
+        .record_mms_backfill_recheck_outcome(
+            &acquisition.acquisition_id,
+            0,
+            MmsBackfillRecheckOutcome::UnchangedUnavailable,
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(due_count(&client, 1, provider_changed()), 1);
+    client
+        .record_mms_backfill_recheck_outcome(
+            &acquisition.acquisition_id,
+            1,
+            MmsBackfillRecheckOutcome::UnchangedUnavailable,
+            Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(due_count(&client, 2, provider_changed()), 0);
+    assert_eq!(due_count(&client, 1_800_001, Default::default()), 1);
+}
+
+#[test]
+fn provider_hints_stop_resetting_awaiting_provider_after_immediate_observations() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let acquisition = client.begin_mms_acquisition(input("1")).unwrap();
+
+    for now_ms in 0..=2 {
+        assert_eq!(due_count(&client, now_ms, provider_changed()), 1);
+        client
+            .record_mms_backfill_recheck_outcome(
+                &acquisition.acquisition_id,
+                now_ms,
+                MmsBackfillRecheckOutcome::AwaitingProvider,
+                Default::default(),
+            )
+            .unwrap();
+    }
+
+    assert_eq!(due_count(&client, 3, provider_changed()), 0);
+    assert_eq!(due_count(&client, 900_002, Default::default()), 1);
+}
+
+#[test]
+fn provider_hint_makes_a_new_pending_row_due_immediately() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    client.begin_mms_acquisition(input("1")).unwrap();
+
+    assert_eq!(due_count(&client, 1, provider_changed()), 1);
+}
+
+#[test]
+fn provider_hint_resets_a_single_failure() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let acquisition = client.begin_mms_acquisition(input("1")).unwrap();
+    client
+        .record_mms_backfill_recheck_outcome(
+            &acquisition.acquisition_id,
+            0,
+            MmsBackfillRecheckOutcome::TransientFailure,
+            Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(due_count(&client, 1, provider_changed()), 1);
+}
+
 #[test]
 fn charging_completed_sweep_is_newest_first_and_rests_after_feedback() {
     let dir = TempDir::new().unwrap();
@@ -538,7 +664,10 @@ fn awaiting_provider_rests_fixed_fifteen_minutes_after_three_observations() {
             },
         )
         .unwrap();
-    assert_eq!(pending_ids(&hinted.requests), ["1"]);
+    assert!(
+        hinted.requests.is_empty(),
+        "a provider hint must not interrupt the post-observation rest"
+    );
 }
 
 #[test]
