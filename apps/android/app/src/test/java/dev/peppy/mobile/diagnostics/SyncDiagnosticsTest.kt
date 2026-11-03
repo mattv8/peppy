@@ -188,6 +188,26 @@ class SyncDiagnosticsTest : GatewayTestBase() {
         assertEquals(2L, event.getValue(SyncTraceField.ROWS.code.toString()))
     }
 
+    @Test fun phoneReadPassEmitsNumericOutcomeAndProviderCounters() {
+        val events = mutableListOf<String>()
+        val counters = PhoneReadDiagnostics.Counters().apply {
+            providerQueries = 2
+            rowsRead = 7
+            providerDurationMs = 11
+        }
+
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            PhoneReadDiagnostics.pass(PhoneReadDiagnostics.ACTED, counters)
+        }
+
+        val event = traceFields(events.single())
+        assertEquals(SyncTraceEvent.PHONE_READ_PASS.code, event.getValue("event"))
+        assertEquals(PhoneReadDiagnostics.ACTED, event.getValue(SyncTraceField.OUTCOME.code.toString()))
+        assertEquals(2L, event.getValue(SyncTraceField.PROVIDER_READS.code.toString()))
+        assertEquals(7L, event.getValue(SyncTraceField.ROWS.code.toString()))
+        assertEquals(11L, event.getValue(SyncTraceField.PROVIDER_DURATION_MS.code.toString()))
+    }
+
     @Test fun gatewayWorkerRetainsSameSessionDiagnosticMetadataAndMeasuresQueueDelay() {
         WorkManagerTestInitHelper.initializeTestWorkManager(
             context,

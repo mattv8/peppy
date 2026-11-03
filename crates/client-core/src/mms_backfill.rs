@@ -15,6 +15,8 @@ const MMS_RECHECK_BACKOFF_MS: i64 = 15 * 60 * 1000;
 const MMS_RECHECK_MAX_BACKOFF_MS: i64 = 24 * 60 * 60 * 1000;
 const MMS_AWAITING_PROVIDER_BACKOFF_MS: i64 = 15 * 60 * 1000;
 const MMS_AWAITING_PROVIDER_IMMEDIATE_OBSERVATIONS: i64 = 2;
+/// Provider-change hints may immediately retry at most this many ordinary failures.
+const MMS_PROVIDER_CHANGE_RESET_MAX_FAILURES: i64 = 2;
 // Pending candidates are the newest rows by local order; the fair sort then runs over at most this
 // many rows, so completed history never enters the recheck sort.
 // One bounded live provider page can add a message, preview, binding and demand records for each
@@ -1254,15 +1256,25 @@ fn reset_pending_recheck_due(
     limit: usize,
 ) -> Result<(), Error> {
     let provider_wide = scope == PROVIDER_WIDE_SCOPE;
+    // The awaiting_provider clause only adds failure_count==2 rows (lower counts already match the
+    // failure_count clause); for those rows the hint clears next_due_at_ms and attempted_at_ms.
     let selected = format!(
-        "SELECT acquisition_id FROM ({})",
+        "SELECT c.acquisition_id FROM ({}) c
+         LEFT JOIN mms_backfill_recheck_state r ON r.acquisition_id=c.acquisition_id
+         WHERE r.acquisition_id IS NULL
+            OR r.failure_count<?
+            OR (r.last_reason='awaiting_provider' AND r.failure_count<=?)",
         newest_pending_candidates(provider_wide, "?")
     );
     let mut values = scope_values(generation, scope, provider_wide);
     values.push(Value::Integer(limit as i64));
+    values.extend([
+        Value::Integer(MMS_PROVIDER_CHANGE_RESET_MAX_FAILURES),
+        Value::Integer(MMS_AWAITING_PROVIDER_IMMEDIATE_OBSERVATIONS),
+    ]);
     conn.execute(
         &format!(
-            "UPDATE mms_backfill_recheck_state SET next_due_at_ms=0,failure_count=0,last_reason=NULL
+            "UPDATE mms_backfill_recheck_state SET next_due_at_ms=0
              WHERE acquisition_id IN ({selected})"
         ),
         params_from_iter(values.iter()),

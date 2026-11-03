@@ -31,6 +31,7 @@ internal data class ConversationNotification(
     override fun toString() = "ConversationNotification(postTime=$postTime, messages=${messageTimes.size}, actions=${actions.size})"
 }
 
+/** rowDates are thread dates restricted to active candidate notification message times. */
 internal data class ProviderThread(val threadId: Long, val unreadDates: Set<Long>, val rowDates: Set<Long>)
 
 internal sealed interface ReadMatch {
@@ -41,6 +42,9 @@ internal sealed interface ReadMatch {
 }
 
 internal object PhoneReadMatcher {
+    fun candidateTimes(notifications: List<ConversationNotification>): Set<Long> =
+        notifications.filterNot { it.groupSummary }.flatMapTo(mutableSetOf()) { it.messageTimes }
+
     fun match(thread: ProviderThread, notifications: List<ConversationNotification>): ReadMatch {
         if (thread.unreadDates.isEmpty()) return ReadMatch.NoCandidate
         val candidates = notifications.filter {
