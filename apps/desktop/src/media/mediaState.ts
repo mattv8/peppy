@@ -64,11 +64,12 @@ export function retryTarget(attachment: GalleryAttachment): string {
 }
 
 export function tileLabel(attachment: GalleryAttachment, state: TileState): string {
-  if (originalPending(attachment)) return attachment.name ? `${attachment.name}, preview only` : "Image preview only";
-  if (state === "loading") return "Loading image";
-  if (state === "failed") return "Image failed to load";
+  const mediaNoun = attachment.mediaType.startsWith("video/") ? "Video" : "Image";
+  if (originalPending(attachment)) return attachment.name ? `${attachment.name}, preview only` : `${mediaNoun} preview only`;
+  if (state === "loading") return `Loading ${mediaNoun.toLowerCase()}`;
+  if (state === "failed") return `${mediaNoun} failed to load`;
   if (state === "unavailable") return "Preview unavailable";
-  return attachment.name || "Image";
+  return attachment.name || mediaNoun;
 }
 
 export function canOpen(attachment: GalleryAttachment, hydrationExhausted = false): boolean {

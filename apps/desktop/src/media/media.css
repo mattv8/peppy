@@ -1,9 +1,15 @@
 [data-media-message-grid], [data-media-grid] { display: grid; gap: 4px; }
 [data-media-message-grid] { gap: 0; }
-#conversation-tabs { display: flex; flex: 0 0 auto; gap: 4px; margin: 0 0 8px; border-bottom: 1px solid var(--peppy-border); }
-#conversation-tabs [role="tab"] { padding: 6px 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--peppy-text-secondary); }
-#conversation-tabs [role="tab"][aria-selected="true"] { border-bottom-color: var(--peppy-accent); color: var(--peppy-text-primary); }
-#conversation-tabs [role="tab"]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
+#conversation-tabs[data-variant="text"] { display: flex; flex: 0 0 auto; gap: 4px; margin: 0 0 8px; border-bottom: 1px solid var(--peppy-border); }
+#conversation-tabs[data-variant="text"] [role="tab"] { padding: 6px 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--peppy-text-secondary); }
+#conversation-tabs[data-variant="text"] [role="tab"][aria-selected="true"] { border-bottom-color: var(--peppy-accent); color: var(--peppy-text-primary); }
+#conversation-tabs[data-variant="text"] [role="tab"]:focus-visible,
+#conversation-tabs[data-variant="icons"] [role="tab"]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
+#conversation-tabs[data-variant="icons"] { display: inline-flex; flex: none; gap: 2px; margin: 0; border: 0; }
+#conversation-tabs[data-variant="icons"] [role="tab"] { display: grid; width: 26px; height: 26px; padding: 0; place-items: center; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: inherit; opacity: .75; }
+#conversation-tabs[data-variant="icons"] [role="tab"]:hover,
+#conversation-tabs[data-variant="icons"] [role="tab"][aria-selected="true"] { opacity: 1; }
+@media (forced-colors: active) { #conversation-tabs[data-variant="icons"] [role="tab"][aria-selected="true"] { outline: 2px solid Highlight; outline-offset: -2px; } }
 #tabpanel-media { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 #media-tab-loading, #media-tab-content { flex: 1; min-height: 0; }
 #media-tab-content { overflow-y: auto; padding: 16px 16px calc(var(--composer-overlay-height, 120px) + var(--composer-gutter)); }
