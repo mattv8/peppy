@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use semver::Version;
 
-use super::types::UpdateChannel;
+use super::super::types::UpdateChannel;
 
 pub const STARTUP_DELAY_SECS: u64 = 30;
 pub const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;

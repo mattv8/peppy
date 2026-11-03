@@ -164,7 +164,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
 const HISTORY_COMMANDS = new Set(["get_history_search", "start_history_search", "cancel_history_search"]);
 
 const NATIVE_ONLY = new Set([
-  "configure_server", "get_app_lock_status", "set_app_lock", "unlock_app", "pick_attachments",
+  "configure_server", "get_app_lock_status", "retry_app_lock_check", "set_app_lock", "unlock_app", "pick_attachments",
   "open_composer", "set_start_at_login", "popout_conversation", "hide_head",
   "close_composer", "close_head_panel", "window", "request_notification_permission", "open_notification_settings", "set_notification_context",
   "subscribe_lifecycle", "subscribe_lifecycle_finished", "acknowledge_lifecycle", "hosted_account",

@@ -68,7 +68,7 @@ mod tests;
 mod tls;
 mod tray;
 mod tray_badge;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(all(feature = "self-update", any(target_os = "linux", test)))]
 mod update_linux;
 mod update_safety;
 mod updates;
@@ -190,6 +190,10 @@ pub struct AppState {
     quit_requested: AtomicBool,
     app_locked: AtomicBool,
     app_lock_storage_available: AtomicBool,
+    app_lock_checking: AtomicBool,
+    app_lock_check_running: AtomicBool,
+    app_lock_enabled: AtomicBool,
+    app_lock_check_generation: AtomicU64,
     app_lock_attempts: Arc<app_lock::Attempts>,
     media_capabilities: Mutex<HashMap<String, MediaCapability>>,
     media_viewers: Mutex<HashMap<String, MediaViewer>>,
@@ -604,6 +608,10 @@ impl AppState {
             quit_requested: AtomicBool::new(false),
             app_locked: AtomicBool::new(true),
             app_lock_storage_available: AtomicBool::new(true),
+            app_lock_checking: AtomicBool::new(true),
+            app_lock_check_running: AtomicBool::new(false),
+            app_lock_enabled: AtomicBool::new(false),
+            app_lock_check_generation: AtomicU64::new(0),
             app_lock_attempts: Arc::new(app_lock::Attempts::default()),
             media_capabilities: Mutex::new(HashMap::new()),
             media_viewers: Mutex::new(HashMap::new()),
@@ -767,10 +775,14 @@ impl AppState {
             self.notifier.clone(),
             binding.clone(),
         );
-        let session = Arc::new(
-            blocking(move || open_session(&root, &*store, &opening_binding, &epochs, notifier))
-                .await?,
-        );
+        let session = match blocking(move || {
+            open_session(&root, &*store, &opening_binding, &epochs, notifier)
+        })
+        .await
+        {
+            Ok(session) => Arc::new(session),
+            Err(error) => return Err(error),
+        };
         sync::start(&session);
         let mut current = self.session.lock().await;
         if let Some(existing) = current.as_ref() {
@@ -934,9 +946,11 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
     }
 }
 
-fn locked_snapshot(storage_available: bool) -> Snapshot {
+fn locked_snapshot(checking: bool, storage_available: bool) -> Snapshot {
     let mut snapshot = empty_snapshot(None);
-    snapshot.connection.error_code = Some(if storage_available {
+    snapshot.connection.error_code = Some(if checking {
+        "app-lock-checking"
+    } else if storage_available {
         "app-locked"
     } else {
         "secure-store-unavailable"
@@ -1039,6 +1053,7 @@ async fn load_state(
     let operation = admit_update_operation(&state)?;
     if state.app_locked.load(Ordering::Acquire) {
         return Ok(locked_snapshot(
+            state.app_lock_checking.load(Ordering::Acquire),
             state.app_lock_storage_available.load(Ordering::Acquire),
         ));
     }
@@ -1067,6 +1082,7 @@ async fn load_state(
     .await?;
     if state.app_locked.load(Ordering::Acquire) {
         return Ok(locked_snapshot(
+            state.app_lock_checking.load(Ordering::Acquire),
             state.app_lock_storage_available.load(Ordering::Acquire),
         ));
     }
@@ -1739,6 +1755,112 @@ struct AppLockStatus {
     enabled: bool,
     locked: bool,
     storage_available: bool,
+    pending: bool,
+}
+
+fn cached_app_lock_status(state: &AppState) -> AppLockStatus {
+    let pending = state.app_lock_checking.load(Ordering::Acquire);
+    AppLockStatus {
+        enabled: !pending && state.app_lock_enabled.load(Ordering::Acquire),
+        locked: state.app_locked.load(Ordering::Acquire),
+        storage_available: state.app_lock_storage_available.load(Ordering::Acquire),
+        pending,
+    }
+}
+
+fn app_lock_actions_allowed(pending: bool, storage_available: bool) -> bool {
+    !pending && storage_available
+}
+
+fn retry_app_lock_check_needed(locked: bool, pending: bool, storage_available: bool) -> bool {
+    locked && (pending || !storage_available)
+}
+
+fn app_lock_check_allows_session_resume(succeeded: bool) -> bool {
+    succeeded
+}
+
+pub(crate) fn refresh_tray_lock_menu(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    badge: &tray_badge::TrayBadge,
+) {
+    let lock = if state.app_lock_checking.load(Ordering::Acquire) {
+        tray::LockMenu::Checking
+    } else if !state.app_lock_storage_available.load(Ordering::Acquire) {
+        tray::LockMenu::Unavailable
+    } else if state.app_locked.load(Ordering::Acquire) || *badge == tray_badge::TrayBadge::Locked {
+        tray::LockMenu::Locked
+    } else {
+        tray::LockMenu::Verified
+    };
+    let _ = tray::set_lock_menu(app, lock);
+}
+
+fn refresh_lock_menu(app: &tauri::AppHandle, state: &AppState) {
+    if state.app_lock_checking.load(Ordering::Acquire) {
+        let _ = tray::set_lock_menu(app, tray::LockMenu::Checking);
+    } else if !state.app_lock_storage_available.load(Ordering::Acquire) {
+        let _ = tray::set_lock_menu(app, tray::LockMenu::Unavailable);
+    } else if state.app_locked.load(Ordering::Acquire) {
+        let _ = tray::set_lock_menu(app, tray::LockMenu::Locked);
+    }
+}
+
+fn resume_session_after_app_lock_check(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let Ok(operation) = admit_update_operation(&state) else {
+            return;
+        };
+        let _ = state.session_admitted(&operation).await;
+    });
+}
+
+fn start_app_lock_check(app: tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if state
+        .app_lock_check_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    state.app_lock_checking.store(true, Ordering::Release);
+    let generation = state.app_lock_check_generation.load(Ordering::Acquire);
+    refresh_lock_menu(&app, &state);
+    let store = state.store.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = blocking(move || app_lock::status(&*store)).await;
+        let state = app.state::<AppState>();
+        let resume_session = app_lock_check_allows_session_resume(result.is_ok());
+        if state.app_lock_check_generation.load(Ordering::Acquire) == generation {
+            match result {
+                Ok(app_lock::Status::Disabled) => {
+                    state.app_lock_storage_available.store(true, Ordering::Release);
+                    state.app_lock_enabled.store(false, Ordering::Release);
+                    state.app_locked.store(false, Ordering::Release);
+                }
+                Ok(app_lock::Status::Enabled) => {
+                    state.app_lock_storage_available.store(true, Ordering::Release);
+                    state.app_lock_enabled.store(true, Ordering::Release);
+                    state.app_locked.store(true, Ordering::Release);
+                }
+                Err(_) => {
+                    state.app_lock_storage_available.store(false, Ordering::Release);
+                    state.app_lock_enabled.store(false, Ordering::Release);
+                    state.app_locked.store(true, Ordering::Release);
+                }
+            }
+        }
+        state.app_lock_checking.store(false, Ordering::Release);
+        state.app_lock_check_running.store(false, Ordering::Release);
+        refresh_lock_menu(&app, &state);
+        (state.notifier)();
+        if resume_session {
+            resume_session_after_app_lock_check(app);
+        }
+    });
 }
 
 #[tauri::command]
@@ -1747,15 +1869,25 @@ fn get_app_lock_status(
     state: State<'_, AppState>,
 ) -> BridgeResult<AppLockStatus> {
     require_main(window.label())?;
-    let configured = app_lock::status(&*state.store);
-    let storage_available =
-        state.app_lock_storage_available.load(Ordering::Acquire) && configured.is_ok();
-    let enabled = storage_available && matches!(configured, Ok(app_lock::Status::Enabled));
-    Ok(AppLockStatus {
-        enabled,
-        locked: state.app_locked.load(Ordering::Acquire),
-        storage_available,
-    })
+    Ok(cached_app_lock_status(&state))
+}
+
+#[tauri::command]
+fn retry_app_lock_check(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> BridgeResult<AppLockStatus> {
+    require_main(window.label())?;
+    let state = app.state::<AppState>();
+    if !retry_app_lock_check_needed(
+        state.app_locked.load(Ordering::Acquire),
+        state.app_lock_checking.load(Ordering::Acquire),
+        state.app_lock_storage_available.load(Ordering::Acquire),
+    ) {
+        return Ok(cached_app_lock_status(&state));
+    }
+    start_app_lock_check(app.clone());
+    Ok(cached_app_lock_status(&app.state::<AppState>()))
 }
 
 #[tauri::command]
@@ -1766,11 +1898,14 @@ async fn unlock_app(
 ) -> BridgeResult<bool> {
     let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
+    if !app_lock_actions_allowed(
+        state.app_lock_checking.load(Ordering::Acquire),
+        state.app_lock_storage_available.load(Ordering::Acquire),
+    ) {
+        return Ok(false);
+    }
     if !state.app_locked.load(Ordering::Acquire) {
         return Ok(true);
-    }
-    if !state.app_lock_storage_available.load(Ordering::Acquire) {
-        return Ok(false);
     }
     let Some(password) =
         dialogs::passphrase(&app, dialogs::PassphrasePurpose::AppLockUnlock).await?
@@ -1781,8 +1916,11 @@ async fn unlock_app(
     let attempts = state.app_lock_attempts.clone();
     let verified = blocking(move || app_lock::verify(&*store, password, &attempts)).await?;
     if verified {
+        state.app_lock_check_generation.fetch_add(1, Ordering::AcqRel);
         state.app_locked.store(false, Ordering::Release);
+        refresh_lock_menu(&app, &state);
         (state.notifier)();
+        resume_session_after_app_lock_check(app.clone());
     }
     Ok(verified)
 }
@@ -1796,7 +1934,10 @@ async fn set_app_lock(
 ) -> BridgeResult<bool> {
     let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    if !state.app_lock_storage_available.load(Ordering::Acquire) {
+    if !app_lock_actions_allowed(
+        state.app_lock_checking.load(Ordering::Acquire),
+        state.app_lock_storage_available.load(Ordering::Acquire),
+    ) {
         return Ok(false);
     }
     let currently_enabled = matches!(app_lock::status(&*state.store)?, app_lock::Status::Enabled);
@@ -1833,6 +1974,9 @@ async fn set_app_lock(
         let store = state.store.clone();
         blocking(move || app_lock::disable(&*store)).await?;
     }
+    state.app_lock_check_generation.fetch_add(1, Ordering::AcqRel);
+    state.app_lock_enabled.store(enabled, Ordering::Release);
+    (state.notifier)();
     Ok(true)
 }
 
@@ -4737,7 +4881,13 @@ async fn check_for_updates(
     state: State<'_, AppState>,
 ) -> BridgeResult<updates::types::UpdateStatus> {
     require_main(window.label())?;
-    state.updates.check(&app).await
+    #[cfg(feature = "self-update")]
+    return state.updates.check(&app).await;
+    #[cfg(not(feature = "self-update"))]
+    {
+        let _ = app;
+        Ok(state.updates.status())
+    }
 }
 
 #[tauri::command]
@@ -4771,21 +4921,30 @@ async fn restart_for_update(
     state: State<'_, AppState>,
 ) -> BridgeResult<updates::types::UpdateStatus> {
     require_main(window.label())?;
-    if let Some(version) = state.updates.installed_pending() {
-        state.updates.clear_attempted()?;
-        let never = restart_into_installed(
-            &app,
-            &state,
-            &version,
-            restart_in_background(main_window_visible(&app)),
-            true,
-        )
-        .await?;
-        match never {}
+    #[cfg(not(feature = "self-update"))]
+    {
+        let _ = app;
+        return Ok(state.updates.status());
     }
-    install_staged_update(&app, &state, updates::install::InstallIntent::User).await
+    #[cfg(feature = "self-update")]
+    {
+        if let Some(version) = state.updates.installed_pending() {
+            state.updates.clear_attempted()?;
+            let never = restart_into_installed(
+                &app,
+                &state,
+                &version,
+                restart_in_background(main_window_visible(&app)),
+                true,
+            )
+            .await?;
+            match never {}
+        }
+        install_staged_update(&app, &state, updates::install::InstallIntent::User).await
+    }
 }
 
+#[cfg(feature = "self-update")]
 async fn install_staged_update(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -4873,6 +5032,7 @@ async fn install_staged_update(
     app.restart();
 }
 
+#[cfg(feature = "self-update")]
 async fn wait_for_background_work(
     app: tauri::AppHandle,
     permit: lifecycle::UpdatePermit,
@@ -4893,7 +5053,7 @@ async fn wait_for_background_work(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "self-update", target_os = "linux"))]
 async fn install_linux_system_package(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -5004,7 +5164,7 @@ async fn install_linux_system_package(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "self-update", target_os = "linux"))]
 fn packagekit_message(outcome: update_linux::InstallOutcome) -> String {
     use update_linux::InstallOutcome;
 
@@ -5019,6 +5179,7 @@ fn packagekit_message(outcome: update_linux::InstallOutcome) -> String {
     }
 }
 
+#[cfg(feature = "self-update")]
 async fn restart_into_installed(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -5063,7 +5224,7 @@ async fn restart_into_installed(
     app.restart();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "self-update", target_os = "linux"))]
 async fn restart_after_external_package_update(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -5097,6 +5258,7 @@ fn activate_main(app: &tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         tray::show_main(&app);
         #[cfg(target_os = "macos")]
+        #[cfg(feature = "self-update")]
         if let Some(state) = app.try_state::<AppState>() {
             let current_version = state.updates.status().current_version;
             if let updates::installed::Installed::Differs(version) = updates::installed::compare(
@@ -5119,6 +5281,7 @@ fn activate_main(app: &tauri::AppHandle) {
     });
 }
 
+#[cfg(feature = "self-update")]
 fn main_window_visible(app: &tauri::AppHandle) -> bool {
     app.get_webview_window(tray::MAIN)
         .and_then(|window| window.is_visible().ok())
@@ -5127,6 +5290,7 @@ fn main_window_visible(app: &tauri::AppHandle) -> bool {
         .unwrap_or(true)
 }
 
+#[cfg(any(feature = "self-update", test))]
 fn restart_in_background(main_visible: bool) -> bool {
     !main_visible
 }
@@ -5190,8 +5354,10 @@ pub fn run() {
             Some(vec![startup::BACKGROUND_ARGUMENT]),
         ))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init());
+    #[cfg(feature = "self-update")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = builder
         .setup(|app| {
             let root = app
                 .path()
@@ -5232,26 +5398,99 @@ pub fn run() {
                 window_placement::restore_initial(&main);
             }
             let state = app.state::<AppState>();
+            // Install the locked tray before anything can read protected storage.
+            let installed = tray::install(
+                app.handle(),
+                |app| {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if new_composer(app.clone(), None).await.is_err() {
+                            tray::show_main(&app);
+                        }
+                    });
+                },
+                heads_runtime::open_recent_from_tray,
+                |app| {
+                    #[cfg(not(feature = "self-update"))]
+                    {
+                        tray::show_main(app);
+                        return;
+                    }
+                    #[cfg(feature = "self-update")]
+                    {
+                        if app.state::<AppState>().app_locked.load(Ordering::Acquire) {
+                            tray::show_main(app);
+                            return;
+                        }
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app.state::<AppState>();
+                            let installed = state.updates.installed_pending();
+                            let result = if let Some(version) = installed.as_deref() {
+                                match state.updates.clear_attempted() {
+                                    Ok(()) => restart_into_installed(
+                                        &app,
+                                        &state,
+                                        version,
+                                        restart_in_background(main_window_visible(&app)),
+                                        true,
+                                    )
+                                    .await
+                                    .map(|never| match never {}),
+                                    Err(error) => Err(error),
+                                }
+                            } else {
+                                install_staged_update(
+                                    &app,
+                                    &state,
+                                    updates::install::InstallIntent::User,
+                                )
+                                .await
+                                .map(|_| ())
+                            };
+                            if let Err(error) = result {
+                                tray::show_main(&app);
+                                if installed.is_none() || error.code != "update-busy" {
+                                    dialogs::inform(
+                                        &app,
+                                        "Could not restart for update",
+                                        &error.message,
+                                    );
+                                }
+                            }
+                        });
+                    }
+                },
+                |app| {
+                    if let Err(error) = lifecycle::request_quit(app) {
+                        tray::show_main(app);
+                        dialogs::inform(app, "Could not quit Peppy", &error.message);
+                    }
+                },
+            );
+            TRAY_ACTIVE.store(installed, Ordering::Relaxed);
+            if installed {
+                tray_badge::apply_initial_locked(app.handle());
+                tray_badge::install(app.handle());
+            }
+            start_app_lock_check(app.handle().clone());
             state
                 .updates
                 .initialize(app.handle(), &root)
                 .map_err(|error| error.message)?;
+            #[cfg(feature = "self-update")]
             let restart_marker = updates::install::confirm_restart_marker(
                 &root,
                 &state.updates.status().current_version,
             );
-            match app_lock::status(&*state.store) {
-                Ok(app_lock::Status::Disabled) => state.app_locked.store(false, Ordering::Release),
-                Ok(app_lock::Status::Enabled) => {}
-                Err(_) => {
-                    state
-                        .app_lock_storage_available
-                        .store(false, Ordering::Release);
-                }
-            }
+            #[cfg(not(feature = "self-update"))]
+            let restart_marker = None;
             app.manage(hosted::HostedState::default());
+            #[cfg(feature = "self-update")]
             let updates = state.updates.clone();
+            #[cfg(feature = "self-update")]
             let update_handle = app.handle().clone();
+            #[cfg(feature = "self-update")]
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(updates::STARTUP_DELAY_SECS))
                     .await;
@@ -5262,8 +5501,11 @@ pub fn run() {
                     tokio::time::sleep(updates.next_check_delay()).await;
                 }
             });
+            #[cfg(feature = "self-update")]
             let updates = state.updates.clone();
+            #[cfg(feature = "self-update")]
             let update_handle = app.handle().clone();
+            #[cfg(feature = "self-update")]
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -5278,7 +5520,7 @@ pub fn run() {
                     }
                 }
             });
-            #[cfg(target_os = "linux")]
+            #[cfg(all(feature = "self-update", target_os = "linux"))]
             {
                 let status = state.updates.status();
                 if status.channel != updates::types::UpdateChannel::Disabled
@@ -5295,7 +5537,7 @@ pub fn run() {
                     });
                 }
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(all(feature = "self-update", target_os = "macos"))]
             {
                 let update_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -5347,6 +5589,14 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     loop {
                         let state = handle.state::<AppState>();
+                        if state.app_lock_checking.load(Ordering::Acquire)
+                            || !state.app_lock_storage_available.load(Ordering::Acquire)
+                        {
+                            if !settings.finish_banner_drain() {
+                                break;
+                            }
+                            continue;
+                        }
                         let more = match admit_update_operation(&state) {
                             Ok(operation) => match state.session_admitted(&operation).await {
                                 Ok(Some(session)) => {
@@ -5378,73 +5628,6 @@ pub fn run() {
                     }
                 });
             });
-            let installed = tray::install(
-                app.handle(),
-                |app| {
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if new_composer(app.clone(), None).await.is_err() {
-                            tray::show_main(&app);
-                        }
-                    });
-                },
-                |app, conversation_id| {
-                    heads_runtime::open_recent_from_tray(app, conversation_id);
-                },
-                |app| {
-                    if app.state::<AppState>().app_locked.load(Ordering::Acquire) {
-                        tray::show_main(app);
-                        return;
-                    }
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let state = app.state::<AppState>();
-                        let installed = state.updates.installed_pending();
-                        let result = if let Some(version) = installed.as_deref() {
-                            match state.updates.clear_attempted() {
-                                Ok(()) => restart_into_installed(
-                                    &app,
-                                    &state,
-                                    version,
-                                    restart_in_background(main_window_visible(&app)),
-                                    true,
-                                )
-                                .await
-                                .map(|never| match never {}),
-                                Err(error) => Err(error),
-                            }
-                        } else {
-                            install_staged_update(
-                                &app,
-                                &state,
-                                updates::install::InstallIntent::User,
-                            )
-                            .await
-                            .map(|_| ())
-                        };
-                        if let Err(error) = result {
-                            tray::show_main(&app);
-                            if installed.is_none() || error.code != "update-busy" {
-                                dialogs::inform(
-                                    &app,
-                                    "Could not restart for update",
-                                    &error.message,
-                                );
-                            }
-                        }
-                    });
-                },
-                |app| {
-                    if let Err(error) = lifecycle::request_quit(app) {
-                        tray::show_main(app);
-                        dialogs::inform(app, "Could not quit Peppy", &error.message);
-                    }
-                },
-            );
-            TRAY_ACTIVE.store(installed, Ordering::Relaxed);
-            if installed {
-                tray_badge::install(app.handle());
-            }
             let _ = tray::set_update_status(app.handle(), &state.updates.status());
             let tray_handle = app.handle().clone();
             app.listen(updates::STATE_EVENT, move |_| {
@@ -5463,15 +5646,6 @@ pub fn run() {
             } else {
                 tray::show_main(app.handle());
             }
-            // Resume background sync for an already imported credential without any prompt.
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let state = handle.state::<AppState>();
-                let Ok(operation) = admit_update_operation(&state) else {
-                    return;
-                };
-                let _ = state.session_admitted(&operation).await;
-            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -5577,6 +5751,7 @@ pub fn run() {
         configure_server,
         unlock_sync,
         get_app_lock_status,
+        retry_app_lock_check,
         unlock_app,
         set_app_lock,
         save_draft,
@@ -5651,6 +5826,7 @@ pub fn run() {
             "load_state"
                 | "load_history"
                 | "get_app_lock_status"
+                | "retry_app_lock_check"
                 | "update_status"
                 | "report_update_activity"
                 | "unlock_app"

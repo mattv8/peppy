@@ -22,13 +22,52 @@ printf '\n' >> "$PNPM_LOG"
 PNPM
 chmod +x "$fake_bin/pnpm"
 
-for tool in codesign spctl xcrun; do
-  cat > "$fake_bin/$tool" <<TOOL
+cat > "$fake_bin/codesign" <<'CODESIGN'
 #!/usr/bin/env bash
-printf '$tool|%s\n' "\$*" >> "\$PNPM_LOG"
-TOOL
-  chmod +x "$fake_bin/$tool"
-done
+printf 'codesign|%s\n' "$*" >> "$PNPM_LOG"
+if [[ "$*" == *-dvvv* ]]; then
+  if [[ "$*" == *'.app'* ]]; then
+    authority="${CODESIGN_APP_AUTHORITY-Developer ID Application: Peppy (team)}"
+    team_id="${CODESIGN_APP_TEAM_ID-team}"
+    flags="${CODESIGN_APP_FLAGS-0x10000(runtime)}"
+  else
+    authority="${CODESIGN_DMG_AUTHORITY-Developer ID Application: Peppy (team)}"
+    team_id="${CODESIGN_DMG_TEAM_ID-team}"
+    flags="${CODESIGN_DMG_FLAGS-0x0(none)}"
+  fi
+  printf 'Authority=%s\n' "$authority" >&2
+  printf 'TeamIdentifier=%s\n' "$team_id" >&2
+  printf 'CodeDirectory v=20500 size=123 flags=%s hashes=4+7 location=embedded\n' "$flags" >&2
+fi
+CODESIGN
+chmod +x "$fake_bin/codesign"
+
+cat > "$fake_bin/spctl" <<'SPCTL'
+#!/usr/bin/env bash
+printf 'spctl|%s\n' "$*" >> "$PNPM_LOG"
+if [[ "$*" == *'--type open'* && "$*" == *.dmg ]] && [ "${SPCTL_DMG_EXIT-0}" != 0 ]; then exit "${SPCTL_DMG_EXIT}"; fi
+SPCTL
+chmod +x "$fake_bin/spctl"
+
+cat > "$fake_bin/xcrun" <<'XCRUN'
+#!/usr/bin/env bash
+printf 'xcrun|%s\n' "$*" >> "$PNPM_LOG"
+if [ "$1" = notarytool ] && [ "$2" = submit ]; then
+  if [ "${NOTARY_MALFORMED-false}" = true ]; then
+    printf '{bad json\n'
+  else
+    printf '{"id":"%s","status":"%s"}\n' "${NOTARY_ID-stub-submission-id}" "${NOTARY_STATUS-Accepted}"
+  fi
+  [ "${NOTARY_EXIT-0}" = 0 ] || exit "${NOTARY_EXIT}"
+fi
+if [ "$1" = stapler ] && [ "$2" = staple ] && [[ "$3" == *.dmg ]]; then
+  [ "${STAPLER_STAPLE_EXIT-0}" = 0 ] || exit "${STAPLER_STAPLE_EXIT}"
+fi
+if [ "$1" = stapler ] && [ "$2" = validate ] && [[ "$3" == *.dmg ]]; then
+  [ "${STAPLER_VALIDATE_EXIT-0}" = 0 ] || exit "${STAPLER_VALIDATE_EXIT}"
+fi
+XCRUN
+chmod +x "$fake_bin/xcrun"
 
 cat > "$fake_bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
@@ -81,6 +120,32 @@ assert_trusted_updater_config() {
     echo 'trusted updater config must keep the public key and stable endpoint' >&2
     exit 1
   }
+}
+
+assert_effective_macos_metadata() {
+  node -e 'const fs = require("fs"); const object = value => value && typeof value === "object" && !Array.isArray(value); const merge = (target, patch) => { if (!object(patch)) return patch; const result = object(target) ? {...target} : {}; for (const [key, value] of Object.entries(patch)) { if (value === null) delete result[key]; else result[key] = object(value) ? merge(result[key], value) : value; } return result; }; const base = JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")); const macos = JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.macos.conf.json", "utf8")); const release = JSON.parse(process.argv[1]); const config = merge(merge(base, macos), release); if (config.bundle.category !== "SocialNetworking" || config.bundle.macOS?.minimumSystemVersion !== "10.13") process.exit(1);' "$1"
+}
+
+run_macos_developer_id() {
+  local bundle_targets="${BUNDLE_TARGETS:-app,dmg}"
+  env "$@" PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES="$bundle_targets" VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
+    PEPPY_UPDATE_CHANNEL=stable PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
+    PEPPY_DESKTOP_GOOGLE_CLIENT_ID=desktop-client-id PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret \
+    PEPPY_MACOS_SIGNING_MODE=developer-id APPLE_CERTIFICATE=certificate APPLE_CERTIFICATE_PASSWORD=password \
+    APPLE_SIGNING_IDENTITY=identity APPLE_ID=id APPLE_PASSWORD=notary-password APPLE_TEAM_ID=team \
+    PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_DMG_OUTPUT_DIR="$root/dmg" "$script_dir/build-desktop-bundles.sh"
+}
+
+assert_developer_id_failure() {
+  local expected_diagnostic="$1"
+  shift
+  local output="$root/developer-id-failure.log"
+  : > "$log"
+  if run_macos_developer_id "$@" >"$output" 2>&1; then
+    printf 'expected Developer ID validation to fail: %s\n' "$expected_diagnostic" >&2
+    exit 1
+  fi
+  grep -Fqx "$expected_diagnostic" "$output"
 }
 
 run_bundles Linux 'appimage,deb,rpm' 1.2.3 false
@@ -174,18 +239,47 @@ if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=Windows BUNDLES=nsis,msi VER
 fi
 
 : > "$log"
-PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
-  PEPPY_UPDATE_CHANNEL=stable PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
-  PEPPY_DESKTOP_GOOGLE_CLIENT_ID=desktop-client-id PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret \
-  PEPPY_MACOS_SIGNING_MODE=developer-id APPLE_CERTIFICATE=certificate APPLE_CERTIFICATE_PASSWORD=password \
-  APPLE_SIGNING_IDENTITY=identity APPLE_ID=id APPLE_PASSWORD=notary-password APPLE_TEAM_ID=team \
-  PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_DMG_OUTPUT_DIR="$root/dmg" "$script_dir/build-desktop-bundles.sh"
-test "$(grep -c '^codesign|' "$log")" = 1
-test "$(grep -c '^spctl|' "$log")" = 1
-test "$(grep -c '^xcrun|' "$log")" = 1
+run_macos_developer_id 'CODESIGN_APP_FLAGS=0x10000(library-validation,runtime)'
+test "$(grep -c '^codesign|' "$log")" = 4
+test "$(grep -c '^spctl|' "$log")" = 2
+test "$(grep -c '^xcrun|' "$log")" = 4
 grep -Fq "repair|packaging/macos/dmg/repair_dmg.py --dmg $root/dmg/Peppy.dmg --signing-mode developer-id --identity identity" "$log"
+grep -Fq "codesign|-dvvv $root/macos/Peppy.app" "$log"
+grep -Fq "codesign|--verify --strict --verbose=2 $root/dmg/Peppy.dmg" "$log"
+grep -Fq "codesign|-dvvv $root/dmg/Peppy.dmg" "$log"
+grep -Fq "xcrun|notarytool submit $root/dmg/Peppy.dmg --wait --output-format json" "$log"
+grep -Fq "xcrun|stapler staple $root/dmg/Peppy.dmg" "$log"
+grep -Fq "xcrun|stapler validate $root/dmg/Peppy.dmg" "$log"
+grep -Fq "spctl|--assess --type open --verbose=4 $root/dmg/Peppy.dmg" "$log"
 config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p' | head -n 1)
 node -e 'const config = JSON.parse(process.argv[1]); if (config.productName !== "Peppy" || config.identifier !== "org.peppy.desktop") process.exit(1)' "$config"
+assert_effective_macos_metadata "$config"
+
+assert_developer_id_failure "Developer ID signature for $root/macos/Peppy.app does not match APPLE_TEAM_ID" CODESIGN_APP_TEAM_ID=wrong-team
+assert_developer_id_failure "$root/macos/Peppy.app is not signed with a Developer ID Application identity" CODESIGN_APP_AUTHORITY='Apple Development: Peppy (team)'
+assert_developer_id_failure "$root/macos/Peppy.app is not signed with the hardened runtime" 'CODESIGN_APP_FLAGS=0x0(none)'
+assert_developer_id_failure "Developer ID signature for $root/dmg/Peppy.dmg does not match APPLE_TEAM_ID" CODESIGN_DMG_TEAM_ID=wrong-team
+assert_developer_id_failure "$root/dmg/Peppy.dmg is not signed with a Developer ID Application identity" CODESIGN_DMG_AUTHORITY='Apple Development: Peppy (team)'
+assert_developer_id_failure "repaired DMG notarization status was Invalid, expected Accepted (submission stub-submission-id)" NOTARY_STATUS=Invalid
+if grep -Fq "xcrun|stapler staple $root/dmg/Peppy.dmg" "$log" || grep -Fq "xcrun|stapler validate $root/dmg/Peppy.dmg" "$log"; then
+  printf 'invalid notarization must not staple the DMG\n' >&2
+  exit 1
+fi
+assert_developer_id_failure "repaired DMG notarization submission failed for $root/dmg/Peppy.dmg (submission stub-submission-id)" NOTARY_EXIT=1
+assert_developer_id_failure "repaired DMG notarization returned malformed JSON for $root/dmg/Peppy.dmg" NOTARY_MALFORMED=true
+assert_developer_id_failure "could not staple repaired DMG $root/dmg/Peppy.dmg" STAPLER_STAPLE_EXIT=1
+assert_developer_id_failure "repaired DMG stapling validation failed for $root/dmg/Peppy.dmg" STAPLER_VALIDATE_EXIT=1
+assert_developer_id_failure "Gatekeeper rejected repaired DMG $root/dmg/Peppy.dmg" SPCTL_DMG_EXIT=1
+
+: > "$log"
+BUNDLE_TARGETS=app run_macos_developer_id
+test "$(grep -c '^codesign|' "$log")" = 2
+test "$(grep -c '^spctl|' "$log")" = 1
+test "$(grep -c '^xcrun|' "$log")" = 1
+if grep -Fq "notarytool submit $root/dmg/Peppy.dmg" "$log" || grep -Fq "codesign|-dvvv $root/dmg/Peppy.dmg" "$log"; then
+  printf 'app-only build must not process a stale DMG\n' >&2
+  exit 1
+fi
 
 : > "$log"
 if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \

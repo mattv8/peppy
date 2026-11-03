@@ -91,7 +91,7 @@ beforeEach(() => {
   setWindowSearch("");
   stateHint = undefined;
   vi.spyOn(bridge, "load_state").mockImplementation(async () => currentSnapshot);
-  vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: false, locked: false, storageAvailable: true });
+  vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: false, locked: false, storageAvailable: true, pending: false });
   vi.spyOn(bridge, "subscribe").mockImplementation((listener) => {
     stateHint = listener;
     return () => undefined;

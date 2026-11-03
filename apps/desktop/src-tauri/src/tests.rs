@@ -38,6 +38,43 @@ fn fresh_native_snapshot_is_locked_not_a_preview_identity() {
     assert_eq!(snapshot.connection.error_code, Some("server-required"));
 }
 
+#[test]
+fn app_lock_snapshot_prioritizes_checking_over_other_lock_states() {
+    assert_eq!(
+        crate::locked_snapshot(true, false).connection.error_code,
+        Some("app-lock-checking")
+    );
+    assert_eq!(
+        crate::locked_snapshot(false, false).connection.error_code,
+        Some("secure-store-unavailable")
+    );
+    assert_eq!(
+        crate::locked_snapshot(false, true).connection.error_code,
+        Some("app-locked")
+    );
+}
+
+#[test]
+fn app_lock_actions_fail_closed_while_checking_or_storage_is_unavailable() {
+    assert!(!crate::app_lock_actions_allowed(true, true));
+    assert!(!crate::app_lock_actions_allowed(false, false));
+    assert!(crate::app_lock_actions_allowed(false, true));
+}
+
+#[test]
+fn app_lock_retry_never_rechecks_a_live_or_verified_session() {
+    assert!(!crate::retry_app_lock_check_needed(false, false, true));
+    assert!(!crate::retry_app_lock_check_needed(true, false, true));
+    assert!(crate::retry_app_lock_check_needed(true, true, true));
+    assert!(crate::retry_app_lock_check_needed(true, false, false));
+}
+
+#[test]
+fn successful_app_lock_checks_allow_background_session_resume() {
+    assert!(crate::app_lock_check_allows_session_resume(true));
+    assert!(!crate::app_lock_check_allows_session_resume(false));
+}
+
 pub(crate) struct Fixture {
     pub dir: tempfile::TempDir,
     pub store: MemoryStore,

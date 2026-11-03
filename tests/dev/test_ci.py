@@ -118,6 +118,7 @@ class CiTestRunnerTests(unittest.TestCase):
             "cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --ignored",
             "pnpm --filter @peppy/web build",
             "cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml",
+            "cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib updates::",
             "cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml",
             "cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml --config deny.toml check licenses bans sources advisories",
             "bash infra/dev/android.sh test",

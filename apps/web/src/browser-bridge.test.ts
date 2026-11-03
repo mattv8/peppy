@@ -764,6 +764,7 @@ describe("BrowserBridge", () => {
     await expect(result).rejects.toMatchObject({ code: "invalid-request", message: "Denied" });
     await expect(bridge.open_composer()).rejects.toMatchObject({ code: "unsupported" });
     await expect(bridge.get_app_lock_status()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.retry_app_lock_check()).rejects.toMatchObject({ code: "unsupported" });
   });
 
   it("round-trips discard requests and moved-draft details", async () => {

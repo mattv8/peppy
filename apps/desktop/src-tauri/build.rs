@@ -19,6 +19,7 @@ const COMMANDS: &[&str] = &[
     "configure_server",
     "unlock_sync",
     "get_app_lock_status",
+    "retry_app_lock_check",
     "unlock_app",
     "set_app_lock",
     "save_draft",

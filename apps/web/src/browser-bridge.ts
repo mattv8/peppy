@@ -515,6 +515,7 @@ export class BrowserBridge implements DesktopBridge {
   public configure_server(origin: string): Promise<void> { return origin === location.origin ? Promise.resolve() : Promise.reject(new BrowserBridgeError("invalid-origin", "The browser uses its own secure origin.")); }
   public hosted_origin_url(): Promise<string> { return Promise.resolve(location.origin); }
   public get_app_lock_status(): Promise<AppLockStatus> { return unsupported("App lock"); }
+  public retry_app_lock_check(): Promise<AppLockStatus> { return unsupported("App lock"); }
   public set_app_lock(_enabled: boolean): Promise<boolean> { return unsupported("App lock"); }
   public unlock_app(): Promise<boolean> { return unsupported("App lock"); }
   public async request_notification_permission(): Promise<NotificationCheck> {

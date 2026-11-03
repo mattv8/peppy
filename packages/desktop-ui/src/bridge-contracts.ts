@@ -143,7 +143,7 @@ export type HostedPreviewView = {
   scenarios: string[];
 };
 /** App-open password state; no password or verifier crosses this boundary. */
-export type AppLockStatus = { enabled: boolean; locked: boolean; storageAvailable: boolean };
+export type AppLockStatus = { enabled: boolean; locked: boolean; storageAvailable: boolean; pending: boolean };
 export type MaximizeButtonRegion = { x: number; y: number; width: number; height: number };
 /** A host without `account_access` reports `unsupported`; a thrown host error never shows a notice. */
 export const readAccountAccess = async (bridge: { account_access?(): Promise<AccountAccessResult> }): Promise<AccountAccessResult> => {
@@ -168,6 +168,7 @@ export interface DesktopBridge {
   configure_server(origin: string): Promise<void>;
   unlock_sync(): Promise<void>;
   get_app_lock_status(): Promise<AppLockStatus>;
+  retry_app_lock_check(): Promise<AppLockStatus>;
   set_app_lock(enabled: boolean): Promise<boolean>;
   unlock_app(): Promise<boolean>;
   /** Browser-only capability for locking a shared encrypted session. */

@@ -9,6 +9,7 @@
     }]
   },
   "bundle": {
+    "category": "SocialNetworking",
     "macOS": {
       "dmg": {
         "background": "../../../packaging/macos/dmg/background.tiff",

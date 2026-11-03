@@ -52,6 +52,69 @@ repair_macos_dmg() {
   )
 }
 
+assert_developer_id_signature() {
+  local artifact="$1"
+  local require_runtime="$2"
+  local details
+  details=$(codesign -dvvv "$artifact" 2>&1) || {
+    echo "could not inspect Developer ID signature for $artifact" >&2
+    return 1
+  }
+  grep -Fqx "TeamIdentifier=$APPLE_TEAM_ID" <<<"$details" || {
+    echo "Developer ID signature for $artifact does not match APPLE_TEAM_ID" >&2
+    return 1
+  }
+  grep -Eq '^Authority=Developer ID Application: .+' <<<"$details" || {
+    echo "$artifact is not signed with a Developer ID Application identity" >&2
+    return 1
+  }
+  if [ "$require_runtime" = true ] && ! grep -Eq 'flags=[^[:space:]]*\([^)]*runtime(,|\))' <<<"$details"; then
+    echo "$artifact is not signed with the hardened runtime" >&2
+    return 1
+  fi
+}
+
+notarize_repaired_dmg() {
+  local image="$1"
+  local result
+  local status
+  local command_status
+  local submission_id
+  command_status=0
+  result=$(xcrun notarytool submit "$image" --wait --output-format json --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID") || command_status=$?
+  submission_id=$(node -e 'try { const result = JSON.parse(process.argv[1]); if (typeof result.id === "string" && /^[A-Za-z0-9-]+$/.test(result.id)) process.stdout.write(result.id); } catch {}' "$result")
+  if [ "$command_status" -ne 0 ]; then
+    echo "repaired DMG notarization submission failed for $image${submission_id:+ (submission $submission_id)}" >&2
+    return 1
+  fi
+  if ! status=$(node -e 'try { const result = JSON.parse(process.argv[1]); if (typeof result.status !== "string") process.exit(1); process.stdout.write(result.status); } catch { process.exit(1); }' "$result"); then
+    echo "repaired DMG notarization returned malformed JSON for $image" >&2
+    return 1
+  fi
+  if [ "$status" != Accepted ]; then
+    echo "repaired DMG notarization status was $status, expected Accepted${submission_id:+ (submission $submission_id)}" >&2
+    return 1
+  fi
+  command_status=0
+  xcrun stapler staple "$image" || command_status=$?
+  if [ "$command_status" -ne 0 ]; then
+    echo "could not staple repaired DMG $image" >&2
+    return 1
+  fi
+  command_status=0
+  xcrun stapler validate "$image" || command_status=$?
+  if [ "$command_status" -ne 0 ]; then
+    echo "repaired DMG stapling validation failed for $image" >&2
+    return 1
+  fi
+  command_status=0
+  spctl --assess --type open --verbose=4 "$image" || command_status=$?
+  if [ "$command_status" -ne 0 ]; then
+    echo "Gatekeeper rejected repaired DMG $image" >&2
+    return 1
+  fi
+}
+
 assert_trusted_identity() {
   node -e 'const config = JSON.parse(process.argv[1]); if (config.productName !== "Peppy" || config.identifier !== "org.peppy.desktop") { process.exit(1); }' "$1" || {
     echo 'trusted builds must use the Peppy/org.peppy.desktop identity' >&2
@@ -125,8 +188,17 @@ if [ "$TRUSTED_UPDATE_BUILD" = true ] && [ "$RUNNER_OS" = macOS ]; then
       exit 1
     fi
     if [ "$macos_mode" = developer-id ]; then
+      assert_developer_id_signature "$application" true
       spctl --assess --type execute --verbose=4 "$application"
       xcrun stapler validate "$application"
     fi
   done < <(find "$bundle_output_dir" -name '*.app' -type d -print0)
+  if [ "$macos_mode" = developer-id ] && [[ ",$BUNDLES," == *,dmg,* ]]; then
+    dmg_output_dir="${PEPPY_DMG_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/dmg}"
+    while IFS= read -r -d '' image; do
+      codesign --verify --strict --verbose=2 "$image"
+      assert_developer_id_signature "$image" false
+      notarize_repaired_dmg "$image"
+    done < <(find "$dmg_output_dir" -maxdepth 1 -type f -name '*.dmg' -print0)
+  fi
 fi

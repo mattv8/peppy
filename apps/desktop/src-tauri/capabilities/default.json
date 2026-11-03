@@ -28,6 +28,7 @@
     "allow-configure-server",
     "allow-unlock-sync",
     "allow-get-app-lock-status",
+    "allow-retry-app-lock-check",
     "allow-unlock-app",
     "allow-set-app-lock",
     "allow-save-draft",

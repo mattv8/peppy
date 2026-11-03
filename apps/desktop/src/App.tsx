@@ -1453,6 +1453,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [historyExhausted, setHistoryExhausted] = useState(false);
   const [appLock, setAppLock] = useState<AppLockStatus | null>(null);
   const appLockRef = useRef(appLock);
+  const appLockStatusRequest = useRef(0);
+  const previousLockCode = useRef<string | undefined>(undefined);
   appLockRef.current = appLock;
   const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
@@ -2651,22 +2653,53 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       void refresh(detachedConversationId).catch(reportRefresh(""));
     }
   }, [renderedSearchSessionKey]);
+  const getAppLockStatus = async (isCurrent: () => boolean = () => true): Promise<AppLockStatus> => {
+    const request = ++appLockStatusRequest.current;
+    try {
+      const status = await bridge.get_app_lock_status();
+      if (isCurrent() && request === appLockStatusRequest.current) setAppLock(status);
+      return status;
+    } catch (error) {
+      if (isCurrent() && request === appLockStatusRequest.current) setAppLock(null);
+      throw error;
+    }
+  };
   useEffect(() => {
     if (browserHost) return;
-    void bridge.get_app_lock_status().then(setAppLock).catch(() => setAppLock(null));
+    let active = true;
+    void getAppLockStatus(() => active).catch(() => {});
+    return () => { active = false; };
   }, [browserHost]);
+  const lockCode = snapshot?.connection.errorCode;
+  const appLockSnapshotLoaded = snapshot !== null;
+  useEffect(() => {
+    const previous = previousLockCode.current;
+    previousLockCode.current = lockCode;
+    const leftChecking = previous === "app-lock-checking" && lockCode !== "app-lock-checking";
+    const pendingWithoutCheckingSnapshot = appLock?.pending === true && appLockSnapshotLoaded && lockCode !== "app-lock-checking";
+    if (browserHost || (!leftChecking && !pendingWithoutCheckingSnapshot)) return;
+    let active = true;
+    void getAppLockStatus(() => active).catch(() => {});
+    return () => { active = false; };
+  }, [appLock?.pending, appLockSnapshotLoaded, browserHost, lockCode]);
   const changeAppLock = async (enabled: boolean): Promise<boolean> => {
     const changed = await bridge.set_app_lock(enabled);
-    setAppLock(await bridge.get_app_lock_status());
+    await getAppLockStatus();
     return changed;
   };
   const unlockApp = async (): Promise<boolean> => {
     const unlocked = await bridge.unlock_app();
     if (unlocked) {
-      setAppLock(await bridge.get_app_lock_status());
+      await getAppLockStatus();
       await refresh();
     }
     return unlocked;
+  };
+  const retryAppLockCheck = async (): Promise<void> => {
+    const request = ++appLockStatusRequest.current;
+    const status = await bridge.retry_app_lock_check();
+    if (request === appLockStatusRequest.current) setAppLock(status);
+    await refresh();
   };
 
   /* Only rows that are actually visible while the window is focused are marked seen. */
@@ -3755,13 +3788,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [ribbonOpenFailed, setRibbonOpenFailed] = useState(false);
 
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
-  const lockCode = snapshot?.connection.errorCode;
-  if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable"))
+  if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable" || lockCode === "app-lock-checking"))
     return (
       <AppLockScreen
-        storageUnavailable={lockCode === "secure-store-unavailable"}
+        state={lockCode === "app-lock-checking" ? "checking" : lockCode === "secure-store-unavailable" ? "storage-unavailable" : "locked"}
         onUnlock={unlockApp}
-        onRetry={() => refresh()}
+        onRetry={retryAppLockCheck}
       />
     );
 

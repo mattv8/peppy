@@ -6332,8 +6332,8 @@ describe("desktop app lock", () => {
   it("enables the requirement only through the native prompt and reflects the fresh status", async () => {
     const setLock = vi.spyOn(bridge, "set_app_lock").mockResolvedValue(true);
     vi.spyOn(bridge, "get_app_lock_status")
-      .mockResolvedValueOnce({ enabled: false, locked: false, storageAvailable: true })
-      .mockResolvedValueOnce({ enabled: true, locked: false, storageAvailable: true });
+      .mockResolvedValueOnce({ enabled: false, locked: false, storageAvailable: true, pending: false })
+      .mockResolvedValueOnce({ enabled: true, locked: false, storageAvailable: true, pending: false });
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -6357,7 +6357,7 @@ describe("desktop app lock", () => {
   });
 
   it("disables the control and explains storage failure when secure storage is unavailable", async () => {
-    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: false, locked: false, storageAvailable: false });
+    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: false, locked: false, storageAvailable: false, pending: false });
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -6384,7 +6384,7 @@ describe("desktop app lock", () => {
     const unlock = vi.spyOn(bridge, "unlock_app").mockResolvedValue(false);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Unlock" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Peppy is still locked.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Peppy could not unlock.");
     expect(unlock).toHaveBeenCalledOnce();
     expect(bridge.load_state).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("heading", { name: "Peppy is locked" })).toBeInTheDocument();
@@ -6399,6 +6399,83 @@ describe("desktop app lock", () => {
     expect(screen.queryByText(/wrong password|incorrect password|server/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Hello from Aurora")).not.toBeInTheDocument();
     expect(unlock).not.toHaveBeenCalled();
+  });
+
+  it("shows the checking lock screen, then refreshes status and focuses Unlock when it resolves", async () => {
+    const initialStatus = deferred<{ enabled: boolean; locked: boolean; storageAvailable: boolean; pending: boolean }>();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    vi.spyOn(bridge, "get_app_lock_status")
+      .mockReturnValueOnce(initialStatus.promise)
+      .mockResolvedValueOnce({ enabled: true, locked: true, storageAvailable: true, pending: false });
+    vi.mocked(bridge.load_state)
+      .mockResolvedValueOnce(lockedSnapshot("app-lock-checking"))
+      .mockResolvedValueOnce(lockedSnapshot("app-locked"))
+      .mockResolvedValue(host.load());
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Checking Peppy's lock" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unlock" })).toBeDisabled();
+
+    await act(async () => { hint?.(); });
+    const unlock = await screen.findByRole("button", { name: "Unlock" });
+    expect(unlock).toHaveFocus();
+    await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
+
+    initialStatus.resolve({ enabled: false, locked: false, storageAvailable: true, pending: false });
+    await act(async () => undefined);
+    expect(unlock).toBeEnabled();
+
+    await act(async () => { hint?.(); });
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeChecked();
+  });
+
+  it("starts a fresh app lock check when storage retry is selected", async () => {
+    vi.mocked(bridge.load_state)
+      .mockResolvedValueOnce(lockedSnapshot("secure-store-unavailable"))
+      .mockResolvedValue(lockedSnapshot("app-lock-checking"));
+    const retry = vi.spyOn(bridge, "retry_app_lock_check").mockResolvedValue({ enabled: false, locked: true, storageAvailable: true, pending: true });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(retry).toHaveBeenCalledOnce());
+    expect(await screen.findByRole("heading", { name: "Checking Peppy's lock" })).toBeInTheDocument();
+  });
+
+  it("refreshes pending startup status after the first healthy snapshot", async () => {
+    vi.spyOn(bridge, "get_app_lock_status")
+      .mockResolvedValueOnce({ enabled: false, locked: true, storageAvailable: true, pending: true })
+      .mockResolvedValueOnce({ enabled: true, locked: false, storageAvailable: true, pending: false });
+
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+
+    await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const checkbox = screen.getByRole("checkbox", { name: "Require a password when Peppy starts" });
+    expect(checkbox).toBeChecked();
+    expect(checkbox).toBeEnabled();
+  });
+
+  it("refreshes pending retry status after an immediate unlocked snapshot", async () => {
+    vi.mocked(bridge.load_state)
+      .mockResolvedValueOnce(lockedSnapshot("secure-store-unavailable"))
+      .mockResolvedValue(host.load());
+    vi.spyOn(bridge, "get_app_lock_status")
+      .mockResolvedValueOnce({ enabled: false, locked: true, storageAvailable: false, pending: false })
+      .mockResolvedValueOnce({ enabled: true, locked: false, storageAvailable: true, pending: false });
+    vi.spyOn(bridge, "retry_app_lock_check").mockResolvedValue({ enabled: false, locked: true, storageAvailable: true, pending: true });
+
+    render(<App />);
+    await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
+    const checkbox = screen.getByRole("checkbox", { name: "Require a password when Peppy starts" });
+    expect(checkbox).toBeChecked();
+    expect(checkbox).toBeEnabled();
   });
 
   it("never applies the local app lock in the browser host", async () => {
