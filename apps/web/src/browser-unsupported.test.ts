@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderAccountDownloadLink, unsupportedPageMarkup, UNSUPPORTED_DOWNLOADS_ID } from "./browser-unsupported";
+import { renderAccountDownloadLink, renderUnsupportedPage, UNSUPPORTED_DOWNLOADS_ID } from "./browser-unsupported";
 import { fetchHostedWebConfig } from "./newhosted-app-auth";
 
 const accountUrl = "https://peppy.pro/account";
 
 function renderPage(reasons: string[]): HTMLElement {
   const root = document.createElement("div");
-  root.innerHTML = unsupportedPageMarkup(reasons);
+  renderUnsupportedPage(root, reasons);
   document.body.append(root);
   return root;
 }
@@ -23,6 +23,13 @@ describe("unsupported browser page", () => {
     expect(page.querySelector("[data-unsupported-reasons]")?.textContent).toBe("Web Locks are not available");
     expect(page.textContent).not.toMatch(/continue/i);
     expect(page.querySelector("button")).toBeNull();
+  });
+
+  it("renders capability text as text rather than an HTML sink", () => {
+    const page = renderPage(["<img src=x onerror=alert(1)>"]);
+
+    expect(page.querySelector("img")).toBeNull();
+    expect(page.querySelector("[data-unsupported-reasons]")?.textContent).toBe("<img src=x onerror=alert(1)>");
   });
 
   it("keeps the download container empty when the account URL is not configured", () => {

@@ -88,6 +88,12 @@ public struct VaultSecretStore: Sendable {
 
     public func pendingSecret(origin: String) throws(ClientError) -> String? { try readPending(origin) }
 
+    /// Deletes only a confirmed-deleted vault's device binding. Pending secrets are retained because
+    /// they may belong to another interrupted creation for the same origin.
+    func deleteBinding(for identity: EnrollmentIdentity) throws(ClientError) {
+        try secure.delete(identity.account("vault-secret-v2"))
+    }
+
     func pendingData(origin: String) throws(ClientError) -> Data? { try secure.read(pendingAccount(origin)) }
     func deletePending(origin: String) throws(ClientError) { try secure.delete(pendingAccount(origin)) }
 

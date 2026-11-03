@@ -45,11 +45,16 @@ def make_run_directory(base: Path) -> Path:
 
 def synthetic_values():
     token = uuid.uuid4().hex
+    role_suffix = uuid.uuid4().hex[:24]
     values = {
         "PEPPY_ENV": "development",
         "POSTGRES_DB": "peppy_demo",
         "POSTGRES_USER": "peppy_demo",
         "POSTGRES_PASSWORD": f"synthetic-{token}",
+        "PEPPY_RUNTIME_DB_USER": f"peppy_demo_runtime_{role_suffix}",
+        "PEPPY_RUNTIME_DB_PASSWORD": f"synthetic-{uuid.uuid4().hex}",
+        "PEPPY_MAINTENANCE_DB_USER": f"peppy_demo_maintenance_{role_suffix}",
+        "PEPPY_MAINTENANCE_DB_PASSWORD": f"synthetic-{uuid.uuid4().hex}",
         "S3_ACCESS_KEY": f"synthetic-{token[:16]}",
         "S3_SECRET_KEY": f"synthetic-{uuid.uuid4().hex}",
         "S3_BUCKET": "peppy-private",

@@ -999,11 +999,11 @@ const mockMessageListGeometry = (geometry: { overlay: number; viewport: number; 
   };
 };
 let lifecycle: ((request: { id: string; action: "quit" | "close" | "collapse" }) => void) | undefined;
-let lifecycleDispose: ReturnType<typeof vi.fn>;
+let lifecycleDispose: () => void;
 let lifecycleFinished: ((result: { id: string; ok: boolean }) => void) | undefined;
-let lifecycleFinishedDispose: ReturnType<typeof vi.fn>;
+let lifecycleFinishedDispose: () => void;
 let draftHint: ((draft: Draft) => void) | undefined;
-let draftDispose: ReturnType<typeof vi.fn>;
+let draftDispose: () => void;
 
 beforeEach(() => {
   const values = new Map<string, string>();
@@ -1622,7 +1622,7 @@ describe("lazy conversation history", () => {
     expect(document.querySelector('[data-message-meta="m-provider-history"] time')).toHaveTextContent(formatDateTime("1788435180000")!);
     expect(document.querySelector('[data-message-meta="m-provider-history"] time')).toHaveAttribute("dateTime", isoDateTime("1788435180000")!);
     expect(document.querySelector('[data-message-meta="m-invalid"]')).not.toBeInTheDocument();
-    expect(within(incomingBubble).getByText("Subject: Estimate")).toBeInTheDocument();
+    expect(within(incomingBubble).getByText((_, element) => element?.tagName === "P" && element.textContent === "Subject: Estimate")).toBeInTheDocument();
     expect(screen.queryByText(/Transport: MMS/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Participants:/)).not.toBeInTheDocument();
     expect(incomingBubble.querySelector('[data-attachment-id="photo-1"]')).toBeInTheDocument();
@@ -4437,54 +4437,77 @@ describe("gateway routes", () => {
     expect(bridge.send_draft).not.toHaveBeenCalled();
   });
 
-  it("processes pending saves once per attachment while state hints overlap", async () => {
-    const first = deferred<Awaited<ReturnType<typeof bridge.open_media>>>();
-    const second = deferred<Awaited<ReturnType<typeof bridge.open_media>>>();
-    const firstAttachment = host.conversations[0].messages[0].attachments[0];
-    host.conversations[0].messages[0].attachments.push({ ...firstAttachment, id: "photo-2", name: "photo-two.png" });
+  it("retries a pending PDF save without opening a media URL", async () => {
+    host.conversations[0].messages[0].attachments[0] = { ...host.conversations[0].messages[0].attachments[0], id: "pending-pdf", name: "notes.pdf", mediaType: "application/pdf" };
     vi.mocked(bridge.save_attachment)
       .mockRejectedValueOnce({ code: "media-pending" })
+      .mockResolvedValue(true);
+    const mediaProbe = vi.spyOn(bridge, "open_media").mockRejectedValue({ code: "unsupported" });
+    render(<App />);
+    await screen.findByRole("button", { name: "Save notes.pdf" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save notes.pdf" }));
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading notes.pdf before saving.");
+    await act(async () => hint?.());
+    await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledTimes(2));
+
+    expect(mediaProbe).not.toHaveBeenCalled();
+    expect(bridge.save_attachment).toHaveBeenLastCalledWith("pending-pdf");
+  });
+
+  it("keeps PDI and RLO filename characters inside the pending-save notice", async () => {
+    const name = "a\u2069\u202Etxt.exe";
+    host.conversations[0].messages[0].attachments[0] = { ...host.conversations[0].messages[0].attachments[0], name };
+    vi.mocked(bridge.save_attachment).mockRejectedValueOnce({ code: "media-pending" });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: `Save ${name}` }));
+
+    const notice = await screen.findByTestId("app-notice-action");
+    const isolatedName = notice.querySelector("bdi");
+    expect(notice).toHaveTextContent(`Downloading ${name} before saving.`);
+    expect(isolatedName?.textContent).toBe(name);
+    expect(isolatedName).toHaveStyle({ display: "inline-block" });
+    expect(notice.querySelector('[role="status"]')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss action notice" }));
+    expect(screen.queryByTestId("app-notice-action")).not.toBeInTheDocument();
+  });
+
+  it("processes overlapping pending-save hints once per attachment", async () => {
+    const firstAttachment = host.conversations[0].messages[0].attachments[0];
+    host.conversations[0].messages[0].attachments.push({ ...firstAttachment, id: "photo-2", name: "photo-two.png" });
+    const resolveSave = deferred<boolean>();
+    vi.mocked(bridge.save_attachment)
+      .mockRejectedValueOnce({ code: "media-pending" })
+      .mockImplementationOnce(() => resolveSave.promise)
       .mockRejectedValueOnce({ code: "media-pending" })
       .mockResolvedValue(true);
-    vi.spyOn(bridge, "open_media")
-      .mockImplementationOnce(() => first.promise)
-      .mockImplementationOnce(() => second.promise);
     render(<App />);
     await screen.findByRole("button", { name: "Save photo.png" });
 
     fireEvent.click(screen.getByRole("button", { name: "Save photo.png" }));
-    await screen.findByText(/Downloading photo.png/);
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo.png before saving.");
     await act(async () => hint?.());
-    await waitFor(() => expect(bridge.open_media).toHaveBeenCalledWith("photo-1"));
+    await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledTimes(2));
     await act(async () => {
       hint?.();
       hint?.();
     });
-    expect(bridge.open_media).toHaveBeenCalledTimes(1);
-
     fireEvent.click(screen.getByRole("button", { name: "Save photo-two.png" }));
-    await screen.findByText(/Downloading photo-two.png/);
-    await act(async () => first.resolve({ state: "ready", url: "file:photo-1", mediaType: "image/png", byteSize: 1 }));
-    await waitFor(() => expect(bridge.open_media).toHaveBeenCalledWith("photo-2"));
-    await act(async () => second.resolve({ state: "ready", url: "file:photo-2", mediaType: "image/png", byteSize: 1 }));
-
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo-two.png before saving.");
+    expect(bridge.save_attachment).toHaveBeenCalledTimes(3);
+    await act(async () => resolveSave.resolve(true));
     await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledWith("photo-2"));
-    expect(bridge.open_media).toHaveBeenCalledTimes(2);
     expect(bridge.save_attachment).toHaveBeenCalledTimes(4);
   });
 
   it("stops pending attachment saves after unmount", async () => {
-    const media = deferred<Awaited<ReturnType<typeof bridge.open_media>>>();
     vi.mocked(bridge.save_attachment).mockRejectedValueOnce({ code: "media-pending" });
-    vi.spyOn(bridge, "open_media").mockImplementationOnce(() => media.promise);
     const rendered = render(<App />);
     await screen.findByRole("button", { name: "Save photo.png" });
     fireEvent.click(screen.getByRole("button", { name: "Save photo.png" }));
-    await screen.findByText(/Downloading photo.png/);
-    await act(async () => hint?.());
-    await waitFor(() => expect(bridge.open_media).toHaveBeenCalledWith("photo-1"));
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo.png before saving.");
     rendered.unmount();
-    await act(async () => media.resolve({ state: "ready", url: "file:photo-1", mediaType: "image/png", byteSize: 1 }));
+    await act(async () => hint?.());
     expect(bridge.save_attachment).toHaveBeenCalledOnce();
   });
 

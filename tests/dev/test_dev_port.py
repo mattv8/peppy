@@ -64,6 +64,19 @@ class DevelopmentPortTests(unittest.TestCase):
             self.assertIn("PUBLIC_ATTACHMENT_URL=https://files.example.test\n", values)
             self.assertEqual(dotenv.stat().st_mode & 0o777, 0o600)
 
+    def test_write_setup_generates_distinct_database_roles_and_passwords(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dotenv = Path(directory) / ".env"
+            result = self.run_helper("write-setup", dotenv)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in dotenv.read_text().splitlines())
+            self.assertNotEqual(values["POSTGRES_USER"], values["PEPPY_RUNTIME_DB_USER"])
+            self.assertNotEqual(values["POSTGRES_USER"], values["PEPPY_MAINTENANCE_DB_USER"])
+            self.assertNotEqual(values["PEPPY_RUNTIME_DB_USER"], values["PEPPY_MAINTENANCE_DB_USER"])
+            self.assertNotEqual(values["POSTGRES_PASSWORD"], values["PEPPY_RUNTIME_DB_PASSWORD"])
+            self.assertNotEqual(values["POSTGRES_PASSWORD"], values["PEPPY_MAINTENANCE_DB_PASSWORD"])
+            self.assertNotEqual(values["PEPPY_RUNTIME_DB_PASSWORD"], values["PEPPY_MAINTENANCE_DB_PASSWORD"])
+
     def test_dotenv_values_are_never_evaluated_as_shell(self):
         with tempfile.TemporaryDirectory() as directory:
             dotenv = Path(directory) / ".env"

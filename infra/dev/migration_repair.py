@@ -377,6 +377,16 @@ def verify_development_compose(root: Path) -> None:
         raise RepairError(f"development Compose configuration is invalid: {result.stderr.strip()}")
 
 
+def bootstrap_development_roles(root: Path) -> None:
+    result = subprocess.run(
+        compose_command(root) + ["exec", "-T", "postgres", "/docker-entrypoint-initdb.d/10-peppy-roles.sh"],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode:
+        raise RepairError("could not provision local database runtime and maintenance roles")
+
+
 def verify_writers_stopped(root: Path) -> None:
     result = subprocess.run(compose_command(root) + ["ps", "--status", "running", "--services"], text=True, capture_output=True)
     if result.returncode:
@@ -393,6 +403,7 @@ def dev_up(root: Path) -> None:
         run_just(root, "_dev-up-build")
         verify_development_compose(root)
         subprocess.run(compose_command(root) + ["up", "--detach", "--wait", "postgres"], check=True)
+        bootstrap_development_roles(root)
         applied = read_applied(root)
         selected = Path(os.environ.get("PEPPY_SOURCE_TREE", root)).resolve()
         if not (selected / "services/server/migrations").is_dir():

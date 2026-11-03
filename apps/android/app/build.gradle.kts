@@ -222,6 +222,8 @@ android {
             buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
         getByName("release") {
+            isDebuggable = false
+            isMinifyEnabled = false
             buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
     }
@@ -432,4 +434,78 @@ tasks.register("verifyReleaseDevTlsResources") {
             "Release resources must not contain the development TLS CA"
         }
     }
+}
+
+val androidNamespace = "http://schemas.android.com/apk/res/android"
+val componentElementNames = setOf("activity", "service", "receiver", "provider")
+val permittedReleaseExports = setOf(
+    Triple("activity", "dev.peppy.mobile.MainActivity", null),
+    Triple("receiver", "dev.peppy.mobile.IncomingSmsReceiver", "android.permission.BROADCAST_SMS"),
+    Triple("receiver", "dev.peppy.mobile.MmsNotificationReceiver", "android.permission.BROADCAST_WAP_PUSH"),
+    Triple(
+        "service",
+        "com.google.android.gms.auth.api.signin.RevocationBoundService",
+        "com.google.android.gms.auth.api.signin.permission.REVOCATION_NOTIFICATION",
+    ),
+    Triple("receiver", "com.google.firebase.iid.FirebaseInstanceIdReceiver", "com.google.android.c2dm.permission.SEND"),
+    Triple("service", "androidx.work.impl.background.systemjob.SystemJobService", "android.permission.BIND_JOB_SERVICE"),
+    Triple(
+        "receiver",
+        "androidx.work.impl.diagnostics.DiagnosticsReceiver",
+        "android.permission.DUMP",
+    ),
+    Triple("receiver", "androidx.profileinstaller.ProfileInstallReceiver", "android.permission.DUMP"),
+)
+
+val verifyReleaseManifestSecurity = tasks.register("verifyReleaseManifestSecurity") {
+    dependsOn("processReleaseManifest")
+
+    doLast {
+        val mergedManifest = layout.buildDirectory
+            .file("intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml")
+            .get()
+            .asFile
+        check(mergedManifest.isFile) { "Expected merged release manifest at $mergedManifest" }
+        val parserFactory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+        val manifest = parserFactory.newDocumentBuilder().parse(mergedManifest)
+        val application = manifest.getElementsByTagName("application").item(0) as? org.w3c.dom.Element
+            ?: throw GradleException("Merged release manifest has no application element")
+        check(application.getAttributeNS(androidNamespace, "debuggable").ifEmpty { "false" } == "false") {
+            "Release manifest must set android:debuggable=false"
+        }
+        check(application.getAttributeNS(androidNamespace, "usesCleartextTraffic").ifEmpty { "false" } == "false") {
+            "Release manifest must deny cleartext traffic"
+        }
+        check(application.getAttributeNS(androidNamespace, "networkSecurityConfig") == "@xml/network_security_config") {
+            "Release manifest must use the restrictive network security configuration"
+        }
+        val networkConfig = file("src/main/res/xml/network_security_config.xml")
+        val networkConfigDocument = parserFactory.newDocumentBuilder().parse(networkConfig)
+        val baseConfig = networkConfigDocument.getElementsByTagName("base-config").item(0)
+            ?: throw GradleException("Release network security configuration has no base-config")
+        check(baseConfig.attributes.getNamedItem("cleartextTrafficPermitted")?.nodeValue == "false") {
+            "Release network security configuration must deny cleartext traffic"
+        }
+        val exportedComponents = buildSet {
+            val childNodes = application.childNodes
+            for (index in 0 until childNodes.length) {
+                val component = childNodes.item(index)
+                val exported = component.attributes?.getNamedItemNS(androidNamespace, "exported")?.nodeValue
+                if (component.nodeName in componentElementNames && exported == "true") {
+                    add(Triple(
+                        component.nodeName,
+                        component.attributes.getNamedItemNS(androidNamespace, "name")?.nodeValue,
+                        component.attributes.getNamedItemNS(androidNamespace, "permission")?.nodeValue,
+                    ))
+                }
+            }
+        }
+        check(exportedComponents == permittedReleaseExports) {
+            "Release manifest exported components differ from the reviewed allowlist: $exportedComponents"
+        }
+    }
+}
+
+tasks.matching { it.name in setOf("assembleRelease", "bundleRelease") }.configureEach {
+    dependsOn(verifyReleaseManifestSecurity)
 }

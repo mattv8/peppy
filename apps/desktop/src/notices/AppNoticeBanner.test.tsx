@@ -71,6 +71,15 @@ describe("AppNoticeBanner", () => {
     expect(container.querySelectorAll('[role="alert"], [role="status"]')).toHaveLength(2);
   });
 
+  it("renders a ReactNode message in its live region", () => {
+    render(<AppNoticeBanner notices={[
+      { source: "action", severity: "info", message: <>Downloading <bdi>x</bdi> before saving.</> },
+    ]} />);
+
+    expect(screen.getByRole("status")).toHaveAttribute("data-app-notice-message-source", "action");
+    expect(screen.getByRole("status")).toHaveTextContent("Downloading x before saving.");
+  });
+
   it("keeps a notice live region mounted for identical notice updates", () => {
     const notices = [{ source: "refresh" as const, severity: "error" as const, message: "Refresh failed" }];
     const { rerender } = render(<AppNoticeBanner notices={notices} />);

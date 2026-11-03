@@ -142,6 +142,43 @@ fn malformed_or_oversize_envelopes_are_rejected() {
 }
 
 #[test]
+fn compaction_references_are_bounded_while_deserializing() {
+    let mut event = envelope();
+    event.purpose = EnvelopePurpose::Event;
+    event.command_id = None;
+    event.route = None;
+    event.compaction = Some(CompactionMetadata {
+        key: vec![0; peppy_protocol::COMPACTION_KEY_BYTES],
+        terminal: false,
+        supersedes: (1..=peppy_protocol::MAX_COMPACTION_SUPERSEDES)
+            .map(|sequence| CompactionReference {
+                producer_device_id: DeviceId::new(),
+                producer_sequence: SourceSequence(sequence as u64),
+            })
+            .collect(),
+        checkpoint: false,
+    });
+    let mut encoded = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Envelope>(encoded.clone()).unwrap(),
+        event
+    );
+    encoded["compaction"]["supersedes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "producer_device_id": DeviceId::new(),
+            "producer_sequence": "129"
+        }));
+    assert!(
+        serde_json::from_value::<Envelope>(encoded)
+            .unwrap_err()
+            .to_string()
+            .contains("too many compaction references")
+    );
+}
+
+#[test]
 fn command_payload_conflicts_are_exact_wire_conflicts() {
     let first = envelope();
     let mut second = first.clone();

@@ -390,7 +390,7 @@ struct HostedEnrollmentView: View {
             self.provisioning = pending
             
             if let pending, let vaultID = acct.vaultId {
-                phase = vaultID == pending.view().vaultId ? .confirm : .existing
+                phase = vaultID == (try pending.view().vaultId) ? .confirm : .existing
             } else if pending != nil {
                 phase = .confirm
             } else if acct.vaultId != nil {

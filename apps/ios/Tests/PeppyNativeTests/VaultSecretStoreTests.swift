@@ -110,6 +110,16 @@ import Testing
         #expect(try store.pendingSecret(origin: origin) == "other vault secret")
     }
 
+    @Test func deletingABindingLeavesThePendingRecoverySecretUntouched() throws {
+        let secure = VaultFaultyStore(); secure.seed(account, "bound secret"); secure.seed(pendingAccount, "pending secret")
+        let store = VaultSecretStore(secure: secure)
+
+        try store.deleteBinding(for: identity)
+
+        #expect(try store.read(identity) == nil)
+        #expect(try store.pendingSecret(origin: origin) == "pending secret")
+    }
+
     @Test func pendingWriteFailureThrowsSoCreationCanAbort() {
         let secure = VaultFaultyStore(); secure.failWrites = true
         do {

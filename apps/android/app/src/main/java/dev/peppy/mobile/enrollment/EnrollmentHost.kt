@@ -43,6 +43,7 @@ internal fun parseInstanceDiscovery(discovery: String): InstanceDiscovery? = try
 internal fun claimErrorResult(response: String?): ImportResult? = try {
     if (response == null || response.length > MAX_CLAIM_ERROR_BYTES) null else when (JSONObject(response).opt("code")) {
         "invalid_setup_token" -> ImportResult.SETUP_TOKEN_REJECTED
+        "setup_window_closed" -> ImportResult.SETUP_WINDOW_CLOSED
         "instance_already_claimed" -> ImportResult.INSTANCE_ALREADY_CLAIMED
         else -> null
     }

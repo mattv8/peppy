@@ -21,6 +21,7 @@ import uniffi.peppy_mobile_bindings.NativeHostedClientKind
 import uniffi.peppy_mobile_bindings.NativeHostedLoginAttempt
 import uniffi.peppy_mobile_bindings.NativeHostedProvisioning
 import uniffi.peppy_mobile_bindings.NativeHostedProvisioningView
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.hostedLoginRequest
 import uniffi.peppy_mobile_bindings.hostedSessionRequest
 import uniffi.peppy_mobile_bindings.parseHostedAccount
@@ -270,7 +271,7 @@ internal class HostedAccountClient(
         if (existing != null) {
             existing.use {
                 if (!it.passphraseMatches(passphrase)) throw HostedFailure(HostedFailure.Kind.WRONG_PASSPHRASE)
-                val view = it.view()
+                val view = it.checkedView()
                 if (account.vaultId != null && account.vaultId != view.vaultId) throw HostedFailure(HostedFailure.Kind.EXISTING_VAULT)
                 persistPending(stamp, session, passphrase)
                 return@operation view
@@ -287,7 +288,7 @@ internal class HostedAccountClient(
         ).use { item ->
             persistPending(stamp, session, passphrase)
             save(stamp, CHECKPOINT_KEY, item.checkpoint())
-            item.view()
+            item.checkedView()
         }
     }
 
@@ -333,7 +334,7 @@ internal class HostedAccountClient(
                 throw HostedFailure(HostedFailure.Kind.WRONG_ACCOUNT)
             }
             provisioning.use {
-                val view = it.view()
+                val view = it.checkedView()
                 if (view.vaultId != vaultId || view.deviceId != deviceId) invalid()
                 val candidate = HostedProvisioningStorage.candidate(
                     store, checkpoint, ORIGIN, session.accountId, vaultId, deviceId,
@@ -381,6 +382,12 @@ internal class HostedAccountClient(
                 }
             }
         } finally { secret.fill('\u0000') }
+    }
+
+    private fun NativeHostedProvisioning.checkedView(): NativeHostedProvisioningView = try {
+        view()
+    } catch (_: MobileBindingsException.LockPoisoned) {
+        throw HostedFailure(HostedFailure.Kind.STORAGE)
     }
 
     private fun body(response: HttpResult): String {

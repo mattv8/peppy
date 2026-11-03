@@ -244,7 +244,15 @@ describe("BrowserSession", () => {
     try {
       const boot = BrowserSession.boot({ ...sessionOptions(core, new MemoryFs(), store), rememberedUnlock: recovery });
       for (let attempt = 0; attempt < 10 && recovery.recover.mock.calls.length === 0; attempt += 1) {
-        await new Promise<void>(resolve => setImmediate(resolve));
+        await new Promise<void>(resolve => {
+          const channel = new MessageChannel();
+          channel.port1.onmessage = () => {
+            channel.port1.close();
+            channel.port2.close();
+            resolve();
+          };
+          channel.port2.postMessage(undefined);
+        });
       }
       expect(recovery.recover).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(3_000);

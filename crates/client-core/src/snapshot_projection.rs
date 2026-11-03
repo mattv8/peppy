@@ -21,8 +21,9 @@
 //!    never touched, so the owner can still rescan its OS provider.
 //! 4. Journal rows at or below the snapshot high-water that carry compaction metadata but are
 //!    not retained are suppressed (`duplicate` / `snapshot_superseded`) instead of applied, so
-//!    a pending pre-snapshot record cannot resurrect removed state. Non-compactable records
-//!    (messages, statuses, commands) are unaffected.
+//!    a pending pre-snapshot record cannot resurrect removed state. Authenticated contact rows
+//!    wait for promotion, then apply when their producer-owned live revision is newer than the
+//!    retained projection. Non-compactable records (messages, statuses, commands) are unaffected.
 //!
 //! Header-free (legacy) records predate compaction metadata, so the server can neither
 //! compact them by identity nor are they staged: their payloads are never decrypted here,
@@ -980,7 +981,11 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
 pub(crate) struct Suppression {
     generation: i64,
     high_water: i64,
-    draining: bool,
+    state: String,
+}
+pub(crate) enum SuppressionDecision {
+    Superseded,
+    Defer,
 }
 impl Suppression {
     pub(crate) fn load(conn: &Connection) -> Result<Option<Self>, Error> {
@@ -992,31 +997,148 @@ impl Suppression {
                     Ok(Self {
                         generation: r.get(0)?,
                         high_water: r.get(1)?,
-                        draining: r.get::<_, String>(2)? == "draining",
+                        state: r.get(2)?,
                     })
                 },
             )
             .optional()?)
     }
 
-    /// A compactable row at or below the high-water that the snapshot did not retain.
-    pub(crate) fn superseded(
+    /// Returns a final supersession decision, or `None` when the record may apply. Contact rows
+    /// wait for projection promotion so their comparison never observes a partial stage.
+    pub(crate) fn decision(
         &self,
         conn: &Connection,
+        ctx: &Ctx,
         cursor: i64,
         wire: &[u8],
-    ) -> Result<bool, Error> {
+    ) -> Result<Option<SuppressionDecision>, Error> {
         if cursor > self.high_water || !compactable(wire) {
-            return Ok(false);
+            return Ok(None);
         }
         // While draining, undrained snapshot rows are still in `snapshot_records`.
         let retained: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM projection_retained WHERE generation=?1 AND cursor=?2) OR (?3 AND EXISTS(SELECT 1 FROM snapshot_records WHERE generation=?1 AND cursor=?2))",
-            params![self.generation, cursor, self.draining],
+            params![self.generation, cursor, self.state == "draining"],
             |r| r.get(0),
         )?;
-        Ok(!retained)
+        if retained {
+            return Ok(None);
+        }
+        if self.state != "promoted" {
+            return Ok(if is_authenticated_contact(ctx, wire) {
+                Some(SuppressionDecision::Defer)
+            } else {
+                Some(SuppressionDecision::Superseded)
+            });
+        }
+        Ok(if newer_pending_contact(conn, ctx, wire)? {
+            None
+        } else {
+            Some(SuppressionDecision::Superseded)
+        })
     }
+}
+
+/// An authenticated contact revision that is newer than the retained version must apply after
+/// promotion. Snapshot cursor omission alone cannot prove that this record was superseded.
+/// Absence remains meaningful: without a retained prior revision, a purged terminal tombstone is
+/// indistinguishable from an omitted contact record and keeps the established purge behavior.
+fn newer_pending_contact(conn: &Connection, ctx: &Ctx, wire: &[u8]) -> Result<bool, Error> {
+    let Some(envelope) = parse_wire(wire) else {
+        return Ok(false);
+    };
+    let Ok(Opened::Payload(payload)) = open_payload(ctx, &envelope) else {
+        return Ok(false);
+    };
+    let producer = envelope.producer_device_id.to_string();
+    match payload {
+        PrivatePayload::ContactBookState { book } => {
+            let (Ok(id), Ok(revision)) = (
+                contacts::req(&book, "id"),
+                contacts::revision(&book, "generation"),
+            ) else {
+                return Ok(false);
+            };
+            live_book_supersedes(conn, id, &producer, revision, &book)
+        }
+        PrivatePayload::ContactUpserted { book, contact } => {
+            let Ok(book_id) = contacts::req(&book, "id") else {
+                return Ok(false);
+            };
+            let Ok((contact_id, revision, _)) = contacts::peer_contact(&contact, book_id) else {
+                return Ok(false);
+            };
+            live_contact_older(conn, book_id, &contact_id, &producer, revision)
+        }
+        PrivatePayload::ContactRemoved {
+            book_id,
+            contact_id,
+            tombstone,
+        } => {
+            let (Ok(tombstone_contact_id), Ok(revision)) = (
+                contacts::req(&tombstone, "contact_id"),
+                contacts::revision(&tombstone, "revision"),
+            ) else {
+                return Ok(false);
+            };
+            if tombstone_contact_id != contact_id {
+                return Ok(false);
+            }
+            live_contact_older(conn, &book_id, &contact_id, &producer, revision)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn is_authenticated_contact(ctx: &Ctx, wire: &[u8]) -> bool {
+    let Some(envelope) = parse_wire(wire) else {
+        return false;
+    };
+    matches!(
+        open_payload(ctx, &envelope),
+        Ok(Opened::Payload(
+            PrivatePayload::ContactBookState { .. }
+                | PrivatePayload::ContactUpserted { .. }
+                | PrivatePayload::ContactRemoved { .. }
+        ))
+    )
+}
+
+fn live_book_supersedes(
+    conn: &Connection,
+    book_id: &str,
+    producer: &str,
+    generation: i64,
+    incoming: &Value,
+) -> Result<bool, Error> {
+    let stored: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT generation,body FROM contact_books WHERE id=? AND owner_device_id=?",
+            params![book_id, producer],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((stored_generation, body)) = stored else {
+        return Ok(false);
+    };
+    let body: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
+    contacts::book_supersedes(stored_generation, &body, generation, incoming)
+}
+
+fn live_contact_older(
+    conn: &Connection,
+    book_id: &str,
+    contact_id: &str,
+    producer: &str,
+    revision: i64,
+) -> Result<bool, Error> {
+    let older = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contacts c JOIN contact_books b ON b.id=c.book_id WHERE c.book_id=? AND c.id=? AND b.owner_device_id=? AND c.revision<?)",
+        params![book_id, contact_id, producer, revision],
+        |row| row.get(0),
+    )?;
+    Ok(older)
 }
 
 /// Bounded removal of stage rows no longer needed (promoted, failed or superseded) and of
