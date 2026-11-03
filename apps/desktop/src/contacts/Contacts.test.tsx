@@ -1055,11 +1055,19 @@ describe("ContactsView", () => {
 
     it("reports a sent edit as waiting for the phone, never as applied", async () => {
       vi.mocked(bridge.submit_contact_edit).mockResolvedValue({ state: "pending", requestId: "r9" });
-      render(<ContactsView />);
+      const deviceName = "Pixel \u202E8";
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, deviceName }]);
+      const { container } = render(<ContactsView />);
       fireEvent.click(await screen.findByLabelText("New contact"));
       fireEvent.change(await screen.findByLabelText("Given name"), { target: { value: "Grace" } });
       fireEvent.click(screen.getByText("Save"));
-      expect(await screen.findByText("Sent to Pixel 8. Waiting for the phone to apply it.")).toBeInTheDocument();
+      await waitFor(() => expect(container.querySelector("#contacts-notice")).toHaveTextContent(`Sent to ${deviceName}. Waiting for the phone to apply it.`));
+      const notice = container.querySelector("#contacts-notice");
+      expect(notice?.querySelector("bdi")?.textContent).toBe(deviceName);
+      expect(notice?.children).toHaveLength(2);
+      expect(notice?.firstElementChild?.tagName).toBe("SPAN");
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(container.querySelector("#contacts-notice")).toBeNull();
     });
 
     it("shows contact projection failures without relabeling repair as sync", async () => {
@@ -1592,7 +1600,7 @@ describe("ContactsView", () => {
       const submit = deferred<Awaited<ReturnType<typeof bridge.submit_contact_edit>>>();
       vi.mocked(bridge.submit_contact_edit).mockReturnValue(submit.promise);
       const consumed = vi.fn();
-      const { rerender } = render(<ContactsView onTargetConsumed={consumed} />);
+      const { container, rerender } = render(<ContactsView onTargetConsumed={consumed} />);
       fireEvent.click(await screen.findByLabelText("New contact"));
       fireEvent.change(await screen.findByLabelText("Given name"), { target: { value: "Grace" } });
       fireEvent.click(screen.getByText("Save"));
@@ -1603,7 +1611,7 @@ describe("ContactsView", () => {
       expect(await screen.findByText("Finish saving the current contact before opening the requested contact.")).toBeInTheDocument();
       expect(consumed).toHaveBeenCalledWith(53);
       submit.resolve({ state: "pending", requestId: "r10" });
-      expect(await screen.findByText("Sent to Pixel 8. Waiting for the phone to apply it.")).toBeInTheDocument();
+      await waitFor(() => expect(container.querySelector("#contacts-notice")).toHaveTextContent("Sent to Pixel 8. Waiting for the phone to apply it."));
     });
 
     it("focuses a target row whose id contains selector-special characters", async () => {
@@ -1898,6 +1906,19 @@ describe("ContactsView", () => {
       expect(screen.queryByRole("form")).not.toBeInTheDocument();
     });
 
+    it("isolates a control-bearing device name in the delete notice", async () => {
+      const deviceName = "Pixel \u202E8";
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, deviceName }]);
+      vi.mocked(bridge.submit_contact_edit).mockResolvedValue({ state: "pending", requestId: "delete-1" });
+      const { container } = render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      fireEvent.click(screen.getByLabelText("Delete contact"));
+      fireEvent.click(screen.getByLabelText("Confirm delete"));
+
+      await waitFor(() => expect(container.querySelector("#contacts-notice")).toHaveTextContent(`Delete sent to ${deviceName}. Waiting for the phone.`));
+      expect(container.querySelector("#contacts-notice bdi")?.textContent).toBe(deviceName);
+    });
+
     it("shows a failed restorable-contact list outside the editor as an alert", async () => {
       vi.mocked(bridge.list_restorable_contacts).mockRejectedValueOnce(new Error("Deleted contacts are unavailable."));
       render(<ContactsView />);
@@ -1921,6 +1942,18 @@ describe("ContactsView", () => {
       expect(panel?.querySelector("#contacts-error")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
       expect(panel?.querySelector("#contacts-error")).toBeNull();
+    });
+
+    it("isolates a control-bearing contact name in the restore notice", async () => {
+      const displayName = "Old \u202EFriend";
+      vi.mocked(bridge.list_restorable_contacts).mockResolvedValueOnce([{ ...deletedFromPixel, displayName }]);
+      vi.mocked(bridge.restore_contact).mockResolvedValueOnce({ state: "pending", requestId: "restore-1" });
+      const { container } = render(<ContactsView />);
+      fireEvent.click(await screen.findByLabelText("Recently deleted contacts"));
+      fireEvent.click(await screen.findByRole("button", { name: `Restore ${displayName}` }));
+
+      await waitFor(() => expect(container.querySelector("#contacts-notice")).toHaveTextContent(`Restore of ${displayName} sent. Waiting for the phone.`));
+      expect(container.querySelector("#contacts-notice bdi")?.textContent).toBe(displayName);
     });
   });
 });

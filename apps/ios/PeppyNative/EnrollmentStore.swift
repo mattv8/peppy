@@ -19,6 +19,7 @@ struct EnrollmentRecord: Codable, Equatable, Sendable {
 /// stay as an archive, so re-importing that identity reopens its unsent local work.
 struct EnrollmentStore: Sendable {
     static let activeAccount = "active-enrollment"
+    private static let vaultBindingCleanupAccount = "vault-binding-cleanup-pending"
     static let databaseKeyBytes = 32
     /// Older epochs whose caches are still imported (decrypt-only after cutover).
     static let retainedCacheEpochs: UInt32 = 64
@@ -58,6 +59,20 @@ struct EnrollmentStore: Sendable {
     /// Removes only the active pointer; the identity's archive is kept.
     func deactivate() throws(ClientError) {
         try secure.delete(Self.activeAccount)
+    }
+
+    /// A confirmed remote vault deletion may leave only the Keychain binding cleanup retryable.
+    func pendingVaultBindingCleanup() throws(ClientError) -> EnrollmentIdentity? {
+        guard let data = try secure.read(Self.vaultBindingCleanupAccount) else { return nil }
+        return try decode(EnrollmentIdentity.self, data, "vault binding cleanup")
+    }
+
+    func markVaultBindingCleanup(_ identity: EnrollmentIdentity) throws(ClientError) {
+        try secure.upsert(Self.vaultBindingCleanupAccount, encode(identity))
+    }
+
+    func clearVaultBindingCleanup() throws(ClientError) {
+        try secure.delete(Self.vaultBindingCleanupAccount)
     }
 
     /// Pairing material is device-only and keyed by the canonical origin plus opaque intent.

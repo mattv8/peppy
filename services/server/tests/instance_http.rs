@@ -103,15 +103,54 @@ impl Fixture {
             .router()
     }
 
-    async fn hosted_app(&self) -> Router {
-        ServerBuilder::new(config(self.pool.clone()), self.pool.clone())
+    async fn hosted_app(&self) -> (Router, PgPool, String) {
+        let role = format!("instance_http_runtime_{}", Uuid::new_v4().simple());
+        let password = Uuid::new_v4().simple().to_string();
+        sqlx::raw_sql(&format!(
+            "CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS NOCREATEROLE"
+        ))
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        peppy_server::rls::grant_runtime_privileges(&self.pool, &role)
+            .await
+            .unwrap();
+
+        let mut runtime_url: Url = test_database_url().parse().unwrap();
+        runtime_url.set_username(&role).unwrap();
+        runtime_url.set_password(Some(&password)).unwrap();
+        runtime_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-csearch_path={}", self.schema));
+        let runtime = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(runtime_url.as_str())
+            .await
+            .unwrap();
+        let mut server_config = config(self.pool.clone());
+        server_config.database_url = runtime_url.to_string();
+        let app = ServerBuilder::new(server_config, runtime.clone())
             .setup_token(SETUP_TOKEN)
             .row_security(true)
             .maintenance_database(self.pool.clone())
             .build()
             .await
             .unwrap()
-            .router()
+            .router();
+        (app, runtime, role)
+    }
+
+    async fn drop_runtime_role(&self, role: &str) {
+        sqlx::raw_sql(&format!(
+            "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA {} FROM {role}; \
+             REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {} FROM {role}; \
+             REVOKE ALL PRIVILEGES ON SCHEMA {} FROM {role}; \
+             DROP ROLE {role}",
+            self.schema, self.schema, self.schema
+        ))
+        .execute(&self.admin)
+        .await
+        .unwrap();
     }
 
     async fn cleanup(self) {
@@ -958,6 +997,31 @@ async fn browser_claim_login_logout_and_revoke_enforce_cookie_origin_and_csrf_co
     .await;
     assert_eq!(account.status(), StatusCode::OK);
 
+    let legacy_cookie = cookie.replacen(
+        "__Host-Peppy-Instance-Session=",
+        "Peppy-Instance-Session=",
+        1,
+    );
+    let legacy_account = send(
+        app.clone(),
+        Method::GET,
+        "/v1/instance/account",
+        None,
+        &[("cookie", &legacy_cookie)],
+    )
+    .await;
+    assert_eq!(legacy_account.status(), StatusCode::OK);
+    let duplicate_cookie = format!("Peppy-Instance-Session=invalid; {cookie}");
+    let preferred_host_account = send(
+        app.clone(),
+        Method::GET,
+        "/v1/instance/account",
+        None,
+        &[("cookie", &duplicate_cookie)],
+    )
+    .await;
+    assert_eq!(preferred_host_account.status(), StatusCode::OK);
+
     let restored_session = send(
         app.clone(),
         Method::GET,
@@ -973,7 +1037,7 @@ async fn browser_claim_login_logout_and_revoke_enforce_cookie_origin_and_csrf_co
     assert!(restored_body.get("session_token").is_none());
 
     let raw_browser_token = cookie
-        .strip_prefix("Peppy-Instance-Session=")
+        .strip_prefix("__Host-Peppy-Instance-Session=")
         .expect("session cookie contains the browser token");
     let native_session_restore = send(
         app.clone(),
@@ -1093,6 +1157,23 @@ async fn browser_claim_login_logout_and_revoke_enforce_cookie_origin_and_csrf_co
     assert!(cleared_cookie.contains("Secure"));
     assert!(cleared_cookie.contains("HttpOnly"));
     assert!(cleared_cookie.contains("SameSite=Strict"));
+    let cleared_names = logout
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(cleared_names.len(), 2);
+    assert!(
+        cleared_names
+            .iter()
+            .any(|value| value.starts_with("__Host-Peppy-Instance-Session="))
+    );
+    assert!(
+        cleared_names
+            .iter()
+            .any(|value| value.starts_with("Peppy-Instance-Session="))
+    );
     let revoked = send(
         app.clone(),
         Method::GET,
@@ -1119,7 +1200,7 @@ async fn browser_claim_login_logout_and_revoke_enforce_cookie_origin_and_csrf_co
 #[tokio::test]
 async fn hosted_router_does_not_mount_community_instance_routes() {
     let fixture = Fixture::new().await;
-    let app = fixture.hosted_app().await;
+    let (app, runtime, role) = fixture.hosted_app().await;
     for (method, path) in [
         (Method::GET, "/v1/instance"),
         (Method::POST, "/v1/instance/claim"),
@@ -1147,6 +1228,9 @@ async fn hosted_router_does_not_mount_community_instance_routes() {
         let response = send(app.clone(), method, path, None, &[]).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
+    drop(app);
+    runtime.close().await;
+    fixture.drop_runtime_role(&role).await;
     fixture.cleanup().await;
 }
 

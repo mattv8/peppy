@@ -57,6 +57,7 @@ case "${1:-}" in
     mkdir -p "$runtime_dir"
     install -m 755 "$target_dir/debug/peppy-server" "$runtime_dir/peppy-server"
     "$runtime_dir/peppy-server" migrate
+    unset DATABASE_MIGRATION_URL
     exec 9>&-
     exec "$runtime_dir/peppy-server" serve ;;
   demo)

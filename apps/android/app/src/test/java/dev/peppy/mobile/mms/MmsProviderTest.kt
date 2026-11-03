@@ -136,6 +136,17 @@ class MmsProviderTest {
         assertEquals("metadata_overflow", reader.read(1)!!.error)
     }
 
+    @Test fun overlongAddressDoesNotStopCollectionOfLaterRecipients() {
+        provider.messages += message(1, 128)
+        provider.parts[1] = listOf(part(1))
+        provider.addresses[1] = listOf("x".repeat(MmsProviderReader.MAX_STRING + 1) to 151, "later-recipient" to 151)
+
+        val record = reader.read(1)!!
+
+        assertEquals("address_overflow", record.error)
+        assertEquals(listOf("later-recipient"), record.toRecipients)
+    }
+
     @Test fun utf8BoundsRetainMalformedSurrogateReplacementAtTheBoundary() {
         val allowed = "\uD800".repeat(MmsProviderReader.MAX_STRING)
         val oversized = allowed + "\uD800"

@@ -23,6 +23,9 @@ import dev.peppy.mobile.mms.MmsCaptureScheduleSink
 import dev.peppy.mobile.mms.MmsCaptureSummary
 import dev.peppy.mobile.mms.MmsLegacyBackfillState
 import dev.peppy.mobile.mms.MmsMediaPreview
+import dev.peppy.mobile.mms.MmsMediaMetadata
+import dev.peppy.mobile.mms.MmsMediaPreviewResult
+import dev.peppy.mobile.mms.MmsMediaPreviewUnavailable
 import dev.peppy.mobile.mms.MmsProviderException
 import dev.peppy.mobile.mms.MmsProviderPage
 import dev.peppy.mobile.mms.MmsProviderPart
@@ -54,6 +57,94 @@ import uniffi.peppy_mobile_bindings.NativeMmsSource
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class MmsCaptureOrchestrationTest {
+    @Test fun deterministicUnsafePreviewCompletesWithTheOriginalMapped() {
+        val core = FakeCore(initialReason = "preview_deferred")
+        val provider = FakeProvider(
+            listOf(record(1).copy(parts = listOf(pngPart(10)))),
+            imageBytes = png(),
+            previewResult = MmsMediaPreviewResult(MmsMediaMetadata(20_000, 1), null, MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW),
+        )
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(1, result.captured)
+        assertEquals(1, core.completed)
+        assertEquals(listOf("image/png"), core.preparedMediaTypes)
+        assertEquals(NativeMmsPreviewState.PERMANENTLY_UNAVAILABLE, core.previewStates("ignored")["10"])
+    }
+
+    @Test fun corruptPreviewAttemptStateDoesNotDiscardTheOriginal() {
+        val directory = temp()
+        File(directory, "mms-preview-interrupted-decodes").writeText("broken=\\u12zz")
+        val core = FakeCore(initialReason = "preview_deferred")
+        val provider = FakeProvider(
+            listOf(record(1).copy(parts = listOf(pngPart(10)))),
+            imageBytes = png(),
+            previewResult = MmsMediaPreviewResult(MmsMediaMetadata(), null, MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW),
+        )
+
+        MmsCapture.run(plan(), core, provider, directory)
+
+        assertEquals(1, core.completed)
+        assertEquals(listOf("image/png"), core.preparedMediaTypes)
+    }
+
+    @Test fun threeInterruptedPreviewDecodesQuarantineThePreviewAndCompleteTheOriginal() {
+        val directory = temp()
+        val core = FakeCore(
+            initialReason = "preview_deferred",
+            mappedParts = mapOf("10" to "attachment-10"),
+            initialPreviewStates = mapOf("10" to NativeMmsPreviewState.DEFERRED),
+        )
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(pngPart(10)))), imageBytes = png())
+        repeat(3) { assertTrue(PreviewDecodeAttempts(directory).begin("acq-1:10")) }
+
+        MmsCapture.run(plan(), core, provider, directory)
+
+        assertEquals(1, core.completed)
+        assertEquals(NativeMmsPreviewState.PERMANENTLY_UNAVAILABLE, core.previewStates("ignored")["10"])
+    }
+
+    @Test fun cancellationClearsThePreviewMarkerBeforeTheNextAttempt() {
+        val directory = temp()
+        val core = FakeCore(
+            initialReason = "preview_deferred",
+            mappedParts = mapOf("10" to "attachment-10"),
+            initialPreviewStates = mapOf("10" to NativeMmsPreviewState.DEFERRED),
+        )
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(pngPart(10)))), imageBytes = png())
+        provider.previewError = CancellationException("stopped")
+
+        assertThrows(CancellationException::class.java) { MmsCapture.run(plan(), core, provider, directory) }
+        provider.previewError = null
+
+        MmsCapture.run(plan(), core, provider, directory)
+
+        assertEquals(1, core.completed)
+        assertEquals(NativeMmsPreviewState.READY, core.previewStates("ignored")["10"])
+    }
+
+    @Test fun interruptedPreviewDecodesQuarantineOnlyAfterThreeDurableDetections() {
+        val directory = temp()
+        val key = "acquisition:part"
+
+        assertTrue(PreviewDecodeAttempts(directory).begin(key))
+        assertTrue(PreviewDecodeAttempts(directory).begin(key))
+        assertTrue(PreviewDecodeAttempts(directory).begin(key))
+        assertFalse(PreviewDecodeAttempts(directory).begin(key))
+    }
+
+    @Test fun cancellingPreviewDecodeClearsItsInterruptedMarker() {
+        val directory = temp()
+        val key = "acquisition:part"
+        val attempts = PreviewDecodeAttempts(directory)
+
+        assertTrue(attempts.begin(key))
+        attempts.finish(key)
+
+        assertTrue(PreviewDecodeAttempts(directory).begin(key))
+    }
+
     @Test fun diagnosticsEmitContentFreeMmsProgress() {
         val events = mutableListOf<String>()
 
@@ -684,10 +775,15 @@ class MmsCaptureOrchestrationTest {
         private val copyError: Exception? = null,
         private val textReadError: Exception? = null,
         private val previewLimit: Int = MmsMediaPreview.MAX_JPEG_BYTES,
+        private val previewResult: MmsMediaPreviewResult? = null,
         private val failHighWater: Boolean = false,
     ) : MmsCaptureProvider {
         var copyCount = 0
-        override fun inspectMedia(file: File, contentType: String?) = MmsMediaPreview(previewLimit).inspect(file, contentType)
+        var previewError: Exception? = null
+        override fun inspectMedia(file: File, contentType: String?): MmsMediaPreviewResult {
+            previewError?.let { throw it }
+            return previewResult ?: MmsMediaPreview(previewLimit).inspect(file, contentType)
+        }
         override fun highWater(): Long {
             if (failHighWater) throw MmsProviderException("MMS provider returned no high-water cursor")
             return records.maxOfOrNull { it.id } ?: 0

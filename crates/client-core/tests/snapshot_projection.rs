@@ -316,8 +316,183 @@ fn pending_superseded_upsert_cannot_resurrect_and_journaled_records_reconstruct(
     );
     assert_eq!(visible(&unlocked_client, BOOK), ["c2"]);
     // Re-applying never revives it either.
-    settle(&unlocked_client);
+    settle_one_by_one(&unlocked_client);
     assert_eq!(visible(&unlocked_client, BOOK), ["c2"]);
+}
+
+fn assert_omitted_newer_contact_survives(limit: usize) {
+    let mut p = pair();
+    let b = book(&p.owner_cfg, BOOK);
+    capture(&p.owner, &b, vec![contact(BOOK, "c1", "Ada")]);
+    p.server.upload(&p.owner);
+    let retained = full(&p.server.log);
+
+    // The receiver journals both authenticated revisions while locked. A snapshot that only
+    // retains the older revision must not let high-water suppression discard the newer one.
+    let locked_cfg = config(&p._dir, "locked-newer", &p.vault);
+    let locked = open(&locked_cfg);
+    p.server.sync(&locked);
+    capture(&p.owner, &b, vec![contact(BOOK, "c1", "Bea")]);
+    p.server.upload(&p.owner);
+    p.server.sync(&locked);
+    let high_water = p.server.log.len();
+    import(&locked, &retained, high_water, Some(38));
+    drop(locked);
+
+    let unlocked_client = unlocked(&locked_cfg, &p.vault);
+    loop {
+        let step = unlocked_client.apply_pending(limit).unwrap();
+        if step.applied + step.drained + step.quarantined + step.superseded == 0
+            && step.snapshot_remaining == 0
+        {
+            break;
+        }
+    }
+    let view = call(unlocked_client.contact_book_view(
+        &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+    ));
+    assert_eq!(view["contacts"][0]["name"]["given"], "Bea");
+}
+
+#[test]
+fn authenticated_newer_pending_contact_survives_snapshot_omission() {
+    for limit in [1, 2, 1_000] {
+        assert_omitted_newer_contact_survives(limit);
+    }
+}
+
+#[test]
+fn large_retained_projection_defers_a_newer_pending_contact_until_promotion() {
+    let mut p = pair();
+    let b = book(&p.owner_cfg, BOOK);
+    let initial: Vec<_> = (0..1_001)
+        .map(|index| contact(BOOK, &format!("c{index:04}"), "Ada"))
+        .collect();
+    capture(&p.owner, &b, initial.clone());
+    p.server.upload(&p.owner);
+    let retained = full(&p.server.log);
+    p.server.sync(&p.peer);
+    settle(&p.peer);
+
+    // The predecessor is already live rather than pending, while the retained snapshot needs
+    // more than one stage batch. This is the batching gap that must defer the update.
+    let peer_cfg = p.peer_cfg.clone();
+    drop(p.peer);
+    let locked = open(&peer_cfg);
+    let mut updated = initial;
+    updated[1_000] = contact(BOOK, "c1000", "Bea");
+    capture(&p.owner, &b, updated);
+    p.server.upload(&p.owner);
+    p.server.sync(&locked);
+    import(&locked, &retained, p.server.log.len(), Some(39));
+    drop(locked);
+
+    let peer = unlocked(&peer_cfg, &p.vault);
+    loop {
+        let step = peer.apply_pending(2).unwrap();
+        if step.applied + step.drained + step.quarantined + step.superseded == 0
+            && step.snapshot_remaining == 0
+        {
+            break;
+        }
+    }
+    let mut offset = 0;
+    let updated_contact = loop {
+        let page = call(
+            peer.contact_book_view(
+                &json!({"schema_version": 1, "book_id": BOOK, "offset": offset, "limit": 200})
+                    .to_string(),
+            ),
+        );
+        let contacts = page["contacts"].as_array().unwrap();
+        if let Some(contact) = contacts.iter().find(|contact| contact["id"] == "c1000") {
+            break contact.clone();
+        }
+        assert!(
+            !contacts.is_empty(),
+            "c1000 was absent from the paginated view"
+        );
+        offset += contacts.len();
+    };
+    assert_eq!(updated_contact["name"]["given"], "Bea");
+}
+
+#[test]
+fn pending_contacts_after_projection_gc_compare_against_durable_state() {
+    let mut p = pair();
+    let b = book(&p.owner_cfg, BOOK);
+    let initial = vec![
+        contact(BOOK, "c1", "Ada"),
+        contact(BOOK, "c2", "Bea"),
+        contact(BOOK, "c3", "Cy"),
+    ];
+    capture(&p.owner, &b, initial.clone());
+    p.server.upload(&p.owner);
+    let retained = full(&p.server.log);
+    let locked_cfg = config(&p._dir, "locked-gc", &p.vault);
+    let locked = open(&locked_cfg);
+    p.server.sync(&locked);
+    capture(
+        &p.owner,
+        &b,
+        vec![
+            contact(BOOK, "c1", "Anna"),
+            contact(BOOK, "c2", "Bryn"),
+            contact(BOOK, "c3", "Cyd"),
+        ],
+    );
+    p.server.upload(&p.owner);
+    p.server.sync(&locked);
+    import(&locked, &retained, p.server.log.len(), Some(40));
+    drop(locked);
+
+    let peer = unlocked(&locked_cfg, &p.vault);
+    // One record per call forces stage GC before the second pending update can be decided.
+    settle_one_by_one(&peer);
+    let view = call(peer.contact_book_view(
+        &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+    ));
+    let names: Vec<_> = view["contacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|contact| contact["name"]["given"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Anna", "Bryn", "Cyd"]);
+}
+
+#[test]
+fn later_epoch_unlock_applies_omitted_newer_contact_after_projection_gc() {
+    let mut p = pair();
+    let b = book(&p.owner_cfg, BOOK);
+    capture(&p.owner, &b, vec![contact(BOOK, "c1", "Ada")]);
+    p.server.upload(&p.owner);
+    let retained = full(&p.server.log);
+    let locked_cfg = config(&p._dir, "locked-epoch", &p.vault);
+    let locked = open(&locked_cfg);
+    p.server.sync(&locked);
+
+    let next_epoch = Vault::epoch(p.vault.id, 2);
+    p.owner
+        .unlock(&next_epoch.profile, &next_epoch.header, PASSPHRASE)
+        .unwrap();
+    p.owner.activate_epoch(2).unwrap();
+    capture(&p.owner, &b, vec![contact(BOOK, "c1", "Bea")]);
+    p.server.upload(&p.owner);
+    p.server.sync(&locked);
+    import(&locked, &retained, p.server.log.len(), Some(41));
+    drop(locked);
+
+    let peer = unlocked(&locked_cfg, &p.vault);
+    settle_one_by_one(&peer);
+    assert_eq!(visible(&peer, BOOK), ["c1"]);
+    peer.unlock(&next_epoch.profile, &next_epoch.header, PASSPHRASE)
+        .unwrap();
+    settle_one_by_one(&peer);
+    let view = call(peer.contact_book_view(
+        &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+    ));
+    assert_eq!(view["contacts"][0]["name"]["given"], "Bea");
 }
 
 #[test]

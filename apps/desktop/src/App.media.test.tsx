@@ -173,7 +173,8 @@ describe("App media wiring", () => {
 
   it("renders a chromeless subject after its caption", async () => {
     const attachment = video("subject-clip");
-    currentSnapshot = snapshot([{ ...message("subject-video", attachment), body: "Watch this", subject: "A subject" }]);
+    const bidiSubject = "\u202Eevil\u202C subject";
+    currentSnapshot = snapshot([{ ...message("subject-video", attachment), body: "Watch this", subject: bidiSubject }]);
 
     render(<App />);
 
@@ -182,6 +183,7 @@ describe("App media wiring", () => {
     const caption = article.querySelector("[data-message-caption]")!;
     const subject = article.querySelector(".message-subject")!;
     expect(caption.compareDocumentPosition(subject) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(subject.querySelector("bdi")?.textContent).toBe(bidiSubject);
   });
 
   it("keeps mixed attachment messages in their bubble", async () => {

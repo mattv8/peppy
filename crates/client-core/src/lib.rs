@@ -2843,14 +2843,19 @@ impl Client {
         };
         for (cursor, wire, historical) in rows {
             if let Some(suppression) = &suppression
-                && suppression.superseded(&tx, cursor, &wire)?
+                && let Some(reason) = suppression.decision(&tx, &ctx, cursor, &wire)?
             {
-                tx.execute(
-                    "UPDATE journal SET status='duplicate',reason=? WHERE cursor=?",
-                    params![snapshot_projection::SUPERSEDED_REASON, cursor],
-                )?;
-                report.superseded += 1;
-                continue;
+                match reason {
+                    snapshot_projection::SuppressionDecision::Superseded => {
+                        tx.execute(
+                            "UPDATE journal SET status='duplicate',reason=? WHERE cursor=?",
+                            params![snapshot_projection::SUPERSEDED_REASON, cursor],
+                        )?;
+                        report.superseded += 1;
+                        continue;
+                    }
+                    snapshot_projection::SuppressionDecision::Defer => continue,
+                }
             }
             let savepoint = tx.savepoint()?;
             match apply_record(&savepoint, &ctx, &wire, historical)? {
@@ -5409,6 +5414,11 @@ fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error>
     pragma.push_str(&hex);
     pragma.push_str("'\";");
     conn.execute_batch(&pragma)?;
+    // SQLCipher format and temporary-page settings must precede the first page read. Memory
+    // security is process-global in SQLCipher; the other settings apply to this connection.
+    conn.execute_batch(
+        "PRAGMA cipher_compatibility = 4; PRAGMA cipher_memory_security = ON; PRAGMA temp_store = MEMORY;",
+    )?;
     // Plain SQLite silently ignores `PRAGMA key`; refuse to continue without SQLCipher.
     let cipher: Option<String> = conn
         .query_row("PRAGMA cipher_version", [], |r| r.get(0))
@@ -5418,9 +5428,7 @@ fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error>
     }
     conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
         .map_err(|_| Error::WrongDatabaseKey)?;
-    conn.execute_batch(
-        "PRAGMA cipher_memory_security = ON; PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;",
-    )?;
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;")?;
     Ok(())
 }
 
@@ -6006,6 +6014,11 @@ enum Opened {
 /// requiring the inner compaction metadata to equal the outer (server-visible) copy.
 fn open_payload(ctx: &Ctx, envelope: &Envelope) -> Result<Opened, QuarantineReason> {
     use QuarantineReason as Q;
+    // Raw replay parsing already bounds the base64 ciphertext before allocation. Revalidate the
+    // typed envelope here so malformed headers and ciphertext never reach frame parsing/decrypt.
+    if envelope.validate().is_err() {
+        return Err(Q::MalformedEnvelope);
+    }
     let Some(keys) = ctx.keys.get(&envelope.key_epoch) else {
         return Err(Q::ProfileMismatch);
     };
@@ -11274,6 +11287,47 @@ mod tests {
         conn.execute("INSERT INTO t VALUES(2001, x'00')", [])
             .unwrap();
         assert_eq!(batch(1_999, 1_000), vec![2000]);
+    }
+
+    #[test]
+    fn database_connections_keep_temporary_pages_in_memory() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_database_key(&conn, &DatabaseKey::new(&[7; 32]).unwrap()).unwrap();
+        let temp_store: i64 = conn
+            .query_row("PRAGMA temp_store", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(temp_store, 2);
+    }
+
+    #[test]
+    fn sqlcipher_file_reopens_with_the_compatible_connection_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("client.db");
+        let key = DatabaseKey::new(&[7; 32]).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        apply_database_key(&conn, &key).unwrap();
+        conn.execute_batch("CREATE TABLE proof(value INTEGER); INSERT INTO proof VALUES(7);")
+            .unwrap();
+        drop(conn);
+
+        let wrong_key = DatabaseKey::new(&[8; 32]).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            apply_database_key(&conn, &wrong_key),
+            Err(Error::WrongDatabaseKey)
+        );
+        drop(conn);
+
+        let conn = Connection::open(&path).unwrap();
+        apply_database_key(&conn, &key).unwrap();
+        let value: i64 = conn
+            .query_row("SELECT value FROM proof", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 7);
+        let temp_store: i64 = conn
+            .query_row("PRAGMA temp_store", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(temp_store, 2);
     }
 
     #[test]

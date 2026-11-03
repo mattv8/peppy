@@ -19,12 +19,14 @@ import dev.peppy.mobile.attachments.AttachmentStorageLoad
 import dev.peppy.mobile.attachments.AttachmentStorageSnapshot
 import dev.peppy.mobile.attachments.AttachmentStorageUnavailableReason
 import dev.peppy.mobile.security.CredentialParser
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -33,7 +35,8 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class GatewayAccountSettingsShellTest : GatewayTestBase() {
-    @get:Rule val compose = createComposeRule()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     @Test fun hiddenAccountModesAndDevicesDetailNeverRequestStorage() {
         val requests = AtomicInteger()

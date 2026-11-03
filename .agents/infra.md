@@ -71,12 +71,22 @@ checkout.
 
 ## Community setup, state, and proxies
 
-- Community first claim is open when `PEPPY_SETUP_TOKEN` is absent or empty. A
-  nonempty value must contain at least 32 UTF-8 bytes and then protects first
-  claim. Configure the same value on every replica; never generate or log a
-  fallback. Unclaimed installs upgraded without the setting become open, so set
-  it before upgrading when protection is required. The setup code, admin
-  password, and vault shared secret remain distinct. Setup and recovery detail
+- With `PEPPY_SETUP_TOKEN` absent or empty, community first claim needs no token
+  but is open only for 60 minutes after each server process start, measured by a
+  monotonic clock held in `ApiState`. Afterward a fresh claim returns
+  `setup_window_closed` until the process restarts. Each replica has an
+  independent window, and a restart reopens it. No environment variable changes
+  this window. A nonempty value must contain at least 32 UTF-8 bytes; it protects
+  first claim and has no time window. Protected retries and already-claimed
+  responses do not depend on the window. Hosted row-security mode never offers
+  community setup. The window limits how long an unclaimed token-free install
+  stays exposed. It does not authenticate the operator and does not stop an
+  attacker who claims during an open window. Configure the same token on every
+  replica when protection is required, and never generate or log a fallback.
+  Unclaimed installs upgraded without the setting become open for a window after
+  their next start, so set the token before upgrading when protection is
+  required. The setup code, admin password, and vault shared secret remain
+  distinct. Setup and recovery detail
   is canonical in [first-run setup](../README.md#first-run-setup-and-device-connections),
   [unwanted first claim](../README.md#recover-from-an-unwanted-first-claim), and
   [hosted enrollment](AGENTS.md#hosted-enrollment-and-pairing).

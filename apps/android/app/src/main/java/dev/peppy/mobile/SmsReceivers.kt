@@ -47,9 +47,10 @@ class IncomingSmsReceiver : BroadcastReceiver() {
         } catch (_: Exception) {
             return
         }
-        val parts = messages.filterNotNull().mapNotNull { message ->
+        if (messages.size > IncomingCapture.MAX_CARRIER_PARTS) return
+        val parts = IncomingCapture.boundedParts(messages.filterNotNull().mapNotNull { message ->
             message.originatingAddress?.let { IncomingSmsPart(it, message.messageBody.orEmpty(), message.timestampMillis) }
-        }
+        })
         if (parts.isEmpty()) return
         val app = context.applicationContext
         val pending = goAsync()
@@ -62,6 +63,19 @@ class IncomingSmsReceiver : BroadcastReceiver() {
 }
 
 object IncomingCapture {
+    /** A concatenated SMS uses an 8-bit UDH count. Platform-decoded text is not wire bytes. */
+    internal const val MAX_CARRIER_PARTS = 255
+    private const val MAX_DECODED_PART_CHARS = 160
+    private const val MAX_DECODED_BROADCAST_CHARS = MAX_CARRIER_PARTS * MAX_DECODED_PART_CHARS
+
+    internal fun boundedParts(parts: List<IncomingSmsPart>): List<IncomingSmsPart> {
+        if (parts.size > MAX_CARRIER_PARTS) return emptyList()
+        return parts.takeIf { incoming ->
+            incoming.all { part -> part.body.length <= MAX_DECODED_PART_CHARS } &&
+                incoming.sumOf { it.body.length.toLong() } <= MAX_DECODED_BROADCAST_CHARS.toLong()
+        }.orEmpty()
+    }
+
     /** Provider recovery is a best-effort hint only; it contains no SMS content or address. */
     fun recover(context: Context) {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) {
@@ -80,7 +94,8 @@ object IncomingCapture {
      * durably captured. Returns the number of messages captured (including core duplicates).
      */
     fun handle(context: Context, parts: List<IncomingSmsPart>): Int {
-        if (parts.isEmpty() ||
+        val bounded = boundedParts(parts)
+        if (bounded.isEmpty() ||
             !GatewayPolicyHost(context).permitsSmsCapture() ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -90,7 +105,7 @@ object IncomingCapture {
         // the core stores the capture unsealed and seals it after unlock/key-cache import.
         val client = NativeGateway.open(context) ?: return 0
         var captured = 0
-        for ((address, group) in parts.groupBy { it.address }) {
+        for ((address, group) in bounded.groupBy { it.address }) {
             val body = group.joinToString(separator = "") { it.body }
             val timestamp = group.first().timestampMillis
             try {

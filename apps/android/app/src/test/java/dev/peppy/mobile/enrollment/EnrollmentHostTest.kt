@@ -56,6 +56,7 @@ class EnrollmentHostTest {
     @Test fun claimErrorsUseOnlyWhitelistedJsonCodes() {
         assertEquals(ImportResult.SETUP_TOKEN_REJECTED, claimErrorResult("{\"code\":\"invalid_setup_token\"}"))
         assertEquals(ImportResult.INSTANCE_ALREADY_CLAIMED, claimErrorResult("{\"code\":\"instance_already_claimed\"}"))
+        assertEquals(ImportResult.SETUP_WINDOW_CLOSED, claimErrorResult("{\"code\":\"setup_window_closed\"}"))
         assertNull(claimErrorResult("invalid_setup_token"))
         assertNull(claimErrorResult("{\"code\":\"unexpected\"}"))
     }

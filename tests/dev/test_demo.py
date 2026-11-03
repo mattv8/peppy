@@ -50,6 +50,15 @@ class DemoTests(unittest.TestCase):
         self.assertEqual(values["PUBLIC_ATTACHMENT_URL"], "https://127.0.0.1")
         self.assertEqual(values["BIND_ADDR"], "127.0.0.1:8080")
 
+    def test_synthetic_environment_generates_distinct_database_roles_and_passwords(self):
+        values = demo.synthetic_values()
+        self.assertNotEqual(values["POSTGRES_USER"], values["PEPPY_RUNTIME_DB_USER"])
+        self.assertNotEqual(values["POSTGRES_USER"], values["PEPPY_MAINTENANCE_DB_USER"])
+        self.assertNotEqual(values["PEPPY_RUNTIME_DB_USER"], values["PEPPY_MAINTENANCE_DB_USER"])
+        self.assertNotEqual(values["POSTGRES_PASSWORD"], values["PEPPY_RUNTIME_DB_PASSWORD"])
+        self.assertNotEqual(values["POSTGRES_PASSWORD"], values["PEPPY_MAINTENANCE_DB_PASSWORD"])
+        self.assertNotEqual(values["PEPPY_RUNTIME_DB_PASSWORD"], values["PEPPY_MAINTENANCE_DB_PASSWORD"])
+
     def test_simulator_passphrase_has_distinct_words_and_is_not_in_dotenv(self):
         with mock.patch.object(demo.secrets, "token_urlsafe", return_value="random-token") as random_token:
             passphrase = demo.synthetic_simulator_passphrase()

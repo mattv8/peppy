@@ -9,11 +9,29 @@ export function renderBrowserStopped(container: HTMLElement, reason: string, rel
     : conflictingWorker ? "Another incompatible Peppy worker owns this browser session. Close that copy, then try again."
     : "Your running Peppy session stopped. Reload to reconnect securely.";
 
-  container.innerHTML = '<main id="browser-stopped" data-browser-screen="browser-stopped" role="main" aria-labelledby="browser-stopped-heading"><section id="browser-stopped-content"><h1 id="browser-stopped-heading" tabindex="-1"></h1><p id="browser-stopped-message"></p><button id="browser-stopped-reload" class="primary-button" type="button">Reload Peppy</button></section></main>';
-  container.querySelector<HTMLElement>("#browser-stopped")!.dataset.stopReason = reason;
-  const title = container.querySelector<HTMLElement>("#browser-stopped-heading")!;
+  const page = document.createElement("main");
+  page.id = "browser-stopped";
+  page.dataset.browserScreen = "browser-stopped";
+  page.dataset.stopReason = reason;
+  page.setAttribute("role", "main");
+  page.setAttribute("aria-labelledby", "browser-stopped-heading");
+  const section = document.createElement("section");
+  section.id = "browser-stopped-content";
+  const title = document.createElement("h1");
+  title.id = "browser-stopped-heading";
+  title.tabIndex = -1;
+  const messageElement = document.createElement("p");
+  messageElement.id = "browser-stopped-message";
+  const reloadButton = document.createElement("button");
+  reloadButton.id = "browser-stopped-reload";
+  reloadButton.className = "primary-button";
+  reloadButton.type = "button";
+  reloadButton.textContent = "Reload Peppy";
+  section.append(title, messageElement, reloadButton);
+  page.append(section);
+  container.replaceChildren(page);
   title.textContent = heading;
-  container.querySelector("#browser-stopped-message")!.textContent = message;
-  container.querySelector("#browser-stopped-reload")!.addEventListener("click", reload);
+  messageElement.textContent = message;
+  reloadButton.addEventListener("click", reload);
   title.focus();
 }
