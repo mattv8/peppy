@@ -4447,12 +4447,29 @@ describe("gateway routes", () => {
     await screen.findByRole("button", { name: "Save notes.pdf" });
 
     fireEvent.click(screen.getByRole("button", { name: "Save notes.pdf" }));
-    await screen.findByText(/Downloading notes.pdf/);
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading notes.pdf before saving.");
     await act(async () => hint?.());
     await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledTimes(2));
 
     expect(mediaProbe).not.toHaveBeenCalled();
     expect(bridge.save_attachment).toHaveBeenLastCalledWith("pending-pdf");
+  });
+
+  it("keeps PDI and RLO filename characters inside the pending-save notice", async () => {
+    const name = "a\u2069\u202Etxt.exe";
+    host.conversations[0].messages[0].attachments[0] = { ...host.conversations[0].messages[0].attachments[0], name };
+    vi.mocked(bridge.save_attachment).mockRejectedValueOnce({ code: "media-pending" });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: `Save ${name}` }));
+
+    const notice = await screen.findByTestId("app-notice-action");
+    const isolatedName = notice.querySelector("bdi");
+    expect(notice).toHaveTextContent(`Downloading ${name} before saving.`);
+    expect(isolatedName?.textContent).toBe(name);
+    expect(isolatedName).toHaveStyle({ display: "inline-block" });
+    expect(notice.querySelector('[role="status"]')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss action notice" }));
+    expect(screen.queryByTestId("app-notice-action")).not.toBeInTheDocument();
   });
 
   it("processes overlapping pending-save hints once per attachment", async () => {
@@ -4468,7 +4485,7 @@ describe("gateway routes", () => {
     await screen.findByRole("button", { name: "Save photo.png" });
 
     fireEvent.click(screen.getByRole("button", { name: "Save photo.png" }));
-    await screen.findByText(/Downloading photo.png/);
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo.png before saving.");
     await act(async () => hint?.());
     await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledTimes(2));
     await act(async () => {
@@ -4476,7 +4493,7 @@ describe("gateway routes", () => {
       hint?.();
     });
     fireEvent.click(screen.getByRole("button", { name: "Save photo-two.png" }));
-    await screen.findByText(/Downloading photo-two.png/);
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo-two.png before saving.");
     expect(bridge.save_attachment).toHaveBeenCalledTimes(3);
     await act(async () => resolveSave.resolve(true));
     await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledWith("photo-2"));
@@ -4488,7 +4505,7 @@ describe("gateway routes", () => {
     const rendered = render(<App />);
     await screen.findByRole("button", { name: "Save photo.png" });
     fireEvent.click(screen.getByRole("button", { name: "Save photo.png" }));
-    await screen.findByText(/Downloading photo.png/);
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo.png before saving.");
     rendered.unmount();
     await act(async () => hint?.());
     expect(bridge.save_attachment).toHaveBeenCalledOnce();

@@ -6,7 +6,10 @@ use axum::{
     extract::ConnectInfo,
     http::{Method, Request, StatusCode},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use peppy_crypto::KeyProfile;
 use peppy_server::{ServerBuilder, config::Config};
 use serde_json::{Value, json};
@@ -668,7 +671,7 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
             .header("connection", "upgrade")
             .header("upgrade", "websocket")
             .header("sec-websocket-version", "13")
-            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+            .header("sec-websocket-key", STANDARD.encode([0x42_u8; 16]));
         if let Some(credential) = credential {
             request = request.header("authorization", credential);
         }
