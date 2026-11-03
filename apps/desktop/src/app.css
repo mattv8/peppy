@@ -535,6 +535,18 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   color: var(--peppy-tone-on-surface);
   border-color: var(--peppy-tone-border);
 }
+.message-bubble[data-chromeless] {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--peppy-text-primary);
+  border-radius: var(--peppy-radius-md, 8px);
+}
+.message-row.self .message-bubble[data-chromeless] { align-items: flex-end; }
 .message-bubble p {
   margin: 0 0 6px;
   white-space: pre-wrap;
@@ -590,6 +602,17 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 }
 .message-bubble.self .message-subject { color: var(--peppy-accent-text); }
 .message-bubble[data-peppy-tone] .message-subject { color: inherit; }
+.message-bubble[data-chromeless] [data-message-caption] {
+  max-width: 100%;
+  margin: 6px 0 2px;
+  color: var(--peppy-text-primary);
+  text-align: start;
+}
+.message-bubble[data-chromeless] .message-subject {
+  margin-top: 2px;
+  color: var(--peppy-text-secondary);
+  font-size: 11px;
+}
 @media (forced-colors: active) {
   .message-bubble[data-peppy-tone] { background: Canvas; color: CanvasText; border-color: CanvasText; }
   .message-sender-label { color: CanvasText; }
@@ -649,8 +672,6 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   width: 100%;
   color: var(--peppy-text-primary);
 }
-.message-bubble [data-inline-media],
-.message-bubble [data-media-play-trigger] { color: var(--peppy-text-primary); }
 .public-copy label {
   display: grid;
   gap: 4px;

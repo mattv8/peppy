@@ -22,6 +22,14 @@ const image = (id: string): AttachmentView => ({
   previewUrl: preview,
 });
 
+const video = (id: string): AttachmentView => ({
+  id,
+  name: `${id}.mp4`,
+  mediaType: "video/mp4",
+  byteSize: 1,
+  state: "ready",
+});
+
 const message = (id: string, attachment: AttachmentView, senderAddress = "+15550001"): MessageView => ({
   id,
   revision: id,
@@ -119,6 +127,88 @@ afterEach(() => {
 });
 
 describe("App media wiring", () => {
+  it("renders video-only messages without bubble chrome and places the caption after the video", async () => {
+    const attachment = { ...video("clip"), mediaMeta: { width: 1080, height: 1920 } };
+    currentSnapshot = snapshot([{ ...message("video-only", attachment), sender: "self", body: "Watch this" }]);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Play video: clip.mp4" });
+    const article = document.querySelector<HTMLElement>('article[data-message-id="video-only"]')!;
+    const inlineMedia = article.querySelector("[data-inline-media]")!;
+    const caption = article.querySelector("[data-message-caption]")!;
+    expect(article).toHaveAttribute("data-chromeless");
+    expect(article).not.toHaveClass("self");
+    expect(article).not.toHaveAttribute("data-peppy-tone");
+    expect(article).toHaveStyle("--video-ar: 1080 / 1920");
+    expect(caption).toHaveTextContent("Watch this");
+    expect(inlineMedia.compareDocumentPosition(caption) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["zero", { width: 0, height: 1920 }],
+    ["NaN", { width: Number.NaN, height: 1920 }],
+  ])("does not inline a video aspect ratio when media metadata is %s", async (_state, mediaMeta) => {
+    const attachment = { ...video("clip"), mediaMeta };
+    currentSnapshot = snapshot([message("video-only", attachment)]);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Play video: clip.mp4" });
+    expect(document.querySelector<HTMLElement>('article[data-message-id="video-only"]')?.style.getPropertyValue("--video-ar")).toBe("");
+  });
+
+  it("keeps a storage-removed single video chromeless without a caption", async () => {
+    const attachment = { ...video("removed-clip"), remoteState: "removed_by_storage_policy" as const, localAvailable: false };
+    currentSnapshot = snapshot([message("removed-video", attachment)]);
+
+    render(<App />);
+
+    await waitFor(() => expect(document.querySelector('article[data-message-id="removed-video"]')).toBeInTheDocument());
+    const article = document.querySelector<HTMLElement>('article[data-message-id="removed-video"]');
+    expect(article).toHaveAttribute("data-chromeless");
+    expect(article?.querySelector("[data-message-caption]")).toBeNull();
+  });
+
+  it("renders a chromeless subject after its caption", async () => {
+    const attachment = video("subject-clip");
+    currentSnapshot = snapshot([{ ...message("subject-video", attachment), body: "Watch this", subject: "A subject" }]);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Play video: subject-clip.mp4" });
+    const article = document.querySelector<HTMLElement>('article[data-message-id="subject-video"]')!;
+    const caption = article.querySelector("[data-message-caption]")!;
+    const subject = article.querySelector(".message-subject")!;
+    expect(caption.compareDocumentPosition(subject) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps mixed attachment messages in their bubble", async () => {
+    const clip = video("mixed-clip");
+    currentSnapshot = snapshot([{ ...message("mixed", clip), attachments: [clip, image("mixed-file")] }]);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Play video: mixed-clip.mp4" });
+    const article = document.querySelector<HTMLElement>('article[data-message-id="mixed"]')!;
+    expect(article).not.toHaveAttribute("data-chromeless");
+    expect(article).toHaveClass("other");
+    expect(article).toHaveAttribute("data-peppy-tone");
+  });
+
+  it("leaves text-only self bubbles unchanged", async () => {
+    currentSnapshot = snapshot([{ ...message("text-only", image("unused")), sender: "self", body: "Still a bubble", transport: "sms", attachments: [] }]);
+
+    render(<App />);
+
+    await screen.findByText("Still a bubble");
+    const article = document.querySelector<HTMLElement>('article[data-message-id="text-only"]')!;
+    expect(article).toHaveClass("self");
+    expect(article).not.toHaveAttribute("data-chromeless");
+    expect(article).not.toHaveAttribute("data-peppy-tone");
+  });
+
   it("opens composer media in a native viewer when the bridge supports it", async () => {
     const attachment = image("composer-image");
     currentSnapshot = snapshot([message("composer-message", attachment)]);

@@ -365,6 +365,15 @@ function attachmentState(file: AttachmentView): string {
     : file.state.charAt(0).toUpperCase() + file.state.slice(1);
 }
 
+function videoAspectRatio(mediaMeta: AttachmentView["mediaMeta"]): string | undefined {
+  const width = mediaMeta?.width;
+  const height = mediaMeta?.height;
+  return typeof width === "number" && Number.isFinite(width) && width > 0
+    && typeof height === "number" && Number.isFinite(height) && height > 0
+    ? `${width} / ${height}`
+    : undefined;
+}
+
 /* ------------------------------------------------------------------ window context */
 
 /** Composer windows are opened natively as `index.html?window=composer&conversationId=<uuid>`. */
@@ -899,6 +908,12 @@ function MessageList({
           if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
           if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
           const badges = reactions.badges.get(message.id);
+          const chromeless = message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("video/"));
+          const video = chromeless && message.attachments.length === 1 ? message.attachments[0] : undefined;
+          const aspectRatio = videoAspectRatio(video?.mediaMeta);
+          const bubbleStyle: CSSProperties | undefined = chromeless
+            ? aspectRatio ? { "--video-ar": aspectRatio } as CSSProperties : undefined
+            : message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined;
           const bubble = (
             <article
               ref={(row) => registerRow(message.id, row)}
@@ -906,14 +921,15 @@ function MessageList({
               data-search-target={searchTargetId === message.id || undefined}
               aria-describedby={searchTargetId === message.id ? "search-result-message-hint" : undefined}
               tabIndex={searchTargetId === message.id ? -1 : undefined}
-              className={`message-bubble ${message.sender}`}
-              data-peppy-tone={message.sender === "other" || undefined}
-              style={message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined}
+              className={chromeless ? "message-bubble" : `message-bubble ${message.sender}`}
+              data-chromeless={chromeless || undefined}
+              data-peppy-tone={(!chromeless && message.sender === "other") || undefined}
+              style={bubbleStyle}
               title={hiddenTimeTitle(message)}
             >
               {sender && <span className="sr-only">From {sender.label.text}: </span>}
-              {message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
-              {message.subject && <p className="message-subject">Subject: {message.subject}</p>}
+              {!chromeless && message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
+              {!chromeless && message.subject && <p className="message-subject">Subject: {message.subject}</p>}
               {message.attachments.map((file) => {
                 const copy = publicCopies[file.id];
                 if (originalPending(file)) return <MediaTile key={file.id} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
@@ -987,6 +1003,8 @@ function MessageList({
                   </div>
                 );
               })}
+              {chromeless && message.body && <p data-message-caption><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
+              {chromeless && message.subject && <p className="message-subject">Subject: {message.subject}</p>}
             </article>
           );
           return (
