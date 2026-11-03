@@ -64,7 +64,7 @@ class PhoneReadEffectsTest {
             fixture.provider.threads.clear()
             fixture.provider.threads += fixture.thread(emptySet())
             fixture.notifications.activeLists.clear()
-            fixture.notifications.activeLists += emptyList()
+            fixture.notifications.activeLists.add(emptyList())
             val run = fixture.runner().run()
             assertTrue(run.acted)
             assertEquals(listOf("complete"), fixture.core.events)
@@ -110,7 +110,7 @@ class PhoneReadEffectsTest {
             fixture.core.pending = fixture.core.pending + second
             if (secondRowUnavailable) fixture.provider.unavailableIds += "2"
             fixture.notifications.activeLists.clear()
-            fixture.notifications.activeLists += emptyList()
+            fixture.notifications.activeLists.add(emptyList())
             fixture.runner().run()
         }
         assertTrue(run(secondRowUnavailable = false).evaluatedNotifications)
@@ -139,14 +139,14 @@ class PhoneReadEffectsTest {
         }
         Fixture().use { fixture ->
             fixture.notifications.activeLists.clear()
-            fixture.notifications.activeLists += emptyList()
+            fixture.notifications.activeLists.add(emptyList())
             assertEquals(PhoneReadDiagnostics.SKIPPED_NO_CANDIDATE, fixture.runner().run().outcome)
         }
         Fixture().use { fixture ->
             fixture.provider.threads.clear()
             fixture.provider.threads += fixture.thread(emptySet())
             fixture.notifications.activeLists.clear()
-            fixture.notifications.activeLists += emptyList()
+            fixture.notifications.activeLists.add(emptyList())
             assertEquals(PhoneReadDiagnostics.COMPLETED_ONLY, fixture.runner().run().outcome)
         }
         Fixture().use { fixture ->
@@ -165,7 +165,7 @@ class PhoneReadEffectsTest {
     @Test fun noCandidatesDoesNotQueryCollisionOrAct() {
         Fixture().use { fixture ->
             fixture.notifications.activeLists.clear()
-            fixture.notifications.activeLists += emptyList()
+            fixture.notifications.activeLists.add(emptyList())
             fixture.runner().run()
             assertEquals(0, fixture.provider.collisionCalls)
             assertEquals(emptyList<String>(), fixture.core.events)
@@ -339,11 +339,11 @@ class PhoneReadEffectsTest {
                 .setSemanticAction(if (markRead) NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ else NotificationCompat.Action.SEMANTIC_ACTION_NONE)
                 .setShowsUserInterface(false)
                 .build()
+            val style = NotificationCompat.MessagingStyle(Person.Builder().setName("me").build())
+            for (time in times) style.addMessage("body", time, null as Person?)
             val builder = NotificationCompat.Builder(context, "phone-read")
                 .setSmallIcon(android.R.drawable.sym_def_app_icon)
-                .setStyle(NotificationCompat.MessagingStyle(Person.Builder().setName("me").build()).apply {
-                    times.forEach { addMessage("body", it, null as Person?) }
-                })
+                .setStyle(style)
             if (notifications.invisibleAction) builder.addInvisibleAction(action) else builder.addAction(action)
             val notification = builder.build()
             return StatusBarNotification("sms", "sms", 1, key, 0, 0, 0, notification, android.os.Process.myUserHandle(), postTime)
