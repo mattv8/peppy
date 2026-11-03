@@ -302,15 +302,16 @@ pub async fn confirm(
     receiver.await.map_err(|_| dialog_error())
 }
 
-pub fn inform(app: &AppHandle, title: &str, message: &str) {
+pub fn inform(app: &AppHandle, title: &str, message: &str) -> bool {
     let Ok(operation) = admit(app) else {
-        return;
+        return false;
     };
     app.dialog()
         .message(message)
         .title(title)
         .kind(MessageDialogKind::Info)
         .show(move |_| drop(operation));
+    true
 }
 
 /// Returns `None` when the person cancels. The passphrase is collected only by a native secure

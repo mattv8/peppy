@@ -44,11 +44,13 @@ struct FakeServerState {
     complete_calls: usize,
     vault_id: Option<String>,
     grant_status: Option<u16>,
+    delete_response: StatusCode,
 }
 
 #[derive(Clone, Copy)]
 enum FakeAuthConfig {
     Google,
+    Apple,
     MissingGoogle,
     Malformed,
     Oversize,
@@ -95,6 +97,7 @@ impl Default for FakeServerState {
             complete_calls: 0,
             vault_id: None,
             grant_status: None,
+            delete_response: StatusCode::NO_CONTENT,
         }
     }
 }
@@ -115,6 +118,10 @@ async fn fake_auth_config_handler(
         FakeAuthConfig::Google => (
             StatusCode::OK,
             r#"{"available_providers":["google"]}"#.to_owned(),
+        ),
+        FakeAuthConfig::Apple => (
+            StatusCode::OK,
+            r#"{"available_providers":["apple"]}"#.to_owned(),
         ),
         FakeAuthConfig::MissingGoogle => {
             (StatusCode::OK, r#"{"available_providers":[]}"#.to_owned())
@@ -156,6 +163,12 @@ async fn fake_account_handler(
         "operation_id": "550e8400-e29b-41d4-a716-446655440001"
     });
     (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn fake_delete_account_handler(
+    axum::extract::State(state): axum::extract::State<Arc<Mutex<FakeServerState>>>,
+) -> impl IntoResponse {
+    state.lock().unwrap().delete_response
 }
 
 async fn fake_session_renew_handler(
@@ -316,7 +329,10 @@ async fn start_fake_server(
     let router = Router::new()
         .route("/hosted/v1/auth/config", get(fake_auth_config_handler))
         .route("/hosted/v1/auth/attempts", post(fake_auth_attempt_handler))
-        .route("/hosted/v1/account", get(fake_account_handler))
+        .route(
+            "/hosted/v1/account",
+            get(fake_account_handler).delete(fake_delete_account_handler),
+        )
         .route(
             "/hosted/v1/auth/session/renew",
             post(fake_session_renew_handler),
@@ -348,38 +364,16 @@ async fn start_fake_server(
 // ============================================================================
 
 #[tokio::test]
-async fn configured_google_is_available_only_when_server_advertises_it() {
+async fn sign_in_providers_preserves_server_advertised_apple_provider() {
     let server_state = Arc::new(Mutex::new(FakeServerState::default()));
     let (uri, _handle) = start_fake_server(server_state.clone()).await;
     let hosted = HostedState::default();
 
-    assert!(
-        super::sign_in_available(&hosted, &uri, Some("desktop-client-id"))
-            .await
-            .unwrap()
-    );
-
-    server_state.lock().unwrap().auth_config = FakeAuthConfig::MissingGoogle;
-    assert!(
-        !super::sign_in_available(&hosted, &uri, Some("desktop-client-id"))
-            .await
-            .unwrap()
-    );
-    let server = server_state.lock().unwrap();
+    server_state.lock().unwrap().auth_config = FakeAuthConfig::Apple;
     assert_eq!(
-        server.auth_attempt_calls, 0,
-        "a missing provider must not create an attempt"
+        super::sign_in_providers(&hosted, &uri).await.unwrap(),
+        ["apple"]
     );
-}
-
-#[tokio::test]
-async fn missing_client_id_is_unavailable_without_fetching_auth_config() {
-    let server_state = Arc::new(Mutex::new(FakeServerState::default()));
-    let (uri, _handle) = start_fake_server(server_state.clone()).await;
-    let hosted = HostedState::default();
-
-    assert!(!super::sign_in_available(&hosted, &uri, None).await.unwrap());
-    assert_eq!(server_state.lock().unwrap().auth_config_calls, 0);
 }
 
 #[tokio::test]
@@ -396,7 +390,7 @@ async fn logout_during_provider_preflight_cancels_the_reserved_sign_in_attempt()
     }));
     let (origin, _handle) = start_fake_server(server_state.clone()).await;
 
-    let preflight = super::begin_sign_in(&hosted, &origin, Some("desktop-client-id"));
+    let preflight = super::begin_sign_in(&hosted, &origin, "google");
     tokio::pin!(preflight);
     let reached = gate.reached.notified();
     tokio::pin!(reached);
@@ -436,10 +430,9 @@ async fn invalid_auth_config_responses_return_typed_retryable_errors() {
             ..FakeServerState::default()
         }));
         let (uri, _handle) = start_fake_server(server_state).await;
-        let error =
-            super::sign_in_available(&HostedState::default(), &uri, Some("desktop-client-id"))
-                .await
-                .unwrap_err();
+        let error = super::sign_in_providers(&HostedState::default(), &uri)
+            .await
+            .unwrap_err();
         assert_eq!(error.code, expected_code);
     }
 }
@@ -465,7 +458,7 @@ async fn loaded_account_survives_missing_google_advertisement() {
         )
         .unwrap();
 
-    let view = super::account_view(&store, &hosted, HTTPS_ORIGIN, Some("desktop-client-id"))
+    let view = super::account_view(&store, &hosted, HTTPS_ORIGIN)
         .await
         .unwrap();
     assert!(view.signed_in);
@@ -502,7 +495,7 @@ async fn loaded_account_survives_malformed_or_unavailable_provider_discovery() {
             )
             .unwrap();
 
-        let view = super::account_view(&store, &hosted, HTTPS_ORIGIN, Some("desktop-client-id"))
+        let view = super::account_view(&store, &hosted, HTTPS_ORIGIN)
             .await
             .unwrap();
 
@@ -541,7 +534,7 @@ async fn loaded_account_survives_refused_provider_discovery() {
         .unwrap()
         .replace(refused);
 
-    let view = super::account_view(&store, &hosted, HTTPS_ORIGIN, Some("desktop-client-id"))
+    let view = super::account_view(&store, &hosted, HTTPS_ORIGIN)
         .await
         .unwrap();
 
@@ -561,13 +554,7 @@ async fn signed_out_provider_discovery_failure_remains_retryable() {
     }));
     let (uri, _handle) = start_fake_server(server_state).await;
 
-    let result = super::account_view(
-        &MemoryStore::default(),
-        &HostedState::default(),
-        &uri,
-        Some("desktop-client-id"),
-    )
-    .await;
+    let result = super::account_view(&MemoryStore::default(), &HostedState::default(), &uri).await;
     let Err(error) = result else {
         panic!("a signed-out discovery failure must remain retryable");
     };
@@ -643,9 +630,7 @@ async fn account_401_signs_out_and_tombstones_session() {
         )
         .unwrap();
 
-    let view = super::account_view(&store, &hosted, &uri, Some("desktop-client-id"))
-        .await
-        .unwrap();
+    let view = super::account_view(&store, &hosted, &uri).await.unwrap();
 
     assert!(!view.signed_in, "Should be signed out after 401");
     assert!(view.available, "Should still be available");
@@ -658,9 +643,9 @@ async fn account_401_signs_out_and_tombstones_session() {
 
 #[tokio::test]
 async fn account_401_uses_current_sign_in_availability_after_tombstoning() {
-    for (auth_config, client_id) in [
-        (FakeAuthConfig::Google, None),
-        (FakeAuthConfig::MissingGoogle, Some("desktop-client-id")),
+    for (auth_config, available) in [
+        (FakeAuthConfig::Google, true),
+        (FakeAuthConfig::MissingGoogle, false),
     ] {
         let store = MemoryStore::default();
         let hosted = HostedState::default();
@@ -682,12 +667,10 @@ async fn account_401_uses_current_sign_in_availability_after_tombstoning() {
             )
             .unwrap();
 
-        let view = super::account_view(&store, &hosted, &uri, client_id)
-            .await
-            .unwrap();
+        let view = super::account_view(&store, &hosted, &uri).await.unwrap();
 
         assert!(!view.signed_in);
-        assert!(!view.available);
+        assert_eq!(view.available, available);
         assert!(store
             .get(&session_key)
             .unwrap()
@@ -1242,9 +1225,7 @@ async fn account_read_write_no_vault_shows_fields() {
         )
         .unwrap();
 
-    let view = super::account_view(&store, &hosted, &uri, Some("desktop-client-id"))
-        .await
-        .unwrap();
+    let view = super::account_view(&store, &hosted, &uri).await.unwrap();
 
     assert!(view.signed_in);
     assert!(view.available);
@@ -1285,14 +1266,136 @@ async fn account_resumable_when_checkpoint_exists() {
     let checkpoint_key = super::checkpoint_key(&uri, account_id);
     store.set(&checkpoint_key, b"checkpoint-data").unwrap();
 
-    let view = super::account_view(&store, &hosted, &uri, Some("desktop-client-id"))
-        .await
-        .unwrap();
+    let view = super::account_view(&store, &hosted, &uri).await.unwrap();
 
     assert!(
         view.resumable,
         "Should show resumable when checkpoint exists"
     );
+}
+
+// ============================================================================
+// Account Deletion Tests
+// ============================================================================
+
+#[tokio::test]
+async fn delete_account_204_tombstones_the_observed_session() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (base, _handle) = start_fake_server(server).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    let key = super::session_key(HTTPS_ORIGIN);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "delete-bearer", super::now_unix() + 3600),
+        )
+        .unwrap();
+    super::load_session_from_store(&store, &hosted, HTTPS_ORIGIN)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        super::delete_account_core(&store, &hosted, HTTPS_ORIGIN)
+            .await
+            .unwrap(),
+        "deleted"
+    );
+    assert!(store
+        .get(&key)
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
+    assert!(hosted.session.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn delete_account_202_keeps_the_session_for_pending_deletion() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState {
+        delete_response: StatusCode::ACCEPTED,
+        ..FakeServerState::default()
+    }));
+    let (base, _handle) = start_fake_server(server).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    let key = super::session_key(HTTPS_ORIGIN);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "pending-bearer", super::now_unix() + 3600),
+        )
+        .unwrap();
+
+    assert_eq!(
+        super::delete_account_core(&store, &hosted, HTTPS_ORIGIN)
+            .await
+            .unwrap(),
+        "pending"
+    );
+    assert!(store
+        .get(&key)
+        .unwrap()
+        .is_some_and(|value| !value.is_empty()));
+}
+
+#[tokio::test]
+async fn delete_account_failures_keep_the_session() {
+    for status in [StatusCode::CONFLICT, StatusCode::INTERNAL_SERVER_ERROR] {
+        let store = MemoryStore::default();
+        let hosted = HostedState::default();
+        let server = Arc::new(Mutex::new(FakeServerState {
+            delete_response: status,
+            ..FakeServerState::default()
+        }));
+        let (base, _handle) = start_fake_server(server).await;
+        hosted.base_override.lock().unwrap().replace(base);
+        let key = super::session_key(HTTPS_ORIGIN);
+        store
+            .set(
+                &key,
+                &encode_session(ACCOUNT, "error-bearer", super::now_unix() + 3600),
+            )
+            .unwrap();
+
+        assert_eq!(
+            super::delete_account_core(&store, &hosted, HTTPS_ORIGIN)
+                .await
+                .unwrap_err()
+                .code,
+            "account-deletion-failed"
+        );
+        assert!(store
+            .get(&key)
+            .unwrap()
+            .is_some_and(|value| !value.is_empty()));
+    }
+
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let refused = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    hosted.base_override.lock().unwrap().replace(refused);
+    let key = super::session_key(HTTPS_ORIGIN);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "offline-bearer", super::now_unix() + 3600),
+        )
+        .unwrap();
+
+    assert_eq!(
+        super::delete_account_core(&store, &hosted, HTTPS_ORIGIN)
+            .await
+            .unwrap_err()
+            .code,
+        "offline"
+    );
+    assert!(store
+        .get(&key)
+        .unwrap()
+        .is_some_and(|value| !value.is_empty()));
 }
 
 // ============================================================================
@@ -2430,7 +2533,7 @@ async fn failed_completion_keeps_checkpoint_and_resume_reuses_operation() {
         peppy_crypto::passphrase::passphrase_acceptable(std::str::from_utf8(&value).unwrap())
     }));
     assert!(
-        super::account_view(&store, &hosted, &uri, Some("desktop-client-id"))
+        super::account_view(&store, &hosted, &uri)
             .await
             .unwrap()
             .resumable

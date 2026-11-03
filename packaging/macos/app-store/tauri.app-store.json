@@ -1,0 +1,16 @@
+{
+  "productName": "Peppy",
+  "identifier": "org.peppy.desktop",
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "entitlements": "../../../packaging/macos/app-store/entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}

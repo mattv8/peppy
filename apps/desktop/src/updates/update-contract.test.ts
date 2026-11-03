@@ -6,7 +6,7 @@ describe("UpdateStatus Rust serde parity fixture", () => {
   it("uses exactly the frozen native DTO field names", () => {
     expect(Object.keys(UPDATE_STATUS_SERDE_FIXTURE).sort()).toEqual([
       "automatic", "availableVersion", "canRestart", "channel", "currentVersion",
-      "deferredUntil", "lastCheckedAt", "message", "packageKind", "phase",
+      "deferredUntil", "distribution", "lastCheckedAt", "message", "packageKind", "phase",
       "progressPercent", "releaseNotesUrl", "unattended",
     ]);
   });

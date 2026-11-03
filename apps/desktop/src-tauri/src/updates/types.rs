@@ -1,11 +1,14 @@
 use serde::Serialize;
 
+use crate::distribution::Distribution;
+
 /// The complete, renderer-safe update contract. Paths, feed URLs, signatures and
 /// installer arguments deliberately never cross the IPC boundary.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
     pub current_version: String,
+    pub distribution: Distribution,
     pub channel: UpdateChannel,
     pub phase: UpdatePhase,
     pub automatic: bool,
@@ -47,6 +50,7 @@ impl UpdateStatus {
     pub fn idle(current_version: String, channel: UpdateChannel) -> Self {
         Self {
             current_version,
+            distribution: Distribution::detect(),
             channel,
             phase: UpdatePhase::Idle,
             automatic: true,
@@ -72,8 +76,10 @@ impl UpdateStatus {
     }
 
     pub fn disabled(current_version: String) -> Self {
+        let distribution = Distribution::detect();
         Self {
             current_version,
+            distribution,
             channel: UpdateChannel::Disabled,
             phase: UpdatePhase::Disabled,
             automatic: false,
@@ -81,7 +87,13 @@ impl UpdateStatus {
             progress_percent: None,
             last_checked_at: None,
             deferred_until: None,
-            message: Some("Updates are disabled for this development build.".into()),
+            message: Some(
+                match distribution {
+                    Distribution::Direct => "Updates are disabled for this development build.",
+                    Distribution::AppStore => "Updates are delivered by the App Store.",
+                }
+                .into(),
+            ),
             release_notes_url: None,
             can_restart: false,
             package_kind: package_kind().into(),
@@ -130,6 +142,7 @@ mod tests {
     fn serializes_the_frozen_renderer_contract() {
         let status = UpdateStatus {
             current_version: "1.2.3".into(),
+            distribution: Distribution::Direct,
             channel: UpdateChannel::Stable,
             phase: UpdatePhase::Ready,
             automatic: true,
@@ -143,8 +156,10 @@ mod tests {
             package_kind: "appimage".into(),
             unattended: false,
         };
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../src/updates/update-status.fixture.json")).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/updates/update-status.fixture.json"
+        ))
+        .unwrap();
         assert_eq!(serde_json::to_value(status).unwrap(), fixture);
     }
 

@@ -19,10 +19,11 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::distribution::Distribution;
 use crate::error::{BridgeError, BridgeResult};
 
-pub(crate) use self::policy::STARTUP_DELAY_SECS;
 use self::policy::{defer_is_active, parse_channel, strictly_newer, RetrySchedule, LATER_SECS};
+pub(crate) use self::policy::{should_start_update_loops, STARTUP_DELAY_SECS};
 use super::{
     types::{UpdateChannel, UpdatePhase, UpdateStatus},
     STATE_EVENT,
@@ -95,7 +96,10 @@ impl UpdateManager {
         let channel = parse_channel(option_env!("PEPPY_UPDATE_CHANNEL"));
         let key_present =
             option_env!("PEPPY_UPDATE_PUBLIC_KEY").is_some_and(|key| !key.trim().is_empty());
-        let status = if channel == UpdateChannel::Disabled || !key_present {
+        let status = if Distribution::detect() == Distribution::AppStore
+            || channel == UpdateChannel::Disabled
+            || !key_present
+        {
             UpdateStatus::disabled(current_version)
         } else {
             UpdateStatus::idle(current_version, channel)
@@ -115,6 +119,9 @@ impl UpdateManager {
     }
 
     pub fn initialize(&self, app: &AppHandle, root: &Path) -> BridgeResult<()> {
+        if self.status().distribution == Distribution::AppStore {
+            return Ok(());
+        }
         let (mut settings, settings_error) = match cache::load_settings(root) {
             Ok(settings) => (settings, false),
             Err(_) => (
@@ -223,6 +230,9 @@ impl UpdateManager {
     }
 
     pub fn set_automatic(&self, enabled: bool) -> BridgeResult<UpdateStatus> {
+        if self.status().distribution == Distribution::AppStore {
+            return Ok(self.status());
+        }
         self.persist_preference(
             |settings| settings.automatic = enabled,
             |inner| {

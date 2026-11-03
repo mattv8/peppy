@@ -72,6 +72,9 @@ const COMMANDS: &[&str] = &[
     "set_maximize_button_region",
     "close_head_panel",
     "set_start_at_login",
+    "startup_status",
+    "set_open_in_background",
+    "open_login_items",
     "get_notification_sound",
     "set_notification_sound",
     "popout_conversation",
@@ -83,6 +86,13 @@ const COMMANDS: &[&str] = &[
     "hosted_sign_out",
     "hosted_open_billing",
     "hosted_provision",
+    "hosted_delete_account",
+    "purchase_options",
+    "store_products",
+    "store_purchase",
+    "store_restore",
+    "open_store_subscriptions",
+    "billing_summary",
     "enrollment_discover",
     "enrollment_start_over",
     "enrollment_create_owner",
@@ -116,6 +126,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PEPPY_DEV_TLS_CERT");
     println!("cargo:rerun-if-env-changed=PEPPY_UPDATE_CHANNEL");
     println!("cargo:rerun-if-env-changed=PEPPY_UPDATE_PUBLIC_KEY");
+    link_storekit_bridge();
     #[cfg(feature = "dev-local-tls")]
     embed_development_tls_ca();
     let mut attributes = tauri_build::Attributes::new()
@@ -123,11 +134,41 @@ fn main() {
     if embed_windows_common_controls_manifest() {
         // The linker owns the sole application manifest on this target. tauri-winres would
         // otherwise emit a second RT_MANIFEST resource that collides with it.
-        attributes = attributes.windows_attributes(
-            tauri_build::WindowsAttributes::new_without_app_manifest(),
-        );
+        attributes = attributes
+            .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
     }
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
+}
+
+/// `swift-rs` is a macOS-host build dependency, so non-macOS hosts compile a no-op.
+#[cfg(not(target_os = "macos"))]
+fn link_storekit_bridge() {}
+
+#[cfg(target_os = "macos")]
+fn link_storekit_bridge() {
+    use std::{env, ffi::OsStr, path::PathBuf};
+
+    if env::var_os("CARGO_CFG_TARGET_OS").as_deref() != Some(OsStr::new("macos")) {
+        return;
+    }
+    swift_rs::SwiftLinker::new("11.0")
+        .with_package("StoreKitBridge", "native/storekit")
+        .link();
+    // Swift 6.x's build system writes products to `out/Products/<Configuration>` instead of
+    // the `<triple>/<configuration>` directory swift-rs 1.0.9 adds to the search path.
+    let configuration = if env::var("PROFILE").as_deref() == Ok("release") {
+        "Release"
+    } else {
+        "Debug"
+    };
+    let products = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by Cargo"))
+        .join("swift-rs/StoreKitBridge/out/Products")
+        .join(configuration);
+    println!("cargo:rustc-link-search=native={}", products.display());
+    // App Store builds call StoreKit only on macOS 12+; direct macOS 11 builds need this weak link.
+    println!("cargo:rustc-link-arg=-Wl,-weak-lswift_Concurrency");
+    // The Swift concurrency runtime ships in newer OS versions; executables must find it there.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }
 
 /// Embeds the Common Controls v6 manifest through the MSVC linker for every package artifact,

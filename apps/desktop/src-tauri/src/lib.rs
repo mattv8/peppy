@@ -30,6 +30,7 @@ mod contacts;
 mod credentials;
 mod devices;
 mod dialogs;
+mod distribution;
 mod dto;
 mod enrollment;
 mod error;
@@ -45,6 +46,7 @@ mod activation_session_tests;
 mod draft_command_tests;
 mod hosted;
 mod lifecycle;
+mod login_item;
 mod material_state;
 mod media;
 mod net;
@@ -52,6 +54,7 @@ mod notification_activation;
 mod notification_permission;
 mod notifications;
 mod origin;
+mod purchases;
 mod recents;
 #[cfg(test)]
 mod recents_command_tests;
@@ -62,6 +65,7 @@ mod security_tests;
 mod session;
 mod snap_layout;
 mod startup;
+mod storekit;
 mod sync;
 #[cfg(test)]
 mod tests;
@@ -241,7 +245,9 @@ fn window_error() -> BridgeError {
     )
 }
 
-fn admit_update_operation(state: &AppState) -> BridgeResult<update_safety::OperationGuard> {
+pub(crate) fn admit_update_operation(
+    state: &AppState,
+) -> BridgeResult<update_safety::OperationGuard> {
     state
         .update_safety
         .enter()
@@ -630,11 +636,14 @@ impl AppState {
         state
     }
 
-    fn config(&self) -> BridgeResult<HostConfig> {
+    pub(crate) fn config(&self) -> BridgeResult<HostConfig> {
         load_config(&self.config_path)
     }
 
-    fn update_config(&self, update: impl FnOnce(&mut HostConfig)) -> BridgeResult<HostConfig> {
+    pub(crate) fn update_config(
+        &self,
+        update: impl FnOnce(&mut HostConfig),
+    ) -> BridgeResult<HostConfig> {
         let _guard = self
             .config_lock
             .lock()
@@ -1837,17 +1846,23 @@ fn start_app_lock_check(app: tauri::AppHandle) {
         if state.app_lock_check_generation.load(Ordering::Acquire) == generation {
             match result {
                 Ok(app_lock::Status::Disabled) => {
-                    state.app_lock_storage_available.store(true, Ordering::Release);
+                    state
+                        .app_lock_storage_available
+                        .store(true, Ordering::Release);
                     state.app_lock_enabled.store(false, Ordering::Release);
                     state.app_locked.store(false, Ordering::Release);
                 }
                 Ok(app_lock::Status::Enabled) => {
-                    state.app_lock_storage_available.store(true, Ordering::Release);
+                    state
+                        .app_lock_storage_available
+                        .store(true, Ordering::Release);
                     state.app_lock_enabled.store(true, Ordering::Release);
                     state.app_locked.store(true, Ordering::Release);
                 }
                 Err(_) => {
-                    state.app_lock_storage_available.store(false, Ordering::Release);
+                    state
+                        .app_lock_storage_available
+                        .store(false, Ordering::Release);
                     state.app_lock_enabled.store(false, Ordering::Release);
                     state.app_locked.store(true, Ordering::Release);
                 }
@@ -1916,7 +1931,9 @@ async fn unlock_app(
     let attempts = state.app_lock_attempts.clone();
     let verified = blocking(move || app_lock::verify(&*store, password, &attempts)).await?;
     if verified {
-        state.app_lock_check_generation.fetch_add(1, Ordering::AcqRel);
+        state
+            .app_lock_check_generation
+            .fetch_add(1, Ordering::AcqRel);
         state.app_locked.store(false, Ordering::Release);
         refresh_lock_menu(&app, &state);
         (state.notifier)();
@@ -1974,7 +1991,9 @@ async fn set_app_lock(
         let store = state.store.clone();
         blocking(move || app_lock::disable(&*store)).await?;
     }
-    state.app_lock_check_generation.fetch_add(1, Ordering::AcqRel);
+    state
+        .app_lock_check_generation
+        .fetch_add(1, Ordering::AcqRel);
     state.app_lock_enabled.store(enabled, Ordering::Release);
     (state.notifier)();
     Ok(true)
@@ -3266,8 +3285,6 @@ async fn open_media_viewer(
             .visible(false)
             .focused(true)
             .always_on_top(heads_runtime::is_panel(&app, window.label()));
-    #[cfg(target_os = "macos")]
-    let builder = builder.transparent(true);
     let viewer = match builder.build() {
         Ok(viewer) => viewer,
         Err(_) => {
@@ -4738,23 +4755,6 @@ fn open_notification_settings(
 /// OS registration is authoritative. This command is main-window-only and no
 /// registration is attempted during setup or tests.
 #[tauri::command]
-fn set_start_at_login(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    enabled: bool,
-) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&app.state::<AppState>())?;
-    require_main(window.label())?;
-    let launcher = app.autolaunch();
-    let result = if enabled {
-        launcher.enable()
-    } else {
-        launcher.disable()
-    };
-    result.map_err(|_| BridgeError::new("start-at-login", "Could not update Start at login."))
-}
-
-#[tauri::command]
 fn get_notification_sound(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
@@ -4928,6 +4928,9 @@ async fn restart_for_update(
     }
     #[cfg(feature = "self-update")]
     {
+        if state.updates.status().distribution == distribution::Distribution::AppStore {
+            return Ok(state.updates.status());
+        }
         if let Some(version) = state.updates.installed_pending() {
             state.updates.clear_attempted()?;
             let never = restart_into_installed(
@@ -5351,12 +5354,16 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![startup::BACKGROUND_ARGUMENT]),
+            Some(vec![startup::LOGIN_ARGUMENT]),
         ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init());
     #[cfg(feature = "self-update")]
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = if distribution::Distribution::detect() == distribution::Distribution::Direct {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    };
     let builder = builder
         .setup(|app| {
             let root = app
@@ -5486,55 +5493,54 @@ pub fn run() {
             #[cfg(not(feature = "self-update"))]
             let restart_marker = None;
             app.manage(hosted::HostedState::default());
+            purchases::start(app.handle().clone());
             #[cfg(feature = "self-update")]
-            let updates = state.updates.clone();
-            #[cfg(feature = "self-update")]
-            let update_handle = app.handle().clone();
-            #[cfg(feature = "self-update")]
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(updates::STARTUP_DELAY_SECS))
-                    .await;
-                loop {
-                    if updates.check_due() {
-                        let _ = updates.check_automatic(&update_handle).await;
-                    }
-                    tokio::time::sleep(updates.next_check_delay()).await;
-                }
-            });
-            #[cfg(feature = "self-update")]
-            let updates = state.updates.clone();
-            #[cfg(feature = "self-update")]
-            let update_handle = app.handle().clone();
-            #[cfg(feature = "self-update")]
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    let state = update_handle.state::<AppState>();
-                    if updates.should_auto_restart(&update_handle) {
-                        let _ = install_staged_update(
-                            &update_handle,
-                            &state,
-                            updates::install::InstallIntent::Automatic,
-                        )
+            if updates::should_start_update_loops(distribution::Distribution::detect()) {
+                let updates = state.updates.clone();
+                let update_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(updates::STARTUP_DELAY_SECS))
                         .await;
-                    }
-                }
-            });
-            #[cfg(all(feature = "self-update", target_os = "linux"))]
-            {
-                let status = state.updates.status();
-                if status.channel != updates::types::UpdateChannel::Disabled
-                    && matches!(status.package_kind.as_str(), "deb" | "rpm")
-                {
-                    let update_handle = app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                            let state = update_handle.state::<AppState>();
-                            let _ =
-                                restart_after_external_package_update(&update_handle, &state).await;
+                    loop {
+                        if updates.check_due() {
+                            let _ = updates.check_automatic(&update_handle).await;
                         }
-                    });
+                        tokio::time::sleep(updates.next_check_delay()).await;
+                    }
+                });
+                let updates = state.updates.clone();
+                let update_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        let state = update_handle.state::<AppState>();
+                        if updates.should_auto_restart(&update_handle) {
+                            let _ = install_staged_update(
+                                &update_handle,
+                                &state,
+                                updates::install::InstallIntent::Automatic,
+                            )
+                            .await;
+                        }
+                    }
+                });
+                #[cfg(target_os = "linux")]
+                {
+                    let status = state.updates.status();
+                    if status.channel != updates::types::UpdateChannel::Disabled
+                        && matches!(status.package_kind.as_str(), "deb" | "rpm")
+                    {
+                        let update_handle = app.handle().clone();
+                        tauri::async_runtime::spawn(async move {
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                                let state = update_handle.state::<AppState>();
+                                let _ =
+                                    restart_after_external_package_update(&update_handle, &state)
+                                        .await;
+                            }
+                        });
+                    }
                 }
             }
             #[cfg(all(feature = "self-update", target_os = "macos"))]
@@ -5635,10 +5641,23 @@ pub fn run() {
                 let _ = tray::set_update_status(&tray_handle, &state.updates.status());
             });
             heads_runtime::install(app.handle()).map_err(|e| e.message)?;
+            let config = state.config().map_err(|error| error.message)?;
+            let arguments = std::env::args().collect::<Vec<_>>();
+            let background_requested = startup::background_requested(arguments.clone());
+            let legacy_background_login = startup::legacy_background_is_login(
+                app.autolaunch().is_enabled().unwrap_or(false),
+                background_requested,
+            );
+            let login_launch = startup::login_requested(arguments.clone())
+                || startup::login_launch().unwrap_or(false);
+            let login_launch = login_launch || legacy_background_login;
+            login_item::migrate_startup_registration(app.handle());
             if startup::hide_initial_main(
-                startup::restart_background(
+                startup::initial_background(
                     restart_marker,
-                    startup::background_requested(std::env::args()),
+                    config.open_in_background,
+                    login_launch,
+                    background_requested && !legacy_background_login,
                 ),
                 installed,
             ) {
@@ -5799,7 +5818,6 @@ pub fn run() {
         get_contact_sync_request,
         list_restorable_contacts,
         restore_contact,
-        set_start_at_login,
         get_notification_sound,
         set_notification_sound,
         popout_conversation,
@@ -5807,6 +5825,10 @@ pub fn run() {
         close_composer,
         set_maximize_button_region,
         close_head_panel,
+        login_item::startup_status,
+        login_item::set_start_at_login,
+        login_item::set_open_in_background,
+        login_item::open_login_items,
         update_status,
         check_for_updates,
         restart_for_update,
@@ -5850,6 +5872,13 @@ pub fn run() {
             hosted::hosted_sign_out,
             hosted::hosted_open_billing,
             hosted::hosted_provision,
+            hosted::hosted_delete_account,
+            purchases::purchase_options,
+            purchases::store_products,
+            purchases::store_purchase,
+            purchases::store_restore,
+            purchases::open_store_subscriptions,
+            purchases::billing_summary,
             account_access,
             attachment_retention_status,
             attachment_retention_state,

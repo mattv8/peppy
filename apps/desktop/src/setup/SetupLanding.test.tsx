@@ -8,7 +8,7 @@ import { peppyCopy } from "../generated/peppyCopy";
 import { SetupLanding } from "./SetupLanding";
 
 const account = (overrides: Partial<HostedAccountView> = {}): HostedAccountView => ({
-  available: true, signedIn: false, accountLabel: null, classification: null,
+  available: true, providers: ["google"], signedIn: false, accountLabel: null, classification: null,
   entitlement: null, access: null, hasVault: false, resumable: false, ...overrides,
 });
 const view = (overrides: Partial<EnrollmentView> = {}): EnrollmentView => ({ mode: "community", stage: "server", ...overrides });
@@ -301,11 +301,11 @@ describe("SetupLanding", () => {
     await waitFor(() => expect(bridge.hosted_account).toHaveBeenCalledTimes(2));
   });
 
-  it("disables unavailable sign-in and identifies why", async () => {
+  it("identifies unavailable sign-in without rendering provider controls", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ available: false }));
     renderLanding();
     fireEvent.click(await screen.findByRole("button", { name: /i'm new to peppy/i }));
-    expect(await screen.findByRole("button", { name: /continue with google/i })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /continue with google/i })).not.toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 
@@ -975,7 +975,7 @@ describe("SetupLanding", () => {
     await screen.findByRole("checkbox");
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: "Confirm and approve" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
 
     await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalled());
     await waitFor(() => expect(document.getElementById("hosted-session-recovery-panel")).not.toBeInTheDocument());
@@ -995,7 +995,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_sign_in").mockResolvedValue(account({ signedIn: true, access: "read_write", resumable: true }));
     renderLanding();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
 
     await waitFor(() => expect(bridge.hosted_provision).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("button", { name: /already use peppy/i })).toBeInTheDocument();
@@ -1011,11 +1011,11 @@ describe("SetupLanding", () => {
     renderLanding();
 
     fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
-    const retry = await screen.findByRole("button", { name: "Sign in again with Google" });
+    const retry = await screen.findByRole("button", { name: "Continue with Google" });
     fireEvent.click(retry);
 
     await waitFor(() => expect(bridge.hosted_sign_in).toHaveBeenCalledOnce());
-    await waitFor(() => expect(screen.getByRole("button", { name: "Sign in again with Google" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Continue with Google" })).toBeEnabled());
     const error = document.getElementById("hosted-session-recovery-error");
     expect(error).toHaveAttribute("role", "alert");
     expect(error).toBeVisible();
@@ -1028,13 +1028,13 @@ describe("SetupLanding", () => {
     renderLanding();
     await chooseExisting();
     await screen.findByRole("alert");
-    expect(screen.queryByRole("button", { name: "Sign in again with Google" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue with Google" })).not.toBeInTheDocument();
 
     cleanup();
     vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ mode: "community", stage: "error", errorCode: "hosted-session-required" }));
     renderLanding({ fixedOrigin: "https://community.example" });
     await screen.findByRole("alert");
-    expect(screen.queryByRole("button", { name: "Sign in again with Google" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue with Google" })).not.toBeInTheDocument();
   });
 
   it("keeps recovery active when OAuth returns a signed-out account", async () => {
@@ -1044,10 +1044,10 @@ describe("SetupLanding", () => {
     renderLanding();
 
     fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
 
     await waitFor(() => expect(bridge.hosted_sign_in).toHaveBeenCalledOnce());
-    await waitFor(() => expect(screen.getByRole("button", { name: "Sign in again with Google" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Continue with Google" })).toBeEnabled());
     expect(bridge.hosted_provision).toHaveBeenCalledOnce();
     expect(screen.getByRole("status")).toHaveTextContent("Sign in again to continue.");
   });
@@ -1060,7 +1060,7 @@ describe("SetupLanding", () => {
     renderLanding();
 
     fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
-    const recover = await screen.findByRole("button", { name: "Sign in again with Google" });
+    const recover = await screen.findByRole("button", { name: "Continue with Google" });
     fireEvent.click(recover);
     fireEvent.click(recover);
 
@@ -1076,7 +1076,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_sign_in").mockReturnValue(signIn.promise);
     renderLanding({ addingPhone: true, enrolledWithoutPhone: true, onExit });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     await act(async () => signIn.resolve(account({ signedIn: true, hasVault: true, access: "read_write" })));
 
@@ -1092,7 +1092,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_sign_in").mockReturnValue(signIn.promise);
     const rendered = renderLanding();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
     rendered.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
     await act(async () => signIn.resolve(account({ signedIn: true, hasVault: true, access: "read_write" })));
     expect(bridge.enrollment_status).not.toHaveBeenCalled();
@@ -1101,7 +1101,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_sign_in").mockReturnValue(anotherSignIn.promise);
     cleanup();
     const second = renderLanding();
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
     second.unmount();
     await act(async () => anotherSignIn.resolve(account({ signedIn: true, hasVault: true, access: "read_write" })));
     expect(bridge.enrollment_status).not.toHaveBeenCalled();
@@ -1116,7 +1116,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ mode: "hosted", stage: "server" }));
     renderLanding();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
 
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
     expect(bridge.enrollment_discover).toHaveBeenCalledTimes(2);
@@ -1131,7 +1131,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_sign_in").mockResolvedValue(account({ signedIn: true, hasVault: true, access: "read_write" }));
     renderLanding({ enrolledWithoutPhone: true });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
     const showCode = await screen.findByRole("button", { name: "Show connection code" });
     expect(bridge.enrollment_add_phone).toHaveBeenCalledOnce();
     fireEvent.click(showCode);
@@ -1146,7 +1146,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_sign_in").mockResolvedValue(account({ signedIn: true, resumable: true, classification: "lapsed", access: "read_only" }));
     renderLanding();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
     expect(await screen.findByRole("button", { name: /check subscription/i })).toBeInTheDocument();
     expect(bridge.hosted_provision).toHaveBeenCalledOnce();
   });
@@ -1159,7 +1159,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_sign_in").mockResolvedValue(account({ signedIn: true, resumable: true, access: "read_only" }));
     renderLanding();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in again with Google" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
     expect(await screen.findByRole("button", { name: /check subscription/i })).toBeInTheDocument();
     expect(bridge.hosted_provision).toHaveBeenCalledOnce();
   });
@@ -2284,6 +2284,15 @@ describe("SetupLanding", () => {
       await waitFor(() => expect(bridge.enrollment_cancel_computer).toHaveBeenCalledOnce());
     });
 
+    it("starts re-enrolment directly in the computer claimant QR stage", async () => {
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_waiting", qrPayload: "reenrol-qr", awaitingOwner: true, computerClaimant: true });
+      renderLanding({ reenrol: true });
+
+      expect(await screen.findByRole("img", { name: /computer connection qr code/i })).toBeInTheDocument();
+      expect(document.getElementById("enrollment-computer_waiting")).toBeInTheDocument();
+      expect(bridge.enrollment_connect_computer).toHaveBeenCalledWith();
+    });
+
     it("does not offer a new computer claimant for a locked saved identity", async () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
       renderLanding({ fixedOrigin: "https://community.example" });
@@ -2686,6 +2695,17 @@ describe("SetupLanding", () => {
       expect(button).toBeEnabled();
       expect(bridge.hosted_account).toHaveBeenCalledOnce();
       expect(document.getElementById("hosted-lapsed-card")).toBe(card);
+    });
+
+    it("keeps website billing actions for a Direct Stripe subscription", async () => {
+      vi.spyOn(bridge, "hosted_account").mockResolvedValue(lapsed());
+      vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
+      vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "stripe", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+      renderLanding();
+
+      const card = await lapsedCard();
+      expect(within(card).getByRole("button", { name: peppyCopy.production_billing_open })).toBeInTheDocument();
+      expect(within(card).getByRole("button", { name: peppyCopy.production_billing_check })).toBeInTheDocument();
     });
   });
 });

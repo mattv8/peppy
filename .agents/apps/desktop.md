@@ -19,6 +19,11 @@ just desktop-open
 
 The bundle is fully ad-hoc signed unless `PEPPY_MACOS_SIGNING_IDENTITY` is set, then its nested signatures are verified. Ad-hoc bundles have sealed resources without a TeamIdentifier and are not notarized. Development uses a separate Keychain namespace and never migrates production `org.peppy.desktop` data. Legacy Keychain records copy only within the current namespace, never from production into development. Each ad-hoc rebuild has a new code identity and can prompt again for Keychain access. Set `PEPPY_MACOS_SIGNING_IDENTITY` to an Apple Development or Developer ID identity and choose **Always Allow** once to preserve access across rebuilds. Switching identities prompts once more. Apple Development certificates expire after one year. The base `tauri.conf.json` uses `Peppy_dev` and `org.peppy.desktop.dev`; trusted production installers override them and come from [GitHub Releases](https://github.com/mattv8/peppy/releases).
 
+Mac App Store packaging is opt-in (`PEPPY_MACOS_DISTRIBUTION=app-store`) and
+uses `packaging/macos/app-store/tauri.app-store.json`. It targets macOS 13,
+uses the App Sandbox, embeds its provisioning profile, and produces a signed
+`.pkg`; it does not use the direct-download updater, DMG repair, or notarization.
+
 ## Windows from WSL
 
 Keep the checkout and `CARGO_TARGET_DIR` on a drive-letter NTFS path; the helper rejects ext4 and UNC. Install Node 26, pnpm 12.8.1, pinned Rust, Visual Studio C++ tools with the Windows SDK, WebView2, and native Windows Perl with `IPC::Cmd`. Do not use Git/MSYS Perl.

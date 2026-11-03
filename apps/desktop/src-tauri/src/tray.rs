@@ -2,6 +2,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use crate::{
+    distribution::Distribution,
     error::{BridgeError, BridgeResult},
     heads::PanelLayout,
     updates::types::{UpdatePhase, UpdateStatus},
@@ -115,7 +116,10 @@ pub fn install(
 }
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let state = menu_state().lock().expect("tray menu state poisoned").clone();
+    let state = menu_state()
+        .lock()
+        .expect("tray menu state poisoned")
+        .clone();
     let heads = visible_conversation_entries(state.lock, &state.heads);
     let recents = visible_conversation_entries(state.lock, &state.recents);
     build_menu_with(app, heads, recents, state.update.as_ref(), state.lock)
@@ -292,18 +296,22 @@ pub fn set_update_status(app: &AppHandle, status: &UpdateStatus) -> bool {
 
 fn apply_menu(app: &AppHandle) -> bool {
     let app = app.clone();
-    app.clone().run_on_main_thread(move || {
-        let Ok(menu) = build_menu(&app) else {
-            return;
-        };
-        let _ = app
-            .tray_by_id(TRAY_ID)
-            .is_some_and(|tray| tray.set_menu(Some(menu)).is_ok());
-    })
-    .is_ok()
+    app.clone()
+        .run_on_main_thread(move || {
+            let Ok(menu) = build_menu(&app) else {
+                return;
+            };
+            let _ = app
+                .tray_by_id(TRAY_ID)
+                .is_some_and(|tray| tray.set_menu(Some(menu)).is_ok());
+        })
+        .is_ok()
 }
 
 fn update_item(status: &UpdateStatus) -> Option<UpdateItem> {
+    if status.distribution == Distribution::AppStore {
+        return None;
+    }
     match status.phase {
         UpdatePhase::Ready if status.can_restart => Some(UpdateItem {
             label: "Update ready — Restart Peppy".into(),
@@ -371,8 +379,6 @@ pub fn open_composer_mode(
         .resizable(true)
         .visible(false)
         .focused(true);
-    #[cfg(target_os = "macos")]
-    let builder = builder.transparent(true);
     let builder = if effective_panel {
         builder.always_on_top(true)
     } else {
@@ -890,9 +896,27 @@ mod tests {
     }
 
     #[test]
+    fn app_store_distribution_builds_no_update_menu_items() {
+        let mut status =
+            UpdateStatus::idle("1.0.0".into(), crate::updates::types::UpdateChannel::Stable);
+        status.distribution = Distribution::AppStore;
+        for phase in [
+            UpdatePhase::Ready,
+            UpdatePhase::Deferred,
+            UpdatePhase::Installed,
+            UpdatePhase::AuthorizationRequired,
+        ] {
+            status.phase = phase;
+            status.can_restart = true;
+            assert!(update_item(&status).is_none(), "{phase:?} must be hidden");
+        }
+    }
+
+    #[test]
     fn update_menu_surfaces_only_actionable_restart_or_authorization() {
         let mut status =
             UpdateStatus::idle("1.0.0".into(), crate::updates::types::UpdateChannel::Stable);
+        status.distribution = Distribution::Direct;
         assert!(update_item(&status).is_none());
         status.phase = UpdatePhase::Ready;
         status.can_restart = true;

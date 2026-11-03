@@ -1165,9 +1165,20 @@ select:focus-visible {
 [data-attachment-storage-capacity-row] { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .attachment-storage-learn-more { padding: 0; border: 0; background: transparent; color: var(--peppy-accent); text-decoration: underline; }
 .attachment-storage-learn-more:focus-visible { outline: 2px solid var(--peppy-focus-ring, var(--peppy-accent)); outline-offset: 2px; }
+.link-button { padding: 0; border: 0; background: transparent; color: var(--peppy-accent); text-decoration: underline; }
+.link-button:focus-visible { outline: 2px solid var(--peppy-focus-ring); outline-offset: 2px; }
+.badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-active); color: var(--peppy-text-primary); font-size: 11px; font-weight: 700; }
+[data-tone="warning"] { border-color: var(--peppy-warning-border); background: var(--peppy-warning-surface); color: var(--peppy-warning-text); }
+#billing-elsewhere-notice, #attachment-storage-addons, #hosted-store-plan-options { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-md); background: var(--peppy-surface-panel); }
+#billing-elsewhere-notice h3, #billing-elsewhere-notice h4, #attachment-storage-addons h4, #hosted-store-plan-options p { margin: 0; }
+#attachment-storage-addon-options, #hosted-plan-options, #hosted-paywall-links { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+#attachment-storage-addon-options > li, #hosted-plan-options > li { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm); background: var(--peppy-surface-widget); }
+#hosted-plan-options { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+#attachment-storage-addon-lapsed-warning { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border: 1px solid var(--peppy-warning-border); border-radius: var(--peppy-radius-sm); }
+#attachment-storage-addon-skeleton { min-height: 44px; padding: 8px; border-radius: var(--peppy-radius-sm); background: var(--peppy-surface-active); }
 
 @media (pointer: coarse) {
-  .attachment-storage-info-button { width: 44px; height: 44px; }
+  .attachment-storage-info-button, .link-button, #billing-elsewhere-manage, #attachment-storage-addon-manage, #attachment-storage-addon-retry, #hosted-store-retry, #hosted-restore-button, #hosted-plan-options .primary-button { min-width: 44px; min-height: 44px; }
 }
 
 :where(.theme-system, .theme-light, .theme-dark)[data-bridge-mode="native"][data-platform="linux"] {
@@ -1193,6 +1204,8 @@ select:focus-visible {
   [data-conversation-actions]::before { background: Canvas; }
   .conversation-pin, .conversation-popout, .conversation-delete { color: ButtonText; }
   .conversation-delete.confirming { background: Highlight; color: HighlightText; }
-  .attachment-storage-info-button:focus-visible, .attachment-storage-learn-more:focus-visible { outline-color: Highlight; }
+  .attachment-storage-info-button:focus-visible, .attachment-storage-learn-more:focus-visible, .link-button:focus-visible, #billing-elsewhere-manage:focus-visible, #attachment-storage-addon-manage:focus-visible, #attachment-storage-addon-retry:focus-visible, #hosted-store-retry:focus-visible, #hosted-restore-button:focus-visible, #hosted-plan-options .primary-button:focus-visible { outline-color: Highlight; }
+  #billing-elsewhere-notice, #attachment-storage-addons, #hosted-store-plan-options, #attachment-storage-addon-options > li, #hosted-plan-options > li, #attachment-storage-addon-skeleton { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; }
+  [data-tone="warning"] { border-color: Highlight; background: Canvas; color: CanvasText; }
   .conversation-copy .conversation-delete-warning { color: CanvasText; }
 }

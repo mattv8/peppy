@@ -1,5 +1,6 @@
 {
   "currentVersion": "1.2.3",
+  "distribution": "direct",
   "channel": "stable",
   "phase": "ready",
   "automatic": true,

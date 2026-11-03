@@ -15,7 +15,7 @@ printf '%s\n' '<plist/>' > "$root/macos/Peppy.app/Contents/Info.plist"
 cat > "$fake_bin/pnpm" <<'PNPM'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'ENV|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "${APPLE_CERTIFICATE+x}" "${APPLE_SIGNING_IDENTITY-}" "${APPLE_ID+x}" "${TAURI_SIGNING_PRIVATE_KEY+x}" "${PEPPY_UPDATE_PUBLIC_KEY-}" "${PEPPY_DESKTOP_GOOGLE_CLIENT_ID-}" "${PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET-}" "${RUNNER_OS-}" "${TRUSTED_UPDATE_BUILD-}" "${BUNDLES-}" >> "$PNPM_LOG"
+printf 'ENV|%s|%s|%s|%s|%s|%s|%s\n' "${APPLE_CERTIFICATE+x}" "${APPLE_SIGNING_IDENTITY-}" "${APPLE_ID+x}" "${TAURI_SIGNING_PRIVATE_KEY+x}" "${PEPPY_UPDATE_PUBLIC_KEY-}" "${RUNNER_OS-}" "${TRUSTED_UPDATE_BUILD-}" >> "$PNPM_LOG"
 printf 'ARGV' >> "$PNPM_LOG"
 printf '|%s' "$@" >> "$PNPM_LOG"
 printf '\n' >> "$PNPM_LOG"
@@ -39,6 +39,10 @@ if [[ "$*" == *-dvvv* ]]; then
   printf 'TeamIdentifier=%s\n' "$team_id" >&2
   printf 'CodeDirectory v=20500 size=123 flags=%s hashes=4+7 location=embedded\n' "$flags" >&2
 fi
+if [[ "$*" == *'--entitlements :-'* ]]; then
+  printf '<plist><dict><key>com.apple.security.app-sandbox</key><true/><key>com.apple.application-identifier</key><string>%s</string><key>com.apple.developer.team-identifier</key><string>%s</string></dict></plist>\n' "${CODESIGN_APPLICATION_IDENTIFIER-team.org.peppy.desktop}" "${CODESIGN_TEAM_IDENTIFIER-team}"
+fi
+if [[ "$*" == *'-d -r-'* ]]; then printf 'designated => certificate leaf[subject.OU] = "team"\n' >&2; fi
 CODESIGN
 chmod +x "$fake_bin/codesign"
 
@@ -69,6 +73,22 @@ fi
 XCRUN
 chmod +x "$fake_bin/xcrun"
 
+cat > "$fake_bin/security" <<'SECURITY'
+#!/usr/bin/env bash
+printf 'security|%s\n' "$*" >> "$PNPM_LOG"
+if [ "$1" = cms ]; then
+  printf '<plist><dict><key>Entitlements</key><dict><key>com.apple.developer.team-identifier</key><string>%s</string><key>application-identifier</key><string>%s</string></dict></dict></plist>\n' "${SECURITY_PROFILE_TEAM-team}" "${SECURITY_PROFILE_APPLICATION_IDENTIFIER-team.org.peppy.desktop}"
+fi
+SECURITY
+chmod +x "$fake_bin/security"
+
+cat > "$fake_bin/productbuild" <<'PRODUCTBUILD'
+#!/usr/bin/env bash
+printf 'productbuild|%s\n' "$*" >> "$PNPM_LOG"
+touch "${!#}"
+PRODUCTBUILD
+chmod +x "$fake_bin/productbuild"
+
 cat > "$fake_bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
 if [ "$1" = -m ] && [ "$2" = venv ]; then
@@ -95,9 +115,15 @@ chmod +x "$fake_bin/python3"
 
 cat > "$fake_bin/plutil" <<'PLUTIL'
 #!/usr/bin/env bash
+if [ "$1" = -replace ]; then exit 0; fi
 case "$*" in
+  *com.apple.security.app-sandbox*) printf '%s\n' 1 ;;
   *CFBundleIdentifier*) printf '%s\n' "${PLUTIL_BUNDLE_IDENTIFIER-org.peppy.desktop}" ;;
   *CFBundleName*) printf '%s\n' "${PLUTIL_BUNDLE_NAME-Peppy}" ;;
+  *Entitlements.com.apple.developer.team-identifier*) printf '%s\n' "${SECURITY_PROFILE_TEAM-team}" ;;
+  *Entitlements.application-identifier*) printf '%s\n' "${SECURITY_PROFILE_APPLICATION_IDENTIFIER-team.org.peppy.desktop}" ;;
+  *com.apple.developer.team-identifier*) printf '%s\n' "${CODESIGN_TEAM_IDENTIFIER-team}" ;;
+  *com.apple.application-identifier*) printf '%s\n' "${CODESIGN_APPLICATION_IDENTIFIER-team.org.peppy.desktop}" ;;
 esac
 PLUTIL
 chmod +x "$fake_bin/plutil"
@@ -111,7 +137,6 @@ run_bundles() {
     PEPPY_UPDATE_PUBLIC_KEY="${6-}" TAURI_SIGNING_PRIVATE_KEY="${7-}" \
     PEPPY_MACOS_SIGNING_MODE="$macos_mode" PEPPY_WINDOWS_SIGNING_MODE="$windows_mode" \
     PEPPY_DMG_OUTPUT_DIR="$root/dmg" \
-  PEPPY_DESKTOP_GOOGLE_CLIENT_ID=desktop-client-id PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret \
     "$script_dir/build-desktop-bundles.sh"
 }
 
@@ -123,14 +148,13 @@ assert_trusted_updater_config() {
 }
 
 assert_effective_macos_metadata() {
-  node -e 'const fs = require("fs"); const object = value => value && typeof value === "object" && !Array.isArray(value); const merge = (target, patch) => { if (!object(patch)) return patch; const result = object(target) ? {...target} : {}; for (const [key, value] of Object.entries(patch)) { if (value === null) delete result[key]; else result[key] = object(value) ? merge(result[key], value) : value; } return result; }; const base = JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")); const macos = JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.macos.conf.json", "utf8")); const release = JSON.parse(process.argv[1]); const config = merge(merge(base, macos), release); if (config.bundle.category !== "SocialNetworking" || config.bundle.macOS?.minimumSystemVersion !== "10.13") process.exit(1);' "$1"
+  node -e 'const fs = require("fs"); const object = value => value && typeof value === "object" && !Array.isArray(value); const merge = (target, patch) => { if (!object(patch)) return patch; const result = object(target) ? {...target} : {}; for (const [key, value] of Object.entries(patch)) { if (value === null) delete result[key]; else result[key] = object(value) ? merge(result[key], value) : value; } return result; }; const base = JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")); const macos = JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.macos.conf.json", "utf8")); const release = JSON.parse(process.argv[1]); const config = merge(merge(base, macos), release); if (config.bundle.category !== "SocialNetworking" || config.bundle.macOS?.minimumSystemVersion !== "11.0") process.exit(1);' "$1"
 }
 
 run_macos_developer_id() {
   local bundle_targets="${BUNDLE_TARGETS:-app,dmg}"
   env "$@" PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES="$bundle_targets" VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
     PEPPY_UPDATE_CHANNEL=stable PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
-    PEPPY_DESKTOP_GOOGLE_CLIENT_ID=desktop-client-id PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret \
     PEPPY_MACOS_SIGNING_MODE=developer-id APPLE_CERTIFICATE=certificate APPLE_CERTIFICATE_PASSWORD=password \
     APPLE_SIGNING_IDENTITY=identity APPLE_ID=id APPLE_PASSWORD=notary-password APPLE_TEAM_ID=team \
     PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_DMG_OUTPUT_DIR="$root/dmg" "$script_dir/build-desktop-bundles.sh"
@@ -151,7 +175,7 @@ assert_developer_id_failure() {
 run_bundles Linux 'appimage,deb,rpm' 1.2.3 false
 test "$(grep -c '^ARGV' "$log")" = 1
 grep -Fq '|build|--bundles|appimage,deb,rpm|--config|{"version":"1.2.3"}|--|--locked' "$log"
-grep -Fq 'ENV||||||||Linux|false|appimage,deb,rpm' "$log"
+grep -Fq 'Linux|false' "$log"
 config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p')
 node -e 'const config = JSON.parse(process.argv[1]); if (config.productName || config.identifier || config.plugins?.updater?.pubkey) process.exit(1)' "$config"
 
@@ -187,7 +211,7 @@ APPLE_CERTIFICATE=stale TAURI_SIGNING_PRIVATE_KEY=stale PATH="$fake_bin:$PATH" P
   PEPPY_MACOS_SIGNING_MODE='' PEPPY_WINDOWS_SIGNING_MODE='' \
   PEPPY_DMG_OUTPUT_DIR="$root/dmg" \
   "$script_dir/build-desktop-bundles.sh"
-grep -Fq 'ENV||||||||macOS|false|app,dmg' "$log"
+grep -Fq 'macOS|false' "$log"
 grep -Fq 'repair|packaging/macos/dmg/repair_dmg.py --dmg' "$log"
 
 before_repair_failure=$(shasum -a 256 "$root/dmg/Peppy.dmg")
@@ -209,11 +233,10 @@ fi
 : > "$log"
 PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
   PEPPY_UPDATE_CHANNEL=stable PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
-  PEPPY_DESKTOP_GOOGLE_CLIENT_ID=desktop-client-id PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret \
   PEPPY_MACOS_SIGNING_MODE=adhoc APPLE_CERTIFICATE=stale APPLE_ID=stale APPLE_PASSWORD=stale APPLE_TEAM_ID=stale \
   PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_DMG_OUTPUT_DIR="$root/dmg" \
   "$script_dir/build-desktop-bundles.sh"
-grep -Fq 'ENV||-||x|public-key|desktop-client-id|installed-client-secret|macOS|true|app,dmg' "$log"
+grep -Fq '|-||x|public-key|macOS|true' "$log"
 grep -Fq "repair|packaging/macos/dmg/repair_dmg.py --dmg $root/dmg/Peppy.dmg --signing-mode adhoc" "$log"
 grep -Fq '"createUpdaterArtifacts":true' "$log"
 test "$(grep -c '^spctl|' "$log")" = 0
@@ -224,7 +247,6 @@ test "$(grep -c '^codesign|' "$log")" = 1
 
 if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
   PEPPY_UPDATE_CHANNEL=stable PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
-  PEPPY_DESKTOP_GOOGLE_CLIENT_ID=desktop-client-id PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret \
   PEPPY_MACOS_SIGNING_MODE=developer-id "$script_dir/build-desktop-bundles.sh" >/dev/null 2>&1; then
   printf 'expected strict macOS mode without credentials to fail\n' >&2
   exit 1
@@ -232,7 +254,6 @@ fi
 
 if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=Windows BUNDLES=nsis,msi VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
   PEPPY_UPDATE_CHANNEL=stable PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
-  PEPPY_DESKTOP_GOOGLE_CLIENT_ID=desktop-client-id PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret \
   PEPPY_MACOS_SIGNING_MODE=invalid PEPPY_WINDOWS_SIGNING_MODE=none "$script_dir/build-desktop-bundles.sh" >/dev/null 2>&1; then
   printf 'expected trusted unknown mode to fail\n' >&2
   exit 1
@@ -284,7 +305,6 @@ fi
 : > "$log"
 if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
   PEPPY_UPDATE_CHANNEL=stable PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
-  PEPPY_DESKTOP_GOOGLE_CLIENT_ID=desktop-client-id PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret \
   PEPPY_MACOS_SIGNING_MODE=adhoc PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" \
   PEPPY_DMG_OUTPUT_DIR="$root/dmg" \
   PLUTIL_BUNDLE_IDENTIFIER=org.peppy.desktop.dev "$script_dir/build-desktop-bundles.sh" >/dev/null 2>&1; then
@@ -296,13 +316,13 @@ test "$(grep -c '^spctl|' "$log")" = 0
 
 : > "$log"
 if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=Linux BUNDLES=rpm VERSION=1.2.3-staging.5 \
-  TRUSTED_UPDATE_BUILD=true PEPPY_UPDATE_CHANNEL=staging PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
-  PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret "$script_dir/build-desktop-bundles.sh" >"$root/missing-credentials.log" 2>&1; then
+  TRUSTED_UPDATE_BUILD=true PEPPY_UPDATE_CHANNEL=staging PEPPY_UPDATE_PUBLIC_KEY=public-key \
+  "$script_dir/build-desktop-bundles.sh" >"$root/missing-credentials.log" 2>&1; then
   printf 'expected trusted build without credentials to fail\n' >&2
   exit 1
 fi
 test ! -s "$log"
-grep -Fq 'PEPPY_DESKTOP_GOOGLE_CLIENT_ID is required for trusted update builds' "$root/missing-credentials.log"
+grep -Fq 'TAURI_SIGNING_PRIVATE_KEY is required for trusted update builds' "$root/missing-credentials.log"
 
 if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=Linux BUNDLES=rpm VERSION=1.2.3-preview.1 \
   TRUSTED_UPDATE_BUILD=false "$script_dir/build-desktop-bundles.sh" >/dev/null 2>&1; then
@@ -326,7 +346,7 @@ assert_trusted_updater_config "$config"
 : > "$log"
 env -u PEPPY_MACOS_SIGNING_MODE -u PEPPY_WINDOWS_SIGNING_MODE PATH="$fake_bin:$PATH" PNPM_LOG="$log" \
   RUNNER_OS=Windows BUNDLES=nsis,msi VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true PEPPY_UPDATE_CHANNEL=stable \
-  PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key PEPPY_DESKTOP_GOOGLE_CLIENT_ID=desktop-client-id PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret GITHUB_WORKSPACE='/fixture path' \
+  PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key GITHUB_WORKSPACE='/fixture path' \
   "$script_dir/build-desktop-bundles.sh"
 config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p' | head -n 1)
 node -e 'const config = JSON.parse(process.argv[1]); if (!config.bundle.windows?.signCommand) process.exit(1)' "$config"
@@ -334,10 +354,106 @@ node -e 'const config = JSON.parse(process.argv[1]); if (!config.bundle.windows?
 : > "$log"
 if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=Linux BUNDLES=appimage,deb,rpm VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
   PEPPY_UPDATE_CHANNEL=stable PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
-  PEPPY_DESKTOP_GOOGLE_CLIENT_ID='   ' PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET=installed-client-secret \
+  TAURI_SIGNING_PRIVATE_KEY='   ' \
   "$script_dir/build-desktop-bundles.sh" >/dev/null 2>&1; then
-  printf 'expected whitespace desktop client ID to fail before build\n' >&2
+  printf 'expected whitespace updater key to fail before build\n' >&2
   exit 1
 fi
 test ! -s "$log"
+
+: > "$log"
+PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION=1.2.3 GITHUB_ACTIONS=true MACOS_BUILD_NUMBER=42 \
+  TRUSTED_UPDATE_BUILD=false PEPPY_MACOS_DISTRIBUTION=app-store \
+  APPLE_MAS_CERTIFICATE_P12=application-certificate APPLE_MAS_CERTIFICATE_PASSWORD=password \
+  APPLE_MAS_INSTALLER_CERTIFICATE=installer-certificate APPLE_MAS_PROVISIONING_PROFILE_BASE64=cHJvZmlsZQ== \
+  APPLE_MAS_SIGNING_IDENTITY='Apple Distribution: Peppy (team)' APPLE_MAS_INSTALLER_IDENTITY='3rd Party Mac Developer Installer: Peppy (team)' \
+  PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_PKG_OUTPUT_DIR="$root/pkg" \
+  "$script_dir/build-desktop-bundles.sh"
+app_store_config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p')
+node -e 'const config = JSON.parse(process.argv[1]); if (config.productName !== "Peppy" || config.identifier !== "org.peppy.desktop" || config.bundle?.createUpdaterArtifacts !== false || config.bundle?.macOS?.minimumSystemVersion !== "13.0" || config.bundle?.macOS?.entitlements !== "../../../packaging/macos/app-store/entitlements.plist" || JSON.stringify(config.plugins?.updater?.endpoints) !== "[]") process.exit(1)' "$app_store_config"
+grep -Fq 'productbuild|--component' "$log"
+grep -Fq 'security|cms -D' "$log"
+grep -Fq 'security|create-keychain' "$log"
+grep -Fq 'security|import' "$log"
+grep -Fq 'security|list-keychains -d user -s' "$log"
+grep -Fq 'security|delete-keychain' "$log"
+grep -Fq 'codesign|--force --sign Apple Distribution: Peppy (team) --keychain' "$log"
+grep -Fq 'productbuild|--component' "$log"
+test -f "$root/pkg/Peppy.pkg"
+if grep -Fq 'repair|' "$log" || grep -Fq '^xcrun|' "$log" || grep -Fq 'notarytool' "$log"; then
+  printf 'App Store packaging must not repair DMGs or notarize artifacts\n' >&2
+  exit 1
+fi
+
+if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION=1.2.3 GITHUB_ACTIONS=true MACOS_BUILD_NUMBER=42 \
+  TRUSTED_UPDATE_BUILD=false PEPPY_MACOS_DISTRIBUTION=app-store \
+  APPLE_MAS_CERTIFICATE_P12=application-certificate APPLE_MAS_CERTIFICATE_PASSWORD=password \
+  APPLE_MAS_INSTALLER_CERTIFICATE=installer-certificate APPLE_MAS_PROVISIONING_PROFILE_BASE64=cHJvZmlsZQ== \
+  APPLE_MAS_SIGNING_IDENTITY='Apple Distribution: Peppy (team)' APPLE_MAS_INSTALLER_IDENTITY='3rd Party Mac Developer Installer: Peppy (team)' \
+  SECURITY_PROFILE_APPLICATION_IDENTIFIER=team.org.peppy.other \
+  PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_PKG_OUTPUT_DIR="$root/pkg" \
+  "$script_dir/build-desktop-bundles.sh" >"$root/app-store-profile-mismatch.log" 2>&1; then
+  printf 'App Store packaging must reject a provisioning profile for another application identifier\n' >&2
+  exit 1
+fi
+grep -Fq 'App Store provisioning profile application identifier must equal team.org.peppy.desktop' "$root/app-store-profile-mismatch.log"
+
+if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION=1.2.3 GITHUB_ACTIONS=true MACOS_BUILD_NUMBER=42 \
+  TRUSTED_UPDATE_BUILD=false PEPPY_MACOS_DISTRIBUTION=app-store \
+  APPLE_MAS_CERTIFICATE_P12=application-certificate APPLE_MAS_CERTIFICATE_PASSWORD=password \
+  APPLE_MAS_INSTALLER_CERTIFICATE=installer-certificate APPLE_MAS_PROVISIONING_PROFILE_BASE64=cHJvZmlsZQ== \
+  APPLE_MAS_SIGNING_IDENTITY='Apple Distribution: Peppy (team)' APPLE_MAS_INSTALLER_IDENTITY='3rd Party Mac Developer Installer: Peppy (team)' \
+  CODESIGN_TEAM_IDENTIFIER=other-team \
+  PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_PKG_OUTPUT_DIR="$root/pkg" \
+  "$script_dir/build-desktop-bundles.sh" >"$root/app-store-signed-team-mismatch.log" 2>&1; then
+  printf 'App Store packaging must reject a signed bundle with another team identifier\n' >&2
+  exit 1
+fi
+grep -Fq 'App Store bundle team identifier does not match the provisioning profile' "$root/app-store-signed-team-mismatch.log"
+
+if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION=1.2.3 GITHUB_ACTIONS=true MACOS_BUILD_NUMBER=42 \
+  TRUSTED_UPDATE_BUILD=false PEPPY_MACOS_DISTRIBUTION=app-store \
+  APPLE_MAS_CERTIFICATE_P12=application-certificate APPLE_MAS_CERTIFICATE_PASSWORD=password \
+  APPLE_MAS_INSTALLER_CERTIFICATE=installer-certificate APPLE_MAS_PROVISIONING_PROFILE_BASE64=cHJvZmlsZQ== \
+  APPLE_MAS_SIGNING_IDENTITY='Apple Distribution: Peppy (team)' APPLE_MAS_INSTALLER_IDENTITY='3rd Party Mac Developer Installer: Peppy (team)' \
+  CODESIGN_APPLICATION_IDENTIFIER=team.org.peppy.other \
+  PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_PKG_OUTPUT_DIR="$root/pkg" \
+  "$script_dir/build-desktop-bundles.sh" >"$root/app-store-signed-app-mismatch.log" 2>&1; then
+  printf 'App Store packaging must reject a signed bundle with another application identifier\n' >&2
+  exit 1
+fi
+grep -Fq 'App Store bundle application identifier does not match the provisioning profile' "$root/app-store-signed-app-mismatch.log"
+
+if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION=1.2.3 GITHUB_ACTIONS=true MACOS_BUILD_NUMBER=42 \
+  TRUSTED_UPDATE_BUILD=false PEPPY_MACOS_DISTRIBUTION=app-store "$script_dir/build-desktop-bundles.sh" >/dev/null 2>&1; then
+  printf 'App Store packaging must reject DMG targets\n' >&2
+  exit 1
+fi
+
+app_store_env=(
+  APPLE_MAS_CERTIFICATE_P12=application-certificate APPLE_MAS_CERTIFICATE_PASSWORD=password
+  APPLE_MAS_INSTALLER_CERTIFICATE=installer-certificate APPLE_MAS_PROVISIONING_PROFILE_BASE64=cHJvZmlsZQ==
+  APPLE_MAS_SIGNING_IDENTITY='Apple Distribution: Peppy (team)'
+  APPLE_MAS_INSTALLER_IDENTITY='3rd Party Mac Developer Installer: Peppy (team)'
+)
+assert_app_store_failure() {
+  local expected_diagnostic="$1"
+  shift
+  local output="$root/app-store-failure.log"
+  : > "$log"
+  if env GITHUB_ACTIONS=true MACOS_BUILD_NUMBER=42 "${app_store_env[@]}" "$@" \
+    PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION=1.2.3 TRUSTED_UPDATE_BUILD=false \
+    PEPPY_MACOS_DISTRIBUTION=app-store PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_PKG_OUTPUT_DIR="$root/pkg" \
+    "$script_dir/build-desktop-bundles.sh" >"$output" 2>&1; then
+    printf 'expected App Store validation to fail: %s\n' "$expected_diagnostic" >&2
+    exit 1
+  fi
+  grep -Fqx "$expected_diagnostic" "$output"
+}
+
+assert_app_store_failure 'app-store distribution must run in GitHub Actions' GITHUB_ACTIONS=
+assert_app_store_failure 'app-store distribution must run in GitHub Actions' GITHUB_ACTIONS=false
+assert_app_store_failure 'MACOS_BUILD_NUMBER is required for app-store builds' MACOS_BUILD_NUMBER=
+assert_app_store_failure 'MACOS_BUILD_NUMBER must be a positive integer' MACOS_BUILD_NUMBER=0
+assert_app_store_failure 'MACOS_BUILD_NUMBER must be a positive integer' MACOS_BUILD_NUMBER=1.2
 printf 'desktop bundle orchestration tests passed\n'

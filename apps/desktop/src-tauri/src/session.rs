@@ -1802,6 +1802,10 @@ fn bounded_preview_ids(ids: impl IntoIterator<Item = AttachmentId>) -> HashSet<A
 mod tests {
     use super::*;
     use crate::{
+        credentials::{
+            parse_credential, store_credential,
+            tests::{credential_json, TOKEN},
+        },
         media::tests::sample_png,
         notifications::NotificationSettings,
         tests::{fixture_at, gateway, input, routed, PHRASE},
@@ -1852,6 +1856,47 @@ mod tests {
             .set_notification_preferences(remote.clone())
             .unwrap();
         assert_eq!(session.notification_preferences(&settings).unwrap(), remote);
+    }
+
+    #[test]
+    fn creating_a_new_binding_database_preserves_the_old_database() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let old_binding = fixture.binding.clone();
+        drop(
+            open_session(
+                fixture.dir.path(),
+                &fixture.store,
+                &old_binding,
+                &[],
+                Arc::new(|| {}),
+            )
+            .unwrap(),
+        );
+        let old_database = old_binding.database_path(fixture.dir.path());
+        let old_bytes = std::fs::read(&old_database).unwrap();
+
+        let new_credential = parse_credential(&credential_json(
+            "http://127.0.0.1:9",
+            &old_binding.vault_id,
+            &uuid::Uuid::new_v4().to_string(),
+            TOKEN,
+        ))
+        .unwrap();
+        let new_binding = new_credential.binding();
+        store_credential(&fixture.store, &new_credential).unwrap();
+        drop(
+            open_session(
+                fixture.dir.path(),
+                &fixture.store,
+                &new_binding,
+                &[],
+                Arc::new(|| {}),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(std::fs::read(old_database).unwrap(), old_bytes);
+        assert!(new_binding.database_path(fixture.dir.path()).exists());
     }
 
     #[test]

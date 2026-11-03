@@ -13,6 +13,7 @@ import { createSingleFlightTrailingScheduler } from "./single-flight-scheduler";
 import { appSessionRenewal, armHostedSessionRenewal, restoreAfterPersistedPageShow } from "./app-session-renewal";
 import { UNSUPPORTED_DOWNLOADS_ID, renderAccountDownloadLink, unsupportedPageMarkup } from "./browser-unsupported";
 import { renderBrowserStopped } from "./browser-stopped";
+import { validateAccountUrl } from "./account-navigation";
 
 function unsupported(reasons: string[]): void {
   document.getElementById("root")!.innerHTML = unsupportedPageMarkup(reasons);
@@ -47,7 +48,7 @@ function showStartupFailure(reason: string): void {
 }
 
 function BrowserApp({ bridge, config }: { bridge: BrowserBridge; config: HostedWebConfig | undefined }) {
-  const accountUrl = config?.accountUrl;
+  const accountUrl = validateAccountUrl(config?.accountUrl);
   const apiOrigin = config?.apiOrigin ?? location.origin;
   const [enrollment, setEnrollment] = useState<{ mode: "community" | "hosted"; owner?: boolean }>();
 

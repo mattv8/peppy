@@ -249,6 +249,8 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let commands = declared_commands();
     let registered = include_str!("lib.rs");
     let hosted = include_str!("hosted/mod.rs");
+    let login_item = include_str!("login_item.rs");
+    let purchases = include_str!("purchases.rs");
     let enrollment = include_str!("enrollment.rs");
     let computer_enrollment = include_str!("enrollment/computer.rs");
     let history_search = include_str!("search_history.rs");
@@ -264,6 +266,8 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
             registered.contains(&format!("fn {command}("))
                 || [
                     hosted,
+                    login_item,
+                    purchases,
                     enrollment,
                     computer_enrollment,
                     history_search,
@@ -273,6 +277,8 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
                 .any(|source| {
                     source.contains(&format!("pub async fn {command}("))
                         || source.contains(&format!("pub fn {command}("))
+                        || source.contains(&format!("pub(crate) async fn {command}("))
+                        || source.contains(&format!("pub(crate) fn {command}("))
                 }),
             "{command} declared in the app manifest but not defined"
         );
@@ -446,6 +452,9 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "discard_draft",
         "open_composer",
         "set_start_at_login",
+        "startup_status",
+        "set_open_in_background",
+        "open_login_items",
         "get_notification_sound",
         "set_notification_sound",
         "popout_conversation",
@@ -461,6 +470,13 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "hosted_sign_out",
         "hosted_open_billing",
         "hosted_provision",
+        "hosted_delete_account",
+        "purchase_options",
+        "store_products",
+        "store_purchase",
+        "store_restore",
+        "open_store_subscriptions",
+        "billing_summary",
         "check_for_updates",
         "restart_for_update",
         "set_automatic_updates",

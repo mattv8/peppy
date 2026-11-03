@@ -107,6 +107,10 @@ pub struct InvoiceSummary {
 #[serde(deny_unknown_fields)]
 #[derive(schemars::JsonSchema)]
 pub struct BillingSummary {
+    #[serde(default)]
+    pub provider: BillingProvider,
+    #[serde(default)]
+    pub manageable_in: BillingManageableIn,
     pub subscription_id: Option<String>,
     pub subscription_status: String,
     pub paid_through: i64,
@@ -116,6 +120,30 @@ pub struct BillingSummary {
     pub plan: PlanSummary,
     pub invoices: Vec<InvoiceSummary>,
     pub storage: StorageSummary,
+}
+
+/// Provider currently responsible for an account's billing.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingProvider {
+    #[default]
+    None,
+    Stripe,
+    Apple,
+}
+
+/// Where the account's current billing can be managed.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingManageableIn {
+    #[default]
+    None,
+    Website,
+    AppStore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -203,6 +231,7 @@ mod tests {
             "config":{"stripe_publishable_key":"pk_test","available_providers":["google"]},
             "summary":{"subscription_id":null,"subscription_status":"none","paid_through":0,
                 "cancel_at_period_end":false,"access":"read_only","price_id":"price_test",
+                "provider":"stripe","manageable_in":"website",
                 "plan":plan,"invoices":[],"storage":{"used_bytes":0,"limit_bytes":100,
                     "base_bytes":100,"pack_quantity":0,"pack_bytes":100,"pack_max_quantity":null,
                     "pack_purchase_available":false,"pack_pending":false,
@@ -210,6 +239,18 @@ mod tests {
         });
         let parsed: WebBillingContextResponse = serde_json::from_value(input.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), input);
+    }
+
+    #[test]
+    fn legacy_billing_summary_defaults_to_no_provider_or_management_surface() {
+        let summary: BillingSummary = serde_json::from_value(serde_json::json!({
+            "subscription_id": null, "subscription_status": "none", "paid_through": 0,
+            "cancel_at_period_end": false, "access": "read_only", "price_id": "",
+            "plan": {"price_id":"","product_name":"","unit_amount":0,"currency":"usd","interval":"month","interval_count":1,"discount_percent":null,"comped":false},
+            "invoices": [], "storage": {"used_bytes":0,"limit_bytes":0,"base_bytes":0,"pack_quantity":0,"pack_bytes":0,"pack_max_quantity":null,"pack_purchase_available":false,"pack_pending":false,"pack_mutation_blocked_reason":null,"pack":null}
+        })).unwrap();
+        assert_eq!(summary.provider, BillingProvider::None);
+        assert_eq!(summary.manageable_in, BillingManageableIn::None);
     }
 
     #[test]

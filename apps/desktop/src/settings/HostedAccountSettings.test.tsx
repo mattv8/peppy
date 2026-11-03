@@ -9,6 +9,7 @@ vi.mock("../bridge/bridge", { spy: true });
 
 const account = (changes: Partial<HostedAccountView> = {}): HostedAccountView => ({
   available: true,
+  providers: ["google"],
   signedIn: false,
   accountLabel: null,
   classification: null,
@@ -53,7 +54,7 @@ describe("HostedAccountSettings", () => {
     fireEvent.click(signOut);
 
     await waitFor(() => expect(bridge.hosted_sign_out).toHaveBeenCalledOnce());
-    const signIn = await screen.findByRole("button", { name: "Sign in with Google" });
+    const signIn = await screen.findByRole("button", { name: "Continue with Google" });
     await waitFor(() => expect(signIn).toHaveFocus());
   });
 
@@ -82,11 +83,11 @@ describe("HostedAccountSettings", () => {
       await waitFor(() => expect(screen.getByRole("button", { name: "Sign out of Peppy" })).toBeDisabled());
 
       await act(async () => signOut.resolve());
-      expect(screen.getByRole("status")).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Sign in with Google" })).not.toBeInTheDocument();
+       expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Continue with Google" })).not.toBeInTheDocument();
 
       await act(async () => refresh.resolve(account()));
-      const signIn = screen.getByRole("button", { name: "Sign in with Google" });
+      const signIn = screen.getByRole("button", { name: "Continue with Google" });
       expect(signIn).toBeEnabled();
       expect(signIn).toHaveFocus();
     } finally {
@@ -129,9 +130,9 @@ describe("HostedAccountSettings", () => {
 
     expect(await screen.findByRole("button", { name: "Sign out of Peppy" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Sign out of Peppy" }));
-    expect(await screen.findByRole("button", { name: "Sign in with Google" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Continue with Google" })).toBeInTheDocument();
     await act(async () => staleRead.resolve(account({ signedIn: true })));
-    expect(screen.getByRole("button", { name: "Sign in with Google" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue with Google" })).toBeInTheDocument();
   });
 
   it("restores focus to sign-in after a delayed sign-out refresh completes", async () => {
@@ -158,7 +159,7 @@ describe("HostedAccountSettings", () => {
       Object.defineProperty(window, "event", { configurable: true, value: undefined });
     }
 
-    const signIn = await screen.findByRole("button", { name: "Sign in with Google" });
+    const signIn = await screen.findByRole("button", { name: "Continue with Google" });
     await waitFor(() => expect(signIn).toBeEnabled());
     expect(signIn).toHaveFocus();
   });
@@ -166,7 +167,7 @@ describe("HostedAccountSettings", () => {
   it("does not move focus after the initial account check", async () => {
     render(<><button autoFocus>Settings navigation</button><HostedAccountSettings /></>);
 
-    await screen.findByRole("button", { name: "Sign in with Google" });
+    await screen.findByRole("button", { name: "Continue with Google" });
     expect(screen.getByRole("button", { name: "Settings navigation" })).toHaveFocus();
   });
 
@@ -175,12 +176,20 @@ describe("HostedAccountSettings", () => {
     vi.mocked(bridge.hosted_sign_in).mockReturnValue(signIn.promise);
     render(<HostedAccountSettings />);
 
-    const action = await screen.findByRole("button", { name: "Sign in with Google" });
+    const action = await screen.findByRole("button", { name: "Continue with Google" });
     fireEvent.click(action);
 
     expect(action).toBeDisabled();
     expect(action).toHaveAttribute("aria-busy", "true");
     expect(bridge.hosted_sign_in).toHaveBeenCalledWith("google");
+  });
+
+  it("shows sign-in unavailable when the server advertises no providers", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ providers: [] }));
+    render(<HostedAccountSettings />);
+
+    expect(await screen.findByText("Sign-in is not available.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /continue with google/i })).not.toBeInTheDocument();
   });
 });
 
@@ -219,6 +228,15 @@ describe("AttachmentStorageSettingsHost", () => {
 
     expect(await screen.findByText("Last known storage usage")).toBeInTheDocument();
     expect(screen.getByText("20 GB")).toBeInTheDocument();
+  });
+
+  it("keeps loading billing controls after a retention-status failure", async () => {
+    vi.mocked(bridge.attachment_retention_status!).mockRejectedValueOnce(new Error("offline"));
+    vi.mocked(bridge.purchase_options).mockResolvedValue({ appStore: false, website: true });
+    render(<AttachmentStorageSettingsHost onManageStorage={vi.fn()} />);
+
+    expect(await screen.findByText(/Storage policy status is unavailable/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Manage storage on the website" })).toBeInTheDocument();
   });
 
   it("keeps a late device-a status from replacing device-b storage", async () => {

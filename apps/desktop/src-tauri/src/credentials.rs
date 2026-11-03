@@ -164,6 +164,10 @@ pub struct HostConfig {
     pub active: Option<Binding>,
     #[serde(default)]
     pub bindings: Vec<KnownBinding>,
+    #[serde(default)]
+    pub open_in_background: bool,
+    #[serde(default)]
+    pub close_notice_shown: bool,
 }
 
 impl HostConfig {
@@ -303,6 +307,13 @@ fn invalid_stored() -> BridgeError {
     )
 }
 
+fn database_key_unavailable() -> BridgeError {
+    BridgeError::new(
+        "database-key-unavailable",
+        "The local database key is unavailable; Peppy will not replace or reset the database.",
+    )
+}
+
 /// Returns the existing key for this binding, or creates one ONLY when no local database exists.
 /// An existing key is never replaced: replacing it would strand the SQLCipher database.
 ///
@@ -317,20 +328,23 @@ pub fn ensure_database_key(
     static KEY_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _serialized = KEY_INIT.lock().unwrap_or_else(|poison| poison.into_inner());
     let database_exists = database.exists();
-    if let Some(existing) = store
-        .get(&binding.db_key_account())?
-        .filter(|existing| !existing.is_empty())
-    {
+    let existing = match store.get(&binding.db_key_account()) {
+        Ok(existing) => existing,
+        Err(_) if database_exists => return Err(database_key_unavailable()),
+        Err(error) => return Err(error),
+    };
+    if let Some(existing) = existing.filter(|existing| !existing.is_empty()) {
         if existing.len() != 32 {
-            return Err(invalid_stored());
+            return Err(if database_exists {
+                database_key_unavailable()
+            } else {
+                invalid_stored()
+            });
         }
         return Ok(existing);
     }
     if database_exists {
-        return Err(BridgeError::new(
-            "database-key-missing",
-            "A local database exists for this device but its protected key is missing; Peppy will not replace or reset it.",
-        ));
+        return Err(database_key_unavailable());
     }
     let mut key = Zeroizing::new(vec![0u8; 32]);
     getrandom::fill(&mut key).map_err(|_| {
@@ -518,7 +532,7 @@ pub mod tests {
         store.set(&b.db_key_account(), &[1, 2, 3]).unwrap();
         assert_eq!(
             ensure_database_key(&store, &b, &present).unwrap_err().code,
-            "secure-store-unavailable"
+            "database-key-unavailable"
         );
         assert_eq!(
             store.get(&b.db_key_account()).unwrap().unwrap().as_slice(),
@@ -530,9 +544,64 @@ pub mod tests {
             ensure_database_key(&store, &other, &present)
                 .unwrap_err()
                 .code,
-            "database-key-missing"
+            "database-key-unavailable"
         );
         assert!(store.get(&other.db_key_account()).unwrap().is_none());
+    }
+
+    struct FailingReadStore {
+        writes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SecretStore for FailingReadStore {
+        fn get(&self, _: &str) -> BridgeResult<Option<Zeroizing<Vec<u8>>>> {
+            Err(BridgeError::new("secure-store-unavailable", "unavailable"))
+        }
+
+        fn set(&self, _: &str, _: &[u8]) -> BridgeResult<()> {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn existing_database_with_an_unavailable_key_never_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("client.sqlcipher");
+        let database_bytes = b"existing encrypted database";
+        fs::write(&database, database_bytes).unwrap();
+        let binding = binding("https://a.test", "v", "d");
+
+        let empty_store = MemoryStore::default();
+        assert_eq!(
+            ensure_database_key(&empty_store, &binding, &database)
+                .unwrap_err()
+                .code,
+            "database-key-unavailable"
+        );
+        assert_eq!(fs::read(&database).unwrap(), database_bytes);
+        assert!(empty_store
+            .get(&binding.db_key_account())
+            .unwrap()
+            .is_none());
+
+        let failing_store = FailingReadStore {
+            writes: Default::default(),
+        };
+        assert_eq!(
+            ensure_database_key(&failing_store, &binding, &database)
+                .unwrap_err()
+                .code,
+            "database-key-unavailable"
+        );
+        assert_eq!(fs::read(&database).unwrap(), database_bytes);
+        assert_eq!(
+            failing_store
+                .writes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     /// Widens the race window: every lookup of a missing key pauses before answering.

@@ -7,9 +7,14 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
+  background: var(--peppy-surface-desk);
+}
+@media (prefers-color-scheme: light) {
+  html:not(.theme-dark),
+  body:not(.theme-dark),
+  #root { background: #f3f3f3; }
 }
 body {
-  background: transparent;
   color: var(--peppy-text-primary);
 }
 #desktop-shell,
@@ -21,6 +26,9 @@ body {
   background: linear-gradient(135deg, var(--peppy-surface-desk), var(--peppy-surface-editor));
   overflow: hidden;
   border-radius: var(--peppy-window-radius);
+}
+#composer-shell.head-panel-shell {
+  background: var(--peppy-surface-panel);
 }
 html[data-window-rounded="false"] #desktop-shell,
 html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
@@ -1131,6 +1139,11 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   font-size: 12px;
 }
 .settings-error, #settings-view .settings-error { color: var(--peppy-error); font-size: 12px; }
+#startup-open-login-items { justify-self: start; }
+#reenrol-screen { display: grid; max-width: 42rem; gap: 12px; padding: 24px; margin: auto; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-md); background: var(--peppy-surface-panel); color: var(--peppy-text-primary); }
+#reenrol-screen > p { margin: 0; color: var(--peppy-text-secondary); }
+#reenrol-draft-warning { color: var(--peppy-warning-text) !important; }
+#reenrol-enrollment { padding-top: 12px; border-top: 1px solid var(--peppy-border); }
 .settings-connection-summary {
   width: 100%;
   padding: 6px 8px;

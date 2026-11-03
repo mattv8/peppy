@@ -106,6 +106,57 @@
   overflow-wrap: anywhere;
 }
 
+#hosted-store-plan-options,
+#hosted-store-plans,
+#hosted-session-recovery-options {
+  display: grid;
+  gap: 0.75rem;
+}
+
+#hosted-plan-options {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#hosted-plan-options > li {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.75rem;
+  border: 1px solid var(--peppy-border);
+  border-radius: var(--peppy-radius-md, var(--peppy-control-radius));
+  background: var(--peppy-surface-widget);
+}
+
+#hosted-paywall-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.provider-button {
+  min-height: 2rem;
+}
+
+@media (min-width: 480px) {
+  #hosted-plan-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (pointer: coarse) {
+  .provider-button,
+  #hosted-website-button,
+  #hosted-billing-check { min-height: 44px; }
+}
+
+@media (forced-colors: active) {
+  #hosted-plan-options > li { border-color: CanvasText; }
+}
+
 /* Headings receive programmatic focus for screen-reader route announcements, not interactive navigation */
 #setup-landing-body h2[tabindex="-1"]:focus {
   outline: none;

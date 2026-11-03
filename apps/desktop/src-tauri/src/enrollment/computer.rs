@@ -690,6 +690,29 @@ fn saved_identity_blocks_claimant(state: &AppState, origin: &str) -> BridgeResul
     saved_identity_for_origin(state, origin)
 }
 
+/// A replacement identity is safe only when the selected origin's active binding has an existing
+/// database whose protected key cannot be read. This is the re-enrollment path after
+/// `database-key-unavailable`; it only reads the old binding and leaves its data untouched.
+fn active_database_key_is_unavailable(state: &AppState, origin: &str) -> BridgeResult<bool> {
+    let config = state.config()?;
+    let Some(binding) = config.active_binding() else {
+        return Ok(false);
+    };
+    let database = binding.database_path(&state.root);
+    if binding.origin != origin || !database.exists() {
+        return Ok(false);
+    }
+    Ok(matches!(
+        crate::credentials::ensure_database_key(&*state.store, binding, &database),
+        Err(error) if error.code == "database-key-unavailable"
+    ))
+}
+
+fn computer_claimant_allowed(state: &AppState, origin: &str) -> BridgeResult<bool> {
+    Ok(!saved_identity_blocks_claimant(state, origin)?
+        || active_database_key_is_unavailable(state, origin)?)
+}
+
 #[cfg(test)]
 fn config_has_saved_identity(config: &crate::credentials::HostConfig, origin: &str) -> bool {
     config
@@ -1127,7 +1150,7 @@ pub async fn enrollment_begin_computer_claimant(
         }
         origin
     };
-    if saved_identity_blocks_claimant(&state, &origin)? {
+    if !computer_claimant_allowed(&state, &origin)? {
         return Err(BridgeError::new(
             "identity-preserved",
             "This device already has a saved identity. Unlock it instead of replacing it.",
@@ -2697,6 +2720,98 @@ mod tests {
         config.remember(&binding);
         assert!(config_has_saved_identity(&config, "https://enroll.example"));
         assert!(!config_has_saved_identity(&config, "https://other.example"));
+    }
+
+    #[test]
+    fn unavailable_active_database_key_allows_a_new_computer_identity_without_changing_old_data() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::secure_store::MemoryStore::default());
+        let state = AppState::new(
+            root.path().to_path_buf(),
+            store.clone(),
+            crate::tests::noop(),
+        );
+        let old = binding("https://enroll.example");
+        let credential = crate::credentials::tests::credential_json(
+            &old.origin,
+            &old.vault_id,
+            &old.device_id,
+            crate::credentials::tests::TOKEN,
+        );
+        std::fs::create_dir_all(old.data_dir(root.path())).unwrap();
+        std::fs::write(old.database_path(root.path()), b"old database").unwrap();
+        store.set(&old.credential_account(), &credential).unwrap();
+        store
+            .set(&old.vault_secret_account(), b"old vault secret")
+            .unwrap();
+        state
+            .update_config(|config| {
+                config.select_origin(&old.origin);
+                config.remember(&old);
+                config.active = Some(old.clone());
+            })
+            .unwrap();
+
+        let old_database = std::fs::read(old.database_path(root.path())).unwrap();
+        let old_credential = store.get(&old.credential_account()).unwrap();
+        let old_secret = store.get(&old.vault_secret_account()).unwrap();
+        let old_config = state.config().unwrap();
+
+        assert!(computer_claimant_allowed(&state, &old.origin).unwrap());
+        assert_eq!(
+            std::fs::read(old.database_path(root.path())).unwrap(),
+            old_database
+        );
+        assert_eq!(
+            store.get(&old.credential_account()).unwrap(),
+            old_credential
+        );
+        assert_eq!(store.get(&old.vault_secret_account()).unwrap(), old_secret);
+        assert!(store.get(&old.db_key_account()).unwrap().is_none());
+        assert_eq!(state.config().unwrap(), old_config);
+    }
+
+    #[test]
+    fn available_active_database_key_preserves_the_existing_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::secure_store::MemoryStore::default());
+        let state = AppState::new(
+            root.path().to_path_buf(),
+            store.clone(),
+            crate::tests::noop(),
+        );
+        let old = binding("https://enroll.example");
+        let credential = crate::credentials::tests::credential_json(
+            &old.origin,
+            &old.vault_id,
+            &old.device_id,
+            crate::credentials::tests::TOKEN,
+        );
+        std::fs::create_dir_all(old.data_dir(root.path())).unwrap();
+        std::fs::write(old.database_path(root.path()), b"old database").unwrap();
+        store.set(&old.credential_account(), &credential).unwrap();
+        store.set(&old.db_key_account(), &[7; 32]).unwrap();
+        state
+            .update_config(|config| {
+                config.select_origin(&old.origin);
+                config.remember(&old);
+                config.active = Some(old.clone());
+            })
+            .unwrap();
+
+        assert!(!computer_claimant_allowed(&state, &old.origin).unwrap());
+    }
+
+    #[test]
+    fn no_saved_binding_allows_normal_first_computer_enrollment() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            root.path().to_path_buf(),
+            Arc::new(crate::secure_store::MemoryStore::default()),
+            crate::tests::noop(),
+        );
+
+        assert!(computer_claimant_allowed(&state, "https://enroll.example").unwrap());
     }
 
     #[test]

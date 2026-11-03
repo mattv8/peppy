@@ -33,6 +33,14 @@ strict_windows_env=(
   WINDOWS_CERTIFICATE=windows-certificate
   WINDOWS_CERTIFICATE_PASSWORD=windows-password
 )
+app_store_env=(
+  APPLE_MAS_CERTIFICATE_P12=app-store-application-certificate
+  APPLE_MAS_CERTIFICATE_PASSWORD=app-store-certificate-password
+  APPLE_MAS_INSTALLER_CERTIFICATE=app-store-installer-certificate
+  APPLE_MAS_PROVISIONING_PROFILE_BASE64=app-store-profile
+  APPLE_MAS_SIGNING_IDENTITY=app-store-signing-identity
+  APPLE_MAS_INSTALLER_IDENTITY=app-store-installer-identity
+)
 
 expect_output() {
   local file="$1"
@@ -84,6 +92,13 @@ run_readiness adhoc-authenticode GITHUB_EVENT_NAME=push "${required_env[@]}" PEP
 expect_output "$temp_dir/adhoc-authenticode.output" 'ready=true'
 run_readiness developer-id-none GITHUB_EVENT_NAME=push "${required_env[@]}" "${strict_macos_env[@]}" PEPPY_WINDOWS_SIGNING_MODE=none
 expect_output "$temp_dir/developer-id-none.output" 'ready=true'
+run_readiness app-store GITHUB_EVENT_NAME=push "${required_env[@]}" "${strict_windows_env[@]}" PEPPY_MACOS_DISTRIBUTION=app-store "${app_store_env[@]}"
+expect_output "$temp_dir/app-store.output" 'ready=true'
+if run_readiness app-store-missing GITHUB_EVENT_NAME=push "${required_env[@]}" "${strict_windows_env[@]}" PEPPY_MACOS_DISTRIBUTION=app-store "${app_store_env[@]:1}"; then
+  echo 'App Store mode without its certificate must fail' >&2
+  exit 1
+fi
+grep -Fq 'APPLE_MAS_CERTIFICATE_P12' "$temp_dir/app-store-missing.stdout" || { echo 'App Store configuration must list missing names' >&2; exit 1; }
 if run_readiness free-modes-partial GITHUB_EVENT_NAME=push "${required_env[@]:1}" PEPPY_MACOS_SIGNING_MODE=adhoc PEPPY_WINDOWS_SIGNING_MODE=none; then
   echo 'partial cryptographic signing configuration must fail in free modes' >&2
   exit 1
@@ -98,7 +113,7 @@ if run_readiness strict-windows-missing GITHUB_EVENT_NAME=push "${required_env[@
   exit 1
 fi
 
-for invalid in PEPPY_MACOS_SIGNING_MODE=invalid PEPPY_MACOS_SIGNING_MODE= PEPPY_WINDOWS_SIGNING_MODE=invalid PEPPY_WINDOWS_SIGNING_MODE=; do
+for invalid in PEPPY_MACOS_SIGNING_MODE=invalid PEPPY_MACOS_SIGNING_MODE= PEPPY_WINDOWS_SIGNING_MODE=invalid PEPPY_WINDOWS_SIGNING_MODE= PEPPY_MACOS_DISTRIBUTION=invalid PEPPY_MACOS_DISTRIBUTION=; do
   if run_readiness invalid-mode GITHUB_EVENT_NAME=push "$invalid"; then
     echo 'invalid explicit signing mode must fail before credential checks' >&2
     exit 1

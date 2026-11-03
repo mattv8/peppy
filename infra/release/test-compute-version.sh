@@ -34,6 +34,7 @@ assert_eq "$component_desktop" "$default_desktop"
 assert_eq "$(field "$component_desktop" tag)" v0.1.0-staging.1
 assert_eq "$(field "$component_desktop" last_stable)" ''
 assert_eq "$(field "$component_desktop" commits_since)" 1
+assert_eq "$(field "$component_desktop" MACOS_BUILD_NUMBER)" ''
 out=$(run "$repo" --channel stable); assert_eq "$(field "$out" version)" 0.1.0
 assert_eq "$(field "$out" android_version_code)" 100999
 assert_eq "$(field "$(run "$repo" --channel dev)" version)" 0.1.0-dev.1

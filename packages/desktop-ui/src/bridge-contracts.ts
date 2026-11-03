@@ -104,8 +104,19 @@ export type RestorableContact = { id: string; bookId: string; displayName: strin
 export type ResolvedContact = { contactId: string; bookId: string; displayName: string; photoDataUrl?: string };
 export type ContactResolutionMap = Record<string, ResolvedContact>;
 /** `currentRevision` is set when the stored draft revision is known (stale saves/sends, refused sends). */
-export type BridgeError = { code: string; message: string; conversationId?: string; draftId?: string; currentRevision?: string };
-export type HostedAccountView = { available: boolean; signedIn: boolean; accountLabel: string | null; classification: "new" | "pending" | "incomplete" | "provisioning" | "existing" | "lapsed" | null; entitlement: string | null; access: "read_write" | "read_only" | null; hasVault: boolean; resumable: boolean };
+export type BridgeErrorCode = "database-key-unavailable" | "cancelled" | (string & {});
+export type BridgeError = { code: BridgeErrorCode; message: string; conversationId?: string; draftId?: string; currentRevision?: string };
+export type HostedSignInProvider = "google" | "apple";
+export type BillingProvider = "none" | "stripe" | "apple";
+export type BillingManageableIn = "none" | "website" | "app_store";
+export type HostedBillingSummary = { provider: BillingProvider; manageableIn: BillingManageableIn };
+/** Account-wide billing state. `storageRenewsWithoutPlan` is true only when Apple storage still renews after the plan lapsed. */
+export type BillingSummaryView = HostedBillingSummary & { planActive: boolean; storagePacks: number; storageRenewsWithoutPlan: boolean; deletionPending: boolean };
+/** `providers` lists server-advertised sign-in providers; a missing field means none are known. */
+export type HostedAccountView = { available: boolean; signedIn: boolean; accountLabel: string | null; classification: "new" | "pending" | "incomplete" | "provisioning" | "existing" | "lapsed" | null; entitlement: string | null; access: "read_write" | "read_only" | null; hasVault: boolean; resumable: boolean; providers?: HostedSignInProvider[] };
+export type StartupStatus = { state: "on" | "off" | "approval_needed" | "unavailable"; background: boolean };
+export type PurchaseOptions = { appStore: boolean; website: boolean };
+export type StoreProduct = { id: string; kind: "plan" | "storage"; displayName: string; displayPrice: string; period: "month" | "year"; storageBytes?: number };
 /** Sanitized enrollment state. Secrets and device credentials remain in the platform host. */
 export type EnrollmentView = {
   mode: "community" | "hosted";
@@ -213,6 +224,9 @@ export interface DesktopBridge {
   /** Explicit user action only; omitting the ID starts a new-conversation draft. */
   open_composer(conversationId?: string): Promise<void>;
   set_start_at_login(enabled: boolean): Promise<void>;
+  startup_status(): Promise<StartupStatus>;
+  set_open_in_background(enabled: boolean): Promise<void>;
+  open_login_items(): Promise<void>;
   get_notification_sound?(): Promise<boolean>;
   set_notification_sound?(enabled: boolean): Promise<void>;
   popout_conversation(conversationId: string): Promise<{ headCreated: boolean; warning?: string }>;
@@ -246,10 +260,17 @@ export interface DesktopBridge {
   hosted_account(): Promise<HostedAccountView>;
   /** Returns the host-validated public Peppy Hosted origin. */
   hosted_origin_url(): Promise<string>;
-  hosted_sign_in(provider: "google"): Promise<HostedAccountView>;
+  hosted_sign_in(provider: HostedSignInProvider): Promise<HostedAccountView>;
   hosted_sign_out(): Promise<void>;
+  hosted_delete_account(): Promise<"deleted" | "pending">;
   hosted_open_billing(): Promise<void>;
   hosted_provision(): Promise<void>;
+  billing_summary(): Promise<BillingSummaryView>;
+  purchase_options(): Promise<PurchaseOptions>;
+  store_products(): Promise<StoreProduct[]>;
+  store_purchase(productId: string): Promise<"purchased" | "pending" | "cancelled">;
+  store_restore(): Promise<void>;
+  open_store_subscriptions(): Promise<void>;
   /** Optional while older fixture hosts do not implement device retention status. Fetch only on settings open or explicit refresh. */
   attachment_retention_status?(): Promise<AttachmentRetentionStatusResult>;
   /** Optional host read of one attachment's core-owned remote/local availability. */

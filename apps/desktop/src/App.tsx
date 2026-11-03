@@ -17,6 +17,7 @@ import type { GatewayAvailability, LocalSearchHit, LocalSearchRequest } from "@p
 import {
   AppTitlebar,
   attachmentStorageRemovalText,
+  BusyIndicator,
   OmniSearch,
   Check,
   CheckCheck,
@@ -32,6 +33,7 @@ import {
   Lock,
   LockKeyhole,
   LockOpen,
+  Modal,
   MessageSquare,
   MessageSquarePlus,
   Minus,
@@ -71,7 +73,6 @@ import {
   paletteIndex,
 } from "@peppy/desktop-ui";
 import "./settings/settings.css";
-import "./shell/vibrancy.css";
 import {
   bridge,
   renewHostedSession,
@@ -1063,6 +1064,7 @@ function SettingsView({
   accountReadOnly = false,
   requestedSection,
   onRequestedSectionConsumed,
+  onAccountDeleted,
 }: {
   mode: "hosted" | "self-hosted";
   configuredOrigin?: string;
@@ -1104,9 +1106,15 @@ function SettingsView({
   accountReadOnly?: boolean;
   requestedSection?: string;
   onRequestedSectionConsumed?(): void;
+  onAccountDeleted(result: { outcome: "deleted" | "pending"; provider: "none" | "stripe" | "apple" }): void;
 }) {
+  const platform = detectPlatform();
+  const [startupStatus, setStartupStatus] = useState<{ state: "on" | "off" | "approval_needed" | "unavailable"; background: boolean }>();
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
+  const [openLoginItemsError, setOpenLoginItemsError] = useState(false);
+  const [billingSummary, setBillingSummary] = useState<{ provider: "none" | "stripe" | "apple"; manageableIn: "none" | "website" | "app_store" }>();
+  const [purchaseOptions, setPurchaseOptions] = useState<{ appStore: boolean; website: boolean }>();
   const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
   const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
   const [revealError, setRevealError] = useState<string | null>(null);
@@ -1116,6 +1124,28 @@ function SettingsView({
   const scrollEndTimer = useRef<number | undefined>(undefined);
   const [activeSection, setActiveSection] = useState("server");
   const syncText = syncStatusText(encryption);
+  const reloadStartupStatus = useCallback(async () => {
+    if (!desktop?.startupSupported) return;
+    setStartupStatus(await bridge.startup_status());
+  }, [desktop?.startupSupported]);
+
+  useEffect(() => {
+    void reloadStartupStatus().catch(() => undefined);
+    const refreshStartupStatus = () => void reloadStartupStatus().catch(() => undefined);
+    window.addEventListener("focus", refreshStartupStatus);
+    return () => window.removeEventListener("focus", refreshStartupStatus);
+  }, [reloadStartupStatus]);
+
+  useEffect(() => {
+    if (browserHost) return;
+    let active = true;
+    void Promise.all([bridge.billing_summary(), bridge.purchase_options()]).then(([summary, options]) => {
+      if (!active) return;
+      setBillingSummary(summary);
+      setPurchaseOptions(options);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [browserHost]);
 
   const runAction = async (action: SettingsAction) => {
     if (pendingAction) return;
@@ -1351,22 +1381,35 @@ function SettingsView({
           <p id="settings-group-sender-avatars-hint" className="settings-field-hint">Shows a photo or initials beside the last message in each stretch from one person. Names always show.</p>
         </div>
       </section>
-      {desktop?.startupSupported && <section id="settings-startup" className="settings-card" data-settings-section="startup">
+      {desktop?.startupSupported && <section id="settings-startup" className="settings-card" data-settings-section="startup" data-startup-state={startupStatus?.state ?? (desktop.startAtLogin ? "on" : "off")}>
         <h2>Startup</h2>
-        <label className="settings-check"><input id="start-at-login" type="checkbox" checked={desktop.startAtLogin} disabled={savingStartup} onChange={async event => {
+        <label className="settings-check"><input id="start-at-login" type="checkbox" checked={startupStatus ? startupStatus.state === "on" || startupStatus.state === "approval_needed" : desktop.startAtLogin} disabled={savingStartup || startupStatus?.state === "unavailable"} onChange={async event => {
           setSavingStartup(true); setStartupError("");
-          try { await onStartAtLogin(event.target.checked); }
+          try { await onStartAtLogin(event.target.checked); await reloadStartupStatus(); }
           catch (error) { setStartupError(errorText(error)); }
           finally { setSavingStartup(false); }
-        }} /> Start at login</label>
-        {startupError && <p className="settings-error" role="alert">Start at login was not changed: {startupError}</p>}
+        }} /> {peppyCopy.startup_login_label}</label>
+        <label className="settings-check"><input id="startup-open-background" type="checkbox" checked={startupStatus?.background ?? desktop.background} disabled={savingStartup || !startupStatus || startupStatus.state === "off" || startupStatus.state === "unavailable"} aria-describedby="startup-open-background-hint" onChange={async event => {
+          const background = event.target.checked;
+          setSavingStartup(true); setStartupError("");
+          try { await bridge.set_open_in_background(background); await reloadStartupStatus(); }
+          catch (error) { setStartupError(errorText(error)); await reloadStartupStatus().catch(() => undefined); }
+          finally { setSavingStartup(false); }
+        }} /> {peppyCopy.startup_background_label}</label>
+        <p id="startup-open-background-hint" className="settings-field-hint">{startupStatus?.state === "off" ? peppyCopy.startup_background_needs_login : platform === "macos" ? peppyCopy.startup_background_hint_menu_bar : peppyCopy.startup_background_hint_notification_area}</p>
+        <p id="startup-status" role="status">{startupStatus?.state === "approval_needed" ? platform === "macos" ? peppyCopy.startup_approval_macos : peppyCopy.startup_approval_windows : startupStatus?.state === "unavailable" ? peppyCopy.startup_unavailable : ""}</p>
+        {startupStatus?.state === "approval_needed" && platform === "macos" && <button id="startup-open-login-items" className="secondary-button" type="button" disabled={savingStartup} onClick={() => { setOpenLoginItemsError(false); void bridge.open_login_items().catch(() => setOpenLoginItemsError(true)); }}>{peppyCopy.startup_open_login_items_cta}</button>}
+        {openLoginItemsError && <p id="startup-open-login-items-error" className="settings-error" role="alert">{peppyCopy.startup_open_login_items_failed}</p>}
+        {startupError && <p className="settings-error" role="alert">{startupError}</p>}
       </section>}
       {nativeUpdateHost && <UpdatesSettings />}
       {!browserHost && <AppLockSettings status={appLock} onChange={onAppLock} />}
       {hasAccount && <section id="settings-account-billing" className="settings-card" data-settings-section="account-billing">
         <h2>Account &amp; billing</h2>
-        <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
-        {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} />}
+        {(browserHost || (purchaseOptions?.website && billingSummary && billingSummary.provider !== "apple")) && <p>{peppyCopy.account_billing_intro_website}</p>}
+        {!browserHost && purchaseOptions?.appStore && billingSummary && (billingSummary.provider === "none" || billingSummary.provider === "apple") && <p>{peppyCopy.account_billing_intro_app_store}</p>}
+        {browserHost && accountUrl && <a id="settings-account-portal-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">{peppyCopy.account_portal_cta}<span className="visually-hidden"> (opens in a new tab)</span></a>}
+        {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
       </section>}
       <PrivacySettings browserHost={browserHost} />
       </div>
@@ -1408,6 +1451,62 @@ function StatusDetails({
       </div>
     </div>
   );
+}
+
+function ReenrolScreen({ onRetry, onStart, enrollment }: { onRetry(): Promise<void>; onStart(): Promise<void>; enrollment?: ReactNode }) {
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [stillUnavailable, setStillUnavailable] = useState(false);
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => { headingRef.current?.focus(); }, []);
+
+  const retry = async () => {
+    setRetrying(true);
+    setStillUnavailable(false);
+    try {
+      await onRetry();
+    } catch {
+      setStillUnavailable(true);
+    } finally {
+      setRetrying(false);
+    }
+  };
+  const start = async () => {
+    setStarting(true);
+    try {
+      await onStart();
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return <section id="reenrol-screen" data-error-code="database-key-unavailable" aria-labelledby="reenrol-headline">
+    <h2 ref={headingRef} id="reenrol-headline" tabIndex={-1}>{peppyCopy.reenrol_headline}</h2>
+    <p id="reenrol-body">{peppyCopy.reenrol_body}</p>
+    <p id="reenrol-data-kept">{peppyCopy.reenrol_data_kept}</p>
+    <p id="reenrol-draft-warning" data-tone="warning"><TriangleAlert size={16} aria-hidden /> {peppyCopy.reenrol_drafts_warning}</p>
+    <div className="enrollment-actions">
+      <button id="reenrol-start-button" className="primary-button" type="button" disabled={starting} onClick={() => void start()}>{peppyCopy.reenrol_start_cta}</button>
+      <button id="reenrol-retry-button" className="secondary-button" type="button" disabled={retrying || starting} onClick={() => void retry()}>{peppyCopy.try_again}</button>
+    </div>
+    {retrying && <BusyIndicator id="reenrol-retry-busy" label={peppyCopy.production_pairing_checking} />}
+    <p id="reenrol-retry-status" role="status">{stillUnavailable ? peppyCopy.reenrol_still_unavailable : ""}</p>
+    {enrollment && <div id="reenrol-enrollment">{enrollment}</div>}
+  </section>;
+}
+
+function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "deleted" | "pending"; provider: "none" | "stripe" | "apple" }; onDone(): void }) {
+  const deleted = result.outcome === "deleted";
+  return <Modal
+    id="account-deletion-result-dialog"
+    title={deleted ? peppyCopy.account_deleted_title : peppyCopy.account_delete_pending_title}
+    onDismiss={onDone}
+    actions={<button id="account-deletion-result-done" className="primary-button" type="button" onClick={onDone}>{peppyCopy.account_deleted_done}</button>}
+  >
+    <p id="account-deletion-result-body">{deleted ? peppyCopy.account_deleted_body : peppyCopy.account_delete_pending_body}</p>
+    {deleted && result.provider === "apple" && <><p id="account-deletion-result-apple-notice">{peppyCopy.account_deleted_apple_body}</p><button id="account-deletion-result-manage" className="secondary-button" type="button" onClick={() => void bridge.open_store_subscriptions()}>{peppyCopy.store_manage_cta}</button></>}
+  </Modal>;
 }
 
 /* ------------------------------------------------------------------ app */
@@ -1484,9 +1583,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, [theme]);
   useEffect(() => {
     const themeClasses = ["theme-light", "theme-dark", "theme-system"];
+    const root = document.documentElement;
     document.body.classList.remove(...themeClasses);
+    root.classList.remove(...themeClasses);
     document.body.classList.add(`theme-${theme}`);
-    return () => document.body.classList.remove(`theme-${theme}`);
+    root.classList.add(`theme-${theme}`);
+    return () => {
+      document.body.classList.remove(`theme-${theme}`);
+      root.classList.remove(`theme-${theme}`);
+    };
   }, [theme]);
   useEffect(() => {
     const syncTheme = (event: StorageEvent) => {
@@ -1596,6 +1701,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
   const [origin, setOrigin] = useState(() => browserHost ? fixedOrigin ?? "" : "");
   const [loading, setLoading] = useState(true);
+  const [reenrolRequired, setReenrolRequired] = useState(false);
+  const [reenrolEnrollment, setReenrolEnrollment] = useState(false);
+  const reenrolEnrollmentRef = useRef(false);
+  reenrolEnrollmentRef.current = reenrolEnrollment;
+  const [deletionResult, setDeletionResult] = useState<{ outcome: "deleted" | "pending"; provider: "none" | "stripe" | "apple" }>();
   const [refreshing, setRefreshing] = useState(false);
   const [sending, setSending] = useState(false);
   const [closingHead, setClosingHead] = useState(false);
@@ -2208,8 +2318,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const conversationId = request.explicit ? request.conversationId : selectedRef.current;
     const run = performRefresh(conversationId);
     run.then(
-      () => request.waiters.forEach(({ resolve }) => resolve()),
-      (error) => request.waiters.forEach(({ reject }) => reject(error)),
+      () => {
+        if (!reenrolEnrollmentRef.current) setReenrolRequired(false);
+        request.waiters.forEach(({ resolve }) => resolve());
+      },
+      (error) => {
+        if (errorCode(error) === "database-key-unavailable") setReenrolRequired(true);
+        request.waiters.forEach(({ reject }) => reject(error));
+      },
     ).finally(() => {
       refreshInFlightRef.current = false;
       const next = pendingRefreshRef.current;
@@ -4349,6 +4465,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   return (
     <ToneOverridesProvider overrides={toneOverrides}>
+    <>
     <main
       ref={mainRef}
       id="desktop-shell"
@@ -4633,9 +4750,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               accountUrl={accountUrl}
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
                serverOffline={serverOffline}
-               accountReadOnly={accountReadOnly}
-               requestedSection={notificationSettingsRequested ? "notifications" : undefined}
-               onRequestedSectionConsumed={() => setNotificationSettingsRequested(false)}
+                accountReadOnly={accountReadOnly}
+                requestedSection={notificationSettingsRequested ? "notifications" : undefined}
+                onRequestedSectionConsumed={() => setNotificationSettingsRequested(false)}
+                onAccountDeleted={result => {
+                  setDeletionResult(result);
+                  void refresh().catch(() => undefined);
+                }}
              />
           ) : notificationsOpen ? (
             <NotificationsView
@@ -4666,7 +4787,21 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} headerHost={contactsHeaderHost} />
           ) : (
             <>
-              {showSetup && snapshot ? (
+              {reenrolRequired ? (
+                <ReenrolScreen
+                  onRetry={() => refresh()}
+                  onStart={async () => setReenrolEnrollment(true)}
+                  enrollment={reenrolEnrollment ? <SetupLanding
+                    reenrol
+                    mode={mode}
+                    onMode={setMode}
+                    enrolledWithoutPhone={false}
+                    onExit={() => setReenrolEnrollment(false)}
+                    onJoined={async () => { setReenrolEnrollment(false); await refresh(); }}
+                    hostKind={browserHost ? "browser" : "native"}
+                  /> : undefined}
+                />
+              ) : showSetup && snapshot ? (
                 <SetupLanding
                   mode={mode}
                   onMode={setMode}
@@ -4714,6 +4849,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         </>}
       </div>
     </main>
+    {deletionResult && <AccountDeletionResultDialog result={deletionResult} onDone={() => {
+      const focusTarget = deletionResult.outcome === "deleted"
+        ? document.querySelector<HTMLElement>("#setup-panel h2, #onboarding-view h2")
+        : document.getElementById("hosted-account-delete-status");
+      setDeletionResult(undefined);
+      requestAnimationFrame(() => focusTarget?.focus());
+    }} />}
+    </>
     </ToneOverridesProvider>
   );
 }

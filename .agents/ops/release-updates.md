@@ -25,7 +25,18 @@ Configure the following protected inputs before enabling an update release:
   (the default when unset) requires `WINDOWS_CERTIFICATE` (base64 PFX) and
   `WINDOWS_CERTIFICATE_PASSWORD` secrets. Set it explicitly to `none` for a
   free Windows build; updater signatures remain required, but installers do not
-  carry an Authenticode publisher signature.
+   carry an Authenticode publisher signature.
+- `PEPPY_MACOS_DISTRIBUTION` protected environment variable defaults to `direct`.
+  Set it to `app-store` only for the separate protected `mac-app-store`
+  artifact build. App Store builds require `APPLE_MAS_CERTIFICATE_P12`,
+  `APPLE_MAS_CERTIFICATE_PASSWORD`, `APPLE_MAS_INSTALLER_CERTIFICATE`, and
+  `APPLE_MAS_PROVISIONING_PROFILE_BASE64`, `APPLE_MAS_SIGNING_IDENTITY`, and
+  `APPLE_MAS_INSTALLER_IDENTITY` secrets. The certificate inputs are base64 P12 files using the certificate
+  password. The profile embeds the restricted team and application identifiers.
+  This mode runs only in CI and produces a sandboxed `.pkg` whose
+  `CFBundleVersion` is the explicit, strictly increasing `macos_build_number`
+  dispatch input (`MACOS_BUILD_NUMBER`); it never creates
+  DMGs, notarization work, updater artifacts, or `latest.json`.
 - `PEPPY_RELEASE_GPG_KEY`, `PEPPY_RELEASE_GPG_KEY_ID`, and optional
   `PEPPY_RELEASE_GPG_PASSPHRASE`: detached-sign `SHA256SUMS` for repository
   handoff. Linux repository operators pin and verify its public key.

@@ -4721,12 +4721,15 @@ describe("host state display", () => {
 
   it("preserves browser account links and native hosted account actions in settings order", async () => {
     const configure = vi.spyOn(bridge, "configure_server");
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
     render(<App hostKind="browser" fixedOrigin="https://app.example.com" accountUrl="https://account.example.com/account" />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     const section = document.querySelector('[data-settings-section="account-billing"]');
-    const link = screen.getByRole("link", { name: /manage storage on the website/i });
+    const link = await screen.findByRole("link", { name: /manage storage on the website/i });
     expect(section).toBeInTheDocument();
     expect(link).toHaveAttribute("href", "https://account.example.com/account");
     expect(link).toHaveAttribute("target", "_blank");
@@ -4739,19 +4742,20 @@ describe("host state display", () => {
     render(<App accountUrl="https://account.example.com/account" />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("button", { name: /manage storage on the website/i })).toBeInTheDocument();
+    await screen.findByRole("button", { name: /manage storage on the website/i });
   });
 
   it("uses the selected native mode to expose only its connection controls", async () => {
-    const openBilling = vi.spyOn(bridge, "hosted_open_billing").mockResolvedValue();
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(document.getElementById("settings-connection-summary")).toHaveTextContent("Peppy Hosted · https://example.test");
 
     expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /manage storage on the website/i }));
-    await waitFor(() => expect(openBilling).toHaveBeenCalledOnce());
+    await screen.findByRole("button", { name: /manage storage on the website/i });
 
     cleanup();
     localStorage.setItem("peppy.setup.mode", "self-hosted");
@@ -5104,6 +5108,88 @@ describe("host state display", () => {
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     await waitFor(() => expect(startup).toBeEnabled());
     expect(startup).not.toBeChecked();
+  });
+
+  it.each([
+    ["on", true, false],
+    ["off", false, false],
+    ["approval_needed", true, true],
+    ["unavailable", false, false],
+  ] as const)("renders the %s startup state", async (state, checked, background) => {
+    vi.spyOn(bridge, "startup_status").mockResolvedValue({ state, background });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const card = document.getElementById("settings-startup")!;
+    await waitFor(() => expect(card).toHaveAttribute("data-startup-state", state));
+    expect(screen.getByRole("checkbox", { name: "Start at login" })).toHaveProperty("checked", checked);
+    const backgroundToggle = screen.getByRole("checkbox", { name: "Open in the background" });
+    expect(backgroundToggle).toHaveProperty("checked", background);
+    if (state === "unavailable") expect(backgroundToggle).toBeDisabled();
+  });
+
+  it("disables opening in the background until start at login is enabled", async () => {
+    vi.spyOn(bridge, "startup_status").mockResolvedValue({ state: "off", background: false });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByRole("checkbox", { name: "Open in the background" })).toBeDisabled();
+    expect(document.getElementById("startup-open-background-hint")).toHaveTextContent("Turn on Start at login to use this.");
+  });
+
+  it("uses neutral feedback when changing the background startup option fails", async () => {
+    vi.spyOn(bridge, "startup_status").mockResolvedValue({ state: "on", background: false });
+    vi.spyOn(bridge, "set_open_in_background").mockRejectedValue(new Error("Permission denied."));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Open in the background" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Permission denied.");
+    expect(screen.queryByText(/Start at login was not changed/)).not.toBeInTheDocument();
+  });
+
+  it("offers re-enrolment when the protected database key is unavailable", async () => {
+    vi.mocked(bridge.load_state).mockRejectedValue({ code: "database-key-unavailable" });
+    const connectComputer = vi.spyOn(bridge, "enrollment_connect_computer");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Reconnect this computer" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show connection code" }));
+    await waitFor(() => expect(document.getElementById("reenrol-enrollment")).toBeInTheDocument());
+    await waitFor(() => expect(connectComputer).toHaveBeenCalledWith());
+    await waitFor(() => expect(document.getElementById("enrollment-computer_waiting")).toBeInTheDocument());
+  });
+
+  it.each([
+    ["deleted", "stripe", "Account deleted"],
+    ["deleted", "apple", "Account deleted"],
+    ["pending", "none", "Deletion in progress"],
+  ] as const)("shows the %s account-deletion result for %s", async (outcome, provider, title) => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider, manageableIn: provider === "apple" ? "app_store" : "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.spyOn(bridge, "hosted_delete_account").mockResolvedValue(outcome);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete account" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "I understand this is permanent" }));
+    fireEvent.click(document.getElementById("account-delete-submit")!);
+
+    expect(await screen.findByRole("heading", { name: title })).toBeInTheDocument();
+    expect(document.getElementById("account-deletion-result-dialog")).toBeInTheDocument();
+    if (provider === "apple") expect(screen.getByRole("button", { name: "Manage App Store subscriptions" })).toBeInTheDocument();
+  });
+
+  it("reports when the protected key remains unavailable after retrying", async () => {
+    vi.mocked(bridge.load_state).mockRejectedValue({ code: "database-key-unavailable" });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("The protected key is still unavailable.")).toHaveAttribute("role", "status");
   });
 
   it("shows the public URL returned by publish_attachment and reports cancellation", async () => {
@@ -6523,7 +6609,7 @@ describe("theme persistence and window sync (M26)", () => {
     window.dispatchEvent(new StorageEvent("storage", { key: LAYOUT_KEY, newValue }));
   });
 
-  it("keeps a chosen Light theme, its body portal class, and sibling layout keys across remount", async () => {
+  it("keeps a chosen Light theme on the document and body, and sibling layout keys across remount", async () => {
     localStorage.setItem(LAYOUT_KEY, JSON.stringify({ composerHeight: 128 }));
     const first = render(<App />);
     await screen.findByText("Hello from Aurora");
@@ -6531,14 +6617,17 @@ describe("theme persistence and window sync (M26)", () => {
     chooseTheme("light");
 
     expect(shell()).toHaveClass("theme-light");
+    expect(document.documentElement).toHaveClass("theme-light");
     expect(document.body).toHaveClass("theme-light");
     expect(storedLayout()).toMatchObject({ theme: "light", composerHeight: 128 });
     first.unmount();
+    expect(document.documentElement).not.toHaveClass("theme-light");
     expect(document.body).not.toHaveClass("theme-light");
 
     render(<App />);
     await screen.findByText("Hello from Aurora");
     expect(shell()).toHaveClass("theme-light");
+    expect(document.documentElement).toHaveClass("theme-light");
     expect(document.body).toHaveClass("theme-light");
   });
 
@@ -6550,6 +6639,7 @@ describe("theme persistence and window sync (M26)", () => {
     otherWindowWrites(JSON.stringify({ theme: "dark", composerHeight: 140 }));
 
     expect(shell()).toHaveClass("theme-dark");
+    expect(document.documentElement).toHaveClass("theme-dark");
     expect(document.body).toHaveClass("theme-dark");
     expect(setItem.mock.calls.filter(([key]) => key === LAYOUT_KEY)).toEqual([]);
   });
@@ -6564,6 +6654,7 @@ describe("theme persistence and window sync (M26)", () => {
     await screen.findByText("Hello from Aurora");
 
     expect(shell()).toHaveClass("theme-system");
+    expect(document.documentElement).toHaveClass("theme-system");
     expect(document.body).toHaveClass("theme-system");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.getByLabelText("Theme")).toHaveValue("system");

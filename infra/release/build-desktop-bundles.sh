@@ -2,13 +2,30 @@
 set -euo pipefail
 
 config=''
-if [ "$TRUSTED_UPDATE_BUILD" = true ]; then
+macos_distribution="${PEPPY_MACOS_DISTRIBUTION-direct}"
+case "$macos_distribution" in direct|app-store) ;; *) echo 'PEPPY_MACOS_DISTRIBUTION must be direct or app-store' >&2; exit 1 ;; esac
+
+if [ "$macos_distribution" = app-store ]; then
+  [ "$RUNNER_OS" = macOS ] || { echo 'app-store distribution requires a macOS runner' >&2; exit 1; }
+  [ "${GITHUB_ACTIONS:-}" = true ] || { echo 'app-store distribution must run in GitHub Actions' >&2; exit 1; }
+  [ "$BUNDLES" = app ] || { echo 'app-store distribution builds only the app bundle' >&2; exit 1; }
+  for required in VERSION MACOS_BUILD_NUMBER APPLE_MAS_CERTIFICATE_P12 APPLE_MAS_CERTIFICATE_PASSWORD APPLE_MAS_INSTALLER_CERTIFICATE APPLE_MAS_PROVISIONING_PROFILE_BASE64 APPLE_MAS_SIGNING_IDENTITY APPLE_MAS_INSTALLER_IDENTITY; do
+    [[ "${!required:-}" =~ [^[:space:]] ]] || { echo "$required is required for app-store builds" >&2; exit 1; }
+  done
+  [[ "$MACOS_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo 'MACOS_BUILD_NUMBER must be a positive integer' >&2; exit 1; }
+  # Tauri recognizes these standard names; keep App Store credentials separate from Developer ID inputs.
+  export APPLE_CERTIFICATE="$APPLE_MAS_CERTIFICATE_P12"
+  export APPLE_CERTIFICATE_PASSWORD="$APPLE_MAS_CERTIFICATE_PASSWORD"
+  export APPLE_SIGNING_IDENTITY="$APPLE_MAS_SIGNING_IDENTITY"
+  unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+  config=$(cat packaging/macos/app-store/tauri.app-store.json)
+elif [ "$TRUSTED_UPDATE_BUILD" = true ]; then
   macos_mode="${PEPPY_MACOS_SIGNING_MODE-developer-id}"
   windows_mode="${PEPPY_WINDOWS_SIGNING_MODE-authenticode}"
   case "$macos_mode" in developer-id|adhoc) ;; *) echo 'PEPPY_MACOS_SIGNING_MODE must be developer-id or adhoc' >&2; exit 1 ;; esac
   case "$windows_mode" in authenticode|none) ;; *) echo 'PEPPY_WINDOWS_SIGNING_MODE must be authenticode or none' >&2; exit 1 ;; esac
   case "$PEPPY_UPDATE_CHANNEL" in stable|staging) ;; *) echo 'trusted update builds require stable or staging channel' >&2; exit 1 ;; esac
-  for required in VERSION PEPPY_UPDATE_PUBLIC_KEY TAURI_SIGNING_PRIVATE_KEY PEPPY_DESKTOP_GOOGLE_CLIENT_ID PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET; do
+  for required in VERSION PEPPY_UPDATE_PUBLIC_KEY TAURI_SIGNING_PRIVATE_KEY; do
     [[ "${!required:-}" =~ [^[:space:]] ]] || { echo "$required is required for trusted update builds" >&2; exit 1; }
   done
   if [ "$RUNNER_OS" = macOS ] && [ "$macos_mode" = developer-id ]; then
@@ -26,7 +43,6 @@ else
   # Tauri interprets even empty Apple credentials as a request to sign.
   unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
   unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
-  unset PEPPY_DESKTOP_GOOGLE_CLIENT_ID PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET
   unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
   macos_mode=adhoc
 fi
@@ -50,6 +66,73 @@ repair_macos_dmg() {
     if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then repair_arguments+=(--identity "$APPLE_SIGNING_IDENTITY"); fi
     "$scratch/venv/bin/python" packaging/macos/dmg/repair_dmg.py "${repair_arguments[@]}"
   )
+}
+
+package_app_store() {
+  local bundle_output_dir profile profile_xml application_certificate installer_certificate entitlements signed_entitlements keychain keychain_password team_id application_identifier signed_team_id signed_application_identifier app pkg_dir pkg
+  local -a previous_keychains
+  bundle_output_dir="${PEPPY_BUNDLE_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/macos}"
+  profile=$(mktemp)
+  profile_xml=$(mktemp)
+  application_certificate=$(mktemp)
+  installer_certificate=$(mktemp)
+  entitlements=$(mktemp)
+  signed_entitlements=$(mktemp)
+  keychain="${TMPDIR:-/tmp}/peppy-mas-$(uuidgen).keychain-db"
+  keychain_password=$(uuidgen)
+  previous_keychains=()
+  while IFS= read -r previous_keychain; do
+    previous_keychain=${previous_keychain#\"}
+    previous_keychain=${previous_keychain%\"}
+    [ -n "$previous_keychain" ] && previous_keychains+=("$previous_keychain")
+  done < <(security list-keychains -d user)
+  cleanup_app_store_keychain() {
+    trap - RETURN
+    if [ "${#previous_keychains[@]}" -gt 0 ]; then
+      security list-keychains -d user -s "${previous_keychains[@]}" >/dev/null 2>&1 || true
+    fi
+    security delete-keychain "$keychain" >/dev/null 2>&1 || true
+    rm -f "$profile" "$profile_xml" "$application_certificate" "$installer_certificate" "$entitlements" "$signed_entitlements"
+  }
+  trap cleanup_app_store_keychain RETURN
+  printf '%s' "$APPLE_MAS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$profile"
+  printf '%s' "$APPLE_MAS_CERTIFICATE_P12" | base64 -D > "$application_certificate"
+  printf '%s' "$APPLE_MAS_INSTALLER_CERTIFICATE" | base64 -D > "$installer_certificate"
+  security cms -D -i "$profile" > "$profile_xml"
+  team_id=$(plutil -extract Entitlements.com.apple.developer.team-identifier raw -o - "$profile_xml")
+  application_identifier=$(plutil -extract Entitlements.application-identifier raw -o - "$profile_xml")
+  [ -n "$team_id" ] || { echo 'App Store provisioning profile does not declare a team identifier' >&2; return 1; }
+  [ "$application_identifier" = "$team_id.org.peppy.desktop" ] || { echo "App Store provisioning profile application identifier must equal $team_id.org.peppy.desktop" >&2; return 1; }
+  security create-keychain -p "$keychain_password" "$keychain"
+  security set-keychain-settings -lut 21600 "$keychain"
+  security unlock-keychain -p "$keychain_password" "$keychain"
+  if [ "${#previous_keychains[@]}" -gt 0 ]; then
+    security list-keychains -d user -s "$keychain" "${previous_keychains[@]}"
+  else
+    security list-keychains -d user -s "$keychain"
+  fi
+  security import "$application_certificate" -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+  security import "$installer_certificate" -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/productbuild
+  cp packaging/macos/app-store/entitlements.plist "$entitlements"
+  plutil -replace com.apple.application-identifier -string "$application_identifier" "$entitlements"
+  plutil -replace com.apple.developer.team-identifier -string "$team_id" "$entitlements"
+  while IFS= read -r -d '' app; do
+    install -m 0644 "$profile" "$app/Contents/embedded.provisionprofile"
+    plutil -replace CFBundleVersion -string "$MACOS_BUILD_NUMBER" "$app/Contents/Info.plist"
+    codesign --force --sign "$APPLE_MAS_SIGNING_IDENTITY" --keychain "$keychain" --entitlements "$entitlements" "$app"
+    codesign --verify --deep --strict --verbose=2 "$app"
+    codesign -d --entitlements :- "$app" > "$signed_entitlements"
+    plutil -extract com.apple.security.app-sandbox raw -o - "$signed_entitlements" | grep -Fqx 1 || { echo 'App Store bundle is missing the app sandbox entitlement' >&2; return 1; }
+    signed_team_id=$(plutil -extract com.apple.developer.team-identifier raw -o - "$signed_entitlements")
+    signed_application_identifier=$(plutil -extract com.apple.application-identifier raw -o - "$signed_entitlements")
+    [ "$signed_team_id" = "$team_id" ] || { echo 'App Store bundle team identifier does not match the provisioning profile' >&2; return 1; }
+    [ "$signed_application_identifier" = "$application_identifier" ] || { echo 'App Store bundle application identifier does not match the provisioning profile' >&2; return 1; }
+    codesign -d -r- "$app" 2>&1 | grep -Fq "$team_id" || { echo 'App Store bundle designated requirement does not match the provisioning-profile team' >&2; return 1; }
+    pkg_dir="${PEPPY_PKG_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/macos}"
+    mkdir -p "$pkg_dir"
+    pkg="$pkg_dir/Peppy.pkg"
+    productbuild --component "$app" /Applications --sign "$APPLE_MAS_INSTALLER_IDENTITY" --keychain "$keychain" "$pkg"
+  done < <(find "$bundle_output_dir" -name '*.app' -type d -print0)
 }
 
 assert_developer_id_signature() {
@@ -137,7 +220,7 @@ if [[ -n "$VERSION" ]]; then
   fi
   json="$json}"
   # shellcheck disable=SC2016
-  if [ -n "$config" ]; then json=$(node -e 'const [base, overlay] = process.argv.slice(1).map(JSON.parse); const bundle={...base.bundle,...overlay.bundle}; if (process.env.RUNNER_OS === "Windows" && process.env.PEPPY_WINDOWS_SIGNING_MODE !== "none") { const script = `${process.env.GITHUB_WORKSPACE}\\infra\\release\\sign-windows-artifact.ps1`; bundle.windows={...(base.bundle?.windows ?? {}),signCommand:`powershell -NoProfile -ExecutionPolicy Bypass -File \"${script}\" %1`}; } console.log(JSON.stringify({...base,...overlay,bundle}));' "$json" "$config"); fi
+  if [ -n "$config" ]; then json=$(node -e 'const object = value => value && typeof value === "object" && !Array.isArray(value); const merge = (base, overlay) => { if (!object(overlay)) return overlay; const result = object(base) ? {...base} : {}; for (const [key, value] of Object.entries(overlay)) result[key] = object(value) ? merge(result[key], value) : value; return result; }; const [base, overlay] = process.argv.slice(1).map(JSON.parse); const merged=merge(base, overlay); if (process.env.RUNNER_OS === "Windows" && process.env.PEPPY_WINDOWS_SIGNING_MODE !== "none") { const bundle=merged.bundle ?? {}; const script = `${process.env.GITHUB_WORKSPACE}\\infra\\release\\sign-windows-artifact.ps1`; bundle.windows={...(bundle.windows ?? {}),signCommand:`powershell -NoProfile -ExecutionPolicy Bypass -File \"${script}\" %1`}; merged.bundle=bundle; } console.log(JSON.stringify(merged));' "$json" "$config"); fi
 else
   json=''
 fi
@@ -174,7 +257,9 @@ else
   fi
 fi
 
-repair_macos_dmg
+if [ "$macos_distribution" = direct ]; then repair_macos_dmg; fi
+
+if [ "$macos_distribution" = app-store ]; then package_app_store; fi
 
 if [ "$TRUSTED_UPDATE_BUILD" = true ] && [ "$RUNNER_OS" = macOS ]; then
   bundle_output_dir="${PEPPY_BUNDLE_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/macos}"
