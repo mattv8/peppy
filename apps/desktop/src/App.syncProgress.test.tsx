@@ -50,13 +50,13 @@ describe("App sync progress banner", () => {
   it("stays hidden when the snapshot reports current or omits sync progress", async () => {
     snapshot = { ...snapshot, syncProgress: { phase: "current", receivedThrough: "5", processedThrough: "5" } };
     const { unmount } = render(<App hostKind="browser" />);
-    await screen.findByRole("toolbar", { name: "Thread list toolbar" });
+    await screen.findByRole("toolbar", { name: "Conversation controls" });
     expect(syncRegion()).not.toBeInTheDocument();
     unmount();
 
     snapshot = { ...snapshot, syncProgress: undefined };
     render(<App hostKind="browser" />);
-    await screen.findByRole("toolbar", { name: "Thread list toolbar" });
+    await screen.findByRole("toolbar", { name: "Conversation controls" });
     expect(syncRegion()).not.toBeInTheDocument();
   });
 

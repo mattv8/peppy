@@ -78,6 +78,8 @@ select:focus-visible {
 @media (forced-colors: active) { [data-tone-picker-panel] { border-color: CanvasText; background: Canvas; box-shadow: none; } [data-tone-option] { forced-color-adjust: none; } [data-tone-option][aria-checked="true"] { outline-color: Highlight; } }
 .titlebar {
   container: titlebar / inline-size;
+  position: relative;
+  z-index: 30;
   height: var(--peppy-titlebar-height);
   display: flex;
   align-items: center;
@@ -88,10 +90,6 @@ select:focus-visible {
   color: var(--peppy-text-strong);
   user-select: none;
   --peppy-active-titlebar-height: var(--peppy-titlebar-height);
-}
-.titlebar[data-navigation-placement] {
-  position: relative;
-  z-index: 30;
 }
 .titlebar-product {
   display: block;
@@ -199,7 +197,6 @@ select:focus-visible {
 [data-omni-number-candidate] small { color: var(--peppy-text-secondary); font-size: 12px; }
 [data-omni-number-candidate] > svg { justify-self: center; color: var(--peppy-text-secondary); }
 @media (width > 640px) {
-  .titlebar:has(> #titlebar-search) { position: relative; }
   .titlebar > #titlebar-search {
     position: absolute;
     inset-block: 0;
@@ -207,7 +204,7 @@ select:focus-visible {
     margin-block: auto;
     margin-inline: auto;
     height: 28px;
-    width: clamp(160px, calc(100% - 480px), 520px);
+    width: clamp(160px, calc(100% - 600px), 520px);
   }
 }
 @media (max-width: 640px) {
@@ -278,9 +275,18 @@ select:focus-visible {
 .traffic-light:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--peppy-focus); }
 [data-window-focused="false"] .window-controls-windows button { color: var(--peppy-text-muted); }
 #titlebar-actions { display: flex; align-items: center; gap: 2px; }
-#titlebar-actions button { display: grid; width: 26px; height: 26px; padding: 0; place-items: center; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-secondary); }
-#titlebar-actions button:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
-#titlebar-actions svg { pointer-events: none; }
+#titlebar-actions > button,
+#titlebar-actions > .titlebar-action-anchor > button { position: relative; display: grid; width: 26px; height: 26px; padding: 0; place-items: center; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-secondary); }
+#titlebar-actions > button:hover:not(:disabled),
+#titlebar-actions > .titlebar-action-anchor > button:hover:not(:disabled) { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+#titlebar-actions > button:disabled,
+#titlebar-actions > .titlebar-action-anchor > button:disabled { opacity: .4; }
+#titlebar-actions > button:focus-visible,
+#titlebar-actions > .titlebar-action-anchor > button:focus-visible { outline: 2px solid var(--peppy-focus); }
+#titlebar-actions > button svg,
+#titlebar-actions > .titlebar-action-anchor > button svg { pointer-events: none; }
+.titlebar-action-dot { position: absolute; top: 4px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--peppy-accent); pointer-events: none; }
+@media (forced-colors: active) { .titlebar-action-dot { background: CanvasText; } }
 #titlebar-navigation {
   display: flex;
   flex-shrink: 0;

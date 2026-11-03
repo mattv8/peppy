@@ -15,6 +15,7 @@ import {
   StatusPopover,
   ConnectionDot,
   ConversationList,
+  isPopoutMode,
 } from "./index";
 
 const people = [{ id: "conv-a", name: "Aurora", preview: "Hi", unread: 0 }];
@@ -22,6 +23,15 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("isPopoutMode", () => {
+  it("accepts supported popout modes only", () => {
+    expect(isPopoutMode("bubble")).toBe(true);
+    expect(isPopoutMode("window")).toBe(true);
+    expect(isPopoutMode("floating")).toBe(false);
+    expect(isPopoutMode(undefined)).toBe(false);
+  });
 });
 
 describe("StatusPopover", () => {
@@ -195,10 +205,19 @@ describe("ConversationList interactions", () => {
     expect(onSelect).toHaveBeenLastCalledWith("conv-b");
     expect(onPopout).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByTitle("Open Cobalt as floating conversation"));
+    fireEvent.click(screen.getByTitle("Open Cobalt as chat bubble"));
     expect(onPopout).toHaveBeenCalledOnce();
     expect(onPopout).toHaveBeenCalledWith("conv-c");
     expect(onSelect).toHaveBeenCalledOnce();
+  });
+
+  it("labels popout actions for the selected popout mode", () => {
+    const { rerender } = render(<ConversationList conversations={threads} selectedId="conv-a" onSelect={() => {}} onPopout={() => {}} />);
+
+    expect(screen.getByTitle("Open Aurora as chat bubble")).toHaveAccessibleName("Open as chat bubble");
+
+    rerender(<ConversationList conversations={threads} selectedId="conv-a" onSelect={() => {}} onPopout={() => {}} popoutMode="window" />);
+    expect(screen.getByTitle("Open Aurora in new window")).toHaveAccessibleName("Open in new window");
   });
 
   it("marks only the selected row as the current location", () => {
@@ -212,7 +231,7 @@ describe("ConversationList interactions", () => {
     const onSelect = vi.fn();
     render(<ConversationList conversations={[...threads, ...drafts]} selectedId="conv-a" onSelect={onSelect} />);
 
-    expect(screen.queryByRole("button", { name: "Open as floating conversation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open as chat bubble" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Delete draft for/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Draft two Draft" }));
     expect(onSelect).toHaveBeenCalledWith("draft-b");
@@ -651,9 +670,25 @@ describe("desktop UI controls", () => {
     expect(newMessage).toHaveBeenCalledOnce();
   });
 
+  it("renders titlebar actions after the new conversation button", () => {
+    render(<AppTitlebar onNewMessage={() => {}} actions={<button type="button" id="titlebar-extra-action">Extra action</button>} />);
+
+    const actions = document.getElementById("titlebar-actions")!;
+    expect(actions).toContainElement(document.getElementById("titlebar-extra-action"));
+    expect(actions.querySelector('[data-action="new-message"]')?.nextElementSibling).toBe(document.getElementById("titlebar-extra-action"));
+  });
+
+  it("renders titlebar actions without built-in conversation controls", () => {
+    render(<AppTitlebar actions={<button type="button">Extra action</button>} />);
+
+    expect(document.getElementById("titlebar-actions")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Extra action" })).toBeInTheDocument();
+  });
+
   it("does not render main-window conversation controls in the composer", () => {
-    render(<AppTitlebar isComposer onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} onToggleSidebar={() => {}} onNewMessage={() => {}} />);
+    render(<AppTitlebar isComposer onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} onToggleSidebar={() => {}} onNewMessage={() => {}} actions={<button type="button">Extra action</button>} />);
     expect(document.getElementById("titlebar-actions")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Extra action" })).not.toBeInTheDocument();
   });
 
   it("renders the view-switch slot in the composer", () => {

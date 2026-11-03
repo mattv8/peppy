@@ -1,8 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { StrictMode, useLayoutEffect, useState } from "react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SyncProgress as SyncProgressSnapshot } from "./bridge-contracts";
-import { SyncProgress } from "./SyncProgress";
+import { HIDE_LINGER_MS, SHOW_DELAY_MS, SyncProgress } from "./SyncProgress";
 
 const HUGE_RECEIVED = "123456789012345678901234567890";
 const HUGE_PROCESSED = "123456789012345678901234567000";
@@ -21,8 +22,17 @@ const announcement = () => document.querySelector<HTMLElement>("[data-sync-annou
 const region = () => screen.queryByRole("region", { name: "History sync" });
 const details = () => document.querySelector<HTMLDetailsElement>("[data-sync-details]");
 
+function SyncProgressThatBecomesCurrent() {
+  const [syncProgress, setSyncProgress] = useState(progress());
+  useLayoutEffect(() => {
+    setSyncProgress(progress({ phase: "current" }));
+  }, []);
+  return <SyncProgress progress={syncProgress} />;
+}
+
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 describe("SyncProgress", () => {
@@ -99,17 +109,132 @@ describe("SyncProgress", () => {
     expect(banner()?.querySelectorAll("button, [tabindex], a[href], input")).toHaveLength(0);
   });
 
-  it("announces phase changes only, not cursor-only updates", () => {
+  it("announces displayed phase changes only, not cursor-only updates", () => {
+    vi.useFakeTimers();
     const { rerender } = render(<SyncProgress progress={progress()} />);
-    expect(announcement()?.textContent).toBe("");
+    expect(announcement()?.textContent).toBe("Loading your history.");
     rerender(<SyncProgress progress={progress({ receivedThrough: "200" })} />);
-    expect(announcement()?.textContent).toBe("");
+    expect(announcement()?.textContent).toBe("Loading your history.");
     rerender(<SyncProgress progress={progress({ phase: "applying", processedThrough: "150" })} />);
     expect(announcement()?.textContent).toBe("Organizing downloaded history.");
     rerender(<SyncProgress progress={progress({ phase: "applying", processedThrough: "160" })} />);
     expect(announcement()?.textContent).toBe("Organizing downloaded history.");
     rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    expect(banner()).not.toBeNull();
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS));
     expect(banner()).toBeNull();
     expect(announcement()?.textContent).toBe("Your history is up to date.");
+  });
+
+  it("suppresses active blips shorter than the show delay", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress />);
+    rerender(<SyncProgress progress={progress()} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS - 1));
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    expect(banner()).toBeNull();
+    expect(announcement()).toHaveTextContent("");
+  });
+
+  it("shows an active phase after the show delay", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress />);
+    rerender(<SyncProgress progress={progress()} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    expect(region()).toHaveAttribute("data-sync-phase", "receiving");
+    expect(announcement()).toHaveTextContent("Loading your history.");
+  });
+
+  it("does not reset the show delay when active phases switch", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress />);
+    rerender(<SyncProgress progress={progress()} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS - 100));
+    rerender(<SyncProgress progress={progress({ phase: "applying" })} />);
+    act(() => vi.advanceTimersByTime(100));
+    expect(region()).toHaveAttribute("data-sync-phase", "applying");
+  });
+
+  it("lingers after current, then hides and announces completion", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress()} />);
+    rerender(<SyncProgress progress={progress({ phase: "current", receivedThrough: "200" })} />);
+    expect(region()).toHaveAttribute("data-sync-phase", "receiving");
+    expect(region()).toHaveTextContent("200");
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS - 1));
+    expect(banner()).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(banner()).toBeNull();
+    expect(announcement()).toHaveTextContent("Your history is up to date.");
+  });
+
+  it("cancels a pending hide when sync becomes active again", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress()} />);
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS - 1));
+    rerender(<SyncProgress progress={progress({ phase: "applying" })} />);
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS));
+    expect(region()).toHaveAttribute("data-sync-phase", "applying");
+  });
+
+  it("shows waiting for keys immediately", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress />);
+    rerender(<SyncProgress progress={progress({ phase: "waitingForKeys" })} />);
+    expect(region()).toHaveAttribute("data-sync-phase", "waitingForKeys");
+  });
+
+  it("hides absent progress after lingering without a completion announcement", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress()} />);
+    rerender(<SyncProgress />);
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS));
+    expect(banner()).toBeNull();
+    expect(announcement()).toHaveTextContent("Loading your history.");
+  });
+
+  it("keeps the hide deadline when current and absent switch during the linger", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress()} />);
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS - 100));
+    rerender(<SyncProgress />);
+    act(() => vi.advanceTimersByTime(100));
+    expect(banner()).toBeNull();
+    expect(announcement()).toHaveTextContent("Loading your history.");
+  });
+
+  it("announces completion when current is restored before the original hide deadline", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress()} />);
+    rerender(<SyncProgress />);
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS - 100));
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    act(() => vi.advanceTimersByTime(100));
+    expect(banner()).toBeNull();
+    expect(announcement()).toHaveTextContent("Your history is up to date.");
+  });
+
+  it("shows an active phase on the first render", () => {
+    render(<SyncProgress progress={progress({ phase: "applying" })} />);
+    expect(region()).toHaveAttribute("data-sync-phase", "applying");
+  });
+
+  it("cleans up timers when unmounted", () => {
+    vi.useFakeTimers();
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const { rerender, unmount } = render(<SyncProgress />);
+    rerender(<SyncProgress progress={progress()} />);
+    unmount();
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+  });
+
+  it("resets timer refs across StrictMode effect cleanup", () => {
+    vi.useFakeTimers();
+    render(<StrictMode><SyncProgressThatBecomesCurrent /></StrictMode>);
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS));
+    expect(banner()).toBeNull();
   });
 });

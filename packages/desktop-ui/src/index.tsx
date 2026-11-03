@@ -148,9 +148,14 @@ export type StatusTone = "neutral" | "ok" | "warning" | "error";
 export type PanelStatus = { tone: StatusTone; summary: string; details: ReactNode };
 export type NavigationView = "conversations" | "notifications" | "settings" | "contacts";
 export type NavigationPosition = "side-rail" | "title-bar";
+export type PopoutMode = "bubble" | "window";
 
 export function isNavigationPosition(value: unknown): value is NavigationPosition {
   return value === "side-rail" || value === "title-bar";
+}
+
+export function isPopoutMode(value: unknown): value is PopoutMode {
+  return value === "bubble" || value === "window";
 }
 
 export function StatusPopover({ tone, summary, children }: { tone: StatusTone; summary: string; children?: ReactNode }): ReactElement {
@@ -740,6 +745,7 @@ export function AppTitlebar({
   navigation,
   search,
   viewSwitch,
+  actions,
 }: {
   onMinimize?(): void;
   onMaximize?(): void;
@@ -758,6 +764,7 @@ export function AppTitlebar({
   navigation?: ReactNode;
   search?: ReactNode;
   viewSwitch?: ReactNode;
+  actions?: ReactNode;
 }) {
   const titlebarRef = useRef<HTMLElement>(null);
   const macos = (platform ?? detectPlatform()) === "macos";
@@ -833,7 +840,7 @@ export function AppTitlebar({
           tabIndex={isComposer ? -1 : undefined}
         ><Maximize2 size={10} strokeWidth={2} aria-hidden /></button>}
       </div>}
-      {!isComposer && (onToggleSidebar || onNewMessage) && <div id="titlebar-actions" role="toolbar" aria-label="Conversation controls">
+      {!isComposer && (onToggleSidebar || onNewMessage || actions) && <div id="titlebar-actions" role="toolbar" aria-label="Conversation controls">
         {onToggleSidebar && <button
           type="button"
           data-action="toggle-sidebar"
@@ -851,6 +858,7 @@ export function AppTitlebar({
           disabled={newMessageDisabled}
           onClick={onNewMessage}
         ><MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden /></button>}
+        {actions}
       </div>}
       <span className="titlebar-product" aria-hidden>
         <img src={logoUrl} alt="" draggable={false} />
@@ -918,6 +926,7 @@ export function ConversationList({
   deleteWarningId,
   pendingPinId,
   loading = false,
+  popoutMode = "bubble",
 }: {
   conversations: Conversation[];
   selectedId: string;
@@ -932,6 +941,7 @@ export function ConversationList({
   deleteWarningId?: string;
   pendingPinId?: string;
   loading?: boolean;
+  popoutMode?: PopoutMode;
 }) {
   return (
     <nav id="conversation-list" aria-label="Conversations" aria-busy={loading}>
@@ -996,7 +1006,7 @@ export function ConversationList({
                   >
                     {deletingId === c.id ? <Loader size={15} aria-hidden /> : <Trash2 size={16} aria-hidden />}
                   </button>}
-                  {onPopout && <button type="button" className="conversation-popout" data-popout-conversation-id={c.id} aria-label="Open as floating conversation" title={`Open ${c.name} as floating conversation`} onClick={() => onPopout(c.id)}><ExternalLink size={15} aria-hidden /></button>}
+                  {onPopout && <button type="button" className="conversation-popout" data-popout-conversation-id={c.id} aria-label={popoutMode === "bubble" ? "Open as chat bubble" : "Open in new window"} title={`Open ${c.name} ${popoutMode === "bubble" ? "as chat bubble" : "in new window"}`} onClick={() => onPopout(c.id)}><ExternalLink size={15} aria-hidden /></button>}
                 </div>}
               </div>
             </li>;

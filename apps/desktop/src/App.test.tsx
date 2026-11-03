@@ -514,15 +514,22 @@ describe("setup landing routing", () => {
     expect(bridge.enrollment_status).not.toHaveBeenCalled();
   });
 
-  it("opens owner add phone enrollment from the workbench even with a gateway", async () => {
+  it("hides Connect a phone for owners with a gateway", async () => {
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
     vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
-    expect(await screen.findByText("Connect your phone")).toBeInTheDocument();
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Connect a phone" })).not.toBeInTheDocument();
   });
 
-  it("defers automatic phone setup per origin while header Add phone remains available", async () => {
+  it("hides Connect a phone for non-owners", async () => {
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "joined" });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Connect a phone" })).not.toBeInTheDocument();
+  });
+
+  it("defers automatic phone setup per origin while titlebar Connect a phone remains available", async () => {
     const refreshedSnapshot = {
       ...await fixtureBridge.load_state(),
       activeConversationId: undefined,
@@ -541,26 +548,71 @@ describe("setup landing routing", () => {
     fireEvent.click(defer);
     await waitFor(() => expect(localStorage.getItem("peppy.setup.phoneDeferred:https://example.test")).toBe("1"));
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Add phone" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect a phone" }));
     expect(await screen.findByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
 
     await act(async () => refresh.resolve(refreshedSnapshot));
     expect(screen.getByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
   });
 
-  it("returns to the selected conversation when add phone is cancelled", async () => {
-    const cancellation = deferred<void>();
+  it("removes phone setup from the conversation header", async () => {
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
-    vi.mocked(bridge.enrollment_add_phone).mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
-    vi.mocked(bridge.enrollment_cancel).mockReturnValue(cancellation.promise);
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("add-phone-action")).not.toBeInTheDocument();
+  });
+
+  it("returns to the selected conversation when titlebar phone setup is cancelled", async () => {
+    const cancellation = deferred<void>();
+    const snapshot = await fixtureBridge.load_state();
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
+    vi.spyOn(bridge, "load_state").mockResolvedValue({
+      ...snapshot,
+      connection: { state: "connected", origin },
+      gateways: [],
+      deviceRole: "owner",
+    });
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(enrollment("ready", { owner: true, hasGateway: false }));
+    vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+    vi.spyOn(bridge, "enrollment_cancel").mockReturnValue(cancellation.promise);
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Connect a phone" }));
     await screen.findByRole("img", { name: /pairing qr/i });
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     expect(bridge.enrollment_cancel).toHaveBeenCalledOnce();
     expect(document.getElementById("conversation-stage")).not.toBeInTheDocument();
     await act(async () => cancellation.resolve());
     await waitFor(() => expect(document.getElementById("conversation-stage")).toBeInTheDocument());
+  });
+
+  it("disables Connect a phone while disconnected or locked", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "offline" }, gateways: [], deviceRole: "owner" });
+    const { unmount } = render(<App />);
+    const disconnected = await screen.findByRole("button", { name: "Connect a phone" });
+    expect(disconnected).toBeDisabled();
+    expect(disconnected).toHaveAttribute("title", "Connect a phone (available when connected and unlocked)");
+    unmount();
+
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, encryption: { state: "locked" }, gateways: [], deviceRole: "owner" });
+    render(<App />);
+    const encryptionLocked = await screen.findByRole("button", { name: "Connect a phone" });
+    expect(encryptionLocked).toBeDisabled();
+    expect(encryptionLocked).toHaveAttribute("title", "Connect a phone (available when connected and unlocked)");
+  });
+
+  it("disables Connect a phone while the app lock is engaged", async () => {
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
+    await landingSnapshot({ connection: { state: "connected", origin }, gateways: [], deviceRole: "owner" });
+    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: true, locked: true, storageAvailable: true });
+    render(<App />);
+    const action = await screen.findByRole("button", { name: "Connect a phone" });
+    await waitFor(() => expect(action).toBeDisabled());
+    expect(action).toHaveAttribute("title", "Connect a phone (available when connected and unlocked)");
   });
 
   it("refreshes after phone enrollment without requesting the legacy sync unlock", async () => {
@@ -573,16 +625,18 @@ describe("setup landing routing", () => {
   });
 
   it("starts native phone pairing without invoking the sync unlock for an unlocked owner", async () => {
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
     await landingSnapshot({
-      connection: { state: "connected", origin: "https://example.test" },
+      connection: { state: "connected", origin },
       encryption: { state: "unlocked" },
-      gateways: [SMS_ONLY],
+      gateways: [],
       deviceRole: "owner",
     });
-    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: false }));
     const unlock = vi.spyOn(bridge, "unlock_sync");
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect a phone" }));
     expect(await screen.findByText("Connect your phone")).toBeInTheDocument();
     expect(unlock).not.toHaveBeenCalled();
   });
@@ -2904,6 +2958,7 @@ describe("floating conversation actions", () => {
   it("opens the row target without changing selection", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelector('[data-header-title]')).toHaveTextContent("Aurora"));
+    expect(document.getElementById("header-popout-conversation")).toHaveAccessibleName("Open as chat bubble");
     fireEvent.click(document.querySelector('[data-popout-conversation-id="river"]')!);
     await waitFor(() => expect(bridge.popout_conversation).toHaveBeenCalledWith("river"));
     expect(document.querySelector('[data-header-title]')).toHaveTextContent("Aurora");
@@ -4334,14 +4389,23 @@ describe("composer window", () => {
     );
   });
 
-  it("uses floating heads for conversations and standalone composer for new messages", async () => {
+  it("opens conversations in a window when that pop-out mode is selected", async () => {
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ popoutMode: "window" }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    expect(document.getElementById("header-popout-conversation")).toHaveAccessibleName("Open in new window");
+    fireEvent.click(document.getElementById("header-popout-conversation")!);
+    await waitFor(() => expect(bridge.open_composer).toHaveBeenCalledWith("aurora"));
+    expect(bridge.popout_conversation).not.toHaveBeenCalled();
+  });
+
+  it("prefixes a window pop-out failure with Conversation window", async () => {
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ popoutMode: "window" }));
+    vi.mocked(bridge.open_composer).mockRejectedValue(new Error("Window blocked"));
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(document.getElementById("header-popout-conversation")!);
-    await waitFor(() => expect(bridge.popout_conversation).toHaveBeenCalledWith("aurora"));
-    expect(bridge.open_composer).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "New message window" }));
-    await waitFor(() => expect(bridge.open_composer).toHaveBeenLastCalledWith(undefined));
+    expect(await screen.findByText("Conversation window: Window blocked")).toBeInTheDocument();
   });
 });
 
@@ -4959,9 +5023,7 @@ describe("host state display", () => {
     expect(
       screen.queryByRole("separator", { name: "Resize thread list" }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "New message window" }),
-    ).not.toBeInTheDocument();
+    expect(document.getElementById("new-composer-window")).not.toBeInTheDocument();
     expect(
       screen.getByRole("heading", { level: 1, name: "Settings" }),
     ).toBeInTheDocument();
@@ -5584,6 +5646,22 @@ describe("desktop presentation controls", () => {
       expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({
         navigationPosition: "side-rail",
       });
+    });
+
+    it("persists the pop-out mode and restores it after remounting", async () => {
+      const { unmount } = render(<App />);
+      await screen.findByText("Hello from Aurora");
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      const mode = document.getElementById("settings-popout-mode")!;
+      expect(within(mode).getByDisplayValue("bubble")).toBeChecked();
+      fireEvent.click(within(mode).getByDisplayValue("window"));
+      expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ popoutMode: "window" });
+      unmount();
+
+      render(<App />);
+      await screen.findByText("Hello from Aurora");
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      expect(within(document.getElementById("settings-popout-mode")!).getByDisplayValue("window")).toBeChecked();
     });
 
     it("moves the status trigger between the titlebar and rail", async () => {
