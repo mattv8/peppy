@@ -8170,6 +8170,80 @@ public func FfiConverterTypeNativePhoneReadEffect_lower(_ value: NativePhoneRead
 }
 
 
+/**
+ * Parsed, account-bound Play billing context. `available` means a new Play
+ * purchase may begin, not merely that existing Play metadata can be restored.
+ */
+public struct NativePlayBillingContext: Equatable, Hashable {
+    public var accountId: String
+    public var available: Bool
+    public var productId: String?
+    public var basePlanIds: [String]
+    public var accountBinding: String?
+    public var currentProvider: NativeBillingProvider
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(accountId: String, available: Bool, productId: String?, basePlanIds: [String], accountBinding: String?, currentProvider: NativeBillingProvider) {
+        self.accountId = accountId
+        self.available = available
+        self.productId = productId
+        self.basePlanIds = basePlanIds
+        self.accountBinding = accountBinding
+        self.currentProvider = currentProvider
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativePlayBillingContext: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePlayBillingContext: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePlayBillingContext {
+        return
+            try NativePlayBillingContext(
+                accountId: FfiConverterString.read(from: &buf), 
+                available: FfiConverterBool.read(from: &buf), 
+                productId: FfiConverterOptionString.read(from: &buf), 
+                basePlanIds: FfiConverterSequenceString.read(from: &buf), 
+                accountBinding: FfiConverterOptionString.read(from: &buf), 
+                currentProvider: FfiConverterTypeNativeBillingProvider.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativePlayBillingContext, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.accountId, into: &buf)
+        FfiConverterBool.write(value.available, into: &buf)
+        FfiConverterOptionString.write(value.productId, into: &buf)
+        FfiConverterSequenceString.write(value.basePlanIds, into: &buf)
+        FfiConverterOptionString.write(value.accountBinding, into: &buf)
+        FfiConverterTypeNativeBillingProvider.write(value.currentProvider, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePlayBillingContext_lift(_ buf: RustBuffer) throws -> NativePlayBillingContext {
+    return try FfiConverterTypeNativePlayBillingContext.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePlayBillingContext_lower(_ value: NativePlayBillingContext) -> RustBuffer {
+    return FfiConverterTypeNativePlayBillingContext.lower(value)
+}
+
+
 public struct NativeProviderRowRef: Equatable, Hashable {
     public var sourceGeneration: String
     public var subscriptionId: String
@@ -10183,6 +10257,90 @@ public func FfiConverterTypeNativeAttachmentUseState_lower(_ value: NativeAttach
 
 
 
+/**
+ * Provider currently associated with the hosted account. `Unknown` is
+ * intentionally non-purchasable.
+ */
+
+public enum NativeBillingProvider: Equatable, Hashable {
+    
+    case none
+    case stripe
+    case play
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeBillingProvider: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeBillingProvider: FfiConverterRustBuffer {
+    typealias SwiftType = NativeBillingProvider
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeBillingProvider {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .none
+        
+        case 2: return .stripe
+        
+        case 3: return .play
+        
+        case 4: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeBillingProvider, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .none:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .stripe:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .play:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeBillingProvider_lift(_ buf: RustBuffer) throws -> NativeBillingProvider {
+    return try FfiConverterTypeNativeBillingProvider.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeBillingProvider_lower(_ value: NativeBillingProvider) -> RustBuffer {
+    return FfiConverterTypeNativeBillingProvider.lower(value)
+}
+
+
+
 
 public enum NativeDeviceRetentionAvailability: Equatable, Hashable {
     
@@ -11583,6 +11741,96 @@ public func FfiConverterTypeNativePhoneReadTransport_lift(_ buf: RustBuffer) thr
 #endif
 public func FfiConverterTypeNativePhoneReadTransport_lower(_ value: NativePhoneReadTransport) -> RustBuffer {
     return FfiConverterTypeNativePhoneReadTransport.lower(value)
+}
+
+
+
+/**
+ * Non-entitling result of an account-bound Play purchase link attempt.
+ */
+
+public enum NativePlayLinkOutcome: Equatable, Hashable {
+    
+    case linked
+    case pending
+    case boundToOtherAccount
+    case notEntitling
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativePlayLinkOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePlayLinkOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = NativePlayLinkOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePlayLinkOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .linked
+        
+        case 2: return .pending
+        
+        case 3: return .boundToOtherAccount
+        
+        case 4: return .notEntitling
+        
+        case 5: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativePlayLinkOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .linked:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .boundToOtherAccount:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .notEntitling:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePlayLinkOutcome_lift(_ buf: RustBuffer) throws -> NativePlayLinkOutcome {
+    return try FfiConverterTypeNativePlayLinkOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePlayLinkOutcome_lower(_ value: NativePlayLinkOutcome) -> RustBuffer {
+    return FfiConverterTypeNativePlayLinkOutcome.lower(value)
 }
 
 
@@ -13322,11 +13570,57 @@ public func parseHostedSessionRenewal(json: String, expectedAccountId: String)th
     )
 })
 }
+public func parsePlayBillingContext(json: String, expectedAccountId: String)throws  -> NativePlayBillingContext  {
+    return try  FfiConverterTypeNativePlayBillingContext_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_play_billing_context(
+        FfiConverterString.lower(json),
+        FfiConverterString.lower(expectedAccountId),uniffiCallStatus
+    )
+})
+}
+public func parsePlayBillingLinkResponse(json: String, expectedAccountId: String)throws  -> NativePlayLinkOutcome  {
+    return try  FfiConverterTypeNativePlayLinkOutcome_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_play_billing_link_response(
+        FfiConverterString.lower(json),
+        FfiConverterString.lower(expectedAccountId),uniffiCallStatus
+    )
+})
+}
 public func parsePushConfig(json: String)throws  -> NativePushConfig  {
     return try  FfiConverterTypeNativePushConfig_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_parse_push_config(
         FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+public func playBillingContextPath() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_play_billing_context_path(uniffiCallStatus
+    )
+})
+}
+public func playBillingLinkPath() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_play_billing_link_path(uniffiCallStatus
+    )
+})
+}
+/**
+ * Builds the account-session-authenticated link body. The purchase token is
+ * not logged or retained here; server-side idempotency is bound to that token.
+ */
+public func playBillingLinkRequest(operationId: String, productId: String, purchaseToken: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_play_billing_link_request(
+        FfiConverterString.lower(operationId),
+        FfiConverterString.lower(productId),
+        FfiConverterString.lower(purchaseToken),uniffiCallStatus
     )
 })
 }
@@ -13519,7 +13813,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session_renewal() != 34969) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_play_billing_context() != 14118) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_play_billing_link_response() != 20760) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_push_config() != 51462) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_play_billing_context_path() != 25374) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_play_billing_link_path() != 64957) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_play_billing_link_request() != 52286) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning() != 3935) {

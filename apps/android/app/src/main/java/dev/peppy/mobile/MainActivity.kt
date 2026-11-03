@@ -79,8 +79,16 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import dev.peppy.mobile.account.AccountStatusNotifier
 import dev.peppy.mobile.account.AccountTabRequests
+import dev.peppy.mobile.account.AccountAccessState
+import dev.peppy.mobile.account.AccountRefreshTrigger
 import dev.peppy.mobile.account.AndroidHostedSecureStore
+import dev.peppy.mobile.account.HostedAccountDeletionEntry
 import dev.peppy.mobile.account.HostedAccountClient
+import dev.peppy.mobile.account.HostedFailure
+import dev.peppy.mobile.account.signInHostedAccount
+import dev.peppy.mobile.billing.PlayBillingCoordinator
+import dev.peppy.mobile.billing.PlaySubscriptionPanel
+import dev.peppy.mobile.billing.isPlayDistribution
 import dev.peppy.mobile.approval.OwnerComputerApprovalHost
 import dev.peppy.mobile.approval.OwnerComputerApprovalScreen
 import dev.peppy.mobile.approval.OwnerPhoneApprovalHost
@@ -97,6 +105,7 @@ import dev.peppy.mobile.enrollment.SelfHostedSetupScreen
 import dev.peppy.mobile.enrollment.WelcomeDestination
 import dev.peppy.mobile.enrollment.WelcomeScreen
 import dev.peppy.mobile.gateway.GatewayAccountHost
+import dev.peppy.mobile.gateway.AccountNavigationRow
 import dev.peppy.mobile.gateway.GatewayAccountSettings
 import dev.peppy.mobile.gateway.GatewayStatus
 import dev.peppy.mobile.gateway.ImportResult
@@ -117,6 +126,7 @@ import dev.peppy.mobile.ui.SystemRibbonHost
 import dev.peppy.mobile.ui.belowSystemRibbon
 import dev.peppy.mobile.ui.theme.PeppyTheme
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -243,6 +253,55 @@ internal fun syncMessage(status: GatewayStatus): String = when {
     else -> "Importing vault history (no texts are sent until this finishes)"
 }
 
+internal data class SubscriptionSelection(
+    val accountId: String? = null,
+    val enrolledVaultId: String? = null,
+    val revision: Int = 0,
+)
+
+internal enum class SubscriptionRouteFeedback { STORAGE, SIGN_IN }
+
+internal data class SubscriptionRouteState(
+    val selection: SubscriptionSelection = SubscriptionSelection(),
+    val feedback: SubscriptionRouteFeedback? = null,
+)
+
+internal suspend fun loadSubscriptionRoute(
+    current: SubscriptionRouteState,
+    readAccountId: suspend () -> String?,
+    readVaultId: suspend () -> String?,
+): SubscriptionRouteState = try {
+    val accountId = try {
+        readAccountId()
+    } catch (failure: HostedFailure) {
+        if (failure.kind == HostedFailure.Kind.SESSION_EXPIRED) null else throw failure
+    }
+    current.copy(
+        selection = SubscriptionSelection(accountId, readVaultId(), current.selection.revision),
+        feedback = null,
+    )
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (_: Exception) {
+    current.copy(feedback = SubscriptionRouteFeedback.STORAGE)
+}
+
+internal suspend fun signInSubscriptionRoute(
+    current: SubscriptionRouteState,
+    signIn: suspend () -> String?,
+    readVaultId: suspend () -> String?,
+): SubscriptionRouteState = try {
+    val accountId = signIn() ?: return current.copy(feedback = null)
+    current.copy(
+        selection = SubscriptionSelection(accountId, readVaultId(), current.selection.revision + 1),
+        feedback = null,
+    )
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (_: Exception) {
+    current.copy(feedback = SubscriptionRouteFeedback.SIGN_IN)
+}
+
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun CompanionScreen(activity: ComponentActivity) {
@@ -256,6 +315,35 @@ private fun CompanionScreen(activity: ComponentActivity) {
     var passphrase by remember { mutableStateOf("") }
     var destination by rememberSaveable { mutableStateOf("sms") }
     var settingsOpen by remember { mutableStateOf(false) }
+    var subscriptionOpen by remember { mutableStateOf(false) }
+    val subscriptionClient = if (isPlayDistribution()) {
+        remember(context) { HostedAccountClient(AndroidHostedSecureStore(context.applicationContext)) }
+    } else {
+        null
+    }
+    val subscriptionCoordinator = subscriptionClient?.let { client ->
+        remember(client) {
+            PlayBillingCoordinator(context.applicationContext, client, scope) {
+                refresh++
+                if (withContext(Dispatchers.IO) { NativeGateway.status(context).enrolled }) {
+                    withContext(Dispatchers.IO) {
+                        AccountAccessState.refresh(context, AccountRefreshTrigger.LAUNCH_OR_FOREGROUND)
+                    }
+                }
+            }
+        }
+    }
+    var subscriptionRouteState by remember { mutableStateOf(SubscriptionRouteState()) }
+    var subscriptionSignInBusy by remember { mutableStateOf(false) }
+    LaunchedEffect(subscriptionOpen) {
+        if (subscriptionOpen && subscriptionClient != null) {
+            subscriptionRouteState = loadSubscriptionRoute(
+                subscriptionRouteState,
+                readAccountId = { withContext(Dispatchers.IO) { subscriptionClient.billingAccountId() } },
+                readVaultId = { withContext(Dispatchers.IO) { NativeGateway.accountIdentity(context)?.vaultId } },
+            )
+        }
+    }
     var appFiltersOpen by remember { mutableStateOf(false) }
     var smsDetailsOpen by remember { mutableStateOf(false) }
     var accountDetailsOpen by remember { mutableStateOf(false) }
@@ -306,10 +394,16 @@ private fun CompanionScreen(activity: ComponentActivity) {
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) permissionRefresh++
+            if (event == Lifecycle.Event.ON_RESUME) {
+                permissionRefresh++
+                subscriptionCoordinator?.onResume()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    DisposableEffect(subscriptionCoordinator) {
+        onDispose { subscriptionCoordinator?.release() }
     }
 
     LaunchedEffect(refresh, permissionRefresh) {
@@ -380,6 +474,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
             onDismiss = { welcomeDestination = WelcomeDestination.HOSTED },
             onEnrolled = { welcomeDestination = WelcomeDestination.HOSTED; refresh++ },
             onEnrollExisting = { welcomeDestination = WelcomeDestination.HOSTED_PAIRING },
+            playBilling = subscriptionCoordinator,
         )
         return
     }
@@ -391,9 +486,9 @@ private fun CompanionScreen(activity: ComponentActivity) {
         return
     }
 
-    if (appFiltersOpen && !settingsOpen && status?.enrolled == true) {
+    if (appFiltersOpen && !settingsOpen && !subscriptionOpen && status?.enrolled == true) {
         Column(Modifier.fillMaxSize()) {
-            val ribbonVisible = SystemRibbonHost(enrolled = true, unlocked = status?.sharedKeysReady == true)
+            val ribbonVisible = SystemRibbonHost(enrolled = true, unlocked = status?.sharedKeysReady == true) { subscriptionOpen = true }
             Box(Modifier.weight(1f).belowSystemRibbon(ribbonVisible)) {
                 NotificationAppFiltersScreen(onBack = {
                     appFiltersOpen = false
@@ -404,24 +499,26 @@ private fun CompanionScreen(activity: ComponentActivity) {
         return
     }
 
-    BackHandler(enabled = settingsOpen) { settingsOpen = false }
+    BackHandler(enabled = settingsOpen || subscriptionOpen) {
+        if (subscriptionOpen) subscriptionOpen = false else settingsOpen = false
+    }
 
     Column(Modifier.fillMaxSize()) {
-        val ribbonVisible = SystemRibbonHost(enrolled = status?.enrolled == true, unlocked = status?.sharedKeysReady == true)
+        val ribbonVisible = SystemRibbonHost(enrolled = status?.enrolled == true, unlocked = status?.sharedKeysReady == true) { subscriptionOpen = true }
         Scaffold(
             modifier = Modifier.weight(1f).belowSystemRibbon(ribbonVisible),
             topBar = {
                 TopAppBar(
-                    title = { Text(stringResource(if (settingsOpen) R.string.peppy_settings else R.string.peppy_app_name)) },
+                    title = { Text(stringResource(if (subscriptionOpen) R.string.peppy_play_subscription_title else if (settingsOpen) R.string.peppy_settings else R.string.peppy_app_name)) },
                     navigationIcon = {
-                        if (settingsOpen) IconButton(onClick = { settingsOpen = false }, Modifier.testTag("settings-back-button")) {
+                        if (settingsOpen || subscriptionOpen) IconButton(onClick = { if (subscriptionOpen) subscriptionOpen = false else settingsOpen = false }, Modifier.testTag(if (subscriptionOpen) "subscription-back-button" else "settings-back-button")) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.peppy_back))
                         }
                     },
                 )
             },
             bottomBar = {
-                if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen && !smsDetailsOpen && !accountDetailsOpen) NavigationBar {
+                if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen && !subscriptionOpen && !smsDetailsOpen && !accountDetailsOpen) NavigationBar(Modifier.testTag("bottom-navigation")) {
                     listOf("mirroring" to R.string.peppy_mirroring, "sms" to R.string.peppy_sms, "contacts" to R.string.peppy_permissions_contacts, "account" to R.string.peppy_account).forEach { (route, labelRes) ->
                         val label = stringResource(labelRes)
                         val icon = when (route) { "mirroring" -> Icons.Default.Notifications; "sms" -> Icons.Default.Sms; "contacts" -> Icons.Default.Contacts; else -> Icons.Default.Person }
@@ -438,6 +535,42 @@ private fun CompanionScreen(activity: ComponentActivity) {
                         .semantics { testTagsAsResourceId = true }.testTag("companion-screen"),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
+            SubscriptionRoute(
+                subscriptionOpen = subscriptionOpen,
+                isPlay = isPlayDistribution(),
+                subscriptionContent = {
+                    ScreenBody("subscription-screen") {
+                        PlaySubscriptionPanel(
+                            requireNotNull(subscriptionCoordinator),
+                            subscriptionRouteState.selection.accountId,
+                            subscriptionRouteState.selection.enrolledVaultId,
+                            subscriptionRouteState.selection.revision,
+                            onSignIn = signIn@{
+                                if (subscriptionSignInBusy) return@signIn
+                                subscriptionSignInBusy = true
+                                scope.launch {
+                                    try {
+                                        subscriptionRouteState = signInSubscriptionRoute(
+                                            subscriptionRouteState,
+                                            signIn = { signInHostedAccount(activity, requireNotNull(subscriptionClient)) },
+                                            readVaultId = {
+                                                withContext(Dispatchers.IO) { NativeGateway.accountIdentity(context)?.vaultId }
+                                            },
+                                        )
+                                    } finally {
+                                        subscriptionSignInBusy = false
+                                    }
+                                }
+                            },
+                            signInError = when (subscriptionRouteState.feedback) {
+                                SubscriptionRouteFeedback.STORAGE -> context.getString(R.string.peppy_play_session_storage_failed)
+                                SubscriptionRouteFeedback.SIGN_IN -> context.getString(R.string.peppy_production_signin_failed)
+                                null -> null
+                            },
+                        )
+                    }
+                },
+            ) {
             if (status?.enrolled != true && !settingsOpen) {
                 when (welcomeDestination) {
                     WelcomeDestination.HOSTED -> WelcomeScreen(
@@ -460,7 +593,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 }
             }
 
-            if (status?.enrolled == true && !status!!.sharedKeysReady && !settingsOpen) Section("lock-screen", stringResource(R.string.peppy_locked), showDivider = false) {
+            if (status?.enrolled == true && !status!!.sharedKeysReady && !settingsOpen && !subscriptionOpen) Section("lock-screen", stringResource(R.string.peppy_locked), showDivider = false) {
                 Text(
                     "Enter the existing encryption passphrase you already use on your other devices. This phone does not create a new passphrase.",
                     style = MaterialTheme.typography.bodyMedium,
@@ -494,7 +627,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 TextButton(onClick = { settingsOpen = true }, modifier = Modifier.testTag("locked-settings-button")) { Text(stringResource(R.string.peppy_settings)) }
             }
 
-            if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "sms") SmsTab(
+            if (!subscriptionOpen && !settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "sms") SmsTab(
                 context = context,
                 refresh = refresh + permissionRefresh,
                 databaseOpen = status?.databaseOpen == true,
@@ -502,20 +635,20 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 gatewayStatus = status,
                 onDetailsChanged = { smsDetailsOpen = it },
             )
-            if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ }, onOpenAppFilters = { appFiltersOpen = true })
-            if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "contacts") {
+            if (!subscriptionOpen && !settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ }, onOpenAppFilters = { appFiltersOpen = true })
+            if (!subscriptionOpen && !settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "contacts") {
                 ContactSyncSettings(
                     context = context,
                     refresh = refresh,
                     onChanged = { refresh++ },
                 )
             }
-            if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ }, onOpenSettings = { settingsOpen = true }, onAddPhone = {
+            if (!subscriptionOpen && !settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ }, onOpenSettings = { settingsOpen = true }, onOpenSubscription = { subscriptionOpen = true }, onAddPhone = {
                 scope.launch { ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }; addPhoneOpen = ownerPhoneHost != null }
             }, canAddPhone = ownerPhoneAvailable, onConnectComputer = {
                 scope.launch { ownerComputerHost = withContext(Dispatchers.IO) { createOwnerComputerApprovalHost(context) }; connectComputerOpen = ownerComputerHost != null }
             }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it })
-            if (settingsOpen) {
+            if (settingsOpen && !subscriptionOpen) {
                 ScreenBody("settings-screen") {
                     Section("about-section", "About") {
                         Text(stringResource(R.string.peppy_encrypted))
@@ -533,13 +666,48 @@ private fun CompanionScreen(activity: ComponentActivity) {
                         Text(stringResource(R.string.peppy_privacy_policy_scope), style = MaterialTheme.typography.bodySmall)
                     }
                     DiagnosticsSettings()
-                    if (status?.sharedKeysReady == true) GatewayAccountSettings(onChanged = { refresh++ }, settingsMode = true)
+                    if (status?.enrolled == true && status?.sharedKeysReady == true) {
+                        GatewayAccountSettings(onChanged = { refresh++ }, settingsMode = true, onOpenSubscription = { subscriptionOpen = true })
+                    } else LockedHostedSettings(status?.origin, isPlayDistribution()) { subscriptionOpen = true }
                 }
+            }
             }
                 }
             }
         }
     }
+}
+
+@Composable
+internal fun SubscriptionRoute(
+    subscriptionOpen: Boolean,
+    isPlay: Boolean,
+    subscriptionContent: @Composable () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    if (subscriptionOpen && isPlay) subscriptionContent() else content()
+}
+
+@Composable
+internal fun LockedHostedSettings(origin: String?, isPlay: Boolean, onOpenSubscription: () -> Unit) {
+    if (origin != "https://peppy.pro") return
+    var deletionOpenError by remember { mutableStateOf(false) }
+    if (isPlay) {
+        Section("settings-account-group", stringResource(R.string.peppy_play_subscription_title), showDivider = false) {
+            AccountNavigationRow("settings-subscription-row", stringResource(R.string.peppy_play_account_row), onOpenSubscription)
+        }
+    }
+    Section("settings-account-deletion-section", stringResource(R.string.peppy_account_delete_section)) {
+        HostedAccountDeletionEntry(
+            tag = "account-delete-row",
+            onOpenFailed = { deletionOpenError = true },
+            onViewSubscription = onOpenSubscription,
+        )
+    }
+    if (deletionOpenError) Text(
+        stringResource(R.string.peppy_toggle_android_link_unavailable),
+        Modifier.testTag("account-delete-open-error"),
+    )
 }
 
 @Composable

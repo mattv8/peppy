@@ -58,6 +58,11 @@ import dev.peppy.mobile.R
 import dev.peppy.mobile.account.AndroidHostedSecureStore
 import dev.peppy.mobile.account.HostedAccountClient
 import dev.peppy.mobile.account.HostedFailure
+import dev.peppy.mobile.account.HostedAccountDeletionEntry
+import dev.peppy.mobile.account.openHostedAccountDeletion
+import dev.peppy.mobile.billing.PlayBillingCoordinator
+import dev.peppy.mobile.billing.PlaySubscriptionPanel
+import dev.peppy.mobile.billing.isPlayDistribution
 import dev.peppy.mobile.diagnostics.HostedAuthDiagnostics
 import dev.peppy.mobile.diagnostics.HostedAuthOutcome
 import dev.peppy.mobile.diagnostics.HostedAuthStage
@@ -70,6 +75,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.SharedFlow
 import uniffi.peppy_mobile_bindings.NativeHostedProvisioningView
 import uniffi.peppy_mobile_bindings.generateHostedPassphrase
 
@@ -100,6 +106,7 @@ internal fun HostedEnrollmentScreen(
     onDismiss: () -> Unit,
     onEnrolled: () -> Unit,
     onEnrollExisting: () -> Unit,
+    playBilling: PlayBillingCoordinator? = null,
 ) {
     val context = LocalContext.current
     val appContext = context.applicationContext
@@ -220,6 +227,9 @@ internal fun HostedEnrollmentScreen(
         diagnostics.record(HostedAuthStage.COMPOSITION, HostedAuthOutcome.STARTED)
         reconcile()
     }
+    if (isPlayDistribution() && playBilling != null) {
+        HostedEnrollmentLinkReconciler(playBilling.linked, { phase }, ::reconcile)
+    }
     DisposableEffect(client) {
         val lifecycle = activity.lifecycle
         val wasSecure = activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0
@@ -238,7 +248,7 @@ internal fun HostedEnrollmentScreen(
                         // The provider's native activity is part of this sign-in operation.
                         phase = HostedPhase.SigningIn
                     }
-                    else {
+                    else if (!(isPlayDistribution() && phase in setOf(HostedPhase.Billing, HostedPhase.ExistingVault))) {
                         val resume = phase == HostedPhase.Provisioning
                         cancelWork(clearDraft = false)
                         if (resume) phase = HostedPhase.Checking
@@ -246,7 +256,7 @@ internal fun HostedEnrollmentScreen(
                 }
                 Lifecycle.Event.ON_START -> {
                     diagnostics.record(HostedAuthStage.LIFECYCLE, HostedAuthOutcome.ON_START)
-                    if (phase == HostedPhase.Billing || phase == HostedPhase.Checking) reconcile()
+                    if (phase == HostedPhase.Checking || (phase == HostedPhase.Billing && !isPlayDistribution())) reconcile()
                 }
                 else -> Unit
             }
@@ -390,27 +400,28 @@ internal fun HostedEnrollmentScreen(
             }
             HostedPhase.SigningIn, HostedPhase.Checking -> CircularProgressIndicator(Modifier.testTag("hosted-signin-inflight"))
             HostedPhase.Billing -> {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(R.string.peppy_hosted_subscribe_headline), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                    InfoButton(
-                        topic = stringResource(R.string.peppy_hosted_subscribe_headline),
-                        title = stringResource(R.string.peppy_hosted_subscribe_headline),
-                        body = stringResource(R.string.peppy_hosted_subscribe_body),
-                        tag = "info-hosted-billing",
-                    )
-                }
-                Text(stringResource(R.string.peppy_production_billing_body), style = MaterialTheme.typography.bodySmall)
-                Button(
-                    onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/account/subscribe"))) },
-                    modifier = Modifier.testTag("hosted-subscribe-button"),
-                ) { Text(stringResource(R.string.peppy_production_billing_open)) }
-                OutlinedButton(onClick = ::reconcile, modifier = Modifier.testTag("hosted-billing-check-again")) {
-                    Text(stringResource(R.string.peppy_production_billing_check))
-                }
+                HostedBillingPhase(
+                    isPlay = isPlayDistribution(),
+                    playContent = {
+                        val coordinator = requireNotNull(playBilling)
+                        Text(stringResource(R.string.peppy_hosted_subscribe_headline), style = MaterialTheme.typography.titleMedium)
+                        PlaySubscriptionPanel(coordinator, draft.accountId, onSignIn = { phase = HostedPhase.Start })
+                        HostedPlayEnrollmentCheck(::reconcile)
+                    },
+                    onSubscribe = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/account/subscribe"))) },
+                    onCheckAgain = ::reconcile,
+                )
             }
             HostedPhase.ExistingVault -> {
                 Text(stringResource(R.string.peppy_production_existing_vault))
-                OutlinedButton(onClick = {
+                if (isPlayDistribution()) {
+                    PlaySubscriptionPanel(
+                        coordinator = requireNotNull(playBilling),
+                        accountId = draft.accountId,
+                        onSignIn = { phase = HostedPhase.Start },
+                    )
+                    HostedPlayEnrollmentCheck(::reconcile)
+                } else OutlinedButton(onClick = {
                     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/account")))
                 }, modifier = Modifier.testTag("hosted-existing-manage-account")) {
                     Text(stringResource(R.string.peppy_production_manage_account))
@@ -510,6 +521,71 @@ internal fun HostedEnrollmentScreen(
                 Text(stringResource(R.string.peppy_settings_server_sign_out))
             }
         }
+        if (phase !in setOf(HostedPhase.SigningIn, HostedPhase.Checking, HostedPhase.Provisioning)) {
+            HostedEnrollmentDeletionEntry()
+        }
+    }
+}
+
+@Composable
+internal fun HostedBillingPhase(
+    isPlay: Boolean,
+    playContent: @Composable () -> Unit,
+    onSubscribe: () -> Unit,
+    onCheckAgain: () -> Unit,
+) {
+    if (isPlay) playContent() else HostedDirectBillingContent(onSubscribe, onCheckAgain)
+}
+
+@Composable
+internal fun HostedEnrollmentLinkReconciler(
+    linked: SharedFlow<Unit>,
+    currentPhase: () -> HostedPhase,
+    reconcile: () -> Unit,
+) {
+    LaunchedEffect(linked) {
+        linked.collect {
+            if (currentPhase() == HostedPhase.Billing || currentPhase() == HostedPhase.ExistingVault) reconcile()
+        }
+    }
+}
+
+@Composable
+internal fun HostedPlayEnrollmentCheck(onCheckAgain: () -> Unit) {
+    OutlinedButton(onClick = onCheckAgain, modifier = Modifier.testTag("play-enrollment-check-again")) {
+        Text(stringResource(R.string.peppy_production_billing_check))
+    }
+}
+
+@Composable
+internal fun HostedEnrollmentDeletionEntry(
+    openDeletion: (android.content.Context) -> Boolean = ::openHostedAccountDeletion,
+) {
+    var deletionOpenError by remember { mutableStateOf(false) }
+    HostedAccountDeletionEntry(tag = "hosted-delete-account-button", onOpenFailed = { deletionOpenError = true }, openDeletion = openDeletion)
+    if (deletionOpenError) Text(
+        stringResource(R.string.peppy_toggle_android_link_unavailable),
+        Modifier.testTag("hosted-delete-account-error"),
+    )
+}
+
+@Composable
+internal fun HostedDirectBillingContent(onSubscribe: () -> Unit, onCheckAgain: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(stringResource(R.string.peppy_hosted_subscribe_headline), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+        InfoButton(
+            topic = stringResource(R.string.peppy_hosted_subscribe_headline),
+            title = stringResource(R.string.peppy_hosted_subscribe_headline),
+            body = stringResource(R.string.peppy_hosted_subscribe_body),
+            tag = "info-hosted-billing",
+        )
+    }
+    Text(stringResource(R.string.peppy_production_billing_body), Modifier.testTag("hosted-billing-body"), style = MaterialTheme.typography.bodySmall)
+    Button(onClick = onSubscribe, modifier = Modifier.testTag("hosted-subscribe-button")) {
+        Text(stringResource(R.string.peppy_production_billing_open))
+    }
+    OutlinedButton(onClick = onCheckAgain, modifier = Modifier.testTag("hosted-billing-check-again")) {
+        Text(stringResource(R.string.peppy_production_billing_check))
     }
 }
 

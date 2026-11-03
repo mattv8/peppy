@@ -1,0 +1,9 @@
+Peppy helps you use your Android phone's SMS messages across your connected Peppy devices. Read and reply to SMS from the devices you choose while your Android phone remains your carrier connection.
+
+Peppy is a companion to your default messaging app. It does not ask to become your default SMS app. Experimental MMS support can import messages and media that your phone's default messaging app has already handled. Peppy does not provide general RCS support.
+
+Choose which optional features to enable. Contacts access and notification-related access are requested only when you choose the related feature, and you can continue using Peppy without granting them.
+
+Use Peppy Hosted with a subscription, or connect Peppy to a server you run yourself. A hosted subscription supports the hosted service; self-hosted servers remain an option for people who want to operate their own service.
+
+Privacy Policy: https://peppy.pro/privacy

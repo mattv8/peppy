@@ -48,6 +48,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.R
+import dev.peppy.mobile.BuildConfig
 import dev.peppy.mobile.RelayWakePreference
 import dev.peppy.mobile.RelayWakeRuntime
 import dev.peppy.mobile.RelayWakeStatus
@@ -59,6 +60,7 @@ import dev.peppy.mobile.Section
 import dev.peppy.mobile.StatusRow
 import dev.peppy.mobile.account.AccountAccessState
 import dev.peppy.mobile.account.AccountSettingsPolicy
+import dev.peppy.mobile.account.HostedAccountDeletionEntry
 import dev.peppy.mobile.attachments.AttachmentStorageCapacityNotice
 import dev.peppy.mobile.attachments.AttachmentStorageLoad
 import dev.peppy.mobile.attachments.AttachmentStorageSettingsController
@@ -88,6 +90,7 @@ internal fun GatewayAccountSettings(
     canConnectComputer: Boolean = false,
     settingsMode: Boolean = false,
     onDetailChanged: (Boolean) -> Unit = {},
+    onOpenSubscription: () -> Unit = {},
     attachmentStorageOriginSupported: (String?) -> Boolean = { it == "https://peppy.pro" },
     accountLoader: (Context) -> GatewayAccountState? = GatewayAccountHost::load,
     gatewayStatusLoader: (Context) -> GatewayStatus = NativeGateway::status,
@@ -225,7 +228,9 @@ internal fun GatewayAccountSettings(
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
-                    if (gatewayStatus?.origin == "https://peppy.pro") {
+                    if (gatewayStatus?.origin == "https://peppy.pro" && BuildConfig.PEPPY_DISTRIBUTION == "play") {
+                        AccountNavigationRow("account-subscription-row", stringResource(R.string.peppy_play_account_row), onOpenSubscription)
+                    } else if (gatewayStatus?.origin == "https://peppy.pro") {
                         AccountNavigationRow("account-hosted-row", stringResource(R.string.peppy_toggle_android_account_billing)) {
                         openUri(context, "https://peppy.pro/account", failureSetter = { failure = it })
                         }
@@ -264,7 +269,13 @@ internal fun GatewayAccountSettings(
                         busy = storageBusy,
                         onRefresh = { scope.launch { refreshStorage() } },
                         onManage = { origin -> openUri(context, "$origin/account", failureSetter = { failure = it }) },
+                        showPurchaseActions = BuildConfig.PEPPY_DISTRIBUTION != "play",
                     )
+                }
+            }
+            if (settingsMode && gatewayStatus?.origin == "https://peppy.pro" && BuildConfig.PEPPY_DISTRIBUTION == "play") {
+                Section("settings-account-group", stringResource(R.string.peppy_play_subscription_title), showDivider = false) {
+                    AccountNavigationRow("settings-subscription-row", stringResource(R.string.peppy_play_account_row), onOpenSubscription)
                 }
             }
             if (settingsMode && gatewayStatus?.sharedKeysReady == true && (account.self.role == "owner" || account.self.role == "gateway")) {
@@ -382,6 +393,22 @@ internal fun GatewayAccountSettings(
                 Text(stringResource(communityFooter), Modifier.testTag("relay-not-configured"))
             }
         }
+        if (settingsMode && account == null && gatewayStatus?.origin == "https://peppy.pro" && BuildConfig.PEPPY_DISTRIBUTION == "play") {
+            Section("settings-account-group", stringResource(R.string.peppy_play_subscription_title), showDivider = false) {
+                AccountNavigationRow("settings-subscription-row", stringResource(R.string.peppy_play_account_row), onOpenSubscription)
+            }
+        }
+        if (settingsMode && gatewayStatus?.origin == "https://peppy.pro") Section(
+            "settings-account-deletion-section",
+            stringResource(R.string.peppy_account_delete_section),
+        ) {
+            HostedAccountDeletionEntry(
+                tag = "account-delete-row",
+                includeVaultDistinction = account?.self?.role == "owner",
+                onOpenFailed = { failure = context.getString(R.string.peppy_toggle_android_link_unavailable) },
+                onViewSubscription = onOpenSubscription,
+            )
+        }
         if (settingsMode && account?.self?.role == "owner") Section("settings-group-danger", stringResource(R.string.peppy_toggle_android_settings_danger)) {
             Button(onClick = { deleteOpen = true }, modifier = Modifier.testTag("vault-delete-button")) { Text("Delete vault") }
         }
@@ -429,6 +456,7 @@ internal fun AttachmentStorageSettings(
     busy: Boolean,
     onRefresh: () -> Unit,
     onManage: (String) -> Unit,
+    showPurchaseActions: Boolean = true,
 ) {
     when (state) {
         AttachmentStorageUiState.Loading -> Section("attachment-storage-section", stringResource(R.string.peppy_attachment_storage_section_title)) {
@@ -449,11 +477,13 @@ internal fun AttachmentStorageSettings(
         }
         is AttachmentStorageUiState.Available -> {
             val status = state.status
-            StorageSection(scope) { onLearnMore ->
+            StorageSection(scope, includePurchaseInfo = showPurchaseActions) { onLearnMore ->
                 StorageValues(status, "attachment-storage-values")
                 CapacityNotice(attachmentStorageCapacityNotice(status), onLearnMore)
-                Text(stringResource(R.string.peppy_attachment_storage_billing_handoff))
-                TextButton(onClick = { onManage("https://peppy.pro") }, modifier = Modifier.testTag("attachment-storage-manage")) { Text(stringResource(R.string.peppy_attachment_storage_manage_cta)) }
+                if (showPurchaseActions) {
+                    Text(stringResource(R.string.peppy_attachment_storage_billing_handoff))
+                    TextButton(onClick = { onManage("https://peppy.pro") }, modifier = Modifier.testTag("attachment-storage-manage")) { Text(stringResource(R.string.peppy_attachment_storage_manage_cta)) }
+                }
                 TextButton(onClick = onRefresh, enabled = !busy, modifier = Modifier.testTag("attachment-storage-refresh")) { Text(stringResource(R.string.peppy_attachment_storage_reload_cta)) }
             }
         }
@@ -464,6 +494,7 @@ internal fun AttachmentStorageSettings(
 private fun StorageSection(
     scope: String?,
     showsInfo: Boolean = true,
+    includePurchaseInfo: Boolean = true,
     content: @Composable (onLearnMore: () -> Unit) -> Unit,
 ) {
     var infoOpen by remember(scope) { mutableStateOf(false) }
@@ -483,11 +514,11 @@ private fun StorageSection(
             null
         },
     ) { content { infoOpen = true } }
-    if (infoOpen) StorageInfoDialog(onDismiss = { infoOpen = false })
+    if (infoOpen) StorageInfoDialog(includePurchaseInfo, onDismiss = { infoOpen = false })
 }
 
 @Composable
-private fun StorageInfoDialog(onDismiss: () -> Unit) {
+private fun StorageInfoDialog(includePurchaseInfo: Boolean, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.peppy_attachment_storage_info_title), Modifier.semantics { heading() }) },
@@ -498,7 +529,7 @@ private fun StorageInfoDialog(onDismiss: () -> Unit) {
             ) {
                 Text(stringResource(R.string.peppy_attachment_storage_info_body_cleanup), style = MaterialTheme.typography.bodyMedium)
                 Text(stringResource(R.string.peppy_attachment_storage_info_body_protected), style = MaterialTheme.typography.bodyMedium)
-                Text(stringResource(R.string.peppy_attachment_storage_info_body_purchase), style = MaterialTheme.typography.bodyMedium)
+                if (includePurchaseInfo) Text(stringResource(R.string.peppy_attachment_storage_info_body_purchase), style = MaterialTheme.typography.bodyMedium)
             }
         },
         confirmButton = {
@@ -575,7 +606,7 @@ private fun Context.findActivity(): Activity? = when (this) {
 }
 
 @Composable
-private fun AccountNavigationRow(tag: String, label: String, onClick: () -> Unit) {
+internal fun AccountNavigationRow(tag: String, label: String, onClick: () -> Unit) {
     TextButton(onClick = onClick, modifier = Modifier.fillMaxWidth().testTag(tag), colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
         Text(label, Modifier.weight(1f))
         Text("›", Modifier.clearAndSetSemantics {})

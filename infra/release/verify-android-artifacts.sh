@@ -9,6 +9,8 @@ apk=$1
 aab=$2
 [ -f "$apk" ] || { echo "signed APK not found: $apk" >&2; exit 1; }
 [ -f "$aab" ] || { echo "signed AAB not found: $aab" >&2; exit 1; }
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+"$script_dir/check-elf-alignment.py" "$apk" "$aab"
 
 normalize_fingerprint() {
   local value

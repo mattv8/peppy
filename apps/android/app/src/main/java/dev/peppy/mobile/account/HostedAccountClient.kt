@@ -1,6 +1,7 @@
 package dev.peppy.mobile.account
 
 import android.content.Context
+import dev.peppy.mobile.billing.BillingSessionSnapshot
 import dev.peppy.mobile.enrollment.HostedProvisioningStorage
 import dev.peppy.mobile.gateway.HostedHttp
 import dev.peppy.mobile.gateway.HttpResult
@@ -21,12 +22,19 @@ import uniffi.peppy_mobile_bindings.NativeHostedClientKind
 import uniffi.peppy_mobile_bindings.NativeHostedLoginAttempt
 import uniffi.peppy_mobile_bindings.NativeHostedProvisioning
 import uniffi.peppy_mobile_bindings.NativeHostedProvisioningView
+import uniffi.peppy_mobile_bindings.NativePlayBillingContext
+import uniffi.peppy_mobile_bindings.NativePlayLinkOutcome
 import uniffi.peppy_mobile_bindings.hostedLoginRequest
 import uniffi.peppy_mobile_bindings.hostedSessionRequest
 import uniffi.peppy_mobile_bindings.parseHostedAccount
 import uniffi.peppy_mobile_bindings.parseHostedLoginAttempt
 import uniffi.peppy_mobile_bindings.parseHostedSession
 import uniffi.peppy_mobile_bindings.parseHostedSessionRenewal
+import uniffi.peppy_mobile_bindings.parsePlayBillingContext
+import uniffi.peppy_mobile_bindings.parsePlayBillingLinkResponse
+import uniffi.peppy_mobile_bindings.playBillingContextPath
+import uniffi.peppy_mobile_bindings.playBillingLinkPath
+import uniffi.peppy_mobile_bindings.playBillingLinkRequest
 import uniffi.peppy_mobile_bindings.prepareHostedProvisioning
 import uniffi.peppy_mobile_bindings.restoreHostedProvisioning
 
@@ -133,6 +141,38 @@ internal class HostedAccountClient(
 
     suspend fun account(): NativeHostedAccount = operation { account(session(), it) }
 
+    /** Reads only the locally stored, unexpired billing account identity. */
+    suspend fun billingAccountId(): String = operation { session().accountId }
+
+    /** Captures a non-secret session fence; every billing effect rechecks secure storage. */
+    suspend fun captureBillingSession(expectedAccountId: String): BillingSessionSnapshot = operation { stamp ->
+        val current = session()
+        if (current.accountId != expectedAccountId) throw HostedFailure(HostedFailure.Kind.WRONG_ACCOUNT)
+        val account = account(current, stamp)
+        if (!currentSessionMatches(current)) throw kotlinx.coroutines.CancellationException()
+        BillingSessionSnapshot(current.accountId, sessionFence(current), account.vaultId)
+    }
+
+    suspend fun isBillingSessionCurrent(snapshot: BillingSessionSnapshot): Boolean = withContext(Dispatchers.IO) {
+        try { currentSessionMatches(snapshot.accountId, snapshot.fence) } catch (_: Exception) { false }
+    }
+
+    suspend fun playBillingContext(snapshot: BillingSessionSnapshot): NativePlayBillingContext = operation { stamp ->
+        val current = session()
+        if (!currentSessionMatches(snapshot.accountId, snapshot.fence)) throw kotlinx.coroutines.CancellationException()
+        val response = transport.get(playBillingContextPath(), current.token); check(stamp)
+        if (!currentSessionMatches(snapshot.accountId, snapshot.fence)) throw kotlinx.coroutines.CancellationException()
+        parsePlayBillingContext(body(response), snapshot.accountId)
+    }
+
+    suspend fun linkPlayPurchase(snapshot: BillingSessionSnapshot, operationId: String, productId: String, purchaseToken: String): NativePlayLinkOutcome = operation { stamp ->
+        val current = session()
+        if (!currentSessionMatches(snapshot.accountId, snapshot.fence)) throw kotlinx.coroutines.CancellationException()
+        val response = transport.post(playBillingLinkPath(), playBillingLinkRequest(operationId, productId, purchaseToken), current.token); check(stamp)
+        if (!currentSessionMatches(snapshot.accountId, snapshot.fence)) throw kotlinx.coroutines.CancellationException()
+        parsePlayBillingLinkResponse(body(response), snapshot.accountId)
+    }
+
     /**
      * Extends the account session only after a foreground user interaction. Local expiry is
      * intentionally ignored here so the server can resolve clock skew or a lost prior response.
@@ -186,6 +226,11 @@ internal class HostedAccountClient(
     } catch (_: Exception) {
         false
     }
+    private fun currentSessionMatches(accountId: String, fence: String): Boolean = try {
+        session(allowExpired = true).let { it.accountId == accountId && sessionFence(it) == fence }
+    } catch (_: Exception) { false }
+    private fun sessionFence(session: Session): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(session.token.toByteArray()).joinToString("") { "%02x".format(it) }
 
     private fun saveRenewedSession(stamp: Stamp, observed: Session, expiresAt: Long) = synchronized(sessionMutationLock) {
         synchronized(stateLock) {

@@ -56,6 +56,38 @@ pub struct NativePushConfig {
     pub apns_environment: Option<String>,
 }
 
+/// Provider currently associated with the hosted account. `Unknown` is
+/// intentionally non-purchasable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeBillingProvider {
+    None,
+    Stripe,
+    Play,
+    Unknown,
+}
+
+/// Parsed, account-bound Play billing context. `available` means a new Play
+/// purchase may begin, not merely that existing Play metadata can be restored.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativePlayBillingContext {
+    pub account_id: String,
+    pub available: bool,
+    pub product_id: Option<String>,
+    pub base_plan_ids: Vec<String>,
+    pub account_binding: Option<String>,
+    pub current_provider: NativeBillingProvider,
+}
+
+/// Non-entitling result of an account-bound Play purchase link attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativePlayLinkOutcome {
+    Linked,
+    Pending,
+    BoundToOtherAccount,
+    NotEntitling,
+    Unknown,
+}
+
 #[derive(uniffi::Object)]
 pub struct NativeHostedProvisioning {
     inner: Mutex<hc::HostedProvisioning>,
@@ -168,6 +200,87 @@ pub fn parse_push_config(json: String) -> Result<NativePushConfig, MobileBinding
                 peppy_hosted_api::ApnsEnvironment::Sandbox => "sandbox".into(),
             }),
     })
+}
+
+#[uniffi::export]
+pub fn play_billing_context_path() -> String {
+    hc::play_billing::play_billing_context_path().into()
+}
+
+#[uniffi::export]
+pub fn play_billing_link_path() -> String {
+    hc::play_billing::play_billing_link_path().into()
+}
+
+/// Builds the account-session-authenticated link body. The purchase token is
+/// not logged or retained here; server-side idempotency is bound to that token.
+#[uniffi::export]
+pub fn play_billing_link_request(
+    operation_id: String,
+    product_id: String,
+    purchase_token: String,
+) -> Result<String, MobileBindingsError> {
+    let operation_id =
+        uuid::Uuid::parse_str(&operation_id).map_err(|_| MobileBindingsError::InvalidRequest)?;
+    hc::play_billing::build_play_billing_link_request(operation_id, &product_id, &purchase_token)
+        .map_err(|_| MobileBindingsError::InvalidRequest)
+}
+
+#[uniffi::export]
+pub fn parse_play_billing_context(
+    json: String,
+    expected_account_id: String,
+) -> Result<NativePlayBillingContext, MobileBindingsError> {
+    let expected_account_id = uuid::Uuid::parse_str(&expected_account_id)
+        .map_err(|_| MobileBindingsError::InvalidRequest)?;
+    let context = hc::play_billing::parse_play_billing_context(&json, expected_account_id)
+        .map_err(|_| MobileBindingsError::InvalidRequest)?;
+    Ok(NativePlayBillingContext {
+        account_id: context.account_id.to_string(),
+        available: context.availability
+            == hc::play_billing::PlayBillingContextAvailability::Available,
+        product_id: context.product_id,
+        base_plan_ids: context.base_plan_ids,
+        account_binding: context.account_binding,
+        current_provider: native_billing_provider(context.current_provider),
+    })
+}
+
+#[uniffi::export]
+pub fn parse_play_billing_link_response(
+    json: String,
+    expected_account_id: String,
+) -> Result<NativePlayLinkOutcome, MobileBindingsError> {
+    let expected_account_id = uuid::Uuid::parse_str(&expected_account_id)
+        .map_err(|_| MobileBindingsError::InvalidRequest)?;
+    let outcome = hc::play_billing::parse_play_billing_link_response(&json, expected_account_id)
+        .map_err(|_| MobileBindingsError::InvalidRequest)?;
+    Ok(match outcome {
+        hc::play_billing::PlayBillingLinkResult::Linked => NativePlayLinkOutcome::Linked,
+        hc::play_billing::PlayBillingLinkResult::Pending => NativePlayLinkOutcome::Pending,
+        hc::play_billing::PlayBillingLinkResult::BoundToOtherAccount => {
+            NativePlayLinkOutcome::BoundToOtherAccount
+        }
+        hc::play_billing::PlayBillingLinkResult::NotEntitling => {
+            NativePlayLinkOutcome::NotEntitling
+        }
+        hc::play_billing::PlayBillingLinkResult::Unknown => NativePlayLinkOutcome::Unknown,
+    })
+}
+
+fn native_billing_provider(
+    provider: peppy_hosted_api::billing_play::PlayBillingProvider,
+) -> NativeBillingProvider {
+    match provider {
+        peppy_hosted_api::billing_play::PlayBillingProvider::None => NativeBillingProvider::None,
+        peppy_hosted_api::billing_play::PlayBillingProvider::Stripe => {
+            NativeBillingProvider::Stripe
+        }
+        peppy_hosted_api::billing_play::PlayBillingProvider::Play => NativeBillingProvider::Play,
+        peppy_hosted_api::billing_play::PlayBillingProvider::Unknown => {
+            NativeBillingProvider::Unknown
+        }
+    }
 }
 
 // Provisioning functions
@@ -383,6 +496,49 @@ mod tests {
             serde_json::json!({"account_id": account, "classification": "new", "entitlement": "none", "access": "read_write"}).to_string(),
             uuid::Uuid::new_v4().to_string()
         ).is_err());
+    }
+
+    #[test]
+    fn play_billing_wrappers_are_account_bound_and_fail_closed() {
+        let account_id = uuid::Uuid::new_v4();
+        let context = serde_json::json!({
+            "account_id": account_id,
+            "available": true,
+            "product_id": "peppy_pro",
+            "base_plan_ids": ["monthly"],
+            "account_binding": "stable_opaque_binding",
+            "current_provider": "none"
+        });
+        assert!(
+            parse_play_billing_context(context.to_string(), account_id.to_string())
+                .unwrap()
+                .available
+        );
+        assert!(
+            parse_play_billing_context(context.to_string(), uuid::Uuid::new_v4().to_string())
+                .is_err()
+        );
+
+        let link = serde_json::json!({"account_id": account_id, "outcome": "future"});
+        assert_eq!(
+            parse_play_billing_link_response(link.to_string(), account_id.to_string()).unwrap(),
+            NativePlayLinkOutcome::Unknown
+        );
+
+        assert!(
+            play_billing_link_request(
+                "not-a-uuid".into(),
+                "peppy_pro".into(),
+                "purchase-token".into()
+            )
+            .is_err()
+        );
+        assert!(parse_play_billing_context(context.to_string(), "not-a-uuid".into()).is_err());
+        assert!(parse_play_billing_link_response(link.to_string(), "not-a-uuid".into()).is_err());
+        assert!(
+            parse_play_billing_link_response(link.to_string(), uuid::Uuid::new_v4().to_string())
+                .is_err()
+        );
     }
 
     #[test]

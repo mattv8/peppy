@@ -127,7 +127,7 @@ build_target() {
         export PATH="$ndk_bin:$PATH" CC="$clang" AR="$llvm_ar" RANLIB="$llvm_ranlib"
         export "CC_$cargo_target=$clang" "AR_$cargo_target=$llvm_ar" "RANLIB_$cargo_target=$llvm_ranlib"
         export "CARGO_TARGET_${upper_target}_LINKER=$clang" "CARGO_TARGET_${upper_target}_AR=$llvm_ar"
-        export "CARGO_TARGET_${upper_target}_RUSTFLAGS=-C link-arg=-Wl,--no-undefined"
+        export "CARGO_TARGET_${upper_target}_RUSTFLAGS=-C link-arg=-Wl,--no-undefined -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
         if [[ "$force_native_clean" == "1" ]]; then
             echo "Android native cache recovery: target=$target profile=$native_profile reason=forced" >&2
             clean_target_cache "$target"
@@ -145,6 +145,7 @@ build_target() {
     local library_dir="$target_dir/$target/$native_profile"
     local library="$library_dir/libpeppy_mobile_bindings.so"
     test -s "$library" || { echo "Android mobile-bindings library is missing: $library" >&2; exit 1; }
+    "$root/infra/release/check-elf-alignment.py" "$library"
     local unresolved
     unresolved=$("$llvm_readelf" --dyn-syms --wide "$library" | awk '$7 == "UND" { sub(/@.*/, "", $8); print $8 }' | grep -E '^(sodium_|randombytes_|crypto_)' || true)
     test -z "$unresolved" || { echo "Android $target library retains unresolved crypto symbols:" >&2; echo "$unresolved" >&2; exit 1; }
