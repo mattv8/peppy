@@ -9,8 +9,6 @@
 #conversation-tabs[data-variant="icons"] [role="tab"] { display: grid; width: 26px; height: 26px; padding: 0; place-items: center; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: inherit; opacity: .75; }
 #conversation-tabs[data-variant="icons"] [role="tab"]:hover,
 #conversation-tabs[data-variant="icons"] [role="tab"][aria-selected="true"] { opacity: 1; }
-#titlebar-view-switch #conversation-tabs[data-variant="icons"] [role="tab"]:hover { background: var(--peppy-surface-hover); }
-#titlebar-view-switch #conversation-tabs[data-variant="icons"] [role="tab"][aria-selected="true"] { background: var(--peppy-surface-active); }
 @media (forced-colors: active) { #conversation-tabs[data-variant="icons"] [role="tab"][aria-selected="true"] { outline: 2px solid Highlight; outline-offset: -2px; } }
 #tabpanel-media { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 #media-tab-loading, #media-tab-content { flex: 1; min-height: 0; }
