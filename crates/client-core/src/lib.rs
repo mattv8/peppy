@@ -5617,14 +5617,51 @@ fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Re
         .split_whitespace()
         .next()
         .ok_or(Error::Database)?;
-    let exists: bool = conn.query_row(
+    if !column_exists(conn, table, column)? {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))?;
+    }
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+        [table],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, Error> {
+    conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
         params![table, column],
         |row| row.get(0),
-    )?;
-    if !exists {
-        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))?;
+    )
+    .map_err(Into::into)
+}
+
+fn drop_column_if_exists(conn: &Connection, table: &str, column: &str) -> Result<(), Error> {
+    if column_exists(conn, table, column)? {
+        conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column}"))?;
     }
+    Ok(())
+}
+
+/// Repairs the closed PR #114 notification-reply spike, which reused schema version 43 on one
+/// device. That device recorded production migration 43 without creating `conversation_folders`.
+fn repair_notification_reply_spike(conn: &mut Connection) -> Result<(), Error> {
+    if !table_exists(conn, "notification_reply_submissions")? {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS notification_reply_submissions_match;
+         DROP TABLE IF EXISTS notification_reply_submissions;",
+    )?;
+    drop_column_if_exists(&tx, "gateway_settings", "reply_via_google_messages_enabled")?;
+    tx.execute_batch(MIGRATION_43)?;
+    tx.commit()?;
     Ok(())
 }
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
@@ -5684,6 +5721,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     message_origin::initialize(conn)?;
     device_succession::initialize(conn)?;
     initialize_compaction_state(conn)?;
+    repair_notification_reply_spike(conn)?;
     let version: Option<i64> = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
         .optional()?;
