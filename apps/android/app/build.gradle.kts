@@ -3,7 +3,11 @@ import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.MessageDigest
 import java.util.Base64
+import java.util.zip.ZipFile
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import javax.xml.parsers.DocumentBuilderFactory
+import groovy.json.JsonSlurper
 
 plugins {
     id("com.android.application")
@@ -171,7 +175,7 @@ val developmentTlsCertificate = System.getenv("PEPPY_DEV_TLS_CERT")?.takeUnless(
         }
     }
 }
-val developmentTlsResources = layout.buildDirectory.dir("generated/res/devTls/debug")
+val developmentTlsResources = layout.buildDirectory.dir("generated/res/devTls/local")
 
 // Operator configuration is deliberately local. Builds without google-services.json keep FCM
 // optional and must not require or commit provider credentials.
@@ -221,6 +225,11 @@ android {
         getByName("debug") {
             buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
+        create("development") {
+            initWith(getByName("debug"))
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = true
+        }
         getByName("release") {
             isDebuggable = false
             isMinifyEnabled = false
@@ -237,6 +246,8 @@ android {
     sourceSets {
         getByName("main").jniLibs.srcDir("src/main/jniLibs")
         getByName("debug").res.srcDir(developmentTlsResources)
+        getByName("development").res.srcDir(developmentTlsResources)
+        getByName("development").manifest.srcFile("src/development/AndroidManifest.xml")
     }
 
     testOptions {
@@ -375,6 +386,19 @@ val debugResourceConsumerTasks = setOf(
     "generateDebugAndroidTestResources",
     "mergeDebugAndroidTestResources",
     "processDebugAndroidTestResources",
+    "preDevelopmentBuild",
+    "mapDevelopmentSourceSetPaths",
+    "generateDevelopmentResources",
+    "packageDevelopmentResources",
+    "extractDeepLinksDevelopment",
+    "parseDevelopmentLocalResources",
+    "mergeDevelopmentResources",
+    "processDevelopmentResources",
+    "preDevelopmentAndroidTestBuild",
+    "mapDevelopmentAndroidTestSourceSetPaths",
+    "generateDevelopmentAndroidTestResources",
+    "mergeDevelopmentAndroidTestResources",
+    "processDevelopmentAndroidTestResources",
 )
 
 tasks.matching { it.name in debugResourceConsumerTasks }.configureEach {
@@ -385,9 +409,9 @@ tasks.register("verifyDevTlsNetworkSecurityConfig") {
     dependsOn(generateDebugNetworkSecurityConfig)
 
     doLast {
-        val generatedResources = layout.buildDirectory.dir("generated/res/devTls/debug").get().asFile
+        val generatedResources = layout.buildDirectory.dir("generated/res/devTls/local").get().asFile
         val config = generatedResources.resolve("xml/network_security_config.xml")
-        check(config.isFile) { "Debug builds must generate a network security configuration" }
+        check(config.isFile) { "Local development builds must generate a network security configuration" }
         DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(config)
         val configText = config.readText()
         val localDomains = listOf("127.0.0.1", "localhost", "::1", "10.0.2.2")
@@ -437,7 +461,7 @@ tasks.register("verifyReleaseDevTlsResources") {
 }
 
 val androidNamespace = "http://schemas.android.com/apk/res/android"
-val componentElementNames = setOf("activity", "service", "receiver", "provider")
+val componentElementNames = setOf("activity", "activity-alias", "service", "receiver", "provider")
 val permittedReleaseExports = setOf(
     Triple("activity", "dev.peppy.mobile.MainActivity", null),
     Triple("receiver", "dev.peppy.mobile.IncomingSmsReceiver", "android.permission.BROADCAST_SMS"),
@@ -508,4 +532,178 @@ val verifyReleaseManifestSecurity = tasks.register("verifyReleaseManifestSecurit
 
 tasks.matching { it.name in setOf("assembleRelease", "bundleRelease") }.configureEach {
     dependsOn(verifyReleaseManifestSecurity)
+}
+
+val restrictedSetupPackagePath = "dev/peppy/mobile/restrictedsetup/"
+val restrictedSetupDexPrefix = "L$restrictedSetupPackagePath"
+val permittedRestrictedSetupDexClasses = Regex(
+    "${Regex.escape(restrictedSetupDexPrefix)}RestrictedSetupEntryKt(?:\\${'$'}\\${'$'}ExternalSyntheticLambda\\d+)?;",
+)
+val restrictedSetupDependencyGroups = setOf(
+    "com.github.MuntashirAkon",
+    "io.github.muntashirakon",
+    "org.conscrypt",
+)
+// Extend these deny lists before approving any future restricted-setup transport dependency.
+val restrictedSetupDependencyCoordinates = setOf(
+    "com.github.MuntashirAkon:libadb-android",
+    "com.github.MuntashirAkon:spake2-android",
+    "org.conscrypt:conscrypt-android",
+)
+val restrictedSetupNativeLibraryNames = setOf("libadb", "libspake2", "libconscrypt")
+
+fun apksFromMetadata(metadataFile: File, variant: String): List<File> {
+    check(metadataFile.isFile) { "Expected $variant APK metadata at $metadataFile" }
+    val metadata = JsonSlurper().parse(metadataFile) as? Map<*, *>
+        ?: throw GradleException("$variant APK metadata must be an object")
+    check(metadata["variantName"] == variant) { "$variant APK metadata has an unexpected variant" }
+    val artifactType = metadata["artifactType"] as? Map<*, *>
+    check(artifactType?.get("type") == "APK") { "$variant APK metadata does not describe APK outputs" }
+    val outputDirectory = metadataFile.parentFile.canonicalFile
+    val outputs = (metadata["elements"] as? List<*>)
+        ?.map { it as? Map<*, *> ?: throw GradleException("$variant APK metadata has an invalid output") }
+        ?.map { it["outputFile"] as? String ?: throw GradleException("$variant APK metadata has an output without a filename") }
+        ?.map { outputFile -> outputDirectory.resolve(outputFile).canonicalFile }
+        ?: emptyList()
+    check(outputs.isNotEmpty()) { "$variant APK metadata contains no APK outputs" }
+    check(outputs.all { it.toPath().startsWith(outputDirectory.toPath()) && it.isFile }) {
+        "$variant APK metadata references a missing or unsafe APK output"
+    }
+    return outputs
+}
+
+fun restrictedSetupDexClasses(apks: List<File>): Set<String> = buildSet {
+    val classDescriptor = Regex("L${Regex.escape(restrictedSetupPackagePath)}[^;]+;")
+    apks.forEach { apk ->
+        ZipFile(apk).use { archive ->
+            val entries = archive.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                if (entry.name.matches(Regex("classes(\\d+)?\\.dex"))) {
+                    classDescriptor.findAll(archive.getInputStream(entry).readBytes().toString(Charsets.ISO_8859_1))
+                        .forEach { add(it.value) }
+                }
+            }
+        }
+    }
+}
+
+fun restrictedSetupNativeLibraries(apks: List<File>): Set<String> = apks.flatMap { apk ->
+    ZipFile(apk).use { archive ->
+        archive.entries().asSequence()
+            .filter { it.name.startsWith("lib/") }
+            .map { it.name.substringAfterLast('/').lowercase() }
+            .filter { nativeLibrary -> restrictedSetupNativeLibraryNames.any(nativeLibrary::contains) }
+            .toList()
+    }
+}.toSet()
+
+fun verifyRestrictedSetupManifest(mergedManifest: File, variant: String) {
+    check(mergedManifest.isFile) { "Expected merged $variant manifest at $mergedManifest" }
+    val parserFactory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+    val manifest = parserFactory.newDocumentBuilder().parse(mergedManifest)
+    val components = manifest.getElementsByTagName("*")
+    for (index in 0 until components.length) {
+        val component = components.item(index) as? org.w3c.dom.Element ?: continue
+        if (component.nodeName !in componentElementNames) continue
+        val rawName = component.getAttributeNS(androidNamespace, "name")
+        val name = when {
+            rawName.startsWith(".") -> "dev.peppy.mobile$rawName"
+            rawName.contains('.') -> rawName
+            else -> "dev.peppy.mobile.$rawName"
+        }
+        check(!name.startsWith("dev.peppy.mobile.restrictedsetup.")) {
+            "$variant manifest must not contain restricted setup component $name"
+        }
+    }
+}
+
+fun verifyRestrictedSetupExclusionTask(variant: String) = tasks.register(
+    "verify${variant.replaceFirstChar(Char::uppercase)}RestrictedSetupExclusion",
+) {
+    dependsOn("package${variant.replaceFirstChar(Char::uppercase)}")
+
+    doLast {
+        val metadata = layout.buildDirectory.file("outputs/apk/$variant/output-metadata.json").get().asFile
+        val apks = apksFromMetadata(metadata, variant)
+        val prohibitedClasses = restrictedSetupDexClasses(apks).filterNot(permittedRestrictedSetupDexClasses::matches)
+        check(prohibitedClasses.isEmpty()) {
+            "$variant DEX must not contain development restricted setup classes: $prohibitedClasses"
+        }
+        val mergedManifest = layout.buildDirectory
+            .file("intermediates/merged_manifests/$variant/process${variant.replaceFirstChar(Char::uppercase)}Manifest/AndroidManifest.xml")
+            .get()
+            .asFile
+        verifyRestrictedSetupManifest(mergedManifest, variant)
+        val prohibitedDependencies = configurations.getByName("${variant}RuntimeClasspath")
+            .resolvedConfiguration.resolvedArtifacts
+            .map { artifact -> artifact.moduleVersion.id.group to "${artifact.moduleVersion.id.group}:${artifact.name}" }
+            .filter { (group, coordinate) -> group in restrictedSetupDependencyGroups || coordinate in restrictedSetupDependencyCoordinates }
+            .toSet()
+        check(prohibitedDependencies.isEmpty()) {
+            "$variant runtime dependencies must not contain restricted setup transport groups: $prohibitedDependencies"
+        }
+        val prohibitedNativeLibraries = restrictedSetupNativeLibraries(apks)
+        check(prohibitedNativeLibraries.isEmpty()) {
+            "$variant APK must not contain restricted setup transport native libraries: $prohibitedNativeLibraries"
+        }
+    }
+}
+
+val verifyReleaseRestrictedSetupExclusion = verifyRestrictedSetupExclusionTask("release")
+val verifyDebugRestrictedSetupExclusion = verifyRestrictedSetupExclusionTask("debug")
+
+val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleaseRestrictedSetupExclusionFixtures") {
+    doLast {
+        val fixtureDirectory = layout.buildDirectory.dir("tmp/restricted-setup-exclusion-fixtures").get().asFile
+        fixtureDirectory.deleteRecursively()
+        fixtureDirectory.mkdirs()
+        val fixtureApk = fixtureDirectory.resolve("app-release-unsigned.apk")
+        ZipOutputStream(fixtureApk.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("classes.dex"))
+            archive.write("${restrictedSetupDexPrefix}RestrictedSetupController;".toByteArray())
+            archive.closeEntry()
+        }
+        val metadata = fixtureDirectory.resolve("output-metadata.json")
+        metadata.writeText("""{"artifactType":{"type":"APK"},"variantName":"release","elements":[{"outputFile":"app-release-unsigned.apk"}]}""")
+        check(runCatching { restrictedSetupDexClasses(apksFromMetadata(metadata, "release")) }.isSuccess)
+        check(runCatching {
+            check(restrictedSetupDexClasses(apksFromMetadata(metadata, "release")).all(permittedRestrictedSetupDexClasses::matches))
+        }.isFailure) { "Synthetic development class must fail the release DEX exclusion guard" }
+
+        val manifest = fixtureDirectory.resolve("AndroidManifest.xml")
+        manifest.writeText("""<manifest xmlns:android="$androidNamespace"><application><service android:name="dev.peppy.mobile.restrictedsetup.RestrictedSetupController" /></application></manifest>""")
+        check(runCatching { verifyRestrictedSetupManifest(manifest, "release") }.isFailure) {
+            "Synthetic restricted setup component must fail the release manifest exclusion guard"
+        }
+
+        ZipOutputStream(fixtureApk.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("lib/arm64-v8a/libadb.so"))
+            archive.closeEntry()
+        }
+        check(restrictedSetupNativeLibraries(apksFromMetadata(metadata, "release")).isNotEmpty()) {
+            "Synthetic restricted setup native library must be detected"
+        }
+
+        ZipOutputStream(fixtureApk.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("classes.dex"))
+            archive.write("${restrictedSetupDexPrefix}RestrictedSetupEntryKt;${restrictedSetupDexPrefix}RestrictedSetupEntryKt${'$'}${'$'}ExternalSyntheticLambda0;".toByteArray())
+            archive.closeEntry()
+        }
+        check(restrictedSetupDexClasses(apksFromMetadata(metadata, "release")).all(permittedRestrictedSetupDexClasses::matches)) {
+            "Synthetic no-op entry classes must remain allowed"
+        }
+    }
+}
+
+tasks.matching { it.name in setOf("assembleRelease", "bundleRelease") }.configureEach {
+    dependsOn(verifyReleaseRestrictedSetupExclusion)
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+    dependsOn(verifyDebugRestrictedSetupExclusion)
+}
+
+tasks.matching { it.name == "check" }.configureEach {
+    dependsOn(verifyReleaseRestrictedSetupExclusionFixtures)
 }
