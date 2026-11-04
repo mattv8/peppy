@@ -24,6 +24,7 @@ pub mod account_access;
 pub mod attachment_retention;
 pub mod device_credentials;
 pub mod newenrollment;
+pub mod play_billing;
 
 const MAX_JSON: usize = 16 * 1024;
 const MAX_CHECKPOINT: usize = 64 * 1024;

@@ -974,6 +974,7 @@ mod tests {
 pub mod account_access;
 pub mod attachments;
 pub mod auth_web;
+pub mod billing_play;
 pub mod billing_web;
 pub mod computer_enrollment;
 pub mod devices;

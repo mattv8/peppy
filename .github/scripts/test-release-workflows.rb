@@ -391,7 +391,7 @@ android_sign_env = android_sign.fetch('env')
 end
 assert.call(android_sign_env.fetch('PEPPY_ANDROID_SIGNING_CERT_SHA256') == "${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}", 'Android signer must receive the protected certificate fingerprint only for trusted builds')
 assert.call(android_steps.any? { |step| step.dig('with', 'path') == 'dist/android-release/peppy-android-debug.apk' }, 'development Android artifact must contain only the debug APK')
-assert.call(android_steps.any? { |step| step.dig('with', 'path') == "dist/android-release/peppy-android.apk\ndist/android-release/peppy-android.aab\n" }, 'release Android artifact must contain only signed assets')
+assert.call(android_steps.any? { |step| step.dig('with', 'path') == "dist/android-release/peppy-android.apk\ndist/android-release/peppy-android.aab\ndist/android-release/peppy-android-native-debug-symbols.zip\n" }, 'release Android artifact must contain only signed assets and native debug symbols')
 android_development_build = android_steps.find { |step| step['name'] == 'Build development Android debug APK' }
 assert.call(android_development_build.fetch('env').fetch('PEPPY_ANDROID_NATIVE_PROFILE') == 'release', 'development Android builds must retain release native compilation')
 assert.call(android_development_build.fetch('run').include?('--dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleRelease :app:bundleRelease'), 'development Android builds must verify release dependencies and the merged manifest before producing artifacts')

@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import dev.peppy.mobile.R
+import dev.peppy.mobile.BuildConfig
 import dev.peppy.mobile.account.AccountAccessState
 import dev.peppy.mobile.account.AccountRefreshTrigger
 import dev.peppy.mobile.account.CachedAccountNotice
@@ -160,12 +161,16 @@ internal fun buildSystemRibbonModel(context: Context, slot: RibbonSlot, nowMs: L
         val deadline = notice.deadline?.takeIf { it * 1000 > nowMs }
         val date = deadline?.let(::formatDeadline).orEmpty()
         val bodyRes = if (notice.kind == NativeAccountNoticeKind.PAYMENT_FAILED_GRACE && deadline == null) copy.gatewayBodyNoDate else copy.gatewayBody
+        val opensSubscription = BuildConfig.PEPPY_DISTRIBUTION == "play" && notice.kind !in setOf(
+            NativeAccountNoticeKind.READ_ONLY_TESTER_INELIGIBLE,
+            NativeAccountNoticeKind.READ_ONLY_ACCOUNT_DELETING,
+        )
         SystemRibbonModel(
             key = notice.kind.name,
             severity = notice.severity,
             title = accountRibbonTitle(context, notice, nowMs),
             body = context.getString(bodyRes, date),
-            actionLabel = notice.manageUrl?.let { context.getString(copy.action) },
+        actionLabel = if (opensSubscription || notice.manageUrl != null) context.getString(copy.action) else null,
             manageUrl = notice.manageUrl,
             dismissible = notice.dismissible,
         )
@@ -174,7 +179,7 @@ internal fun buildSystemRibbonModel(context: Context, slot: RibbonSlot, nowMs: L
 
 /** Stateless ribbon. Warning and error differ in colour and border width; the title always names the state. */
 @Composable
-internal fun SystemRibbon(model: SystemRibbonModel, linkFailed: Boolean, onAction: (String) -> Unit, onDismiss: () -> Unit) {
+internal fun SystemRibbon(model: SystemRibbonModel, linkFailed: Boolean, onAction: () -> Unit, onDismiss: () -> Unit) {
     val colors = if (isSystemInDarkTheme()) PeppyTokens.Dark else PeppyTokens.Light
     val isError = model.severity == NativeNoticeSeverity.ERROR
     val surface = if (isError) colors.errorSurface else colors.warningSurface
@@ -183,7 +188,10 @@ internal fun SystemRibbon(model: SystemRibbonModel, linkFailed: Boolean, onActio
     val bodyColor = if (isError) colors.textPrimary else colors.warningText
     val border = if (isError) colors.error else colors.warningBorder
     val borderWidth = if (isError) 2.dp else 1.dp
-    val opensInBrowser = stringResource(R.string.peppy_system_banner_opens_in_browser)
+    val actionDestination = stringResource(
+        if (BuildConfig.PEPPY_DISTRIBUTION == "play") R.string.peppy_system_banner_opens_subscription
+        else R.string.peppy_system_banner_opens_in_browser,
+    )
     var expanded by remember(model.key) { mutableStateOf(false) }
     var overflows by remember(model.key, model.body) { mutableStateOf(false) }
     Surface(
@@ -224,10 +232,10 @@ internal fun SystemRibbon(model: SystemRibbonModel, linkFailed: Boolean, onActio
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     model.actionLabel?.let { label ->
                         TextButton(
-                            onClick = { model.manageUrl?.let(onAction) },
+                            onClick = onAction,
                             colors = ButtonDefaults.textButtonColors(contentColor = titleColor),
                             modifier = Modifier.heightIn(min = 48.dp).testTag("system-ribbon-action")
-                                .semantics { contentDescription = "$label, $opensInBrowser" },
+                                .semantics { contentDescription = "$label, $actionDestination" },
                         ) { Text(label) }
                     }
                     if (model.dismissible) TextButton(
@@ -250,7 +258,7 @@ private const val BODY_COLLAPSED_LINES = 3
  * shown, so content below it can consume the status-bar inset the ribbon already pads.
  */
 @Composable
-internal fun SystemRibbonHost(enrolled: Boolean, unlocked: Boolean): Boolean {
+internal fun SystemRibbonHost(enrolled: Boolean, unlocked: Boolean, onOpenSubscription: () -> Unit = {}): Boolean {
     if (!enrolled) return false
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -283,7 +291,10 @@ internal fun SystemRibbonHost(enrolled: Boolean, unlocked: Boolean): Boolean {
     SystemRibbon(
         model = model,
         linkFailed = linkFailed,
-        onAction = { url -> if (!openManageUrl(context, url)) linkFailed = true },
+        onAction = {
+            if (BuildConfig.PEPPY_DISTRIBUTION == "play") onOpenSubscription()
+            else if (model.manageUrl?.let { openManageUrl(context, it) } != true) linkFailed = true
+        },
         onDismiss = {
             (slot as? RibbonSlot.Account)?.notice?.let { notice ->
                 scope.launch(Dispatchers.IO) { AccountAccessState.snooze(context, notice) }
