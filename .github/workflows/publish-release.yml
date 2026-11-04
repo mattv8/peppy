@@ -193,6 +193,9 @@ jobs:
           find dist/release -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > dist/STAGED-ARTIFACT-SHA256SUMS
           test -s dist/STAGED-ARTIFACT-SHA256SUMS
       - if: steps.guard.outputs.skip != 'true'
+        name: Create staged release artifact SBOM directory
+        run: mkdir -p dist/sbom
+      - if: steps.guard.outputs.skip != 'true'
         name: Generate staged release artifact SBOM
         # This inventories only staged release archives/APK/AAB files for the checked-out revision.
         # It does not claim a complete binary SBOM for archive formats Syft cannot inspect.
