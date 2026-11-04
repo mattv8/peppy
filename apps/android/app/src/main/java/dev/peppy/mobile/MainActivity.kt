@@ -51,6 +51,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.semantics.heading
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -529,8 +530,9 @@ private fun CompanionScreen(activity: ComponentActivity) {
             },
         ) { innerPadding ->
             Column(Modifier.fillMaxSize().padding(innerPadding)) {
+                val scrollState = rememberScrollState()
                 Column(
-                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()).then(
+                    Modifier.fillMaxSize().verticalScroll(scrollState).then(
                         if (status?.enrolled == true && status?.sharedKeysReady == true) Modifier else Modifier.padding(24.dp),
                     )
                         .semantics { testTagsAsResourceId = true }.testTag("companion-screen"),
@@ -648,7 +650,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 scope.launch { ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }; addPhoneOpen = ownerPhoneHost != null }
             }, canAddPhone = ownerPhoneAvailable, onConnectComputer = {
                 scope.launch { ownerComputerHost = withContext(Dispatchers.IO) { createOwnerComputerApprovalHost(context) }; connectComputerOpen = ownerComputerHost != null }
-            }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it })
+            }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it }, onRouteChanged = { scope.launch { scrollState.scrollTo(0) } })
             if (settingsOpen && !subscriptionOpen) {
                 ScreenBody("settings-screen") {
                     Section("about-section", "About") {
@@ -723,7 +725,7 @@ internal fun Section(
     Column(Modifier.fillMaxWidth().testTag(tag), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (showDivider) HorizontalDivider()
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+            Text(title, Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleMedium)
             helpBody?.let { InfoButton(title, title, it, "info-$tag") }
             headerAction?.invoke()
         }

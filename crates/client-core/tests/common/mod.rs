@@ -55,6 +55,14 @@ pub fn unlocked(config: &ClientConfig, vault: &Vault) -> Client {
 pub fn connect(client: &Client) {
     client.set_server_compaction_state(true, true).unwrap();
 }
+
+/// Makes a fixture's initial replay explicit before exercising imported history capture.
+pub fn catch_up_initial_replay(client: &Client, high_water: u64) {
+    client
+        .observe_server_high_water(Cursor(high_water))
+        .unwrap();
+    assert!(client.initial_replay_caught_up().unwrap());
+}
 pub fn route(gateway: &ClientConfig) -> GatewayRoute {
     GatewayRoute {
         gateway_device_id: gateway.device_id,

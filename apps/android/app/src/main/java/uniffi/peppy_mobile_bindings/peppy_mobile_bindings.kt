@@ -819,6 +819,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_provider_rescan_page(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_mms_acquisition(
@@ -840,6 +842,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_apply_evidence_json(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_approval_json(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_book_selection(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_book_view(
     ): Int
@@ -895,6 +899,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_raw(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_initial_replay_caught_up(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_install_downloaded_attachment(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_invalidate_attachment_retention_reconciliation(
@@ -948,6 +954,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_notification_source_device_id(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_contact_scan(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_server_high_water(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate(
     ): Int
@@ -1011,6 +1019,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_send_result(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_register_device_hint(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_register_no_device_hint(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_attachment_removed_by_storage_policy(
@@ -1030,6 +1042,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_repair(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_sync(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_provider_rescan(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_recheck(
     ): Int
@@ -1066,6 +1080,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_compaction_state(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_compaction_supported(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_origin_tags_supported(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_acquisition_state(
     ): Int
@@ -1285,6 +1301,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_provider_rescan_page(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`expectedCursor`: RustBuffer.ByValue,`lastDurableId`: RustBuffer.ByValue,`exhausted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_compaction_backfill_step_json(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_mms_acquisition(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1306,6 +1324,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_apply_evidence_json(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_approval_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_book_selection(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_book_view(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1361,6 +1381,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_ingest_raw(`ptr`: Long,`envelopeJson`: RustBuffer.ByValue,`cursor`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_initial_replay_caught_up(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_install_downloaded_attachment(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,`downloadedPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_invalidate_attachment_retention_reconciliation(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1415,6 +1437,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_observe_contact_scan(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_observe_server_high_water(`ptr`: Long,`highWaterCursor`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_history_import_gate(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_native_plaintext_file(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1477,6 +1501,10 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_send_result(`ptr`: Long,`commandId`: RustBuffer.ByValue,`result`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_register_device_hint(`ptr`: Long,`platform`: RustBuffer.ByValue,`hint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_register_no_device_hint(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification(`ptr`: Long,`notificationKey`: RustBuffer.ByValue,`instance`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_attachment_removed_by_storage_policy(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1497,6 +1525,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_sync(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_mms_provider_rescan(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`observedMaxId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_mms_recheck(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_restore_contact_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1532,6 +1562,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_compaction_state(`ptr`: Long,`supported`: Byte,`active`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_compaction_supported(`ptr`: Long,`supported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_origin_tags_supported(`ptr`: Long,`supported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_acquisition_state(`ptr`: Long,`id`: RustBuffer.ByValue,`state`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2106,6 +2138,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext() and 0xFFFF) != 13469) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_provider_rescan_page() and 0xFFFF) != 8014) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json() and 0xFFFF) != 57580) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2137,6 +2172,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_approval_json() and 0xFFFF) != 64985) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_book_selection() and 0xFFFF) != 46918) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_book_view() and 0xFFFF) != 44419) {
@@ -2220,6 +2258,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_raw() and 0xFFFF) != 45413) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_initial_replay_caught_up() and 0xFFFF) != 37136) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_install_downloaded_attachment() and 0xFFFF) != 42975) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2299,6 +2340,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_contact_scan() and 0xFFFF) != 7624) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_server_high_water() and 0xFFFF) != 10269) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate() and 0xFFFF) != 17220) {
@@ -2394,6 +2438,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_send_result() and 0xFFFF) != 45880) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_register_device_hint() and 0xFFFF) != 17175) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_register_no_device_hint() and 0xFFFF) != 50092) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification() and 0xFFFF) != 35619) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2422,6 +2472,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_sync() and 0xFFFF) != 9333) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_provider_rescan() and 0xFFFF) != 54566) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_recheck() and 0xFFFF) != 20669) {
@@ -2476,6 +2529,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_compaction_supported() and 0xFFFF) != 14767) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_origin_tags_supported() and 0xFFFF) != 3875) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_acquisition_state() and 0xFFFF) != 18914) {
@@ -3216,6 +3272,8 @@ public interface NativeClientInterface {
      */
     fun `cleanupUploadedGatewayMmsCiphertext`(`limit`: kotlin.UInt): NativeGatewayMmsCleanup
     
+    fun `commitMmsProviderRescanPage`(`generation`: kotlin.String, `scope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean
+    
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
@@ -3240,6 +3298,8 @@ public interface NativeClientInterface {
     fun `contactApplyEvidenceJson`(`inputJson`: kotlin.String): kotlin.String
     
     fun `contactApprovalJson`(`input`: kotlin.String): kotlin.String
+    
+    fun `contactBookSelection`(): NativeContactBookSelection
     
     fun `contactBookView`(`inputJson`: kotlin.String): kotlin.String
     
@@ -3337,6 +3397,8 @@ public interface NativeClientInterface {
      */
     fun `ingestRaw`(`envelopeJson`: kotlin.ByteArray, `cursor`: kotlin.String): NativeIngestResult
     
+    fun `initialReplayCaughtUp`(): kotlin.Boolean
+    
     fun `installDownloadedAttachment`(`attachmentId`: kotlin.String, `downloadedPath`: kotlin.String)
     
     fun `invalidateAttachmentRetentionReconciliation`()
@@ -3393,6 +3455,11 @@ public interface NativeClientInterface {
     fun `notificationSourceDeviceId`(): kotlin.String
     
     fun `observeContactScan`(`inputJson`: kotlin.String): kotlin.String
+    
+    /**
+     * Records the first server replay watermark observed by the host.
+     */
+    fun `observeServerHighWater`(`highWaterCursor`: kotlin.String)
     
     fun `openHistoryImportGate`(`reason`: kotlin.String): kotlin.Boolean
     
@@ -3489,6 +3556,16 @@ public interface NativeClientInterface {
     
     fun `recordSendResult`(`commandId`: kotlin.String, `result`: NativeSendResult): kotlin.String
     
+    /**
+     * Call after unlock and before choosing or minting a native contact book.
+     */
+    fun `registerDeviceHint`(`platform`: kotlin.String, `hint`: kotlin.ByteArray)
+    
+    /**
+     * Call when the host cannot read or create its reinstall-stable hint.
+     */
+    fun `registerNoDeviceHint`()
+    
     fun `removeNotification`(`notificationKey`: kotlin.String, `instance`: kotlin.String)
     
     fun `reportAttachmentRemovedByStoragePolicy`(`attachmentId`: kotlin.String)
@@ -3512,6 +3589,8 @@ public interface NativeClientInterface {
     fun `requestContactRepair`()
     
     fun `requestContactSync`(`inputJson`: kotlin.String): kotlin.String
+    
+    fun `requestMmsProviderRescan`(`generation`: kotlin.String, `scope`: kotlin.String, `observedMaxId`: kotlin.String): kotlin.Boolean
     
     fun `requestMmsRecheck`(`generation`: kotlin.String, `scope`: kotlin.String, `limit`: kotlin.ULong): kotlin.ULong
     
@@ -3552,6 +3631,8 @@ public interface NativeClientInterface {
     fun `setServerCompactionState`(`supported`: kotlin.Boolean, `active`: kotlin.Boolean): kotlin.String
     
     fun `setServerCompactionSupported`(`supported`: kotlin.Boolean)
+    
+    fun `setServerOriginTagsSupported`(`supported`: kotlin.Boolean)
     
     fun `setSmsAcquisitionState`(`id`: kotlin.String, `state`: NativeSmsAcquisitionState, `reason`: kotlin.String?)
     
@@ -4181,6 +4262,26 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `commitMmsProviderRescanPage`(`generation`: kotlin.String, `scope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_provider_rescan_page(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterString.lower(`token`),
+        FfiConverterOptionalString.lower(`expectedCursor`),
+        FfiConverterOptionalString.lower(`lastDurableId`),
+        FfiConverterBoolean.lower(`exhausted`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
@@ -4343,6 +4444,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`input`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `contactBookSelection`(): NativeContactBookSelection {
+            return FfiConverterTypeNativeContactBookSelection.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_book_selection(
+        it,
+        _status)
 }
     }
     )
@@ -4795,6 +4910,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `initialReplayCaughtUp`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_initial_replay_caught_up(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `installDownloadedAttachment`(`attachmentId`: kotlin.String, `downloadedPath`: kotlin.String)
         = 
     callWithHandle {
@@ -5196,6 +5325,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     }
     )
     }
+    
+
+    
+    /**
+     * Records the first server replay watermark observed by the host.
+     */
+    @Throws(MobileBindingsException::class)override fun `observeServerHighWater`(`highWaterCursor`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_observe_server_high_water(
+        it,
+        
+        FfiConverterString.lower(`highWaterCursor`),_status)
+}
+    }
+    
     
 
     
@@ -5709,6 +5855,40 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    /**
+     * Call after unlock and before choosing or minting a native contact book.
+     */
+    @Throws(MobileBindingsException::class)override fun `registerDeviceHint`(`platform`: kotlin.String, `hint`: kotlin.ByteArray)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_register_device_hint(
+        it,
+        
+        FfiConverterString.lower(`platform`),
+        FfiConverterByteArray.lower(`hint`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Call when the host cannot read or create its reinstall-stable hint.
+     */
+    @Throws(MobileBindingsException::class)override fun `registerNoDeviceHint`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_register_no_device_hint(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `removeNotification`(`notificationKey`: kotlin.String, `instance`: kotlin.String)
         = 
     callWithHandle {
@@ -5853,6 +6033,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `requestMmsProviderRescan`(`generation`: kotlin.String, `scope`: kotlin.String, `observedMaxId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_mms_provider_rescan(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterString.lower(`observedMaxId`),_status)
 }
     }
     )
@@ -6141,6 +6338,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     callWithHandle {
     uniffiRustCallWithError(MobileBindingsException) { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_compaction_supported(
+        it,
+        
+        FfiConverterBoolean.lower(`supported`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `setServerOriginTagsSupported`(`supported`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_origin_tags_supported(
         it,
         
         FfiConverterBoolean.lower(`supported`),_status)
@@ -10856,6 +11067,8 @@ data class NativeMmsBackfillScanPlan (
     , 
     var `cursor`: kotlin.String?
     , 
+    var `providerRescanToken`: kotlin.String?
+    , 
     var `descending`: kotlin.Boolean
     , 
     var `historyFloor`: kotlin.String?
@@ -10889,6 +11102,7 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -10904,6 +11118,7 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.allocationSize(value.`sourceGeneration`) +
             FfiConverterString.allocationSize(value.`subscriptionId`) +
             FfiConverterOptionalString.allocationSize(value.`cursor`) +
+            FfiConverterOptionalString.allocationSize(value.`providerRescanToken`) +
             FfiConverterBoolean.allocationSize(value.`descending`) +
             FfiConverterOptionalString.allocationSize(value.`historyFloor`) +
             FfiConverterOptionalString.allocationSize(value.`historyUpperBound`) +
@@ -10918,6 +11133,7 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.write(value.`sourceGeneration`, buf)
             FfiConverterString.write(value.`subscriptionId`, buf)
             FfiConverterOptionalString.write(value.`cursor`, buf)
+            FfiConverterOptionalString.write(value.`providerRescanToken`, buf)
             FfiConverterBoolean.write(value.`descending`, buf)
             FfiConverterOptionalString.write(value.`historyFloor`, buf)
             FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
@@ -13579,6 +13795,121 @@ public object FfiConverterTypeNativeBillingProvider: FfiConverterRustBuffer<Nati
 
 
 
+sealed class NativeContactBookSelection {
+    
+    data class Inherited(
+        val `bookId`: kotlin.String, 
+        val `retireBookIds`: List<kotlin.String>) : NativeContactBookSelection()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Owned(
+        val `bookId`: kotlin.String) : NativeContactBookSelection()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object Wait : NativeContactBookSelection()
+    
+    
+    object Mint : NativeContactBookSelection()
+    
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeContactBookSelection : FfiConverterRustBuffer<NativeContactBookSelection>{
+    override fun read(buf: ByteBuffer): NativeContactBookSelection {
+        return when(buf.getInt()) {
+            1 -> NativeContactBookSelection.Inherited(
+                FfiConverterString.read(buf),
+                FfiConverterSequenceString.read(buf),
+                )
+            2 -> NativeContactBookSelection.Owned(
+                FfiConverterString.read(buf),
+                )
+            3 -> NativeContactBookSelection.Wait
+            4 -> NativeContactBookSelection.Mint
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: NativeContactBookSelection): ULong = when(value) {
+        is NativeContactBookSelection.Inherited -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`bookId`)
+                + FfiConverterSequenceString.allocationSize(value.`retireBookIds`)
+            )
+        }
+        is NativeContactBookSelection.Owned -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`bookId`)
+            )
+        }
+        is NativeContactBookSelection.Wait -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeContactBookSelection.Mint -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: NativeContactBookSelection, buf: ByteBuffer) {
+        when(value) {
+            is NativeContactBookSelection.Inherited -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`bookId`, buf)
+                FfiConverterSequenceString.write(value.`retireBookIds`, buf)
+                Unit
+            }
+            is NativeContactBookSelection.Owned -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`bookId`, buf)
+                Unit
+            }
+            is NativeContactBookSelection.Wait -> {
+                buf.putInt(3)
+                Unit
+            }
+            is NativeContactBookSelection.Mint -> {
+                buf.putInt(4)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 
 enum class NativeDeviceRetentionAvailability {
     
@@ -13899,6 +14230,7 @@ public object FfiConverterTypeNativeMmsBackfillPause: FfiConverterRustBuffer<Nat
 enum class NativeMmsBackfillPhase {
     
     LIVE,
+    PROVIDER_RESCAN,
     HISTORY,
     RECHECK;
 

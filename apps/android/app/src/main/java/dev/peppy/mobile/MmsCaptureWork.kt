@@ -54,7 +54,9 @@ import dev.peppy.mobile.mms.MmsProviderPage
 import dev.peppy.mobile.mms.MmsProviderPart
 import dev.peppy.mobile.mms.MmsProviderReader
 import dev.peppy.mobile.mms.MmsProviderRecord
+import dev.peppy.mobile.mms.RestrictedMessageAccess
 import dev.peppy.mobile.mms.mmsReceiveGranted
+import dev.peppy.mobile.mms.restrictedMessageAccess
 import dev.peppy.mobile.sms.MmsCaptureLifecycle
 import dev.peppy.mobile.telephony.OwnNumberDetector
 import dev.peppy.mobile.telephony.SimRoute
@@ -336,6 +338,7 @@ internal object MmsCapture {
             provider,
             context.noBackupFilesDir,
             onControlPublished = { GatewayWork.enqueueAfterCapture(context.applicationContext) },
+            restrictedAccess = { restrictedMessageAccess(context) },
         )
     }
 
@@ -360,6 +363,7 @@ internal object MmsCapture {
         provider: MmsCaptureProvider,
         tempDirectory: File,
         onControlPublished: () -> Unit = {},
+        restrictedAccess: () -> RestrictedMessageAccess = { RestrictedMessageAccess.ALLOWED },
     ): MmsCaptureSummary {
         var captured = 0
         var pending = 0
@@ -441,38 +445,61 @@ internal object MmsCapture {
                         explicitRefresh = plan.manualRecheck,
                         providerChanged = plan.providerChanged,
                     ),
-                    scanPage = { backfillPlan ->
-                    val result = scan(
-                        core, diagnosticProvider, tempDirectory, plan.generation,
-                        imported = backfillPlan.phase == MmsBackfillPhase.HISTORY,
-                        cursor = backfillPlan.cursor?.toLongOrNull(),
-                        upperBound = if (backfillPlan.phase == MmsBackfillPhase.HISTORY) backfillPlan.historyUpperBound?.toLongOrNull() else null,
-                        descending = backfillPlan.phase == MmsBackfillPhase.HISTORY && backfillPlan.descending,
-                        floor = backfillPlan.historyFloor?.toLongOrNull(),
-                        budget = backfillPlan.budget.coerceIn(1, PAGE),
-                        budgetExpired = ::budgetExpired,
-                    )
-                    diagnostics.add(result.diagnostics())
-                    captured += result.captured
-                    pending += result.pending
-                    unavailable += result.unavailable
-                    followup = followup || result.more
-                    captureMmsProgress(
-                        rowsQueried = result.rowsQueried,
-                        processed = result.processed,
-                        advanced = result.lastDurableId != null,
-                        budgetExhausted = result.budgetExhausted,
-                        captured = result.captured,
-                        pending = result.pending,
-                        unavailable = result.unavailable,
-                        more = result.more,
-                    )
-                    MmsBackfillPageResult(
-                        result.lastDurableId,
-                        result.exhausted,
-                        result.more,
-                        observations = result.rowsQueried,
-                    )
+                    scanPage = scanPage@{ backfillPlan ->
+                        if (backfillPlan.phase == MmsBackfillPhase.PROVIDER_RESCAN &&
+                            restrictedAccess() != RestrictedMessageAccess.ALLOWED
+                        ) {
+                            return@scanPage MmsBackfillPageResult(null, exhausted = false, more = false, runnable = false)
+                        }
+                        val provider = if (backfillPlan.phase == MmsBackfillPhase.PROVIDER_RESCAN) {
+                            accessFencedProvider(diagnosticProvider, restrictedAccess)
+                        } else {
+                            diagnosticProvider
+                        }
+                        val importsHistory = backfillPlan.phase == MmsBackfillPhase.HISTORY ||
+                            backfillPlan.phase == MmsBackfillPhase.PROVIDER_RESCAN
+                        val result = try {
+                            scan(
+                                core, provider, tempDirectory, plan.generation,
+                                imported = importsHistory,
+                                cursor = backfillPlan.cursor?.toLongOrNull(),
+                                upperBound = if (importsHistory) backfillPlan.historyUpperBound?.toLongOrNull() else null,
+                                descending = importsHistory && backfillPlan.descending,
+                                floor = backfillPlan.historyFloor?.toLongOrNull(),
+                                budget = backfillPlan.budget.coerceIn(1, PAGE),
+                                budgetExpired = ::budgetExpired,
+                            )
+                        } catch (_: RestrictedMessageAccessRevokedException) {
+                            return@scanPage MmsBackfillPageResult(null, exhausted = false, more = false, runnable = false)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            return@scanPage MmsBackfillPageResult(null, exhausted = false, more = false, runnable = false)
+                        }
+                        diagnostics.add(result.diagnostics())
+                        captured += result.captured
+                        pending += result.pending
+                        unavailable += result.unavailable
+                        followup = followup || result.more
+                        captureMmsProgress(
+                            rowsQueried = result.rowsQueried,
+                            processed = result.processed,
+                            advanced = result.lastDurableId != null,
+                            budgetExhausted = result.budgetExhausted,
+                            captured = result.captured,
+                            pending = result.pending,
+                            unavailable = result.unavailable,
+                            more = result.more,
+                        )
+                        val stillAllowed = backfillPlan.phase != MmsBackfillPhase.PROVIDER_RESCAN ||
+                            restrictedAccess() == RestrictedMessageAccess.ALLOWED
+                        MmsBackfillPageResult(
+                            result.lastDurableId,
+                            result.exhausted,
+                            result.more,
+                            observations = result.rowsQueried,
+                            runnable = stillAllowed,
+                        )
                     },
                     recheck = recheck@{ request ->
                     fun recordOutcome(value: MmsBackfillRecheckOutcome): MmsBackfillRecheckOutcome {
@@ -512,7 +539,13 @@ internal object MmsCapture {
                         override fun begin() = coordinator.begin(plan.generation, "mms")
                         override fun finish(admission: MessageHistoryRequestCoordinator.Admission, observations: Int, exhausted: Boolean, reason: String?) =
                             coordinator.finish(plan.generation, admission, observations, exhausted, reason)
-                    } },
+                        } },
+                    canRunPlan = { scanPlan ->
+                        scanPlan.phase != MmsBackfillPhase.PROVIDER_RESCAN || restrictedAccess() == RestrictedMessageAccess.ALLOWED
+                    },
+                    canCommitProviderRescan = {
+                        restrictedAccess() == RestrictedMessageAccess.ALLOWED
+                    },
                 )
             }
             MmsCaptureSummary(captured, pending, unavailable, followup)
@@ -553,6 +586,8 @@ internal object MmsCapture {
             if (subscriptionId == null) {
                 val outcome = try {
                     unavailableUnknownSubscription(core, generation, record, imported)
+                } catch (error: RestrictedMessageAccessRevokedException) {
+                    throw error
                 } catch (_: Exception) {
                     ProcessResult(durable = false)
                 }
@@ -572,6 +607,8 @@ internal object MmsCapture {
             val outcome = try {
                 process(core, provider, tempDirectory, generation, routeId, record, imported, null)
             } catch (error: CancellationException) {
+                throw error
+            } catch (error: RestrictedMessageAccessRevokedException) {
                 throw error
             } catch (_: Exception) {
                 ProcessResult(durable = false)
@@ -650,7 +687,8 @@ internal object MmsCapture {
             core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "settling:$stableFingerprint")
             return ProcessResult(true, pending = 1, followup = true)
         }
-        val body = try { readText(provider, stable) } catch (_: Exception) {
+        val body = try { readText(provider, stable) } catch (error: Exception) {
+            if (error is RestrictedMessageAccessRevokedException) throw error
             core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "text_unavailable")
             return ProcessResult(true, pending = 1)
         }
@@ -696,7 +734,7 @@ internal object MmsCapture {
         var binary = 0
         var hasDeferredPreview = false
         for (part in ordered(record.parts)) {
-            if (part.mediaType.equals("text/plain", true)) continue
+            if (part.mediaType.equals("text/plain", true) || part.mediaType.equals(SMIL_MEDIA_TYPE, true)) continue
             if (++binary > MAX_BINARY) {
                 core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.BLOCKED, "too_many_attachments")
                 return ProcessResult(true, pending = 1)
@@ -778,6 +816,8 @@ internal object MmsCapture {
                 if (previewState == NativeMmsPreviewState.DEFERRED) hasDeferredPreview = true
             } catch (error: CancellationException) {
                 throw error
+            } catch (error: RestrictedMessageAccessRevokedException) {
+                throw error
             } catch (_: Exception) {
                 if (createdAttachment && attachmentId != null) try { core.discardAttachment(attachmentId) } catch (_: Exception) { }
                 if (mappedAttachmentId != null) {
@@ -844,7 +884,33 @@ internal object MmsCapture {
     private fun granted(context: Context) =
         ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_MMS) == PackageManager.PERMISSION_GRANTED
-    private fun currentHighWater(context: Context): Long {
+
+    internal fun accessFencedProvider(
+        provider: MmsCaptureProvider,
+        access: () -> RestrictedMessageAccess,
+    ): MmsCaptureProvider = object : MmsCaptureProvider by provider {
+        private fun <T> read(block: () -> T): T {
+            if (access() != RestrictedMessageAccess.ALLOWED) throw RestrictedMessageAccessRevokedException()
+            return try {
+                val value = block()
+                if (access() != RestrictedMessageAccess.ALLOWED) throw RestrictedMessageAccessRevokedException()
+                value
+            } catch (error: Exception) {
+                if (access() != RestrictedMessageAccess.ALLOWED) throw RestrictedMessageAccessRevokedException()
+                throw error
+            }
+        }
+
+        override fun highWater() = read { provider.highWater() }
+        override fun page(afterId: Long, limit: Int) = read { provider.page(afterId, limit) }
+        override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int) =
+            read { provider.descendingPage(cursor, upperBound, floor, limit) }
+        override fun read(id: Long) = read { provider.read(id) }
+        override fun readPartText(part: MmsProviderPart, byteLimit: Int) = read { provider.readPartText(part, byteLimit) }
+        override fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long) =
+            read { provider.copyPart(part, destination, byteLimit) }
+    }
+    internal fun currentHighWater(context: Context): Long {
         return context.contentResolver.query(Uri.parse("content://mms"), arrayOf("_id"), null, null, "_id DESC LIMIT 1")?.use {
             if (it.moveToFirst()) it.getLong(0) else 0L
         } ?: throw MmsProviderException("MMS provider returned no high-water cursor")
@@ -855,10 +921,13 @@ internal object MmsCapture {
     private const val SEND_REQ = 128
     private const val NOTIFICATION_IND = 130
     private const val RETRIEVE_CONF = 132
+    private const val SMIL_MEDIA_TYPE = "application/smil"
     private const val UNKNOWN_PROVIDER_DATE_MS = 0L
     private const val UNKNOWN_SUBSCRIPTION = "android-mms-unknown-subscription"
 
     private enum class ProviderReadKind { HIGH_WATER_OR_PAGE, ROW_READ, PART_TEXT_READ, PART_COPY }
+
+    internal class RestrictedMessageAccessRevokedException : IllegalStateException()
 
     private data class ProcessResult(
         val durable: Boolean,
@@ -964,6 +1033,7 @@ private class NativeCore(internal val client: NativeClientInterface) : MmsCaptur
                 it.budget.coerceAtMost(Int.MAX_VALUE.toULong()).toInt(),
                 it.descending,
                 it.historyFloor,
+                it.providerRescanToken,
             )
         }
 
@@ -972,6 +1042,15 @@ private class NativeCore(internal val client: NativeClientInterface) : MmsCaptur
 
     override fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean) =
         client.finishMmsBackfillPhase(generation, scope, NativeMmsBackfillPhase.valueOf(phase.name), bound, exhausted)
+
+    override fun commitProviderRescanPage(
+        generation: String,
+        scope: String,
+        token: String,
+        expectedCursor: String?,
+        lastDurableId: String?,
+        exhausted: Boolean,
+    ) = client.commitMmsProviderRescanPage(generation, scope, token, expectedCursor, lastDurableId, exhausted)
 
     override fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions): MmsBackfillRecheck {
         return nativeRecheck(client.mmsBackfillDueRechecks(

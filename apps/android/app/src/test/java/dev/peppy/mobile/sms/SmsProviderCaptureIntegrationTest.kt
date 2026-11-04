@@ -60,6 +60,7 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
     /** Runs bounded capture passes until initial history completes, modeling later periodic work
      * when history deliberately declines an immediate continuation. */
     private fun drain(client: NativeClient): List<SmsCaptureSummary> {
+        client.observeServerHighWater(client.receiveCursor())
         client.openHistoryImportGate("contacts_settled")
         val passes = mutableListOf<SmsCaptureSummary>()
         do {
@@ -223,6 +224,11 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         assertEquals(listOf("live"), messages(client).map { it.body })
 
         assertTrue(client.openHistoryImportGate("contacts_settled"))
+        val replayGated = pass(client)
+        assertFalse(client.initialReplayCaughtUp())
+        assertEquals(0, replayGated.captured)
+        assertEquals(listOf("live"), messages(client).map { it.body })
+        client.observeServerHighWater(client.receiveCursor())
         val released = drain(client)
 
         assertTrue(released.none { it.providerError || it.coreError })
@@ -274,6 +280,7 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         // The production runner is gated by READ_SMS and the core SMS policy (which needs RECEIVE_SMS).
         grant(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)
         val client = enrollAndUnlock()
+        client.observeServerHighWater(client.receiveCursor())
         client.openHistoryImportGate("contacts_settled")
         provider.rows += row(1, 1, "+14155552671", "one", 1_600_000_000_001, 1_600_000_000_001, MESSAGES_APP)
         val first = SmsNativeCapture.run(context)

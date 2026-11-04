@@ -444,6 +444,7 @@ pub(super) async fn snapshot_start(
     Ok(Json(json!({
         "snapshot_version": 1,
         "compaction_supported": true,
+        "origin_tags_supported": true,
         "compaction_active": compaction_active,
         "compaction_generation": marks.compaction_generation.to_string(),
         "vault_id": p.vault,
@@ -1033,7 +1034,7 @@ async fn compact_vault(db: &PgPool, vault: Uuid) -> Result<u64, sqlx::Error> {
         || cursors.len() == COMPACTION_BATCH_ROWS
         || expired_roots.len() as i64 == COMPACTION_ROOT_LIMIT;
     if !cursors.is_empty() {
-        sqlx::query("INSERT INTO compacted_records(vault_id,producer_device_id,producer_sequence,envelope_id,command_id,cipher_digest,original_cursor) SELECT vault_id,producer_device_id,producer_sequence,envelope_id,command_id,cipher_digest,cursor FROM encrypted_records WHERE vault_id=$1 AND cursor=ANY($2)")
+        sqlx::query("INSERT INTO compacted_records(vault_id,producer_device_id,producer_sequence,envelope_id,command_id,cipher_digest,original_cursor,origin_tag) SELECT vault_id,producer_device_id,producer_sequence,envelope_id,command_id,cipher_digest,cursor,origin_tag FROM encrypted_records WHERE vault_id=$1 AND cursor=ANY($2)")
             .bind(vault).bind(&cursors).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM record_supersessions WHERE vault_id=$1 AND by_cursor = ANY($2)")
             .bind(vault)

@@ -103,6 +103,7 @@ fn pending_media_history_events_do_not_backpressure_sms_import() {
         complete_mms_with_media(&client, &id.to_string(), true, media, thumbnail);
     }
 
+    catch_up_initial_replay(&client, 0);
     client.open_history_import_gate("contacts_settled").unwrap();
     assert!(!imported_sms_plan_is_paused(&client));
 }
@@ -114,6 +115,7 @@ fn eligible_history_events_backpressure_sms_import_at_the_threshold() {
     let client = unlocked(&config(&directory, "gateway", &vault), &vault);
     capture_events(&client, 500);
 
+    catch_up_initial_replay(&client, 0);
     client.open_history_import_gate("contacts_settled").unwrap();
     assert!(imported_sms_plan_is_paused(&client));
 }
@@ -140,7 +142,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 41);
+    assert_eq!(version, 42);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -246,7 +248,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 41);
+    assert_eq!(version, 42);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -334,6 +336,7 @@ fn conflict_contact_registration_and_unsupported_compaction_rows_do_not_backpres
         if name == "unsupported-compaction" {
             client.set_server_compaction_supported(false).unwrap();
         }
+        catch_up_initial_replay(&client, 0);
         client.open_history_import_gate("contacts_settled").unwrap();
         assert!(client.pending_outbox().unwrap().is_empty(), "{name}");
         assert!(!imported_sms_plan_is_paused(&client), "{name}");

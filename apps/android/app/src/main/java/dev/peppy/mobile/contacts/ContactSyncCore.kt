@@ -9,6 +9,7 @@ import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeAttachmentState
 import uniffi.peppy_mobile_bindings.NativeClientInterface
+import uniffi.peppy_mobile_bindings.NativeContactBookSelection
 
 /**
  * The Rust core's contact surface used by the Android host. Every call is a method on the one
@@ -17,6 +18,7 @@ import uniffi.peppy_mobile_bindings.NativeClientInterface
  * apply evidence; the host keeps no parallel copy of any of them.
  */
 internal interface ContactCore {
+    fun contactBookSelection(): NativeContactBookSelection
     fun listBooks(): JSONObject
     fun capture(input: JSONObject): JSONObject
     fun beginScan(input: JSONObject): JSONObject
@@ -48,6 +50,7 @@ internal interface ContactCore {
 }
 
 internal class NativeContactCore(private val client: NativeClientInterface) : ContactCore {
+    override fun contactBookSelection() = client.contactBookSelection()
     override fun listBooks() = JSONObject(client.listContactBooksJson())
     override fun capture(input: JSONObject) = JSONObject(client.capturePlatformContactsJson(input.toString()))
     override fun beginScan(input: JSONObject) = JSONObject(client.beginContactScan(input.toString()))

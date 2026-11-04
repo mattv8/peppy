@@ -209,8 +209,11 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         let deviceId = UUID().uuidString.lowercased()
         let provider = WritableFakeProvider()
         await provider.configure { $0.book = contacts }
+        let client = try openUnlockedClient(server, passphrase: passphrase, deviceId: deviceId)
+        try client.registerDeviceHint(platform: "ios", hint: Data(repeating: 1, count: 32))
+        try client.observeServerHighWater(highWaterCursor: "0")
         return Owner(
-            server: server, deviceId: deviceId, client: try openUnlockedClient(server, passphrase: passphrase, deviceId: deviceId),
+            server: server, deviceId: deviceId, client: client,
             provider: provider, preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: true))
         )
     }
@@ -221,6 +224,69 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         let report = try await owner.run()
         #expect(report.outcome == .disabled)
         #expect(try owner.coordinator.ownedBook() == nil)
+    }
+
+    @Test func contactBookSelectionWaitsThenMintsAndReusesOwnedBook() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let deviceId = UUID().uuidString.lowercased()
+        let client = try openUnlockedClient(server, passphrase: passphrase, deviceId: deviceId)
+        defer { try? client.dispose() }
+
+        #expect(try client.contactBookSelection() == .wait)
+        try client.registerDeviceHint(platform: "ios", hint: Data(repeating: 2, count: 32))
+        try client.observeServerHighWater(highWaterCursor: "0")
+        #expect(try client.contactBookSelection() == .mint)
+
+        let provider = WritableFakeProvider()
+        await provider.configure { $0.book = sampleContacts(1) }
+        let coordinator = NativeContactsCoordinator(
+            client: client, deviceId: deviceId, provider: provider,
+            preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        )
+        let report = try await coordinator.run(reason: .foreground, isCancelled: { false })
+        let bookId = try #require(report.bookId)
+        #expect(try client.contactBookSelection() == .owned(bookId: bookId))
+    }
+
+    @Test func inheritedSelectionRetiresTheSupersededMintOnlyAfterItsFullScopeRemoval() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let hint = Data(repeating: 3, count: 32)
+        let predecessorId = UUID().uuidString.lowercased()
+        let predecessor = try openUnlockedClient(server, passphrase: passphrase, deviceId: predecessorId)
+        defer { try? predecessor.dispose() }
+        try predecessor.registerDeviceHint(platform: "ios", hint: hint)
+        try predecessor.observeServerHighWater(highWaterCursor: "0")
+        let predecessorProvider = WritableFakeProvider()
+        await predecessorProvider.configure { $0.book = sampleContacts(1) }
+        let predecessorCoordinator = NativeContactsCoordinator(
+            client: predecessor, deviceId: predecessorId, provider: predecessorProvider,
+            preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        )
+        let inheritedBookId = try #require(try await predecessorCoordinator.run(reason: .foreground, isCancelled: { false }).bookId)
+        _ = try await ForegroundSync(client: predecessor, server: serverClient(server), vaultId: server.vaultId).run()
+
+        let successorId = UUID().uuidString.lowercased()
+        let successor = try openUnlockedClient(server, passphrase: passphrase, deviceId: successorId)
+        defer { try? successor.dispose() }
+        try successor.registerNoDeviceHint()
+        try successor.observeServerHighWater(highWaterCursor: "0")
+        _ = try await ForegroundSync(client: successor, server: serverClient(server), vaultId: server.vaultId).run()
+        let successorProvider = WritableFakeProvider()
+        await successorProvider.configure { $0.book = sampleContacts(1) }
+        let successorCoordinator = NativeContactsCoordinator(
+            client: successor, deviceId: successorId, provider: successorProvider,
+            preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        )
+        let supersededBookId = try #require(try await successorCoordinator.run(reason: .foreground, isCancelled: { false }).bookId)
+
+        try successor.registerDeviceHint(platform: "ios", hint: hint)
+        _ = try await ForegroundSync(client: successor, server: serverClient(server), vaultId: server.vaultId).run()
+        #expect(try successor.contactBookSelection() == .inherited(bookId: inheritedBookId, retireBookIds: [supersededBookId]))
+
+        let report = try await successorCoordinator.run(reason: .foreground, isCancelled: { false })
+        #expect(report.bookId == inheritedBookId && report.authoritative)
+        let books = try NativeContactsCoordinator.object(successor.listContactBooksJson())["books"] as? [[String: Any]] ?? []
+        #expect(books.first { $0["id"] as? String == supersededBookId }?["state"] as? String == "retired")
     }
 
     @Test func inactiveCompactionRosterPausesRetentionButDoesNotBlockContacts() async throws {

@@ -1,0 +1,1 @@
+DROP INDEX compacted_records_origin_tag_unique;

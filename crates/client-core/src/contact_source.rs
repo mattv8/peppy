@@ -417,7 +417,11 @@ pub(crate) fn capture(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resu
     object_keys(&input, &["schema_version", "book", "contacts"])?;
     let book = input.get("book").ok_or_else(invalid)?;
     let book_id = req(book, "id")?.to_owned();
-    if req(book, "owner_device_id")? != ctx.device_id.to_string() {
+    if !contacts::owner_or_successor(
+        conn,
+        req(book, "owner_device_id")?,
+        &ctx.device_id.to_string(),
+    )? {
         return Err(invalid());
     }
     let incoming = input
@@ -436,7 +440,11 @@ pub(crate) fn capture(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resu
             |r| r.get(0),
         )
         .optional()?;
-    if owner.is_some_and(|owner| owner != ctx.device_id.to_string()) {
+    if owner
+        .map(|owner| contacts::owner_or_successor(&tx, &owner, &ctx.device_id.to_string()))
+        .transpose()?
+        .is_some_and(|allowed| !allowed)
+    {
         return Err(invalid());
     }
     let mut keys = Vec::with_capacity(incoming.len());
@@ -479,7 +487,7 @@ pub(crate) fn context(conn: &Connection, device_id: &str, input: &str) -> Result
         )
         .optional()?
         .ok_or(Error::NotFound)?;
-    if owner != device_id {
+    if !contacts::owner_or_successor(conn, &owner, device_id)? {
         return Err(Error::InvalidRequest("not contact book owner"));
     }
     let contact_id = if by_contact {

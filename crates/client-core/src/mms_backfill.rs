@@ -36,6 +36,7 @@ const RECOVERY_BYTE_RESERVE: u64 = 64 * 1024 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum MmsBackfillPhase {
     Live,
+    ProviderRescan,
     History,
     Recheck,
 }
@@ -117,6 +118,7 @@ pub struct MmsBackfillScanPlan {
     pub subscription_id: String,
     /// Last acknowledged provider ID, if a page is resumable.
     pub cursor: Option<String>,
+    pub provider_rescan_token: Option<String>,
     pub descending: bool,
     pub history_floor: Option<String>,
     /// Frozen maximum ID for history/recheck classification; absent only before initialization.
@@ -190,6 +192,19 @@ pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
          CREATE TABLE IF NOT EXISTS mms_backfill_recheck_attempts(
            acquisition_id TEXT PRIMARY KEY,
            attempted_at_ms INTEGER NOT NULL
+         );",
+    )?;
+    // An explicit provider rescan is independent from ordinary history progress. Keeping its
+    // frozen bound and cursor in a separate table prevents a delayed host page from rewinding or
+    // completing the ordinary lifecycle.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mms_backfill_provider_rescans(
+           source_generation TEXT NOT NULL,
+           subscription_id TEXT NOT NULL,
+           upper_bound TEXT NOT NULL,
+           cursor TEXT,
+           token TEXT NOT NULL,
+           PRIMARY KEY(source_generation, subscription_id)
          );",
     )?;
     // Completed-sweep keyset order is (length, provider id, local order), descending. The exact
@@ -341,40 +356,74 @@ impl Client {
         let gate_open = if complete {
             true
         } else {
-            crate::history_import::history_import_gate_open(&tx, crate::notifications::now_ms())?
+            crate::initial_replay::caught_up(&tx)?
+                && crate::history_import::history_import_gate_open(
+                    &tx,
+                    crate::notifications::now_ms(),
+                )?
         };
         let outbox_backpressured =
             !complete && crate::history_import::outbox_backpressures_history(&tx)?;
         let live = checkpoint(&tx, generation, scope, false)?;
         let history = checkpoint(&tx, generation, scope, true)?;
+        let provider_rescan = provider_rescan(&tx, generation, scope)?;
+        let (provider_rescan_gate_open, provider_rescan_outbox_backpressured) =
+            if provider_rescan.is_some() {
+                (
+                    crate::history_import::history_import_gate_open(
+                        &tx,
+                        crate::notifications::now_ms(),
+                    )?,
+                    crate::history_import::outbox_backpressures_history(&tx)?,
+                )
+            } else {
+                (true, false)
+            };
         tx.commit()?;
-        Ok(vec![
-            MmsBackfillScanPlan {
-                phase: MmsBackfillPhase::Live,
+        let mut plans = vec![MmsBackfillScanPlan {
+            phase: MmsBackfillPhase::Live,
+            source_generation: generation.into(),
+            subscription_id: scope.into(),
+            cursor: live,
+            provider_rescan_token: None,
+            descending: false,
+            history_floor: None,
+            history_upper_bound: Some(baseline.clone()),
+            history_complete: complete,
+            pause,
+            // The reserve protects history recovery only. Live delivery may consume it until
+            // the absolute snapshot ceiling, while genuine local media pressure still stops it.
+            paused: matches!(
+                pause,
+                Some(MmsBackfillPause::AbsoluteRecoveryCapacity | MmsBackfillPause::LocalCapacity)
+            ),
+            budget: MAX_MMS_BACKFILL_RECHECK,
+        }];
+        if let Some((upper_bound, cursor, token)) = provider_rescan {
+            plans.push(MmsBackfillScanPlan {
+                phase: MmsBackfillPhase::ProviderRescan,
                 source_generation: generation.into(),
                 subscription_id: scope.into(),
-                cursor: live,
-                descending: false,
+                cursor,
+                provider_rescan_token: Some(token),
+                descending: true,
                 history_floor: None,
-                history_upper_bound: Some(baseline.clone()),
+                history_upper_bound: Some(upper_bound),
                 history_complete: complete,
                 pause,
-                // The reserve protects history recovery only. Live delivery may consume it until
-                // the absolute snapshot ceiling, while genuine local media pressure still stops it.
-                paused: matches!(
-                    pause,
-                    Some(
-                        MmsBackfillPause::AbsoluteRecoveryCapacity
-                            | MmsBackfillPause::LocalCapacity
-                    )
-                ),
+                paused: pause.is_some()
+                    || !provider_rescan_gate_open
+                    || provider_rescan_outbox_backpressured,
                 budget: MAX_MMS_BACKFILL_RECHECK,
-            },
+            });
+        }
+        plans.extend([
             MmsBackfillScanPlan {
                 phase: MmsBackfillPhase::History,
                 source_generation: generation.into(),
                 subscription_id: scope.into(),
                 cursor: if descending { history_cursor } else { history },
+                provider_rescan_token: None,
                 descending,
                 history_floor: floor,
                 history_upper_bound: Some(baseline),
@@ -388,6 +437,7 @@ impl Client {
                 source_generation: generation.into(),
                 subscription_id: scope.into(),
                 cursor: recheck_cursor,
+                provider_rescan_token: None,
                 descending: false,
                 history_floor: None,
                 history_upper_bound: None,
@@ -396,7 +446,99 @@ impl Client {
                 paused: matches!(pause, Some(MmsBackfillPause::AbsoluteRecoveryCapacity)),
                 budget: MAX_MMS_BACKFILL_RECHECK,
             },
-        ])
+        ]);
+        Ok(plans)
+    }
+
+    /// Starts one explicit, frozen-bound provider sweep without touching ordinary live/history
+    /// checkpoints. Repeating an active request preserves its original bound and cursor.
+    pub fn request_mms_provider_rescan(
+        &self,
+        generation: &str,
+        scope: &str,
+        observed_max_id: &str,
+    ) -> Result<bool, Error> {
+        validate_scope(generation, scope)?;
+        validate_id(observed_max_id, "MMS observed maximum")?;
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let initialized: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM mms_backfill_scopes WHERE source_generation=? AND subscription_id=? AND history_upper_bound IS NOT NULL)",
+                params![generation, scope],
+                |row| row.get(0),
+            )?;
+        if !initialized {
+            return Err(Error::InvalidRequest("MMS backfill scope"));
+        }
+        let inserted = tx.execute(
+            "INSERT INTO mms_backfill_provider_rescans(source_generation,subscription_id,upper_bound,token)
+             VALUES(?,?,?,?) ON CONFLICT(source_generation,subscription_id) DO NOTHING",
+            params![generation, scope, observed_max_id, uuid::Uuid::new_v4().to_string()],
+        )?;
+        tx.commit()?;
+        Ok(inserted != 0)
+    }
+
+    /// Atomically commits one fenced provider-rescan page after its imported acquisitions are durable.
+    pub fn commit_mms_provider_rescan_page(
+        &self,
+        generation: &str,
+        scope: &str,
+        token: &str,
+        expected_cursor: Option<&str>,
+        last_durable_id: Option<&str>,
+        exhausted: bool,
+    ) -> Result<bool, Error> {
+        validate_scope(generation, scope)?;
+        if token.is_empty() || token.len() > 256 {
+            return Err(Error::InvalidRequest("MMS provider rescan token"));
+        }
+        for id in [expected_cursor, last_durable_id].into_iter().flatten() {
+            validate_id(id, "MMS checkpoint")?;
+        }
+        if !exhausted && last_durable_id.is_none() {
+            return Err(Error::InvalidRequest("MMS provider rescan page"));
+        }
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some((upper_bound, cursor, stored_token)) = provider_rescan(&tx, generation, scope)?
+        else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if stored_token != token || cursor.as_deref() != expected_cursor {
+            tx.commit()?;
+            return Ok(false);
+        }
+        if let Some(last_durable_id) = last_durable_id
+            && !crate::history_import::advances_descending_cursor(
+                cursor.as_deref(),
+                None,
+                &upper_bound,
+                last_durable_id,
+            )?
+        {
+            tx.commit()?;
+            return Ok(false);
+        }
+        if exhausted {
+            tx.execute(
+                "DELETE FROM mms_backfill_provider_rescans WHERE source_generation=? AND subscription_id=? AND token=?",
+                params![generation, scope, token],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE mms_backfill_provider_rescans SET cursor=? WHERE source_generation=? AND subscription_id=? AND token=? AND cursor IS ?",
+                params![last_durable_id, generation, scope, token, expected_cursor],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Acknowledges a provider page after its acquisitions are durable. Recheck uses its own fair
@@ -413,6 +555,9 @@ impl Client {
         let imported = match phase {
             MmsBackfillPhase::Live => false,
             MmsBackfillPhase::History => true,
+            MmsBackfillPhase::ProviderRescan => {
+                return Err(Error::InvalidRequest("MMS provider rescan checkpoint"));
+            }
             MmsBackfillPhase::Recheck => {
                 return Err(Error::InvalidRequest("MMS recheck checkpoint"));
             }
@@ -470,13 +615,21 @@ impl Client {
     ) -> Result<bool, Error> {
         validate_scope(generation, scope)?;
         validate_id(bound, "MMS scan bound")?;
-        if phase != MmsBackfillPhase::History || !exhausted {
+        if !exhausted {
             return Ok(false);
         }
         let mut guard = self.lock()?;
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if phase == MmsBackfillPhase::ProviderRescan {
+            tx.commit()?;
+            return Err(Error::InvalidRequest("MMS provider rescan checkpoint"));
+        }
+        if phase != MmsBackfillPhase::History {
+            tx.commit()?;
+            return Ok(false);
+        }
         let (baseline, _, _, _, _, _, _) = scope_row(&tx, generation, scope)?;
         let baseline = baseline.as_deref().ok_or(Error::Database)?;
         if crate::history_import::stored_provider_id(baseline)?
@@ -1018,6 +1171,20 @@ fn checkpoint(
     ).optional().map(|value| value.filter(|value| !value.is_empty())).map_err(Into::into)
 }
 
+fn provider_rescan(
+    conn: &Connection,
+    generation: &str,
+    scope: &str,
+) -> Result<Option<(String, Option<String>, String)>, Error> {
+    conn.query_row(
+        "SELECT upper_bound,cursor,token FROM mms_backfill_provider_rescans WHERE source_generation=? AND subscription_id=?",
+        params![generation, scope],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn refresh_local_pause(
     conn: &Connection,
     generation: &str,
@@ -1062,6 +1229,14 @@ fn effective_pause(
     } else {
         None
     }
+}
+
+/// New imported rows must not consume the history recovery reserve after a page was planned.
+/// Live rows intentionally retain their existing admission behavior at Reserve capacity.
+pub(crate) fn imported_mms_acquisition_capacity_available(
+    conn: &Connection,
+) -> Result<bool, Error> {
+    Ok(recovery_capacity(conn)? == RecoveryCapacity::Available)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
