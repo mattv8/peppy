@@ -34,14 +34,17 @@ mod conversation_match;
 mod conversation_pinning;
 mod conversation_tones;
 mod deferred_media;
+mod device_succession;
 mod gateway_settings;
 mod history_import;
+mod initial_replay;
 mod local_search;
 mod media;
 mod media_cache;
 mod message_history_capture;
 mod message_history_protocol;
 mod message_history_requests;
+mod message_origin;
 mod notification_preferences;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
 mod media_paging;
@@ -118,7 +121,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 41;
+const SCHEMA_VERSION: i64 = 42;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -188,7 +191,7 @@ const BROWSER_LOCAL_IDENTITY_AAD_PREFIX: &[u8] = b"peppy-browser-local-identity-
 const BROWSER_LOCAL_IDENTITY_PLAINTEXT_BYTES: usize = 128;
 const MAX_BROWSER_LOCAL_IDENTITY_AAD_BYTES: usize = 64 * 1024;
 const NEXT_SOURCE_SEQUENCE_SQL: &str = "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')";
-const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND NOT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.envelope_id=outbox.envelope_id AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1)))) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachment_remote_state rs ON rs.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND rs.removed_by_storage_policy=1) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND a.state='pending_upload' AND a.remote_object_id IS NULL) AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos p LEFT JOIN contact_photo_aliases alias ON alias.old_id=p.attachment_id JOIN attachments a ON a.attachment_id=COALESCE(alias.new_id,p.attachment_id) WHERE p.outbox_sequence=outbox.seq AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos other WHERE other.outbox_sequence=p.outbox_sequence AND other.attachment_id<>p.attachment_id) AND NOT EXISTS(SELECT 1 FROM contact_photo_unavailable unavailable WHERE unavailable.outbox_sequence=p.outbox_sequence) AND a.state='pending_upload' AND a.remote_object_id IS NULL AND a.media_type='image/jpeg' AND a.plaintext_bytes<=65536 AND NOT EXISTS(SELECT 1 FROM contact_photo_reclaims reclaim WHERE reclaim.attachment_id=a.attachment_id AND reclaim.state='completed')) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
+const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction,origin_tag FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND NOT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.envelope_id=outbox.envelope_id AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1)))) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachment_remote_state rs ON rs.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND rs.removed_by_storage_policy=1) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND a.state='pending_upload' AND a.remote_object_id IS NULL) AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos p LEFT JOIN contact_photo_aliases alias ON alias.old_id=p.attachment_id JOIN attachments a ON a.attachment_id=COALESCE(alias.new_id,p.attachment_id) WHERE p.outbox_sequence=outbox.seq AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos other WHERE other.outbox_sequence=p.outbox_sequence AND other.attachment_id<>p.attachment_id) AND NOT EXISTS(SELECT 1 FROM contact_photo_unavailable unavailable WHERE unavailable.outbox_sequence=p.outbox_sequence) AND a.state='pending_upload' AND a.remote_object_id IS NULL AND a.media_type='image/jpeg' AND a.plaintext_bytes<=65536 AND NOT EXISTS(SELECT 1 FROM contact_photo_reclaims reclaim WHERE reclaim.attachment_id=a.attachment_id AND reclaim.state='completed')) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
 const BATTERY_LOOKUP_INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS sms_acquisitions_reserved_sequence ON sms_acquisitions(conversation_id,source_sequence) WHERE state!='complete';
 CREATE INDEX IF NOT EXISTS outbox_unsealed_priority ON outbox(priority,seq) WHERE state='unsealed';
@@ -421,6 +424,24 @@ pub enum PrivatePayload {
         subscription_id: String,
         address: String,
         revision: u64,
+    },
+    MessageOriginAlias {
+        message_id: MessageId,
+        origin_key: String,
+    },
+    DeviceHintRegistered {
+        device_id: DeviceId,
+        platform: String,
+        hint_tag: String,
+        #[serde(default)]
+        key_epoch: u32,
+    },
+    DeviceSucceeded {
+        predecessor: DeviceId,
+        successor: DeviceId,
+        platform: String,
+        hint_tag: String,
+        key_epoch: u32,
     },
     ContactBookState {
         book: serde_json::Value,
@@ -1004,6 +1025,19 @@ impl Store {
 /// Cloneable handle to the process-wide owner of one database path.
 #[derive(Clone)]
 pub struct Client(Arc<Mutex<Store>>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContactBookSelection {
+    Inherited {
+        book_id: String,
+        retire_book_ids: Vec<String>,
+    },
+    Owned {
+        book_id: String,
+    },
+    Wait,
+    Mint,
+}
 
 impl Client {
     /// Opens (or shares) the per-canonical-path owner. A second open must present the same key
@@ -1831,6 +1865,16 @@ impl Client {
     pub fn server_compaction_supported(&self) -> Result<bool, Error> {
         let s = self.lock()?;
         Ok(get_meta(&s.conn, "server_compaction_supported")?.as_deref() == Some("1"))
+    }
+
+    /// Records whether the trusted server accepts message-origin tags.
+    pub fn set_server_origin_tags_supported(&self, supported: bool) -> Result<(), Error> {
+        let s = self.lock()?;
+        set_meta(
+            &s.conn,
+            "server_origin_tags_supported",
+            if supported { "1" } else { "0" },
+        )
     }
 
     /// Records both trusted `/v1/snapshot` compaction fields: `supported` (the server stores
@@ -2784,6 +2828,80 @@ impl Client {
     /// Highest contiguous journaled cursor; resume server fetches after it.
     pub fn receive_cursor(&self) -> Result<Cursor, Error> {
         Ok(Cursor(receive_cursor(&self.lock()?.conn)?))
+    }
+
+    /// Records the first server replay watermark learned after pairing.
+    pub fn observe_server_high_water(&self, cursor: Cursor) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        initial_replay::observe_server_high_water(&tx, cursor.0)?;
+        device_succession::evaluate_succession(&tx, &ctx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether replay and the message-origin backfill have reached the initial server watermark.
+    pub fn initial_replay_caught_up(&self) -> Result<bool, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let caught_up = initial_replay::caught_up(&tx)?;
+        if caught_up {
+            device_succession::evaluate_succession(&tx, &ctx)?;
+        }
+        tx.commit()?;
+        Ok(caught_up)
+    }
+
+    /// Registers an opaque reinstall-stable native hint. The raw value remains local.
+    pub fn register_device_hint(&self, platform: &str, hint: &[u8]) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        device_succession::register_hint(&tx, &ctx, platform, hint)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records that the native host cannot provide a device hint for this installation.
+    pub fn register_no_device_hint(&self) -> Result<(), Error> {
+        let store = self.lock()?;
+        device_succession::register_no_hint(&store.conn)
+    }
+
+    pub fn contact_book_selection(&self) -> Result<ContactBookSelection, Error> {
+        let mut store = self.lock()?;
+        let device_id = store.config.device_id;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let caught_up = initial_replay::caught_up(&tx)?;
+        if caught_up {
+            device_succession::evaluate_succession(&tx, &ctx)?;
+        }
+        tx.commit()?;
+        if !caught_up || !device_succession::local_hint_registered(conn)? {
+            return Ok(ContactBookSelection::Wait);
+        }
+        let inherited = device_succession::inherited_books(conn, &device_id)?;
+        if let Some(book_id) = inherited.first() {
+            let retire = conn.prepare("SELECT id FROM contact_books WHERE owner_device_id=? AND forgotten=0 AND state!='retired' AND id NOT IN (SELECT book_id FROM inherited_contact_books) ORDER BY id")?
+                .query_map([device_id.to_string()], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            if retire.is_empty() && device_succession::takeover_complete(conn, book_id)? {
+                return Ok(ContactBookSelection::Owned {
+                    book_id: book_id.clone(),
+                });
+            }
+            return Ok(ContactBookSelection::Inherited {
+                book_id: book_id.clone(),
+                retire_book_ids: retire,
+            });
+        }
+        let owned: Option<String> = conn.query_row("SELECT id FROM contact_books WHERE owner_device_id=? AND forgotten=0 AND state!='retired' ORDER BY id LIMIT 1", [device_id.to_string()], |row| row.get(0)).optional()?;
+        Ok(owned.map_or(ContactBookSelection::Mint, |book_id| {
+            ContactBookSelection::Owned { book_id }
+        }))
     }
 
     /// Reports contiguous receipt and processing frontiers without mutating durable state.
@@ -4042,6 +4160,7 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        initial_replay::observe_server_high_water(&tx, high_water.0)?;
         phone_read::retire_all_phone_read_effects(&tx)?;
         mms_backfill::record_snapshot_capacity(&tx, high_water.0, record_count)?;
         if active_generation(&tx)?.is_some_and(|g| g.published) {
@@ -5375,6 +5494,10 @@ CREATE INDEX IF NOT EXISTS phone_read_effects_created ON phone_read_effects(crea
 CREATE TABLE IF NOT EXISTS phone_read_effect_terminals(message_id TEXT PRIMARY KEY);
 ";
 
+fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(conn, "outbox", "origin_tag TEXT")
+}
+
 fn apply_migration_40(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
         conn,
@@ -5401,7 +5524,8 @@ fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Re
     Ok(())
 }
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
-const DECODER_REVISION: &str = "7";
+// Revision 8 reprojects retained control wires that older clients consumed as unknown.
+const DECODER_REVISION: &str = "8";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -5453,6 +5577,8 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     contact_state::initialize(conn)?;
     contact_media::initialize(conn)?;
     snapshot_projection::initialize(conn)?;
+    message_origin::initialize(conn)?;
+    device_succession::initialize(conn)?;
     initialize_compaction_state(conn)?;
     let version: Option<i64> = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
@@ -5497,6 +5623,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_38)?;
             tx.execute_batch(MIGRATION_39)?;
             apply_migration_40(&tx)?;
+            apply_migration_42(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5505,7 +5632,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=40)) => {
+        Some(version @ (4..=41)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5613,6 +5740,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 39 {
                 apply_migration_40(&tx)?;
+            }
+            if version <= 41 {
+                apply_migration_42(&tx)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -5800,6 +5930,57 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                 }
                 (
                     "applied",
+                    PrivatePayload::MessageOriginAlias {
+                        message_id,
+                        origin_key,
+                    },
+                ) => {
+                    message_origin::apply_alias(conn, &message_id, &origin_key)?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::DeviceHintRegistered {
+                        device_id,
+                        platform,
+                        hint_tag,
+                        key_epoch,
+                    },
+                ) if device_id == envelope.producer_device_id => {
+                    device_succession::apply_hint(
+                        conn,
+                        ctx,
+                        &device_id,
+                        &platform,
+                        &hint_tag,
+                        if key_epoch == 0 {
+                            envelope.key_epoch
+                        } else {
+                            key_epoch
+                        },
+                    )?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::DeviceSucceeded {
+                        predecessor,
+                        successor,
+                        platform,
+                        hint_tag,
+                        key_epoch,
+                    },
+                ) => {
+                    let _ = device_succession::apply_succession(
+                        conn,
+                        envelope.producer_device_id,
+                        predecessor,
+                        successor,
+                        &platform,
+                        &hint_tag,
+                        key_epoch,
+                    )?;
+                }
+                (
+                    "applied",
                     PrivatePayload::ConversationPin {
                         conversation_id,
                         pinned,
@@ -5911,6 +6092,29 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
         }
     }
     set_meta(conn, &marker, DECODER_REVISION)
+}
+
+/// A newly accepted successor may have been rejected by this version before its ownership
+/// transfer was known. Re-apply only invalid payload records from that successor.
+pub(crate) fn requeue_successor_invalid_payload(
+    conn: &Connection,
+    successor: &DeviceId,
+) -> Result<(), Error> {
+    let mut statement = conn.prepare(
+        "SELECT cursor,wire FROM journal WHERE status='quarantined' AND reason='invalid_payload'",
+    )?;
+    let rows: Vec<(i64, Vec<u8>)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    for (cursor, wire) in rows {
+        if parse_wire(&wire).is_some_and(|envelope| envelope.producer_device_id == *successor) {
+            conn.execute(
+                "UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=?",
+                [cursor],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn hydrate_mms_context(conn: &Connection, recovered: &MessagePayload) -> Result<(), Error> {
@@ -6089,6 +6293,9 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "conversation_tone"
             | "notification_preferences"
             | "mms_own_address"
+            | "message_origin_alias"
+            | "device_hint_registered"
+            | "device_succeeded"
             | "contact_book_state"
             | "contact_upserted"
             | "contact_removed"
@@ -6374,6 +6581,60 @@ fn apply_record(
         }
         (
             EnvelopePurpose::Event,
+            PrivatePayload::MessageOriginAlias {
+                message_id,
+                origin_key,
+            },
+        ) => {
+            message_origin::apply_alias(conn, &message_id, &origin_key)?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::DeviceHintRegistered {
+                device_id,
+                platform,
+                hint_tag,
+                key_epoch,
+            },
+        ) => {
+            if device_id != producer {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            device_succession::apply_hint(
+                conn,
+                ctx,
+                &device_id,
+                &platform,
+                &hint_tag,
+                if key_epoch == 0 {
+                    envelope.key_epoch
+                } else {
+                    key_epoch
+                },
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::DeviceSucceeded {
+                predecessor,
+                successor,
+                platform,
+                hint_tag,
+                key_epoch,
+            },
+        ) => {
+            device_succession::apply_succession(
+                conn,
+                producer,
+                predecessor,
+                successor,
+                &platform,
+                &hint_tag,
+                key_epoch,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
             PrivatePayload::ConversationPin {
                 conversation_id,
                 pinned,
@@ -6617,6 +6878,7 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
         }
         Err(error) => return Err(error.into()),
     }
+    message_origin::index_message(conn, message)?;
     if !message.record.attachments.is_empty() {
         let mut insert_attachment = conn.prepare(
             "INSERT INTO message_attachments(message_id,position,attachment_id) VALUES(?,?,?)",
@@ -6795,6 +7057,7 @@ fn enqueue_without_sealing(
     // never inspect a row whose source sequence has already become its own sequence. Contact
     // producers fail closed here (before any row exists) unless compaction is ready.
     let plan = compaction_plan(conn, ctx, purpose, payload)?;
+    let origin_tag = origin_tag(conn, ctx, payload)?;
     let identity = compaction_identity(payload);
     let own = ctx.device_id.to_string();
     let plain = Zeroizing::new(serde_json::to_vec(payload).map_err(|_| Error::Database)?);
@@ -6818,6 +7081,7 @@ fn enqueue_without_sealing(
         route,
         plain.as_slice(),
         main.as_ref(),
+        origin_tag,
         outbox_priority(purpose, payload),
     )?;
     // Contact validation may re-prepare a reclaimed photo under a fresh alias. Do that before
@@ -6852,6 +7116,7 @@ fn enqueue_without_sealing(
                 route,
                 plain.as_slice(),
                 checkpoint.as_ref(),
+                origin_tag,
                 outbox_priority(purpose, payload),
             )?;
             record_attachment_inventory(conn, payload, &checkpoint_id.to_string())?;
@@ -6877,6 +7142,64 @@ fn enqueue_without_sealing(
         }
     }
     Ok((envelope_id, sequence))
+}
+
+fn origin_tag(
+    conn: &Connection,
+    ctx: &Ctx,
+    payload: &PrivatePayload,
+) -> Result<Option<[u8; 32]>, Error> {
+    if get_meta(conn, "server_origin_tags_supported")?.as_deref() != Some("1") {
+        return Ok(None);
+    }
+    let message = match payload {
+        PrivatePayload::Message(message) | PrivatePayload::MmsDeferredPreview { message, .. } => {
+            message
+        }
+        PrivatePayload::MmsMessage { .. }
+            if get_meta(conn, "deferred_mms_enabled")?.as_deref() == Some("1") =>
+        {
+            return Ok(None);
+        }
+        PrivatePayload::MmsMessage { message, .. } => message,
+        PrivatePayload::MessageOriginAlias { origin_key, .. } => {
+            if origin_key.len() != 80 {
+                return Ok(None);
+            }
+            let evidence = match message_origin::decode_hex(origin_key) {
+                Ok(evidence) => evidence,
+                Err(_) => return Ok(None),
+            };
+            let Some(key) = ctx
+                .active_epoch
+                .and_then(|epoch| ctx.keys.get(&epoch))
+                .and_then(|keys| keys.compaction.as_ref())
+            else {
+                return Ok(None);
+            };
+            return Ok(Some(compaction_hmac(
+                key,
+                b"message-origin-tag-v1",
+                &[&evidence],
+            )));
+        }
+        _ => return Ok(None),
+    };
+    let Some(evidence) = message_origin::exact_evidence(conn, message)? else {
+        return Ok(None);
+    };
+    let Some(key) = ctx
+        .active_epoch
+        .and_then(|epoch| ctx.keys.get(&epoch))
+        .and_then(|keys| keys.compaction.as_ref())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(compaction_hmac(
+        key,
+        b"message-origin-tag-v1",
+        &[&evidence],
+    )))
 }
 
 fn record_attachment_inventory(
@@ -6985,6 +7308,7 @@ fn payload_attachment_ids(payload: &PrivatePayload) -> Vec<AttachmentId> {
 }
 
 /// Allocates the next producer sequence and stores one unsealed outbox row.
+#[allow(clippy::too_many_arguments)]
 fn insert_outbox(
     conn: &Connection,
     purpose: EnvelopePurpose,
@@ -6992,6 +7316,7 @@ fn insert_outbox(
     route: Option<&GatewayRoute>,
     plain: &[u8],
     compaction: Option<&CompactionMetadata>,
+    origin_tag: Option<[u8; 32]>,
     priority: i64,
 ) -> Result<(EnvelopeId, u64), Error> {
     let sequence = get_meta(conn, "producer_sequence")?
@@ -7003,7 +7328,7 @@ fn insert_outbox(
     set_meta(conn, "producer_sequence", &sequence.to_string())?;
     let envelope_id = EnvelopeId::new();
     conn.execute(
-        "INSERT INTO outbox(seq,envelope_id,command_id,purpose,route,plain,compaction,priority,state) VALUES(?,?,?,?,?,?,?,?,'unsealed')",
+        "INSERT INTO outbox(seq,envelope_id,command_id,purpose,route,plain,compaction,origin_tag,priority,state) VALUES(?,?,?,?,?,?,?,?,?,'unsealed')",
         params![
             to_i64(sequence)?,
             envelope_id.to_string(),
@@ -7012,6 +7337,7 @@ fn insert_outbox(
             route.map(json).transpose()?,
             plain,
             compaction.map(json).transpose()?,
+            origin_tag.map(|tag| media::hex(&tag)),
             priority,
         ],
     )?;
@@ -7686,6 +8012,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         Option<String>,
         Vec<u8>,
         Option<String>,
+        Option<String>,
     );
     while count < limit {
         let rows: Vec<Row> = {
@@ -7701,6 +8028,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                         r.get(5)?,
                         r.get(6)?,
                         r.get(7)?,
+                        r.get(8)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -7708,7 +8036,17 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         if rows.is_empty() {
             break;
         }
-        for (priority, sequence, envelope_id, command_id, purpose, route, plain, compaction) in rows
+        for (
+            priority,
+            sequence,
+            envelope_id,
+            command_id,
+            purpose,
+            route,
+            plain,
+            compaction,
+            origin_tag,
+        ) in rows
         {
             after = (priority, sequence);
             if count >= limit {
@@ -7773,6 +8111,9 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                 purpose,
                 route: route.map(|route| decode(route.as_bytes())).transpose()?,
                 compaction: None,
+                origin_tag: origin_tag
+                    .map(|tag| message_origin::decode_hex_32(&tag))
+                    .transpose()?,
                 ciphertext: Vec::new(),
             };
             note_seal_pending_decode();
@@ -10203,6 +10544,7 @@ mod tests {
                 None,
                 &serde_json::to_vec(&payload).unwrap(),
                 None,
+                None,
                 1,
             )
             .unwrap();
@@ -10223,6 +10565,7 @@ mod tests {
             None,
             None,
             &serde_json::to_vec(&photo_payload).unwrap(),
+            None,
             None,
             2,
         )
@@ -10248,6 +10591,7 @@ mod tests {
                 message_id: MessageId::new(),
             })
             .unwrap(),
+            None,
             None,
             1,
         )
@@ -11144,6 +11488,7 @@ mod tests {
                 purpose: EnvelopePurpose::Event,
                 route: None,
                 compaction: None,
+                origin_tag: None,
                 ciphertext: Vec::new(),
             };
             let plain = serde_json::to_vec(&payload).unwrap();
@@ -11372,6 +11717,7 @@ mod tests {
                 purpose: EnvelopePurpose::Event,
                 route: None,
                 compaction: None,
+                origin_tag: None,
                 ciphertext: Vec::new(),
             };
             let plain = serde_json::to_vec(&payload).unwrap();
@@ -11753,6 +12099,7 @@ mod tests {
             purpose: EnvelopePurpose::Event,
             route: None,
             compaction: None,
+            origin_tag: None,
             ciphertext: Vec::new(),
         };
         let plain = serde_json::to_vec(&PrivatePayload::NotificationDismiss {

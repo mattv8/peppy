@@ -1,0 +1,4 @@
+ALTER TABLE encrypted_records
+  VALIDATE CONSTRAINT encrypted_records_origin_tag_length_check;
+ALTER TABLE compacted_records
+  VALIDATE CONSTRAINT compacted_records_origin_tag_length_check;

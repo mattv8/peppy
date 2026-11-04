@@ -212,6 +212,7 @@ struct ForegroundSync: Sendable {
                 case .quarantined: pass.report.quarantinedOnIngest += 1
                 }
             }
+            try client.observeServerHighWater(highWaterCursor: String(try page.decimal("high_water_cursor")))
             guard let next = try page.optionalDecimal("next_after") else { return }
             // Continue after the page actually served, even if the core cursor stops at a gap.
             guard next >= last, next > after else { throw ClientError.invalidResponse("next_after") }

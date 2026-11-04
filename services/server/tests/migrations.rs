@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 21] = [
+const UP: [&str; 25] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -25,9 +25,13 @@ const UP: [&str; 21] = [
     include_str!("../migrations/0019_attachment_retention.sql"),
     include_str!("../migrations/0020_admission.sql"),
     include_str!("../migrations/0021_community_rls.sql"),
+    include_str!("../migrations/0022_origin_tags.sql"),
+    include_str!("../migrations/0023_origin_tag_indexes.sql"),
+    include_str!("../migrations/0024_compacted_origin_tag_index.sql"),
+    include_str!("../migrations/0025_validate_origin_tag_constraints.sql"),
 ];
 
-const DOWN: [&str; 21] = [
+const DOWN: [&str; 25] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -49,6 +53,10 @@ const DOWN: [&str; 21] = [
     include_str!("../migrations/down/0019_attachment_retention.down.sql"),
     include_str!("../migrations/down/0020_admission.down.sql"),
     include_str!("../migrations/down/0021_community_rls.down.sql"),
+    include_str!("../migrations/down/0022_origin_tags.down.sql"),
+    include_str!("../migrations/down/0023_origin_tag_indexes.down.sql"),
+    include_str!("../migrations/down/0024_compacted_origin_tag_index.down.sql"),
+    include_str!("../migrations/down/0025_validate_origin_tag_constraints.down.sql"),
 ];
 
 #[tokio::test]
@@ -161,6 +169,10 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(constraint_exists(database, "storage_deletions_reason_check").await);
     assert!(function_exists(database, "peppy_reject_mutation").await);
     assert!(trigger_exists(database, "encrypted_records_immutable").await);
+    assert!(column_exists(database, "encrypted_records", "origin_tag").await);
+    assert!(column_exists(database, "compacted_records", "origin_tag").await);
+    assert!(index_exists(database, "encrypted_records_origin_tag_unique").await);
+    assert!(index_exists(database, "compacted_records_origin_tag_unique").await);
 }
 
 async fn seed_populated_downgrade_case(database: &mut PgConnection, version: usize) {

@@ -107,6 +107,12 @@
       "minimum": 0,
       "type": "integer"
     },
+    "origin_tag": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "producer_device_id": {
       "format": "uuid",
       "type": "string"

@@ -736,6 +736,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func contactApprovalJson(input: String) throws  -> String
     
+    func contactBookSelection() throws  -> NativeContactBookSelection
+    
     func contactBookView(inputJson: String) throws  -> String
     
     /**
@@ -832,6 +834,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func ingestRaw(envelopeJson: Data, cursor: String) throws  -> NativeIngestResult
     
+    func initialReplayCaughtUp() throws  -> Bool
+    
     func installDownloadedAttachment(attachmentId: String, downloadedPath: String) throws 
     
     func invalidateAttachmentRetentionReconciliation() throws 
@@ -888,6 +892,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func notificationSourceDeviceId() throws  -> String
     
     func observeContactScan(inputJson: String) throws  -> String
+    
+    /**
+     * Records the first server replay watermark observed by the host.
+     */
+    func observeServerHighWater(highWaterCursor: String) throws 
     
     func openHistoryImportGate(reason: String) throws  -> Bool
     
@@ -984,6 +993,16 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func recordSendResult(commandId: String, result: NativeSendResult) throws  -> String
     
+    /**
+     * Call after unlock and before choosing or minting a native contact book.
+     */
+    func registerDeviceHint(platform: String, hint: Data) throws 
+    
+    /**
+     * Call when the host cannot read or create its reinstall-stable hint.
+     */
+    func registerNoDeviceHint() throws 
+    
     func removeNotification(notificationKey: String, instance: String) throws 
     
     func reportAttachmentRemovedByStoragePolicy(attachmentId: String) throws 
@@ -1049,6 +1068,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func setServerCompactionState(supported: Bool, active: Bool) throws  -> String
     
     func setServerCompactionSupported(supported: Bool) throws 
+    
+    func setServerOriginTagsSupported(supported: Bool) throws 
     
     func setSmsAcquisitionState(id: String, state: NativeSmsAcquisitionState, reason: String?) throws 
     
@@ -1601,6 +1622,15 @@ open func contactApprovalJson(input: String)throws  -> String  {
 })
 }
     
+open func contactBookSelection()throws  -> NativeContactBookSelection  {
+    return try  FfiConverterTypeNativeContactBookSelection_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_book_selection(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func contactBookView(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1911,6 +1941,15 @@ open func ingestRaw(envelopeJson: Data, cursor: String)throws  -> NativeIngestRe
 })
 }
     
+open func initialReplayCaughtUp()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_initial_replay_caught_up(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func installDownloadedAttachment(attachmentId: String, downloadedPath: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_install_downloaded_attachment(
@@ -2179,6 +2218,18 @@ open func observeContactScan(inputJson: String)throws  -> String  {
         FfiConverterString.lower(inputJson),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Records the first server replay watermark observed by the host.
+     */
+open func observeServerHighWater(highWaterCursor: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_observe_server_high_water(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(highWaterCursor),uniffiCallStatus
+    )
+}
 }
     
 open func openHistoryImportGate(reason: String)throws  -> Bool  {
@@ -2536,6 +2587,30 @@ open func recordSendResult(commandId: String, result: NativeSendResult)throws  -
 })
 }
     
+    /**
+     * Call after unlock and before choosing or minting a native contact book.
+     */
+open func registerDeviceHint(platform: String, hint: Data)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_register_device_hint(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(platform),
+        FfiConverterData.lower(hint),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Call when the host cannot read or create its reinstall-stable hint.
+     */
+open func registerNoDeviceHint()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_register_no_device_hint(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
 open func removeNotification(notificationKey: String, instance: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification(
@@ -2843,6 +2918,15 @@ open func setServerCompactionState(supported: Bool, active: Bool)throws  -> Stri
 open func setServerCompactionSupported(supported: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_compaction_supported(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(supported),uniffiCallStatus
+    )
+}
+}
+    
+open func setServerOriginTagsSupported(supported: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_origin_tags_supported(
             self.uniffiCloneHandle(),
         FfiConverterBool.lower(supported),uniffiCallStatus
     )
@@ -10383,6 +10467,93 @@ public func FfiConverterTypeNativeBillingProvider_lower(_ value: NativeBillingPr
 
 
 
+public enum NativeContactBookSelection: Equatable, Hashable {
+    
+    case inherited(bookId: String, retireBookIds: [String]
+    )
+    case owned(bookId: String
+    )
+    case wait
+    case mint
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeContactBookSelection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeContactBookSelection: FfiConverterRustBuffer {
+    typealias SwiftType = NativeContactBookSelection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeContactBookSelection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .inherited(bookId: try FfiConverterString.read(from: &buf), retireBookIds: try FfiConverterSequenceString.read(from: &buf)
+        )
+        
+        case 2: return .owned(bookId: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .wait
+        
+        case 4: return .mint
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeContactBookSelection, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .inherited(bookId,retireBookIds):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(bookId, into: &buf)
+            FfiConverterSequenceString.write(retireBookIds, into: &buf)
+            
+        
+        case let .owned(bookId):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(bookId, into: &buf)
+            
+        
+        case .wait:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .mint:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeContactBookSelection_lift(_ buf: RustBuffer) throws -> NativeContactBookSelection {
+    return try FfiConverterTypeNativeContactBookSelection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeContactBookSelection_lower(_ value: NativeContactBookSelection) -> RustBuffer {
+    return FfiConverterTypeNativeContactBookSelection.lower(value)
+}
+
+
+
+
 public enum NativeDeviceRetentionAvailability: Equatable, Hashable {
     
     case unsupported
@@ -14035,6 +14206,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_approval_json() != 64985) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_book_selection() != 46918) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_book_view() != 44419) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14116,6 +14290,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_raw() != 45413) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_initial_replay_caught_up() != 37136) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_install_downloaded_attachment() != 42975) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14195,6 +14372,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_contact_scan() != 7624) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_server_high_water() != 10269) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate() != 17220) {
@@ -14290,6 +14470,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_send_result() != 45880) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_register_device_hint() != 17175) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_register_no_device_hint() != 50092) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification() != 35619) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14375,6 +14561,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_compaction_supported() != 14767) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_origin_tags_supported() != 3875) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_acquisition_state() != 18914) {
