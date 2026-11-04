@@ -49,7 +49,7 @@ val peppyDistribution = providers.gradleProperty("peppyDistribution").orNull ?: 
 require(peppyDistribution in setOf("direct", "play")) {
     "peppyDistribution must be direct or play; got '$peppyDistribution'"
 }
-val jnaVersion = "5.17.0"
+val jnaVersion = "5.19.1"
 
 fun gitValueOrNull(vararg arguments: String): String? = runCatching {
     ProcessBuilder("git", *arguments).directory(rootProject.projectDir.resolve("../.."))
@@ -123,11 +123,11 @@ val sourceDiffSha256 = validatedMetadata(providers.gradleProperty("peppySourceDi
 // fails the test immediately. Each needs its own configuration, or Gradle keeps only the newest.
 val robolectricDependencyDirectory = layout.buildDirectory.dir("robolectric-dependencies")
 val robolectricDependencies = listOf(
-    "org.robolectric:android-all-instrumented:8.0.0_r4-robolectric-r1-i7",
-    "org.robolectric:android-all-instrumented:11-robolectric-6757853-i7",
-    "org.robolectric:android-all-instrumented:12-robolectric-7732740-i7",
-    "org.robolectric:android-all-instrumented:14-robolectric-10818077-i7",
-    "org.robolectric:android-all-instrumented:15-robolectric-12650502-i7",
+    "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
+    "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
+    "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
+    "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
+    "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
 ).mapIndexed { index, coordinate ->
     configurations.create("robolectricDependency$index").also { configuration ->
         dependencies.add(configuration.name, coordinate)
@@ -283,15 +283,15 @@ android {
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2025.10.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.activity:activity-compose:1.10.0")
-    implementation("androidx.work:work-runtime-ktx:2.10.0")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.work:work-runtime-ktx:2.12.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
+    implementation("androidx.core:core-ktx:1.19.1")
     implementation("androidx.credentials:credentials:1.5.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
-    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
-    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.2.1")
+    implementation("com.google.zxing:core:3.5.4")
     // Offline, on-device QR decoding. CameraX 1.4.2 supports minSdk 21/compileSdk 36;
     // ML Kit barcode-scanning 17.3.0 bundles the decoder and makes no cloud request.
     implementation("androidx.camera:camera-camera2:1.4.2")
@@ -299,7 +299,7 @@ dependencies {
     implementation("androidx.camera:camera-view:1.4.2")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     // Optional at runtime without google-services.json; required to compile the content-free wake service.
-    implementation("com.google.firebase:firebase-messaging:25.1.3")
+    implementation("com.google.firebase:firebase-messaging:26.0.1")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui")
@@ -308,13 +308,13 @@ dependencies {
     // UniFFI-generated Kotlin uses JNA to load libpeppy_mobile_bindings.so
     // from this APK's jniLibs directory; never from an arbitrary filesystem path.
     implementation("net.java.dev.jna:jna:$jnaVersion@aar")
-    implementation("com.android.billingclient:billing:8.3.0")
+    implementation("com.android.billingclient:billing:9.1.0")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("org.robolectric:robolectric:4.17")
     testImplementation("androidx.test:core:1.6.1")
-    testImplementation("androidx.work:work-testing:2.10.0")
-    testImplementation(platform("androidx.compose:compose-bom:2025.10.01"))
+    testImplementation("androidx.work:work-testing:2.12.0")
+    testImplementation(platform("androidx.compose:compose-bom:2026.09.00"))
     testImplementation("androidx.compose.ui:ui-test-junit4")
     // Desktop JNA jar (with host jnidispatch) for the JVM-hosted Robolectric runtime.
     testImplementation("net.java.dev.jna:jna:$jnaVersion")
@@ -322,7 +322,7 @@ dependencies {
     androidTestImplementation("androidx.test:core:1.6.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation(platform("androidx.compose:compose-bom:2025.10.01"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2026.09.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
