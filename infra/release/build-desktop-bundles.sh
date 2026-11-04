@@ -70,7 +70,9 @@ repair_macos_dmg() {
 
 # GNU coreutils spells decode `--decode`; older macOS base64 only accepts `-D`.
 decode_base64() {
-  printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D
+  local flag=--decode
+  base64 --decode </dev/null >/dev/null 2>&1 || flag=-D
+  printf '%s' "$1" | base64 "$flag"
 }
 
 package_app_store() {
