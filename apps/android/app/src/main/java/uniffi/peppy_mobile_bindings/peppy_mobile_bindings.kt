@@ -809,6 +809,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_provider_rescan_page(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_mms_acquisition(
@@ -1020,6 +1022,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_repair(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_sync(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_provider_rescan(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_recheck(
     ): Int
@@ -1275,6 +1279,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_provider_rescan_page(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`expectedCursor`: RustBuffer.ByValue,`lastDurableId`: RustBuffer.ByValue,`exhausted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_compaction_backfill_step_json(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_mms_acquisition(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1487,6 +1493,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_sync(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_mms_provider_rescan(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`observedMaxId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_mms_recheck(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_restore_contact_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2071,6 +2079,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext() and 0xFFFF) != 13469) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_provider_rescan_page() and 0xFFFF) != 8014) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json() and 0xFFFF) != 57580) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2387,6 +2398,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_sync() and 0xFFFF) != 9333) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_provider_rescan() and 0xFFFF) != 54566) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_recheck() and 0xFFFF) != 20669) {
@@ -3181,6 +3195,8 @@ public interface NativeClientInterface {
      */
     fun `cleanupUploadedGatewayMmsCiphertext`(`limit`: kotlin.UInt): NativeGatewayMmsCleanup
     
+    fun `commitMmsProviderRescanPage`(`generation`: kotlin.String, `scope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean
+    
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
@@ -3477,6 +3493,8 @@ public interface NativeClientInterface {
     fun `requestContactRepair`()
     
     fun `requestContactSync`(`inputJson`: kotlin.String): kotlin.String
+    
+    fun `requestMmsProviderRescan`(`generation`: kotlin.String, `scope`: kotlin.String, `observedMaxId`: kotlin.String): kotlin.Boolean
     
     fun `requestMmsRecheck`(`generation`: kotlin.String, `scope`: kotlin.String, `limit`: kotlin.ULong): kotlin.ULong
     
@@ -4139,6 +4157,26 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterUInt.lower(`limit`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `commitMmsProviderRescanPage`(`generation`: kotlin.String, `scope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_provider_rescan_page(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterString.lower(`token`),
+        FfiConverterOptionalString.lower(`expectedCursor`),
+        FfiConverterOptionalString.lower(`lastDurableId`),
+        FfiConverterBoolean.lower(`exhausted`),_status)
 }
     }
     )
@@ -5818,6 +5856,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `requestMmsProviderRescan`(`generation`: kotlin.String, `scope`: kotlin.String, `observedMaxId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_mms_provider_rescan(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterString.lower(`observedMaxId`),_status)
 }
     }
     )
@@ -10821,6 +10876,8 @@ data class NativeMmsBackfillScanPlan (
     , 
     var `cursor`: kotlin.String?
     , 
+    var `providerRescanToken`: kotlin.String?
+    , 
     var `descending`: kotlin.Boolean
     , 
     var `historyFloor`: kotlin.String?
@@ -10854,6 +10911,7 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -10869,6 +10927,7 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.allocationSize(value.`sourceGeneration`) +
             FfiConverterString.allocationSize(value.`subscriptionId`) +
             FfiConverterOptionalString.allocationSize(value.`cursor`) +
+            FfiConverterOptionalString.allocationSize(value.`providerRescanToken`) +
             FfiConverterBoolean.allocationSize(value.`descending`) +
             FfiConverterOptionalString.allocationSize(value.`historyFloor`) +
             FfiConverterOptionalString.allocationSize(value.`historyUpperBound`) +
@@ -10883,6 +10942,7 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.write(value.`sourceGeneration`, buf)
             FfiConverterString.write(value.`subscriptionId`, buf)
             FfiConverterOptionalString.write(value.`cursor`, buf)
+            FfiConverterOptionalString.write(value.`providerRescanToken`, buf)
             FfiConverterBoolean.write(value.`descending`, buf)
             FfiConverterOptionalString.write(value.`historyFloor`, buf)
             FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
@@ -13762,6 +13822,7 @@ public object FfiConverterTypeNativeMmsBackfillPause: FfiConverterRustBuffer<Nat
 enum class NativeMmsBackfillPhase {
     
     LIVE,
+    PROVIDER_RESCAN,
     HISTORY,
     RECHECK;
 

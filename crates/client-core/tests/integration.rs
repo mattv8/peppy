@@ -39,6 +39,7 @@ mod mms_backfill;
 mod mms_backfill_retry;
 mod mms_identity;
 mod mms_media_v3;
+mod mms_provider_rescan;
 mod mms_source_instances;
 mod notification_preferences;
 mod notification_sync;

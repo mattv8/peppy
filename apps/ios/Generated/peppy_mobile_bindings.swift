@@ -709,6 +709,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func cleanupUploadedGatewayMmsCiphertext(limit: UInt32) throws  -> NativeGatewayMmsCleanup
     
+    func commitMmsProviderRescanPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool) throws  -> Bool
+    
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
@@ -1005,6 +1007,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func requestContactRepair() throws 
     
     func requestContactSync(inputJson: String) throws  -> String
+    
+    func requestMmsProviderRescan(generation: String, scope: String, observedMaxId: String) throws  -> Bool
     
     func requestMmsRecheck(generation: String, scope: String, limit: UInt64) throws  -> UInt64
     
@@ -1464,6 +1468,21 @@ open func cleanupUploadedGatewayMmsCiphertext(limit: UInt32)throws  -> NativeGat
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(
             self.uniffiCloneHandle(),
         FfiConverterUInt32.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
+open func commitMmsProviderRescanPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_provider_rescan_page(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(generation),
+        FfiConverterString.lower(scope),
+        FfiConverterString.lower(token),
+        FfiConverterOptionString.lower(expectedCursor),
+        FfiConverterOptionString.lower(lastDurableId),
+        FfiConverterBool.lower(exhausted),uniffiCallStatus
     )
 })
 }
@@ -2614,6 +2633,18 @@ open func requestContactSync(inputJson: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_sync(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
+open func requestMmsProviderRescan(generation: String, scope: String, observedMaxId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_mms_provider_rescan(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(generation),
+        FfiConverterString.lower(scope),
+        FfiConverterString.lower(observedMaxId),uniffiCallStatus
     )
 })
 }
@@ -6907,6 +6938,7 @@ public struct NativeMmsBackfillScanPlan: Equatable, Hashable {
     public var sourceGeneration: String
     public var subscriptionId: String
     public var cursor: String?
+    public var providerRescanToken: String?
     public var descending: Bool
     public var historyFloor: String?
     public var historyUpperBound: String?
@@ -6917,11 +6949,12 @@ public struct NativeMmsBackfillScanPlan: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(phase: NativeMmsBackfillPhase, sourceGeneration: String, subscriptionId: String, cursor: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pause: NativeMmsBackfillPause?, budget: UInt64) {
+    public init(phase: NativeMmsBackfillPhase, sourceGeneration: String, subscriptionId: String, cursor: String?, providerRescanToken: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pause: NativeMmsBackfillPause?, budget: UInt64) {
         self.phase = phase
         self.sourceGeneration = sourceGeneration
         self.subscriptionId = subscriptionId
         self.cursor = cursor
+        self.providerRescanToken = providerRescanToken
         self.descending = descending
         self.historyFloor = historyFloor
         self.historyUpperBound = historyUpperBound
@@ -6951,6 +6984,7 @@ public struct FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer 
                 sourceGeneration: FfiConverterString.read(from: &buf), 
                 subscriptionId: FfiConverterString.read(from: &buf), 
                 cursor: FfiConverterOptionString.read(from: &buf), 
+                providerRescanToken: FfiConverterOptionString.read(from: &buf), 
                 descending: FfiConverterBool.read(from: &buf), 
                 historyFloor: FfiConverterOptionString.read(from: &buf), 
                 historyUpperBound: FfiConverterOptionString.read(from: &buf), 
@@ -6966,6 +7000,7 @@ public struct FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer 
         FfiConverterString.write(value.sourceGeneration, into: &buf)
         FfiConverterString.write(value.subscriptionId, into: &buf)
         FfiConverterOptionString.write(value.cursor, into: &buf)
+        FfiConverterOptionString.write(value.providerRescanToken, into: &buf)
         FfiConverterBool.write(value.descending, into: &buf)
         FfiConverterOptionString.write(value.historyFloor, into: &buf)
         FfiConverterOptionString.write(value.historyUpperBound, into: &buf)
@@ -10857,6 +10892,7 @@ public func FfiConverterTypeNativeMmsBackfillPause_lower(_ value: NativeMmsBackf
 public enum NativeMmsBackfillPhase: Equatable, Hashable {
     
     case live
+    case providerRescan
     case history
     case recheck
 
@@ -10882,9 +10918,11 @@ public struct FfiConverterTypeNativeMmsBackfillPhase: FfiConverterRustBuffer {
         
         case 1: return .live
         
-        case 2: return .history
+        case 2: return .providerRescan
         
-        case 3: return .recheck
+        case 3: return .history
+        
+        case 4: return .recheck
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -10898,12 +10936,16 @@ public struct FfiConverterTypeNativeMmsBackfillPhase: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case .history:
+        case .providerRescan:
             writeInt(&buf, Int32(2))
         
         
-        case .recheck:
+        case .history:
             writeInt(&buf, Int32(3))
+        
+        
+        case .recheck:
+            writeInt(&buf, Int32(4))
         
         }
     }
@@ -13648,6 +13690,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext() != 13469) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_provider_rescan_page() != 8014) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json() != 57580) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13964,6 +14009,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_sync() != 9333) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_provider_rescan() != 54566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_recheck() != 20669) {
