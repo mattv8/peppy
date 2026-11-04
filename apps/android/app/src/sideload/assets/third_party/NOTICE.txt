@@ -1,0 +1,57 @@
+Third-party notices for the Peppy sideload APK
+===============================================
+
+This notice applies only to the APK distributed from GitHub Releases. The
+Google Play build does not include the libraries listed below.
+
+spake2-android 2.2.1
+--------------------
+Package: com.github.MuntashirAkon.spake2-java:spake2-android
+Copyright 2021 Muntashir Al-Islam.
+License: GNU Lesser General Public License, version 3 (LGPL-3.0).
+
+Peppy uses spake2-android as a separate shared library (libspake2.so) with its
+Java wrapper. The corresponding source for spake2-android is available at:
+https://github.com/MuntashirAkon/spake2-java/tree/2.2.1
+
+libspake2.so is built from spake2-c, which is licensed under LGPL-3.0 or later.
+Portions of spake2-c are under the Apache License 2.0, the MIT license and, for
+its SHA-512 code derived from the GNU C Library, LGPL-2.1. Its corresponding
+source is at the commit used by spake2-android 2.2.1:
+https://github.com/MuntashirAkon/spake2-c/tree/0d15933e5ba3e662cb01245a7ac0dc9fca3eac31
+
+Peppy's complete corresponding application source, suitable for recombining or
+relinking with a modified version of the library, is available at:
+https://github.com/mattv8/peppy at the release tag for this APK.
+To run a modified version, rebuild the sideload APK from that source with your
+modified library (see README.md and apps/android in the repository), sign it
+with your own key and install it on your device. Android requires the
+signature to match the installed app, so uninstall this APK first; that removes
+Peppy's local data on the device.
+
+The LGPL-3.0, GPL-3.0 and LGPL-2.1 texts are in LGPL-3.0.txt, GPL-3.0.txt and
+LGPL-2.1.txt.
+
+libadb-android 3.1.1
+--------------------
+Copyright Muntashir Al-Islam and libadb-android contributors.
+Peppy includes a modified fork of libadb-android 3.1.1. Modified by Peppy.
+The fork and its changes are documented in apps/android/libadb/README.md in
+Peppy's source repository. It is distributed under the Apache License 2.0;
+Apache-2.0.txt contains that license. Upstream BSD-3-Clause attributions for
+Cameron Gutman (2013) and Sam Palmer (2020) are retained in BSD-3-Clause.txt.
+The upstream MIT notice for Google Inc. (2013) is retained in MIT.txt.
+
+Conscrypt 2.5.3
+---------------
+Package: org.conscrypt:conscrypt-android
+License: Apache License 2.0; see Apache-2.0.txt. Conscrypt's upstream NOTICE
+is reproduced in Conscrypt-NOTICE.txt. The Netty and Apache Harmony licenses it
+refers to are also the Apache License 2.0. Conscrypt's native library
+(libconscrypt_jni.so) includes BoringSSL, which is covered by the OpenSSL,
+SSLeay, ISC and MIT terms reproduced in BoringSSL-LICENSE.txt.
+
+Bouncy Castle 1.81
+------------------
+Packages: bcprov-jdk15to18, bcpkix-jdk15to18, and bcutil-jdk15to18.
+License: Bouncy Castle's MIT-style license; see BouncyCastle-LICENSE.txt.

@@ -624,6 +624,14 @@ fun archiveEntryContains(archives: List<File>, entryName: String, value: String)
     }
 }
 
+fun archiveContainsEntryPrefix(archives: List<File>, prefix: String): Boolean = archives.any { archiveFile ->
+    ZipFile(archiveFile).use { archive -> archive.entries().asSequence().any { it.name.startsWith(prefix) } }
+}
+
+fun archiveContainsEntry(archives: List<File>, name: String): Boolean = archives.any { archiveFile ->
+    ZipFile(archiveFile).use { archive -> archive.getEntry(name) != null }
+}
+
 fun verifyRestrictedSetupManifest(mergedManifest: File, variant: String) {
     check(mergedManifest.isFile) { "Expected merged $variant manifest at $mergedManifest" }
     val parserFactory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
@@ -733,6 +741,9 @@ fun verifyRestrictedSetupExclusionTask(variant: String) = tasks.register(
         check(prohibitedNativeLibraries.isEmpty()) {
             "$variant APK must not contain restricted setup transport native libraries: $prohibitedNativeLibraries"
         }
+        check(!archiveContainsEntryPrefix(apks, "assets/third_party/")) {
+            "$variant APK must not contain sideload third-party notices"
+        }
     }
 }
 
@@ -744,6 +755,9 @@ fun verifyReleaseRestrictedSetupAabExclusion() {
     check(prohibitedClasses.isEmpty()) { "Release AAB DEX must not contain restricted setup classes: $prohibitedClasses" }
     check(restrictedSetupNativeLibraries(archives).isEmpty()) {
         "Release AAB must not contain restricted setup transport native libraries"
+    }
+    check(!archiveContainsEntryPrefix(archives, "base/assets/third_party/")) {
+        "Release AAB must not contain sideload third-party notices"
     }
     check(!archiveEntryContains(archives, "base/manifest/AndroidManifest.xml", "dev.peppy.mobile.restrictedsetup") &&
         !archiveEntryContains(archives, "base/manifest/AndroidManifest.xml", "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE") &&
@@ -773,6 +787,10 @@ val verifySideloadRestrictedSetupInclusion = tasks.register("verifySideloadRestr
             check(listOf("libspake2.so", "libconscrypt_jni.so").all { library -> "lib/$abi/$library" in nativeLibraryPaths }) {
                 "Sideload APK must contain libspake2.so and libconscrypt_jni.so for $abi"
             }
+        }
+        val requiredNotices = setOf("NOTICE.txt", "LGPL-3.0.txt", "LGPL-2.1.txt", "GPL-3.0.txt", "BoringSSL-LICENSE.txt")
+        check(requiredNotices.all { notice -> archiveContainsEntry(apks, "assets/third_party/$notice") }) {
+            "Sideload APK must contain required third-party notices"
         }
     }
 }
@@ -818,6 +836,13 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
         check(restrictedSetupNativeLibraries(apksFromMetadata(metadata, "release")).isNotEmpty()) {
             "Synthetic restricted setup native library must be detected"
         }
+        ZipOutputStream(fixtureApk.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("assets/third_party/NOTICE.txt"))
+            archive.closeEntry()
+        }
+        check(archiveContainsEntryPrefix(apksFromMetadata(metadata, "release"), "assets/third_party/")) {
+            "Synthetic sideload notice must fail the release APK exclusion guard"
+        }
 
         val fixtureAab = fixtureDirectory.resolve("app-release.aab")
         ZipOutputStream(fixtureAab.outputStream()).use { archive ->
@@ -826,12 +851,17 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
             archive.closeEntry()
             archive.putNextEntry(ZipEntry("base/lib/arm64-v8a/libspake2.so"))
             archive.closeEntry()
+            archive.putNextEntry(ZipEntry("base/assets/third_party/NOTICE.txt"))
+            archive.closeEntry()
         }
         check(restrictedSetupDexClasses(listOf(fixtureAab)).isNotEmpty()) {
             "Synthetic libadb class must fail the release AAB DEX exclusion guard"
         }
         check(restrictedSetupNativeLibraries(listOf(fixtureAab)).contains("libspake2.so")) {
             "Synthetic restricted setup native library must fail the release AAB exclusion guard"
+        }
+        check(archiveContainsEntryPrefix(listOf(fixtureAab), "base/assets/third_party/")) {
+            "Synthetic sideload notice must fail the release AAB exclusion guard"
         }
 
         ZipOutputStream(fixtureApk.outputStream()).use { archive ->
