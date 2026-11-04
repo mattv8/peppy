@@ -150,11 +150,40 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - run: npm install --global corepack@0.36.0
+      - run: corepack enable && pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm audit --prod
+      - run: python3 infra/audit/check-advisory-exceptions.py
       - run: |
           scan=$(mktemp -d)
           trap 'rm -rf "$scan"' EXIT
           git ls-files -co --exclude-standard -z | tar --null -T - -cf - | tar -xf - -C "$scan"
           docker run --rm -v "$scan:/repo:ro" -v "$PWD/.gitleaks.toml:/gitleaks.toml:ro" -w /repo zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source . --no-git --redact --exit-code 1 --config /gitleaks.toml
+
+  workflow-security:
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify Gradle wrapper binaries
+        uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      - name: Lint GitHub Actions workflows
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 && "$(go env GOPATH)/bin/actionlint" .github/workflows/*.yml
+      - name: Audit GitHub Actions workflows
+        uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
+        with:
+          inputs: .github/workflows
+          persona: auditor
+          version: 1.9.0
+          advanced-security: false
+          online-audits: false
+          min-severity: high
 
   rust:
     needs: changes
@@ -361,7 +390,7 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
           restore-keys: gradle-${{ runner.os }}-
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
@@ -386,10 +415,10 @@ jobs:
           infra/compose/verify-android-native.sh
       - name: Run JVM binding smoke test
         working-directory: apps/android
-        run: ./gradlew --console=plain :jvm-smoke:run
+        run: ./gradlew --console=plain --dependency-verification=strict :jvm-smoke:run
       - name: Compile Android unit tests and prepare Robolectric runtimes
         working-directory: apps/android
-        run: ./gradlew --console=plain :app:compileDebugUnitTestKotlin :app:prepareRobolectricDependencies
+        run: ./gradlew --console=plain --dependency-verification=strict :app:compileDebugUnitTestKotlin :app:prepareRobolectricDependencies
       # Compiled unit tests normally run in about two minutes. A stall fails the
       # step with JVM thread dumps instead of silently consuming the job budget.
       - name: Run Android debug unit tests
@@ -406,7 +435,7 @@ jobs:
           dump_threads &
           watchdog_pid=$!
           trap 'pkill -P "$watchdog_pid" 2>/dev/null || true; kill "$watchdog_pid" 2>/dev/null || true' EXIT
-          timeout --signal=TERM --kill-after=30s 8m ./gradlew --console=plain :app:testDebugUnitTest
+          timeout --signal=TERM --kill-after=30s 8m ./gradlew --console=plain --dependency-verification=strict :app:testDebugUnitTest
       - name: Preserve Android unit test failure reports
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -419,10 +448,10 @@ jobs:
           retention-days: 7
       - name: Lint and assemble Android artifacts
         working-directory: apps/android
-        run: ./gradlew --console=plain --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
+        run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
       - name: Verify release SMS diagnostics policy
         working-directory: apps/android
-        run: ./gradlew --console=plain :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest
+        run: ./gradlew --console=plain --dependency-verification=strict :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest
       - name: Stop Gradle before caching
         if: ${{ success() && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
         working-directory: apps/android
@@ -444,6 +473,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
+      - run: npm install --global corepack@0.36.0
+      - run: corepack enable && pnpm install --frozen-lockfile --ignore-scripts
+      - name: Report development dependency advisories
+        run: |
+          if ! pnpm audit; then
+            echo '::warning::Development dependency advisories detected; production dependency advisories remain blocking.'
+          fi
       - run: sudo apt-get update && sudo apt-get install --yes shellcheck
       - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3
         with:
@@ -529,7 +565,7 @@ jobs:
 
   gate:
     if: always()
-    needs: [changes, source-audit, version, release-tooling, development-tools, rust, integration, desktop, android, swift-bindings, container-image, development-artifacts]
+    needs: [changes, source-audit, workflow-security, version, release-tooling, development-tools, rust, integration, desktop, android, swift-bindings, container-image, development-artifacts]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -542,6 +578,8 @@ jobs:
           CHANGES_REQUIRED: 'true'
           SOURCE_AUDIT_RESULT: ${{ needs.source-audit.result }}
           SOURCE_AUDIT_REQUIRED: 'true'
+          WORKFLOW_SECURITY_RESULT: ${{ needs.workflow-security.result }}
+          WORKFLOW_SECURITY_REQUIRED: 'true'
           VERSION_RESULT: ${{ needs.version.result }}
           VERSION_REQUIRED: 'true'
           RELEASE_TOOLING_RESULT: ${{ needs.release-tooling.result }}
@@ -569,6 +607,8 @@ jobs:
     needs: [version, gate]
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     uses: ./.github/workflows/publish-release.yml
     with:
       version: ${{ needs.version.outputs.version }}
@@ -585,6 +625,8 @@ jobs:
     needs: [version, gate, development-artifacts, publish-prerelease]
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     uses: ./.github/workflows/publish-release.yml
     with:
       component: android
@@ -672,6 +714,8 @@ jobs:
     permissions:
       contents: write
       actions: read
+      attestations: write
+      id-token: write
     concurrency:
       group: stable-release
       cancel-in-progress: false

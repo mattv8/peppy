@@ -35,6 +35,8 @@ pub struct Controller {
     origin: Option<String>,
     info: Option<InstanceInfo>,
     admin_session: Option<Zeroizing<String>>,
+    /// Peppy Hosted stores a native account session, which takes the place of the admin session.
+    hosted_account_session: bool,
     ready: bool,
     owner: bool,
     /// `None` until the active session's gateway registry is known.
@@ -160,6 +162,9 @@ impl Controller {
             Some(_) if pending_request.is_some() => "invite_waiting",
             Some(info) if !info.claimed || info.setup_required => "setup",
             Some(_) if self.admin_session.is_some() => "locked",
+            Some(info) if info.mode == DeploymentMode::Hosted && self.hosted_account_session => {
+                "locked"
+            }
             Some(_) => "signin",
         };
         let setup_code_required = self.info.as_ref().and_then(|info| {
@@ -944,6 +949,7 @@ fn known_claim_error_code(body: &[u8]) -> Option<&'static str> {
         .as_str()?
     {
         "invalid_setup_token" => Some("invalid_setup_token"),
+        "setup_window_closed" => Some("setup_window_closed"),
         "instance_already_claimed" => Some("instance_already_claimed"),
         "invalid_username" => Some("invalid_username"),
         "username_taken" => Some("username_taken"),
@@ -1283,6 +1289,7 @@ fn discovery_origin(state: &AppState, origin: Option<String>) -> BridgeResult<St
 pub async fn enrollment_discover(
     window: WebviewWindow,
     state: State<'_, AppState>,
+    hosted: State<'_, crate::hosted::HostedState>,
     origin: Option<String>,
 ) -> BridgeResult<EnrollmentView> {
     let _operation = crate::admit_update_operation(&state)?;
@@ -1303,6 +1310,9 @@ pub async fn enrollment_discover(
     let saved_identity = saved_identity_for_origin(&state, &selected)?;
     let existing = existing_identity(&state, &selected).await?;
     let existing_role = existing.as_ref().map(ExistingIdentity::role);
+    let hosted_account_session = response.mode == DeploymentMode::Hosted
+        && existing_role.is_none()
+        && crate::hosted::has_enrollment_account_session(&state, &hosted, &selected).await;
     if existing_role == Some(EnrollmentRole::Owner) {
         let _ = tombstone_if_present(&*state.store, &owner_checkpoint_key(&selected));
         if let Some(session) = state.session().await? {
@@ -1395,6 +1405,7 @@ pub async fn enrollment_discover(
             new_identity: !saved_identity && existing_role.is_none(),
         },
     );
+    controller.hosted_account_session = hosted_account_session;
     Ok(controller.view())
 }
 
@@ -1591,12 +1602,7 @@ pub async fn enrollment_create_owner(
     .await;
     let outcome = match completed {
         Ok(outcome) => outcome,
-        Err(error)
-            if matches!(
-                error.code,
-                "invalid_setup_token" | "instance_already_claimed"
-            ) =>
-        {
+        Err(error) if first_claim_error_keeps_setup_view(error.code) => {
             let mut view = state
                 .enrollment
                 .lock()
@@ -1629,6 +1635,13 @@ pub async fn enrollment_create_owner(
     }
 }
 
+fn first_claim_error_keeps_setup_view(code: &str) -> bool {
+    matches!(
+        code,
+        "invalid_setup_token" | "setup_window_closed" | "instance_already_claimed"
+    )
+}
+
 #[tauri::command]
 pub async fn enrollment_sign_in(
     window: WebviewWindow,
@@ -1648,14 +1661,11 @@ pub async fn enrollment_sign_in(
         .is_some_and(|info| info.mode == DeploymentMode::Hosted)
     {
         crate::hosted::hosted_sign_in(window, app, state.clone(), hosted, "google".into()).await?;
-        return Ok(EnrollmentView {
-            stage: "signin",
-            ..state
-                .enrollment
-                .lock()
-                .map_err(|_| BridgeError::host_state())?
-                .view()
-        });
+        let mut controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        return Ok(record_hosted_sign_in(&mut controller));
     }
     let Some(password) = dialogs::passphrase(&app, PassphrasePurpose::AdminPassword).await? else {
         return Ok(state
@@ -1696,6 +1706,12 @@ pub async fn enrollment_sign_in(
         response.session_token.ok_or_else(enrollment_error)?,
     ));
     Ok(controller.view())
+}
+
+/// A completed hosted sign-in advances this computer to device admission.
+fn record_hosted_sign_in(controller: &mut Controller) -> EnrollmentView {
+    controller.hosted_account_session = true;
+    controller.view()
 }
 
 #[tauri::command]
@@ -2929,6 +2945,21 @@ fn invitation_is_current(
     })
 }
 
+/// Re-check the locally authenticated claim immediately before sending approval. Network work to
+/// refresh account authorization can yield, so preparation alone cannot authorize a later submit.
+fn phone_approval_submit_is_fresh(
+    controller: &std::sync::Mutex<Controller>,
+    preparation: &PhoneApprovalPreparation,
+) -> BridgeResult<bool> {
+    let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    Ok(controller.invitation_method == Some(preparation.method)
+        && invitation_is_current(
+            &controller,
+            preparation.invitation_id,
+            &preparation.claim_digest,
+        ))
+}
+
 /// Captures the validated invitation identity before approval begins. Approval never collects a
 /// vault shared secret; transfer uses the active client's verified handoff capability instead.
 fn prepare_phone_approval_without_secret(
@@ -3156,6 +3187,15 @@ pub async fn enrollment_approve(
     };
     let origin = session.api.origin().to_owned();
     let account = hosted_account_header(&state, &hosted).await?;
+    if state.require_session_admitted(&operation).await?.binding != binding
+        || !phone_approval_submit_is_fresh(&state.enrollment, &preparation)?
+    {
+        return Ok(state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .view());
+    }
     body(
         device_request(
             &session,
@@ -3306,11 +3346,12 @@ pub async fn enrollment_sign_out(
 ) -> BridgeResult<()> {
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
-    state
+    let mut controller = state
         .enrollment
         .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .admin_session = None;
+        .map_err(|_| BridgeError::host_state())?;
+    controller.admin_session = None;
+    controller.hosted_account_session = false;
     Ok(())
 }
 
@@ -4895,6 +4936,48 @@ mod owner_retry_tests {
     }
 
     #[test]
+    fn phone_approval_submit_requires_the_prepared_claim_to_remain_current() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
+
+        assert!(phone_approval_submit_is_fresh(&controller, &preparation).unwrap());
+
+        controller.lock().unwrap().invitation_method = Some(EnrollmentMethod::SharedSecret);
+        assert!(!phone_approval_submit_is_fresh(&controller, &preparation).unwrap());
+    }
+
+    #[test]
+    fn phone_approval_submit_rejects_a_replaced_invitation_id() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
+
+        controller.lock().unwrap().invitation_id = Some(uuid::Uuid::new_v4());
+
+        assert!(!phone_approval_submit_is_fresh(&controller, &preparation).unwrap());
+    }
+
+    #[test]
+    fn phone_approval_submit_rejects_a_changed_claim_digest() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
+
+        controller
+            .lock()
+            .unwrap()
+            .invitation
+            .as_mut()
+            .unwrap()
+            .transcript
+            .as_mut()
+            .unwrap()
+            .key_epoch += 1;
+
+        let (_, changed_digest) = claimed_phone_invitation(&controller.lock().unwrap()).unwrap();
+        assert_ne!(preparation.claim_digest, changed_digest);
+        assert!(!phone_approval_submit_is_fresh(&controller, &preparation).unwrap());
+    }
+
+    #[test]
     fn phone_approval_rejects_a_forged_claimed_status() {
         let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
         controller
@@ -5511,6 +5594,23 @@ mod owner_retry_tests {
         controller.owner_resume = true;
         assert_eq!(controller.view().stage, "signin");
         assert!(controller.view().owner_resume_pending);
+    }
+
+    #[test]
+    fn a_hosted_account_session_moves_hosted_sign_in_to_device_admission() {
+        let mut controller = ready_controller();
+        controller.info.as_mut().unwrap().mode = DeploymentMode::Hosted;
+        assert_eq!(controller.view().stage, "signin");
+
+        assert_eq!(record_hosted_sign_in(&mut controller).stage, "locked");
+        assert_eq!(controller.view().stage, "locked");
+    }
+
+    #[test]
+    fn a_hosted_account_session_never_signs_in_a_community_server() {
+        let mut controller = ready_controller();
+        controller.hosted_account_session = true;
+        assert_eq!(controller.view().stage, "signin");
     }
 
     #[test]
@@ -6496,6 +6596,10 @@ mod owner_retry_tests {
             known_claim_error_code(br#"{"code":"instance_already_claimed"}"#),
             Some("instance_already_claimed")
         );
+        assert_eq!(
+            known_claim_error_code(br#"{"code":"setup_window_closed"}"#),
+            Some("setup_window_closed")
+        );
         assert_eq!(known_claim_error_code(b"invalid_setup_token"), None);
         assert_eq!(
             known_claim_error_code(br#"{"code":"unexpected_server_detail"}"#),
@@ -6505,6 +6609,12 @@ mod owner_retry_tests {
             known_claim_error_code(br#"{"code":"vault_owner_required"}"#),
             Some("vault_owner_required")
         );
+    }
+
+    #[test]
+    fn setup_window_closed_keeps_the_setup_retry_error_view() {
+        assert!(first_claim_error_keeps_setup_view("setup_window_closed"));
+        assert!(!first_claim_error_keeps_setup_view("server-rejected"));
     }
 
     /// Fails only the first write to `account`, then behaves like `RecordingStore`.

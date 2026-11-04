@@ -411,13 +411,67 @@ async fn manual_challenge_rejects_wrong_psk_and_replay_and_expiry() {
         app = next;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT expires_at > now() FROM device_admissions WHERE id=$1",
+        )
+        .bind(renewal_challenge.enrollment_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "bounded failed proofs must not permanently invalidate an unexpired admission"
+    );
+    let renewal_context = EnrollmentContext {
+        purpose: EnrollmentPurpose::Manual,
+        canonical_origin: renewal_challenge.origin.clone(),
+        vault_id: vault,
+        fingerprint: hex::decode("11".repeat(32)).unwrap().try_into().unwrap(),
+        key_epoch: renewal_challenge.key_epoch,
+        enrollment_id: renewal_challenge.enrollment_id,
+        server_nonce: URL_SAFE_NO_PAD
+            .decode(&renewal_challenge.nonce)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        owner_transfer_public_key: [0; 32],
+        recipient_transfer_public_key: [0; 32],
+        recipient_signing_public_key: *device.public_key.as_bytes(),
+        device_id: renewal.device.device_id,
+        credential_digest: hex::decode(&renewal.credential_digest)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        role: match renewal_challenge.requested_role {
+            ApiRole::Device => EnrollmentRole::Device,
+            ApiRole::Gateway => EnrollmentRole::Gateway,
+            ApiRole::Owner => panic!("manual renewal cannot request owner"),
+        },
+    };
+    let recovered_proof = CompleteAdmissionRequest {
+        admission_signature: URL_SAFE_NO_PAD
+            .encode(admission.sign_context(&renewal_context).unwrap()),
+        device_signature: URL_SAFE_NO_PAD
+            .encode(sign_device_proof(device.secret_key.as_bytes(), &renewal_context).unwrap()),
+        credential_digest: renewal.credential_digest.clone(),
+    };
+    let (next, status, recovered_body) = call(
+        app,
+        &format!(
+            "/v1/enrollment/challenges/{}/complete",
+            renewal_challenge.enrollment_id
+        ),
+        serde_json::to_value(&recovered_proof).unwrap(),
+    )
+    .await;
+    app = next;
+    assert_eq!(status, StatusCode::OK, "{recovered_body}");
     let (_, status, _) = call(
         app,
         "/v1/enrollment/challenges",
         serde_json::to_value(renewal).unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CONFLICT);
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&pool)
         .await

@@ -2512,7 +2512,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_passphrase_matches() and 0xFFFF) != 59165) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_view() and 0xFFFF) != 36610) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_view() and 0xFFFF) != 18680) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_account_id() and 0xFFFF) != 62329) {
@@ -8129,10 +8129,11 @@ open class NativeHostedProvisioning: Disposable, AutoCloseable, NativeHostedProv
     }
     
 
-    override fun `view`(): NativeHostedProvisioningView {
+    
+    @Throws(MobileBindingsException::class)override fun `view`(): NativeHostedProvisioningView {
             return FfiConverterTypeNativeHostedProvisioningView.lift(
     callWithHandle {
-    uniffiRustCall() { _status ->
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_view(
         it,
         _status)
@@ -12850,6 +12851,12 @@ sealed class MobileBindingsException: kotlin.Exception() {
             get() = ""
     }
     
+    class LockPoisoned(
+        ) : MobileBindingsException() {
+        override val message
+            get() = ""
+    }
+    
 
     
 
@@ -12890,6 +12897,7 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
             19 -> MobileBindingsException.MmsAcquisitionLimit()
             20 -> MobileBindingsException.MmsMediaQuota()
             21 -> MobileBindingsException.SmsCapacity()
+            22 -> MobileBindingsException.LockPoisoned()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -12980,6 +12988,10 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
+            is MobileBindingsException.LockPoisoned -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
         }
     }
 
@@ -13067,6 +13079,10 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
             }
             is MobileBindingsException.SmsCapacity -> {
                 buf.putInt(21)
+                Unit
+            }
+            is MobileBindingsException.LockPoisoned -> {
+                buf.putInt(22)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

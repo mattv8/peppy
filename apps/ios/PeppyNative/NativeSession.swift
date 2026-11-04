@@ -669,7 +669,7 @@ public actor NativeSession {
         }
         let scope = HostedProvisioningStorage.pendingScope(
             origin: record.identity.origin,
-            accountID: provisioning.view().accountId
+            accountID: try provisioning.view().accountId
         )
         let secrets = VaultSecretStore(secure: store.secure)
         let snapshot = try HostedProvisioningStorage.withLock { () -> (pending: Data?, binding: Data?) in
@@ -849,7 +849,10 @@ public actor NativeSession {
 
     public func deleteVault(vaultId: String) async throws -> SessionStatus {
         try await changeEnrollment {
-            guard let record = self.record else { throw ClientError.notEnrolled }
+            guard let record = self.record else {
+                try self.retryVaultBindingCleanup()
+                return self.status
+            }
             var meter = RequestMeter(limit: 2)
             let server = try self.authenticatedServer(record.identity)
             let response = try await server.exchange("DELETE", "/v1/vault", body: try JSONSerialization.data(withJSONObject: ["vault_id": vaultId]), contentType: "application/json", limit: ServerClient.maxSmallBytes, meter: &meter)
@@ -858,9 +861,36 @@ public actor NativeSession {
             // retirement queue survives a lost cleanup response and drains after deactivation.
             try self.retireRelayWakeContexts()
             guard try self.store.activeIdentity() == record.identity else { throw ClientError.identityMismatch }
+            var cleanupError: ClientError?
+            do {
+                // A successful vault deletion is an explicit, irreversible local teardown. Unlike
+                // a revoked credential, this cannot be used to recover or re-enroll the deleted vault.
+                try self.store.markVaultBindingCleanup(record.identity)
+                try VaultSecretStore(secure: self.store.secure).deleteBinding(for: record.identity)
+                try self.store.clearVaultBindingCleanup()
+            } catch let error as ClientError {
+                cleanupError = error
+            }
             self.close()
             try self.store.deactivate()
+            if let cleanupError { throw cleanupError }
             return self.status
+        }
+    }
+
+    private func retryVaultBindingCleanup() throws {
+        guard let identity = try store.pendingVaultBindingCleanup() else { throw ClientError.notEnrolled }
+        try VaultSecretStore(secure: store.secure).deleteBinding(for: identity)
+        try store.clearVaultBindingCleanup()
+    }
+
+    private func retryPendingVaultBindingCleanup() {
+        guard let identity = try? store.pendingVaultBindingCleanup() else { return }
+        do {
+            try VaultSecretStore(secure: store.secure).deleteBinding(for: identity)
+            try store.clearVaultBindingCleanup()
+        } catch {
+            // The durable marker retains the explicit confirmed-delete intent for a later retry.
         }
     }
 
@@ -1095,6 +1125,7 @@ public actor NativeSession {
     @discardableResult
     public func open() throws -> SessionStatus {
         do {
+            retryPendingVaultBindingCleanup()
             guard let identity = try store.activeIdentity() else {
                 close()
                 return status

@@ -45,6 +45,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     concurrency:
       # Android tags, guards, and pruning are prefix-isolated, so its publisher queues separately from v*.
       group: ${{ inputs.component == 'android' && 'release-publish-android' || 'release-publish' }}
@@ -149,6 +151,17 @@ jobs:
         with:
           name: android-release-artifacts
           path: dist/download/android-release-artifacts
+      - if: steps.guard.outputs.skip != 'true'
+        name: Record downloaded artifact digests
+        run: |
+          find dist/download -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | tee dist/ARTIFACT-SHA256SUMS
+          test -s dist/ARTIFACT-SHA256SUMS
+          cat dist/ARTIFACT-SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.guard.outputs.skip != 'true'
+        name: Attest downloaded release artifacts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/download/**
       - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         env:
           CHANNEL: ${{ inputs.channel }}
@@ -174,6 +187,33 @@ jobs:
           VERSION: ${{ inputs.version }}
           PEPPY_ANDROID_SIGNING_CERT_SHA256: ${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}
         run: bash infra/release/verify-android-artifacts.sh "dist/release/peppy-$VERSION-android.apk" "dist/release/peppy-$VERSION-android.aab"
+      - if: steps.guard.outputs.skip != 'true'
+        name: Record immutable staged artifact digests for SBOM attestation
+        run: |
+          find dist/release -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > dist/STAGED-ARTIFACT-SHA256SUMS
+          test -s dist/STAGED-ARTIFACT-SHA256SUMS
+      - if: steps.guard.outputs.skip != 'true'
+        name: Create staged release artifact SBOM directory
+        run: mkdir -p dist/sbom
+      - if: steps.guard.outputs.skip != 'true'
+        name: Generate staged release artifact SBOM
+        # This inventories only staged release archives/APK/AAB files for the checked-out revision.
+        # It does not claim a complete binary SBOM for archive formats Syft cannot inspect.
+        uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0.20.0
+        with:
+          path: dist/release
+          syft-version: v1.56.0
+          format: spdx-json
+          output-file: dist/sbom/staged-release-artifacts.spdx.json
+          dependency-snapshot: false
+          upload-artifact: false
+          upload-release-assets: false
+      - if: steps.guard.outputs.skip != 'true'
+        name: Attest staged release artifact SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2
+        with:
+          subject-checksums: dist/STAGED-ARTIFACT-SHA256SUMS
+          sbom-path: dist/sbom/staged-release-artifacts.spdx.json
       - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY || '' }}

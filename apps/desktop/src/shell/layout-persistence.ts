@@ -1,4 +1,4 @@
-import type { NavigationPosition, RecipientPosition } from "@peppy/desktop-ui";
+import type { NavigationPosition, PopoutMode, RecipientPosition } from "@peppy/desktop-ui";
 
 const LAYOUT_KEY = "peppy.layout.v1";
 
@@ -9,6 +9,7 @@ type LayoutPatch = {
   headComposerHeight?: number | null;
   recipientPosition?: RecipientPosition;
   navigationPosition?: NavigationPosition;
+  popoutMode?: PopoutMode;
   contactsDetailWidth?: number;
   compactTimestamps?: boolean;
   theme?: "light" | "dark" | "system";

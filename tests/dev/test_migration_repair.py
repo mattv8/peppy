@@ -1,9 +1,12 @@
 import hashlib
 import contextlib
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -174,6 +177,69 @@ class MigrationRepairTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[-14:], ["exec", "-T", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "actual user", "-d", "actual db", "-At", "-F", "\t"])
 
+    def test_local_role_bootstrap_executes_in_the_existing_postgres_container_without_resetting_data(self):
+        success = type("Result", (), {"returncode": 0, "stderr": ""})()
+        with mock.patch.object(repair.subprocess, "run", return_value=success) as run:
+            repair.bootstrap_development_roles(Path("/repo"))
+        self.assertEqual(
+            run.call_args.args[0][-4:],
+            ["exec", "-T", "postgres", "/docker-entrypoint-initdb.d/10-peppy-roles.sh"],
+        )
+
+    def test_local_role_bootstrap_failure_does_not_expose_command_output(self):
+        failure = type("Result", (), {"returncode": 1, "stderr": "synthetic-password"})()
+        with mock.patch.object(repair.subprocess, "run", return_value=failure):
+            with self.assertRaisesRegex(repair.RepairError, "could not provision local database runtime and maintenance roles") as error:
+                repair.bootstrap_development_roles(Path("/repo"))
+        self.assertNotIn("synthetic-password", str(error.exception))
+
+    @unittest.skipUnless(shutil.which("docker"), "Docker is unavailable")
+    def test_existing_local_postgres_volume_reprovisions_roles_without_resetting_data(self):
+        if subprocess.run(["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            self.skipTest("Docker daemon is unavailable")
+        image = "postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f"
+        if subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            self.skipTest("PostgreSQL test image is unavailable")
+        identifier = uuid.uuid4().hex
+        container = f"peppy-role-bootstrap-{identifier}"
+        volume = f"peppy-role-bootstrap-{identifier}"
+        environment = {
+            "POSTGRES_DB": "peppy_test",
+            "POSTGRES_USER": "peppy_owner",
+            "POSTGRES_PASSWORD": "synthetic-owner-password",
+            "PEPPY_RUNTIME_DB_USER": "peppy_runtime_test",
+            "PEPPY_RUNTIME_DB_PASSWORD": "synthetic-runtime-password",
+            "PEPPY_MAINTENANCE_DB_USER": "peppy_maintenance_test",
+            "PEPPY_MAINTENANCE_DB_PASSWORD": "synthetic-maintenance-password",
+        }
+        try:
+            command = ["docker", "run", "--detach", "--name", container, "-v", f"{volume}:/var/lib/postgresql", "-v", f"{ROOT / 'infra/compose/bootstrap-roles.sh'}:/docker-entrypoint-initdb.d/10-peppy-roles.sh:ro"]
+            for name, value in environment.items():
+                command.extend(("-e", f"{name}={value}"))
+            subprocess.run(command + [image], check=True, stdout=subprocess.DEVNULL)
+            deadline = time.monotonic() + 30
+            ready_since = None
+            while time.monotonic() < deadline:
+                ready = subprocess.run(["docker", "exec", container, "psql", "-X", "-U", environment["POSTGRES_USER"], "-d", environment["POSTGRES_DB"], "-c", "SELECT 1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if ready.returncode == 0:
+                    ready_since = ready_since or time.monotonic()
+                    if time.monotonic() - ready_since >= 1:
+                        break
+                else:
+                    ready_since = None
+                time.sleep(0.2)
+            else:
+                self.fail("PostgreSQL test container did not become ready")
+            psql = ["docker", "exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", environment["POSTGRES_USER"], "-d", environment["POSTGRES_DB"], "-At"]
+            subprocess.run(psql, input="CREATE TABLE preserved_data (value text); INSERT INTO preserved_data VALUES ('kept');", text=True, check=True, stdout=subprocess.DEVNULL)
+            for _ in range(2):
+                subprocess.run(["docker", "exec", container, "/docker-entrypoint-initdb.d/10-peppy-roles.sh"], check=True, stdout=subprocess.DEVNULL)
+            result = subprocess.run(psql, input="SELECT value FROM preserved_data; SELECT rolname || ':' || rolbypassrls FROM pg_roles WHERE rolname IN ('peppy_runtime_test', 'peppy_maintenance_test') ORDER BY rolname;", text=True, capture_output=True, check=True)
+            self.assertEqual(result.stdout.splitlines(), ["kept", "peppy_maintenance_test:true", "peppy_runtime_test:false"])
+        finally:
+            subprocess.run(["docker", "rm", "--force", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["docker", "volume", "rm", volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def test_missing_history_table_is_an_empty_history(self):
         missing = type("Result", (), {"returncode": 0, "stdout": "\n", "stderr": ""})()
         with mock.patch.object(repair, "psql", return_value=missing) as psql:
@@ -208,21 +274,23 @@ class MigrationRepairTests(unittest.TestCase):
             with mock.patch.object(repair, "docker_endpoint", return_value="unix:///docker.sock"), \
                  mock.patch.object(repair, "transition_lock", return_value=contextlib.nullcontext()), \
                  mock.patch.object(repair, "run_just", side_effect=lambda _root, recipe: calls.append(recipe)), \
-                 mock.patch.object(repair, "verify_development_compose", side_effect=lambda _root: calls.append("compose")), \
-                 mock.patch.object(repair, "verify_writers_stopped", side_effect=lambda _root: calls.append("writers")), \
+                  mock.patch.object(repair, "verify_development_compose", side_effect=lambda _root: calls.append("compose")), \
+                  mock.patch.object(repair, "bootstrap_development_roles", side_effect=lambda _root: calls.append("roles")), \
+                  mock.patch.object(repair, "verify_writers_stopped", side_effect=lambda _root: calls.append("writers")), \
                  mock.patch.object(repair, "read_applied", return_value=[]), \
                  mock.patch.object(repair, "current_database", return_value="peppy"), \
                  mock.patch.object(repair, "repair", return_value=None), \
                  mock.patch.object(repair.subprocess, "run", return_value=success):
                 repair.dev_up(root)
-            self.assertEqual(calls, ["_dev-up-build", "compose", "_dev-up-stop-writers", "writers", "_dev-up-start"])
+            self.assertEqual(calls, ["_dev-up-build", "compose", "roles", "_dev-up-stop-writers", "writers", "_dev-up-start"])
 
             calls.clear()
             with mock.patch.object(repair, "docker_endpoint", return_value="unix:///docker.sock"), \
                  mock.patch.object(repair, "transition_lock", return_value=contextlib.nullcontext()), \
                  mock.patch.object(repair, "run_just", side_effect=lambda _root, recipe: calls.append(recipe)), \
-                 mock.patch.object(repair, "verify_development_compose"), \
-                 mock.patch.object(repair, "verify_writers_stopped"), \
+                  mock.patch.object(repair, "verify_development_compose"), \
+                  mock.patch.object(repair, "bootstrap_development_roles"), \
+                  mock.patch.object(repair, "verify_writers_stopped"), \
                  mock.patch.object(repair, "read_applied", return_value=[]), \
                  mock.patch.object(repair, "current_database", return_value="peppy"), \
                  mock.patch.object(repair, "repair", side_effect=repair.RepairError("backup failed")), \

@@ -1,7 +1,9 @@
+import type { ReactNode } from "react";
+
 export type AppNotice = {
   source: "refresh" | "action";
   severity: "error" | "warning" | "info";
-  message: string;
+  message: ReactNode;
   persistent?: boolean;
 };
 

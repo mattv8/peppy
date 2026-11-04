@@ -37,6 +37,13 @@ describe("MediaTile", () => {
     expect(onOpen).not.toHaveBeenCalled();
     expect(props.loadOriginal).not.toHaveBeenCalled();
   });
+  it("uses video nouns for held video fallback labels", () => {
+    const video = attachment({ id: "video-held", name: "", mediaType: "video/mp4", state: "pending", mediaHold: "held", previewUrl: undefined });
+    render(<MediaActionsProvider {...providerProps({ requestMediaSync: vi.fn() })}><MediaTile attachment={video} message={{ ...message, attachments: [video] }} variant="single" onOpen={vi.fn()} /></MediaActionsProvider>);
+
+    expect(screen.getByRole("img", { name: "Video preview only" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync video using mobile data if needed" })).toBeInTheDocument();
+  });
   it("renders state labels and a loading busy state", () => {
     const props = providerProps();
     const { rerender } = renderTile(attachment({ state: "pending", transfer: "download", previewUrl: undefined }), props);
@@ -50,6 +57,17 @@ describe("MediaTile", () => {
     expect(failedBody).toHaveAttribute("data-thumbnail", "true");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(props.onRetry).toHaveBeenCalledWith("thumbnail-1");
+  });
+
+  it("uses video nouns for loading and failed video tiles", () => {
+    const props = providerProps();
+    const loading = attachment({ id: "video-loading", mediaType: "video/mp4", state: "pending", transfer: "download", previewUrl: undefined });
+    const { rerender } = render(<MediaActionsProvider {...props}><MediaTile attachment={loading} message={{ ...message, attachments: [loading] }} variant="cell" onOpen={vi.fn()} /></MediaActionsProvider>);
+    expect(screen.getByRole("button", { name: "Loading video" })).toBeInTheDocument();
+
+    const failed = attachment({ id: "video-failed", mediaType: "video/mp4", state: "failed", previewUrl: undefined });
+    rerender(<MediaActionsProvider {...props}><MediaTile attachment={failed} message={{ ...message, attachments: [failed] }} variant="cell" onOpen={vi.fn()} /></MediaActionsProvider>);
+    expect(screen.getByRole("img", { name: "Video failed to load" })).toBeInTheDocument();
   });
 
   it("replaces only remote-only policy removals with a permanent non-retry placeholder", async () => {

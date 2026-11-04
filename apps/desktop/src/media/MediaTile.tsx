@@ -119,6 +119,7 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
   const heldControlFocused = useRef(false);
   const removedRemoteOnly = attachment.remoteState === "removed_by_storage_policy" && !attachment.localAvailable;
   const removedWithLocalCopy = attachment.remoteState === "removed_by_storage_policy" && attachment.localAvailable;
+  const isVideo = attachment.mediaType.startsWith("video/");
   const canAct = !removedRemoteOnly && canOpen(shown, hydration.exhausted);
   // A held original with a visible preview can still be copied natively; the menu then offers Copy only.
   const nativeHeldCopy = pendingOriginal && Boolean(actions?.nativeCopy) && previewUrl(shown) !== undefined && attachment.mediaType.startsWith("image/");
@@ -187,9 +188,10 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
   }, [observeSlideVisibility]);
   const effectiveSyncState = original.phase === "requested" ? "queued" : heldSyncState;
   const heldNote = holdNoteText(effectiveSyncState, Boolean(actions?.canRequestMediaSync), attachment.error);
-  const syncAccessibleLabel = original.phase === "requested" ? `Requested ${label?.toLowerCase() || attachment.name || "image"}` : `Sync ${label?.toLowerCase() || attachment.name || "image"} using mobile data if needed`;
-  const syncLabel = attachment.mediaType.startsWith("image/") ? "Sync image" : attachment.mediaType.startsWith("video/") ? "Sync video" : "Sync file";
-  return <div ref={rootRef} tabIndex={-1} data-media-tile data-variant={variant} data-state={state} data-original={pendingOriginal ? original.phase : undefined} data-partly-visible={observeSlideVisibility && !slideFullyVisible ? true : undefined} data-sync={pendingOriginal ? effectiveSyncState : undefined} data-has-actions={hasActions || undefined} data-local-copy={removedWithLocalCopy || undefined} data-menu-open={menuAnchor ? true : undefined} aria-busy={state === "loading" || heldSyncState === "requesting" || undefined}>
+  const attachmentNoun = isVideo ? "video" : "image";
+  const syncAccessibleLabel = original.phase === "requested" ? `Requested ${label?.toLowerCase() || attachment.name || attachmentNoun}` : `Sync ${label?.toLowerCase() || attachment.name || attachmentNoun} using mobile data if needed`;
+  const syncLabel = attachment.mediaType.startsWith("image/") ? "Sync image" : isVideo ? "Sync video" : "Sync file";
+  return <div ref={rootRef} tabIndex={-1} data-media-tile data-media-kind={isVideo ? "video" : undefined} data-variant={variant} data-state={state} data-original={pendingOriginal ? original.phase : undefined} data-partly-visible={observeSlideVisibility && !slideFullyVisible ? true : undefined} data-sync={pendingOriginal ? effectiveSyncState : undefined} data-has-actions={hasActions || undefined} data-local-copy={removedWithLocalCopy || undefined} data-menu-open={menuAnchor ? true : undefined} aria-busy={state === "loading" || heldSyncState === "requesting" || undefined}>
     {removedRemoteOnly ? <div className="tile-body tile-removed" role="group" aria-label={peppyCopy.attachment_storage_removed_title} {...bodyProps}><ImageOff size={20} aria-hidden="true" /><span>{attachmentStorageRemovalText(false, peppyCopy).body}</span></div> : pendingOriginal ? <>
       <div ref={heldBodyRef} className="tile-body tile-held" role="img" aria-label={accessibleLabel} {...bodyProps} tabIndex={nativeHeldCopy ? 0 : undefined} aria-haspopup={nativeHeldCopy ? "menu" : undefined} onContextMenu={(event) => { if (!nativeHeldCopy) return; event.preventDefault(); openMenu(event.clientX, event.clientY); }} onKeyDown={(event) => { if (!nativeHeldCopy || !isMenuKey(event)) return; event.preventDefault(); const bounds = event.currentTarget.getBoundingClientRect(); openMenu(bounds.left + 8, bounds.top + 8); }}>
         {imageUrl ? <img className="tile-held-preview" loading="lazy" decoding="async" src={imageUrl} alt="" aria-hidden="true" /> : <WifiOff className="tile-held-icon" size={20} aria-hidden="true" />}

@@ -16,13 +16,13 @@ exceptions = [
 # upgrade exists. Revisit with the upstream GTK/Tauri dependency update.
 # This exception is for maintenance status, not a runtime vulnerability.
 ignore = [
-  { id = "RUSTSEC-2024-0370", reason = "Transitive build-time proc-macro-error via Tauri GTK3/glib; no compatible patched release. Track upstream replacement." },
+  { id = "RUSTSEC-2024-0370", reason = "Transitive build-time proc-macro-error via Tauri GTK3/glib; no compatible patched release. Track upstream replacement. [expires: 2027-02-01]" },
   # These standalone crates moved into zbus 6. Remove these maintenance-only
   # exceptions when Tauri notification/opener/single-instance and notify-rust migrate.
-  { id = "RUSTSEC-2026-0370", reason = "Transitive zvariant via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates." },
-  { id = "RUSTSEC-2026-0371", reason = "Transitive zbus_names via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates." },
-  { id = "RUSTSEC-2026-0372", reason = "Transitive zvariant_derive via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates." },
-  { id = "RUSTSEC-2026-0374", reason = "Transitive build-time parser via UniFFI CLI bindgen and Askama 0.16.1; no released compatible replacement. Remove after Askama replaces basic-toml in a release." },
+  { id = "RUSTSEC-2026-0370", reason = "Transitive zvariant via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates. [expires: 2027-02-01]" },
+  { id = "RUSTSEC-2026-0371", reason = "Transitive zbus_names via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates. [expires: 2027-02-01]" },
+  { id = "RUSTSEC-2026-0372", reason = "Transitive zvariant_derive via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates. [expires: 2027-02-01]" },
+  { id = "RUSTSEC-2026-0374", reason = "Transitive build-time parser via UniFFI CLI bindgen and Askama 0.16.1; no released compatible replacement. Remove after Askama replaces basic-toml in a release. [expires: 2027-02-01]" },
 ]
 
 [bans]

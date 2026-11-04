@@ -3881,7 +3881,7 @@ public protocol NativeHostedProvisioningProtocol: AnyObject, Sendable {
     
     func passphraseMatches(passphrase: String) throws  -> Bool
     
-    func view()  -> NativeHostedProvisioningView
+    func view() throws  -> NativeHostedProvisioningView
     
 }
 open class NativeHostedProvisioning: NativeHostedProvisioningProtocol, @unchecked Sendable {
@@ -4002,8 +4002,8 @@ open func passphraseMatches(passphrase: String)throws  -> Bool  {
 })
 }
     
-open func view() -> NativeHostedProvisioningView  {
-    return try!  FfiConverterTypeNativeHostedProvisioningView_lift(try! rustCall() {
+open func view()throws  -> NativeHostedProvisioningView  {
+    return try  FfiConverterTypeNativeHostedProvisioningView_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_view(
             self.uniffiCloneHandle(),uniffiCallStatus
@@ -9396,6 +9396,7 @@ enum MobileBindingsError: Swift.Error, Equatable, Hashable, Foundation.Localized
     case MmsAcquisitionLimit
     case MmsMediaQuota
     case SmsCapacity
+    case LockPoisoned
 
     
 
@@ -9446,6 +9447,7 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
         case 19: return .MmsAcquisitionLimit
         case 20: return .MmsMediaQuota
         case 21: return .SmsCapacity
+        case 22: return .LockPoisoned
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -9540,6 +9542,10 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
         
         case .SmsCapacity:
             writeInt(&buf, Int32(21))
+        
+        
+        case .LockPoisoned:
+            writeInt(&buf, Int32(22))
         
         }
     }
@@ -14083,7 +14089,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_passphrase_matches() != 59165) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_view() != 36610) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_view() != 18680) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_account_id() != 62329) {

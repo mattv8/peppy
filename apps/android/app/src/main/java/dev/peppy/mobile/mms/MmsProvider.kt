@@ -80,16 +80,16 @@ class MmsProviderReader(context: Context) {
         val values = mutableListOf<MmsProviderPart>(); var error: String? = null
         (resolver.query(PART, PART_COLUMNS, "mid=?", arrayOf("$message"), "seq ASC, _id ASC")
             ?: throw MmsProviderException("MMS provider returned no parts cursor")).use { c -> while (c.moveToNext()) {
-            if (values.size >= MAX_PARTS) { error = "too_many_parts"; continue }; val id = c.long("_id") ?: continue; valid(id)
+            if (values.size >= MAX_PARTS) { error = "too_many_parts"; break }; val id = c.long("_id") ?: continue; valid(id)
             val name = c.string("name") ?: c.string("fn"); if (name != null && exceedsUtf8Limit(name, MAX_STRING)) { error = "metadata_overflow"; continue }
             values += MmsProviderPart(id, c.long("seq")?.toInt(), bounded(c.string("ct")), name, c.long("chset")?.toInt(), bounded(c.string("text")), partUri(id))
         } }; return PartResult(values, error)
     }
     private fun addresses(message: Long): AddressResult {
-        val from = mutableListOf<String>(); val to = mutableListOf<String>(); val cc = mutableListOf<String>(); val bcc = mutableListOf<String>(); var error: String? = null
+        val from = mutableListOf<String>(); val to = mutableListOf<String>(); val cc = mutableListOf<String>(); val bcc = mutableListOf<String>(); var error: String? = null; var scanned = 0
         (resolver.query(Uri.withAppendedPath(Uri.withAppendedPath(MMS, "$message"), "addr"), arrayOf("address", "type"), "type IN (137,151,130,129)", null, null)
             ?: throw MmsProviderException("MMS provider returned no address cursor")).use { c -> val a = c.getColumnIndexOrThrow("address"); val t = c.getColumnIndexOrThrow("type"); while (c.moveToNext()) {
-            val value = c.getString(a) ?: continue; if (exceedsUtf8Limit(value, MAX_STRING) || from.size + to.size + cc.size + bcc.size >= MAX_ADDRESSES) { error = "address_overflow"; continue }; when (c.getInt(t)) { 137 -> from += value; 151 -> to += value; 130 -> cc += value; 129 -> bcc += value }
+            if (++scanned > MAX_ADDRESS_ROWS) { error = "address_overflow"; break }; val value = c.getString(a) ?: continue; if (exceedsUtf8Limit(value, MAX_STRING)) { error = "address_overflow"; continue }; if (from.size + to.size + cc.size + bcc.size >= MAX_ADDRESSES) { error = "address_overflow"; break }; when (c.getInt(t)) { 137 -> from += value; 151 -> to += value; 130 -> cc += value; 129 -> bcc += value }
         } }; return AddressResult(from, to, cc, bcc, error)
     }
     private fun bounded(value: String?) = value?.takeIf { !exceedsUtf8Limit(it, MAX_STRING) }
@@ -103,5 +103,5 @@ class MmsProviderReader(context: Context) {
     private fun valid(id: Long) { require(id > 0) }; private fun partUri(id: Long)=Uri.withAppendedPath(PART,"$id")
     private fun android.database.Cursor.string(n:String)=getColumnIndex(n).takeIf{it>=0}?.let{getString(it)}; private fun android.database.Cursor.long(n:String)=getColumnIndex(n).takeIf{it>=0&&!isNull(it)}?.let{getLong(it)}
     private data class AddressResult(val from:List<String>,val to:List<String>,val cc:List<String>,val bcc:List<String>,val error:String?); private data class PartResult(val value:List<MmsProviderPart>,val error:String?)
-    companion object { private const val SECONDS_TO_MILLIS = 1_000L; private val MMS=Uri.parse("content://mms"); private val PART=Uri.parse("content://mms/part"); private val MESSAGE=arrayOf("_id","thread_id","sub_id","msg_box","date","tr_id","sub","m_type","exp"); private val PART_COLUMNS=arrayOf("_id","seq","ct","name","fn","chset","text"); const val MAX_PAGE=50; const val MAX_PARTS=10; const val MAX_TEXT=256*1024; const val MAX_PART=32L*1024*1024; const val MAX_STRING=4096; const val MAX_ADDRESSES=100 }
+    companion object { private const val SECONDS_TO_MILLIS = 1_000L; private val MMS=Uri.parse("content://mms"); private val PART=Uri.parse("content://mms/part"); private val MESSAGE=arrayOf("_id","thread_id","sub_id","msg_box","date","tr_id","sub","m_type","exp"); private val PART_COLUMNS=arrayOf("_id","seq","ct","name","fn","chset","text"); const val MAX_PAGE=50; const val MAX_PARTS=10; const val MAX_TEXT=256*1024; const val MAX_PART=32L*1024*1024; const val MAX_STRING=4096; const val MAX_ADDRESSES=100; const val MAX_ADDRESS_ROWS=MAX_ADDRESSES * 2 }
 }

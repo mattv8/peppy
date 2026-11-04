@@ -17,6 +17,12 @@ describe("linkReactions", () => {
     expect(linked.notices.get("m3")?.targetId).toBeUndefined();
   });
 
+  it("badges a multi-line target from an emoji-first reaction", () => {
+    const linked = linkReactions([message("m1", "Hey!\n\nyes"), message("m2", "❤️ to “Hey! yes”")]);
+    expect(linked.notices.get("m2")).toMatchObject({ reactionId: "m2", targetId: "m1", emoji: "❤️" });
+    expect(linked.badges.get("m1")).toEqual([{ emoji: "❤️", actors: [{ key: "other:+15550001", sender: "other", senderAddress: "+15550001" }], reactionIds: ["m2"] }]);
+  });
+
   it("replaces an actor's emoji and removes only that actor", () => {
     const linked = linkReactions([message("m1", "plan?"), message("m2", "Loved “plan?”"), message("m3", "Reacted 😆 to “plan?”"), message("m4", "Reacted 😆 to “plan?”", { senderAddress: "+15550002" }), message("m5", "Removed 😆 from “plan?”")]);
     expect(linked.badges.get("m1")).toEqual([{ emoji: "😆", actors: [{ key: "other:+15550002", sender: "other", senderAddress: "+15550002" }], reactionIds: ["m4"] }]);

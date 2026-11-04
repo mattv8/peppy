@@ -111,7 +111,13 @@ describe("browser host enrollment lock", () => {
 
     vi.stubGlobal("fetch", fetcher);
     vi.stubGlobal("self", { location: { origin } });
-    process.on("unhandledRejection", onRejection);
+    const { process: nodeProcess } = globalThis as typeof globalThis & {
+      process: {
+        on(event: "unhandledRejection", listener: (reason: unknown) => void): void;
+        off(event: "unhandledRejection", listener: (reason: unknown) => void): void;
+      };
+    };
+    nodeProcess.on("unhandledRejection", onRejection);
     try {
       const host = new BrowserWorkerHost(browserHostDependencies(locks(), () => { terminated = true; }));
       const attached = port();
@@ -130,7 +136,7 @@ describe("browser host enrollment lock", () => {
       expect(statusSignal?.aborted).toBe(true);
       expect(rejections).toEqual([]);
     } finally {
-      process.off("unhandledRejection", onRejection);
+      nodeProcess.off("unhandledRejection", onRejection);
       vi.unstubAllGlobals();
     }
   });

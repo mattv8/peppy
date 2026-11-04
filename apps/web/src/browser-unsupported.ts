@@ -1,8 +1,32 @@
 export const UNSUPPORTED_DOWNLOADS_ID = "browser-unsupported-downloads";
 
 /** Names what is missing. It offers no continue action: the browser cannot run Peppy. */
-export function unsupportedPageMarkup(reasons: string[]): string {
-  return `<main id="browser-unsupported" data-browser-screen="browser-unsupported" role="main" aria-label="Browser not supported"><section><h1 id="unsupported-heading" tabindex="-1">This browser isn't supported</h1><p>Peppy requires a recent desktop browser with SharedWorker, WebAssembly, IndexedDB, and Web Locks support.</p><ul data-unsupported-reasons>${reasons.map((reason) => `<li>${reason}</li>`).join("")}</ul><div id="${UNSUPPORTED_DOWNLOADS_ID}" data-unsupported-downloads></div></section></main>`;
+export function renderUnsupportedPage(container: HTMLElement, reasons: string[]): void {
+  const page = document.createElement("main");
+  page.id = "browser-unsupported";
+  page.dataset.browserScreen = "browser-unsupported";
+  page.setAttribute("role", "main");
+  page.setAttribute("aria-label", "Browser not supported");
+  const section = document.createElement("section");
+  const heading = document.createElement("h1");
+  heading.id = "unsupported-heading";
+  heading.tabIndex = -1;
+  heading.textContent = "This browser isn't supported";
+  const explanation = document.createElement("p");
+  explanation.textContent = "Peppy requires a recent desktop browser with SharedWorker, WebAssembly, IndexedDB, and Web Locks support.";
+  const list = document.createElement("ul");
+  list.dataset.unsupportedReasons = "";
+  reasons.forEach(reason => {
+    const item = document.createElement("li");
+    item.textContent = reason;
+    list.append(item);
+  });
+  const downloads = document.createElement("div");
+  downloads.id = UNSUPPORTED_DOWNLOADS_ID;
+  downloads.dataset.unsupportedDownloads = "";
+  section.append(heading, explanation, list, downloads);
+  page.append(section);
+  container.replaceChildren(page);
 }
 
 /**

@@ -39,12 +39,12 @@ import {
   Minus,
   NavButtons,
   type NavigationPosition,
+  type PopoutMode,
   Panel,
   RecipientPanel,
   ResizeHandle,
   ShieldAlert,
   Smartphone,
-  SquarePen,
   StatusPopover,
   SyncProgress,
   TriangleAlert,
@@ -59,6 +59,7 @@ import {
   installOverlayScrollbars,
   isRecipientPosition,
   isNavigationPosition,
+  isPopoutMode,
   formatPhoneNumber,
   normalizePhoneNumber,
   formatDateTime,
@@ -118,6 +119,7 @@ import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/
 import { MediaGrid } from "./media/MediaGrid";
 import { MediaTile } from "./media/MediaTile";
 import { originalPending } from "./media/mediaState";
+import { ConversationViewTabs, type ConversationView as ConversationTab } from "./ConversationViewTabs";
 import { MediaActionsProvider, type SaveOutcome as GallerySaveOutcome } from "./media/MediaActionsContext";
 import { clipboardImageSupported } from "./media/clipboard";
 import { InlineMedia } from "./media/InlineMedia";
@@ -148,6 +150,7 @@ import {
 import { DraftNotice } from "./drafts/DraftNotice";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
 import { measureComposerChrome } from "./conversation/composerChrome";
+import { IsolatedText } from "./notices/IsolatedText";
 
 type RefreshRequest = {
   conversationId?: string;
@@ -156,7 +159,7 @@ type RefreshRequest = {
 };
 
 type ActionNotice = Omit<AppNotice, "source">;
-type ComposerFeedback = Pick<AppNotice, "message" | "severity"> & { key: string };
+type ComposerFeedback = { key: string; message: string; severity: AppNotice["severity"] };
 type DraftNoticeState = { key: string; event: DraftNoticeEvent | "stale-send" | "send-failed" | "loading"; sequence: number; detail?: string; persistent?: boolean };
 type PinFocusRestoreIntent = {
   conversationId: string;
@@ -362,6 +365,15 @@ function attachmentState(file: AttachmentView): string {
   return file.state === "uploading"
     ? "Uploading…"
     : file.state.charAt(0).toUpperCase() + file.state.slice(1);
+}
+
+function videoAspectRatio(mediaMeta: AttachmentView["mediaMeta"]): string | undefined {
+  const width = mediaMeta?.width;
+  const height = mediaMeta?.height;
+  return typeof width === "number" && Number.isFinite(width) && width > 0
+    && typeof height === "number" && Number.isFinite(height) && height > 0
+    ? `${width} / ${height}`
+    : undefined;
 }
 
 /* ------------------------------------------------------------------ window context */
@@ -898,6 +910,12 @@ function MessageList({
           if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
           if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
           const badges = reactions.badges.get(message.id);
+          const chromeless = message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("video/"));
+          const video = chromeless && message.attachments.length === 1 ? message.attachments[0] : undefined;
+          const aspectRatio = videoAspectRatio(video?.mediaMeta);
+          const bubbleStyle: CSSProperties | undefined = chromeless
+            ? aspectRatio ? { "--video-ar": aspectRatio } as CSSProperties : undefined
+            : message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined;
           const bubble = (
             <article
               ref={(row) => registerRow(message.id, row)}
@@ -905,14 +923,15 @@ function MessageList({
               data-search-target={searchTargetId === message.id || undefined}
               aria-describedby={searchTargetId === message.id ? "search-result-message-hint" : undefined}
               tabIndex={searchTargetId === message.id ? -1 : undefined}
-              className={`message-bubble ${message.sender}`}
-              data-peppy-tone={message.sender === "other" || undefined}
-              style={message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined}
+              className={chromeless ? "message-bubble" : `message-bubble ${message.sender}`}
+              data-chromeless={chromeless || undefined}
+              data-peppy-tone={(!chromeless && message.sender === "other") || undefined}
+              style={bubbleStyle}
               title={hiddenTimeTitle(message)}
             >
               {sender && <span className="sr-only">From {sender.label.text}: </span>}
-              {message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
-              {message.subject && <p className="message-subject">Subject: {message.subject}</p>}
+              {!chromeless && message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
+              {!chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
               {message.attachments.map((file) => {
                 const copy = publicCopies[file.id];
                 if (originalPending(file)) return <MediaTile key={file.id} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
@@ -941,7 +960,7 @@ function MessageList({
                     ) : (
                       <FileText size={16} aria-hidden />
                     )}
-                    <span>{file.name}</span>
+                    <span><bdi>{file.name}</bdi></span>
                     <small>
                       {fileSize(file.byteSize)}{removedRemoteOnly ? "" : ` · ${attachmentState(file)}`}
                     </small>
@@ -986,6 +1005,8 @@ function MessageList({
                   </div>
                 );
               })}
+              {chromeless && message.body && <p data-message-caption><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
+              {chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
             </article>
           );
           return (
@@ -1036,6 +1057,8 @@ function SettingsView({
   onTheme,
   navigationPosition,
   onNavigationPosition,
+  popoutMode,
+  onPopoutMode,
   compactTimestamps,
   onCompactTimestamps,
   groupSenderAvatars,
@@ -1078,6 +1101,8 @@ function SettingsView({
   onTheme(theme: Theme): void;
   navigationPosition: NavigationPosition;
   onNavigationPosition(position: NavigationPosition): void;
+  popoutMode: PopoutMode;
+  onPopoutMode(mode: PopoutMode): void;
   compactTimestamps: boolean;
   onCompactTimestamps(enabled: boolean): void;
   groupSenderAvatars: boolean;
@@ -1366,6 +1391,36 @@ function SettingsView({
             Title bar
           </label>
         </fieldset>
+        {!browserHost && <fieldset id="settings-popout-mode" aria-describedby="settings-popout-mode-hint">
+          <legend>Pop-out button opens</legend>
+          <p id="settings-popout-mode-hint" className="settings-field-hint">Applies to the pop-out button in the conversation header and in the conversation list.</p>
+          <label className="settings-check settings-check-described">
+            <input
+              type="radio"
+              name="popout-mode"
+              value="bubble"
+              checked={popoutMode === "bubble"}
+              onChange={() => onPopoutMode("bubble")}
+            />
+            <span className="settings-check-text">
+              <span>Chat bubble</span>
+              <span className="settings-field-hint">Floating bubble that stays on top and expands into the conversation.</span>
+            </span>
+          </label>
+          <label className="settings-check settings-check-described">
+            <input
+              type="radio"
+              name="popout-mode"
+              value="window"
+              checked={popoutMode === "window"}
+              onChange={() => onPopoutMode("window")}
+            />
+            <span className="settings-check-text">
+              <span>Window</span>
+              <span className="settings-field-hint">A normal conversation window without a bubble.</span>
+            </span>
+          </label>
+        </fieldset>}
         <div id="settings-compact-timestamps-group">
           <label className="settings-check">
             <input id="settings-compact-timestamps" type="checkbox" checked={compactTimestamps} aria-describedby="settings-compact-timestamps-hint" onChange={(event) => onCompactTimestamps(event.target.checked)} />
@@ -1527,7 +1582,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
-  const [conversationTab, setConversationTab] = useState<"messages" | "media">("messages");
+  const [conversationTab, setConversationTab] = useState<ConversationTab>("messages");
   const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);
   const [lightboxAttachmentId, setLightboxAttachmentId] = useState<string>();
   const [lightboxMessageId, setLightboxMessageId] = useState<string>();
@@ -1618,6 +1673,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         : "side-rail";
     } catch {
       return "side-rail";
+    }
+  });
+  const [popoutMode, setPopoutMode] = useState<PopoutMode>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}");
+      return typeof stored === "object" && stored !== null && !Array.isArray(stored) &&
+          isPopoutMode(stored.popoutMode)
+        ? stored.popoutMode
+        : "bubble";
+    } catch {
+      return "bubble";
     }
   });
   const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
@@ -1739,6 +1805,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const persistedHeadComposerHeight = useRef<number | null>(null);
   const paneRef = useRef<HTMLElement>(null);
   const desktopBodyRef = useRef<HTMLDivElement>(null);
+  const [threadListHost, setThreadListHost] = useState<HTMLElement | null>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const [messageListNode, setMessageListRoot] = useState<HTMLDivElement | null>(null);
   const [reactionSeenRevision, setReactionSeenRevision] = useState(0);
@@ -1948,6 +2015,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setNavigationPosition(position);
     persistLayout({ navigationPosition: position });
   };
+  const changePopoutMode = (mode: PopoutMode) => {
+    setPopoutMode(mode);
+    persistLayout({ popoutMode: mode });
+  };
   const changeCompactTimestamps = (enabled: boolean) => {
     setCompactTimestamps(enabled);
     persistLayout({ compactTimestamps: enabled });
@@ -2137,7 +2208,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setSelected(key);
     if (narrowBrowserViewport) setMobileConversationListOpen(false);
   };
-  const setNotice = (message: string, severity: ActionNotice["severity"] = "error", persistent = false) =>
+  const setNotice = (message: ReactNode, severity: ActionNotice["severity"] = "error", persistent = false) =>
     setActionNotice(message ? { message, severity, persistent } : undefined);
   const setComposerNotice = (key: string, message: string, severity: ComposerFeedback["severity"] = "error") =>
     setComposerFeedback(message ? { key, message, severity } : undefined);
@@ -2174,10 +2245,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           if (!attachmentId) break;
           attempted.add(attachmentId);
           try {
-            const media = await bridge.open_media(attachmentId);
-            if (!mountedRef.current) return;
-            if (media.state === "pending") continue;
             await bridge.save_attachment(attachmentId);
+            if (!mountedRef.current) return;
             pendingSaveIdsRef.current.delete(attachmentId);
           } catch (error) {
             if (errorCode(error) !== "media-pending") pendingSaveIdsRef.current.delete(attachmentId);
@@ -3630,7 +3699,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     } catch (error) {
       if (errorCode(error) === "media-pending") {
         pendingSaveIdsRef.current.add(attachment.id);
-        setNotice(`Downloading ${attachment.name} before saving.`, "info");
+        setNotice(<>Downloading <IsolatedText text={attachment.name} /> before saving.</>, "info");
       } else setNotice(`Attachment save: ${errorText(error)}`);
     }
   };
@@ -3731,29 +3800,21 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setLifecyclePending(current => current === result.id ? null : current);
   }), []);
 
-  const openComposerWindow = async (conversationId?: string) => {
-    if (conversationId) {
-      const outcome = await store.flush(conversationId);
-      if (!outcome.ok)
-        return setNotice(
-          `Not opened: the draft could not be saved (${outcome.error}).`,
-        );
-    }
-    try {
-      await bridge.open_composer(conversationId);
-    } catch (error) {
-      setNotice(`Composer window: ${errorText(error)}`);
-    }
-  };
   const popoutConversation = async (conversationId: string) => {
     const outcome = await store.flush(conversationId);
     if (!outcome.ok) return setNotice(`Not opened: the draft could not be saved (${outcome.error}).`);
     const resolvedId = store.resolve(conversationId);
     if (isLocalDraftKey(resolvedId)) return setNotice("Not opened: the draft has not been stored yet.");
     try {
-      const result = await bridge.popout_conversation(resolvedId);
-      if (result.warning) setNotice(result.warning);
-    } catch (error) { setNotice(`Floating conversation: ${errorText(error)}`); }
+      if (popoutMode === "window") {
+        await bridge.open_composer(resolvedId);
+      } else {
+        const result = await bridge.popout_conversation(resolvedId);
+        if (result.warning) setNotice(result.warning);
+      }
+    } catch (error) {
+      setNotice(`${popoutMode === "window" ? "Conversation window" : "Floating conversation"}: ${errorText(error)}`);
+    }
   };
   const toggleConversationPin = async (conversationId: string, pinned: boolean) => {
     if (pendingPinId || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
@@ -3927,6 +3988,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const narrowConversationListMode = narrowBrowserViewport && !showSetup && activeView === "conversations";
   const showingMobileConversationList = narrowConversationListMode && (!selected || mobileConversationListOpen);
   const hideThreadList = settingsOpen || notificationsOpen || contactsOpen || (narrowConversationListMode ? !showingMobileConversationList : listCollapsed);
+  const threadListToastHost = hideThreadList ? undefined : threadListHost;
   const enrolled = Boolean(snapshot && (nativeCredentialed || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state !== "preview")));
   const serverOffline = Boolean(snapshot && enrolled && isServerUnreachable(snapshot.connection));
   const accountNoticeShown = enrolled ? accountNotice.notice : null;
@@ -4285,15 +4347,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const messages = (
     <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()} copyNativeImage={copyNativeImage} hydrateMediaPreview={hydrateMediaPreview}>
-      <div id="conversation-tabs" role="tablist" aria-label="Conversation views" onKeyDown={(event) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-        const next = conversationTab === "messages" ? "media" : "messages";
-        setConversationTab(next);
-        document.getElementById(next === "messages" ? "tab-messages" : "tab-media")?.focus();
-      }}>
-        <button id="tab-messages" type="button" role="tab" tabIndex={conversationTab === "messages" ? 0 : -1} aria-selected={conversationTab === "messages"} aria-controls="tabpanel-messages" onClick={() => setConversationTab("messages")}>Messages</button>
-        <button id="tab-media" type="button" role="tab" tabIndex={conversationTab === "media" ? 0 : -1} aria-selected={conversationTab === "media"} aria-controls="tabpanel-media" onClick={() => setConversationTab("media")}>Media</button>
-      </div>
+      {!composerConversation && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="text" />}
       <div id="tabpanel-messages" role="tabpanel" aria-labelledby="tab-messages" hidden={conversationTab !== "messages"}>
       <MessageList
       key={reactionScopeKey}
@@ -4436,11 +4490,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         >
           {!headPanel && <AppTitlebar
             isComposer platform={platform} title={title}
+            viewSwitch={<ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="icons" />}
             status={composerConnectionDot}
             onMinimize={browserHost ? undefined : () => {}} onMaximize={browserHost ? undefined : () => {}} onClose={browserHost ? undefined : handlers.current.close}
           />}
           {headPanel && <header id="head-panel-header" aria-label={`Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
             <strong data-tauri-drag-region>{title ?? "Conversation"}</strong>
+            <ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="icons" />
             <span className="head-panel-status">{composerConnectionDot}</span>
             <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}><Minus size={14} strokeWidth={1.75} aria-hidden /></button>
             <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} strokeWidth={1.75} aria-hidden /></button>
@@ -4490,6 +4546,37 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         sidebarControls="thread-list"
         onNewMessage={startTitlebarMessage}
         newMessageDisabled={loading || snapshot?.encryption.state !== "unlocked" || Boolean(appLock?.locked)}
+        actions={snapshot && enrolled && !showSetup ? <>
+          <MarkAllReadAction
+            key={currentSearchSessionKey()}
+            unreadCount={snapshot.conversations.reduce((total, conversation) => total + conversation.unread, 0)}
+            enabled={snapshot.encryption.state === "unlocked" && !appLock?.locked && !loading}
+            markAllRead={() => bridge.mark_all_read()}
+            refresh={() => refresh()}
+            toastHost={threadListToastHost}
+            onFocusFallback={() => {
+              const titlebarNewMessage = document.querySelector<HTMLButtonElement>("[data-action='new-message']");
+              const omniInput = document.querySelector<HTMLInputElement>("#titlebar-search input");
+              const fallback = document.getElementById("thread-list") ?? document.getElementById("conversation-pane");
+              if (titlebarNewMessage && !titlebarNewMessage.disabled) titlebarNewMessage.focus();
+              else if (omniInput && !omniInput.disabled) omniInput.focus();
+              else fallback?.focus();
+            }}
+          />
+          {snapshot.deviceRole === "owner" && snapshot.gateways.length === 0 && <button
+            id="titlebar-connect-phone"
+            type="button"
+            aria-label="Connect a phone"
+            title={snapshot.connection.state !== "connected" || snapshot.encryption.state !== "unlocked" || appLock?.locked
+              ? "Connect a phone (available when connected and unlocked)"
+              : "Connect a phone"}
+            disabled={snapshot.connection.state !== "connected" || snapshot.encryption.state !== "unlocked" || Boolean(appLock?.locked)}
+            onClick={() => setAddingPhone(true)}
+          >
+            <Smartphone size={16} strokeWidth={1.75} aria-hidden />
+            <span className="titlebar-action-dot" aria-hidden />
+          </button>}
+        </> : undefined}
         navigation={navigationPosition === "title-bar" ? (
           <NavButtons
             orientation="titlebar"
@@ -4550,6 +4637,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           data-collapsed={!showingMobileConversationList && listCollapsed || undefined}
           data-mobile-list={showingMobileConversationList || undefined}
           hidden={hideThreadList}
+          ref={setThreadListHost}
           style={
             hideThreadList
               ? { display: "none" }
@@ -4558,26 +4646,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 : { width: renderedListWidth, flexBasis: renderedListWidth }
           }
         >
-            <MarkAllReadAction
-              key={currentSearchSessionKey()}
-              unreadCount={snapshot?.conversations.reduce((total, conversation) => total + conversation.unread, 0) ?? 0}
-              enabled={snapshot?.encryption.state === "unlocked" && !appLock?.locked}
-              markAllRead={() => bridge.mark_all_read()}
-              refresh={() => refresh()}
-              onFocusFallback={() => {
-                const titlebarNewMessage = document.querySelector<HTMLButtonElement>("[data-action='new-message']");
-                const omniInput = document.querySelector<HTMLInputElement>("#titlebar-search input");
-                const fallback = document.getElementById("thread-list") ?? document.getElementById("conversation-pane");
-                if (titlebarNewMessage && !titlebarNewMessage.disabled) titlebarNewMessage.focus();
-                else if (omniInput && !omniInput.disabled) omniInput.focus();
-                else fallback?.focus();
-              }}
-            />
             <ConversationList
             conversations={conversations}
             selectedId={slotKey}
             onSelect={select}
               onPopout={id => void popoutConversation(id)}
+              popoutMode={popoutMode}
               onTogglePin={snapshot?.encryption.state === "unlocked" && !appLock?.locked ? (id, pinned) => void toggleConversationPin(id, pinned) : undefined}
               onDelete={id => void deleteDraft(id)}
               onCancelDelete={cancelDeleteDraft}
@@ -4644,23 +4718,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               >
                 <UserPlus size={16} aria-hidden />
               </button>}
-              {!browserHost && <button
-                id="new-composer-window"
-                aria-label="New message window"
-                title="New message window"
-                onClick={() => void openComposerWindow()}
-              >
-                <SquarePen size={16} aria-hidden />
-              </button>}
-              {snapshot?.deviceRole === "owner" && (
-                <button id="add-phone-action" aria-label="Add phone" title="Add phone" onClick={() => setAddingPhone(true)}>
-                  <Smartphone size={16} aria-hidden />
-                </button>
-              )}
               {!browserHost && conversationLoaded && (
                 <button id="header-popout-conversation"
-                  aria-label="Open as floating conversation"
-                  title="Open as floating conversation"
+                  aria-label={popoutMode === "bubble" ? "Open as chat bubble" : "Open in new window"}
+                  title={popoutMode === "bubble" ? "Open as chat bubble" : "Open in new window"}
                   onClick={() => void popoutConversation(slotKey)}
                 >
                   <ExternalLink size={16} aria-hidden />
@@ -4723,6 +4784,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onTheme={setTheme}
               navigationPosition={navigationPosition}
               onNavigationPosition={changeNavigationPosition}
+              popoutMode={popoutMode}
+              onPopoutMode={changePopoutMode}
               compactTimestamps={compactTimestamps}
               onCompactTimestamps={changeCompactTimestamps}
               groupSenderAvatars={groupSenderAvatars}

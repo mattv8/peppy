@@ -89,6 +89,33 @@ class IncomingCaptureTest : GatewayTestBase() {
     }
 
     @Test
+    fun acceptsValidPlatformDecodedCarrierPartBodies() {
+        val timestamp = 1_700_000_000_000
+        val validBodies = listOf(
+            "a".repeat(160),
+            "é".repeat(160),
+            "漢".repeat(70),
+        ).map { IncomingSmsPart("+15557654321", it, timestamp) }
+        val concatenated = List(IncomingCapture.MAX_CARRIER_PARTS) {
+            IncomingSmsPart("+15557654321", "a".repeat(153), timestamp)
+        }
+
+        assertEquals(validBodies, IncomingCapture.boundedParts(validBodies))
+        assertEquals(concatenated, IncomingCapture.boundedParts(concatenated))
+    }
+
+    @Test
+    fun rejectsMalformedBroadcastsAboveTheCarrierConcatenationOrAllocationLimit() {
+        val oversized = List(IncomingCapture.MAX_CARRIER_PARTS + 1) {
+            IncomingSmsPart("+15557654321", "x", 1_700_000_000_000)
+        }
+        val oversizedBody = listOf(IncomingSmsPart("+15557654321", "x".repeat(161), 1_700_000_000_000))
+
+        assertTrue(IncomingCapture.boundedParts(oversized).isEmpty())
+        assertTrue(IncomingCapture.boundedParts(oversizedBody).isEmpty())
+    }
+
+    @Test
     fun receiverWorkFinishesOnlyAfterDurableCaptureAndScheduling() {
         grant(Manifest.permission.RECEIVE_SMS)
         enroll()

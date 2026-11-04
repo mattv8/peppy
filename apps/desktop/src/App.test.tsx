@@ -514,15 +514,22 @@ describe("setup landing routing", () => {
     expect(bridge.enrollment_status).not.toHaveBeenCalled();
   });
 
-  it("opens owner add phone enrollment from the workbench even with a gateway", async () => {
+  it("hides Connect a phone for owners with a gateway", async () => {
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
     vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
-    expect(await screen.findByText("Connect your phone")).toBeInTheDocument();
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Connect a phone" })).not.toBeInTheDocument();
   });
 
-  it("defers automatic phone setup per origin while header Add phone remains available", async () => {
+  it("hides Connect a phone for non-owners", async () => {
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "joined" });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Connect a phone" })).not.toBeInTheDocument();
+  });
+
+  it("defers automatic phone setup per origin while titlebar Connect a phone remains available", async () => {
     const refreshedSnapshot = {
       ...await fixtureBridge.load_state(),
       activeConversationId: undefined,
@@ -541,26 +548,71 @@ describe("setup landing routing", () => {
     fireEvent.click(defer);
     await waitFor(() => expect(localStorage.getItem("peppy.setup.phoneDeferred:https://example.test")).toBe("1"));
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Add phone" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect a phone" }));
     expect(await screen.findByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
 
     await act(async () => refresh.resolve(refreshedSnapshot));
     expect(screen.getByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
   });
 
-  it("returns to the selected conversation when add phone is cancelled", async () => {
-    const cancellation = deferred<void>();
+  it("removes phone setup from the conversation header", async () => {
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
-    vi.mocked(bridge.enrollment_add_phone).mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
-    vi.mocked(bridge.enrollment_cancel).mockReturnValue(cancellation.promise);
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("add-phone-action")).not.toBeInTheDocument();
+  });
+
+  it("returns to the selected conversation when titlebar phone setup is cancelled", async () => {
+    const cancellation = deferred<void>();
+    const snapshot = await fixtureBridge.load_state();
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
+    vi.spyOn(bridge, "load_state").mockResolvedValue({
+      ...snapshot,
+      connection: { state: "connected", origin },
+      gateways: [],
+      deviceRole: "owner",
+    });
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(enrollment("ready", { owner: true, hasGateway: false }));
+    vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+    vi.spyOn(bridge, "enrollment_cancel").mockReturnValue(cancellation.promise);
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Connect a phone" }));
     await screen.findByRole("img", { name: /pairing qr/i });
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     expect(bridge.enrollment_cancel).toHaveBeenCalledOnce();
     expect(document.getElementById("conversation-stage")).not.toBeInTheDocument();
     await act(async () => cancellation.resolve());
     await waitFor(() => expect(document.getElementById("conversation-stage")).toBeInTheDocument());
+  });
+
+  it("disables Connect a phone while disconnected or locked", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "offline" }, gateways: [], deviceRole: "owner" });
+    const { unmount } = render(<App />);
+    const disconnected = await screen.findByRole("button", { name: "Connect a phone" });
+    expect(disconnected).toBeDisabled();
+    expect(disconnected).toHaveAttribute("title", "Connect a phone (available when connected and unlocked)");
+    unmount();
+
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, encryption: { state: "locked" }, gateways: [], deviceRole: "owner" });
+    render(<App />);
+    const encryptionLocked = await screen.findByRole("button", { name: "Connect a phone" });
+    expect(encryptionLocked).toBeDisabled();
+    expect(encryptionLocked).toHaveAttribute("title", "Connect a phone (available when connected and unlocked)");
+  });
+
+  it("disables Connect a phone while the app lock is engaged", async () => {
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
+    await landingSnapshot({ connection: { state: "connected", origin }, gateways: [], deviceRole: "owner" });
+    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: true, locked: true, storageAvailable: true, pending: false });
+    render(<App />);
+    const action = await screen.findByRole("button", { name: "Connect a phone" });
+    await waitFor(() => expect(action).toBeDisabled());
+    expect(action).toHaveAttribute("title", "Connect a phone (available when connected and unlocked)");
   });
 
   it("refreshes after phone enrollment without requesting the legacy sync unlock", async () => {
@@ -573,16 +625,18 @@ describe("setup landing routing", () => {
   });
 
   it("starts native phone pairing without invoking the sync unlock for an unlocked owner", async () => {
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
     await landingSnapshot({
-      connection: { state: "connected", origin: "https://example.test" },
+      connection: { state: "connected", origin },
       encryption: { state: "unlocked" },
-      gateways: [SMS_ONLY],
+      gateways: [],
       deviceRole: "owner",
     });
-    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: false }));
     const unlock = vi.spyOn(bridge, "unlock_sync");
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect a phone" }));
     expect(await screen.findByText("Connect your phone")).toBeInTheDocument();
     expect(unlock).not.toHaveBeenCalled();
   });
@@ -999,11 +1053,11 @@ const mockMessageListGeometry = (geometry: { overlay: number; viewport: number; 
   };
 };
 let lifecycle: ((request: { id: string; action: "quit" | "close" | "collapse" }) => void) | undefined;
-let lifecycleDispose: ReturnType<typeof vi.fn>;
+let lifecycleDispose: () => void;
 let lifecycleFinished: ((result: { id: string; ok: boolean }) => void) | undefined;
-let lifecycleFinishedDispose: ReturnType<typeof vi.fn>;
+let lifecycleFinishedDispose: () => void;
 let draftHint: ((draft: Draft) => void) | undefined;
-let draftDispose: ReturnType<typeof vi.fn>;
+let draftDispose: () => void;
 
 beforeEach(() => {
   const values = new Map<string, string>();
@@ -1622,7 +1676,7 @@ describe("lazy conversation history", () => {
     expect(document.querySelector('[data-message-meta="m-provider-history"] time')).toHaveTextContent(formatDateTime("1788435180000")!);
     expect(document.querySelector('[data-message-meta="m-provider-history"] time')).toHaveAttribute("dateTime", isoDateTime("1788435180000")!);
     expect(document.querySelector('[data-message-meta="m-invalid"]')).not.toBeInTheDocument();
-    expect(within(incomingBubble).getByText("Subject: Estimate")).toBeInTheDocument();
+    expect(within(incomingBubble).getByText((_, element) => element?.tagName === "P" && element.textContent === "Subject: Estimate")).toBeInTheDocument();
     expect(screen.queryByText(/Transport: MMS/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Participants:/)).not.toBeInTheDocument();
     expect(incomingBubble.querySelector('[data-attachment-id="photo-1"]')).toBeInTheDocument();
@@ -2904,6 +2958,7 @@ describe("floating conversation actions", () => {
   it("opens the row target without changing selection", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelector('[data-header-title]')).toHaveTextContent("Aurora"));
+    expect(document.getElementById("header-popout-conversation")).toHaveAccessibleName("Open as chat bubble");
     fireEvent.click(document.querySelector('[data-popout-conversation-id="river"]')!);
     await waitFor(() => expect(bridge.popout_conversation).toHaveBeenCalledWith("river"));
     expect(document.querySelector('[data-header-title]')).toHaveTextContent("Aurora");
@@ -3993,6 +4048,42 @@ describe("draft durability", () => {
 });
 
 describe("composer window", () => {
+  it("keeps text conversation tabs outside the main window titlebar", async () => {
+    render(<App />);
+
+    const tabs = await screen.findByRole("tablist", { name: "Conversation views" });
+    expect(tabs).toHaveAttribute("data-variant", "text");
+    expect(tabs.closest("#desktop-titlebar")).not.toBeInTheDocument();
+  });
+
+  it("places icon conversation tabs in the head panel header and supports arrow navigation", async () => {
+    openComposerWindow("aurora", true);
+    render(<App />);
+
+    const tabs = await screen.findByRole("tablist", { name: "Conversation views" });
+    expect(tabs).toHaveAttribute("data-variant", "icons");
+    expect(tabs.closest("#head-panel-header")).toBeInTheDocument();
+
+    const messagesTab = screen.getByRole("tab", { name: "Messages" });
+    fireEvent.keyDown(messagesTab, { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "Media" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Media" })).toHaveFocus();
+  });
+
+  it("places icon conversation tabs in the composer titlebar", async () => {
+    openComposerWindow("aurora");
+    render(<App />);
+
+    const tabs = await screen.findByRole("tablist", { name: "Conversation views" });
+    expect(tabs).toHaveAttribute("data-variant", "icons");
+    expect(tabs.closest("#desktop-titlebar")).toBeInTheDocument();
+    expect(document.querySelectorAll("#conversation-tabs")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Media" }));
+    expect(screen.getByRole("tab", { name: "Media" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Messages" })).toHaveAttribute("tabindex", "-1");
+  });
+
   it("waits for the stored draft before mounting the composer editor", async () => {
     host.drafts.set("aurora", {
       id: "draft-aurora",
@@ -4298,14 +4389,23 @@ describe("composer window", () => {
     );
   });
 
-  it("uses floating heads for conversations and standalone composer for new messages", async () => {
+  it("opens conversations in a window when that pop-out mode is selected", async () => {
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ popoutMode: "window" }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    expect(document.getElementById("header-popout-conversation")).toHaveAccessibleName("Open in new window");
+    fireEvent.click(document.getElementById("header-popout-conversation")!);
+    await waitFor(() => expect(bridge.open_composer).toHaveBeenCalledWith("aurora"));
+    expect(bridge.popout_conversation).not.toHaveBeenCalled();
+  });
+
+  it("prefixes a window pop-out failure with Conversation window", async () => {
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ popoutMode: "window" }));
+    vi.mocked(bridge.open_composer).mockRejectedValue(new Error("Window blocked"));
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(document.getElementById("header-popout-conversation")!);
-    await waitFor(() => expect(bridge.popout_conversation).toHaveBeenCalledWith("aurora"));
-    expect(bridge.open_composer).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "New message window" }));
-    await waitFor(() => expect(bridge.open_composer).toHaveBeenLastCalledWith(undefined));
+    expect(await screen.findByText("Conversation window: Window blocked")).toBeInTheDocument();
   });
 });
 
@@ -4437,54 +4537,77 @@ describe("gateway routes", () => {
     expect(bridge.send_draft).not.toHaveBeenCalled();
   });
 
-  it("processes pending saves once per attachment while state hints overlap", async () => {
-    const first = deferred<Awaited<ReturnType<typeof bridge.open_media>>>();
-    const second = deferred<Awaited<ReturnType<typeof bridge.open_media>>>();
-    const firstAttachment = host.conversations[0].messages[0].attachments[0];
-    host.conversations[0].messages[0].attachments.push({ ...firstAttachment, id: "photo-2", name: "photo-two.png" });
+  it("retries a pending PDF save without opening a media URL", async () => {
+    host.conversations[0].messages[0].attachments[0] = { ...host.conversations[0].messages[0].attachments[0], id: "pending-pdf", name: "notes.pdf", mediaType: "application/pdf" };
     vi.mocked(bridge.save_attachment)
       .mockRejectedValueOnce({ code: "media-pending" })
+      .mockResolvedValue(true);
+    const mediaProbe = vi.spyOn(bridge, "open_media").mockRejectedValue({ code: "unsupported" });
+    render(<App />);
+    await screen.findByRole("button", { name: "Save notes.pdf" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save notes.pdf" }));
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading notes.pdf before saving.");
+    await act(async () => hint?.());
+    await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledTimes(2));
+
+    expect(mediaProbe).not.toHaveBeenCalled();
+    expect(bridge.save_attachment).toHaveBeenLastCalledWith("pending-pdf");
+  });
+
+  it("keeps PDI and RLO filename characters inside the pending-save notice", async () => {
+    const name = "a\u2069\u202Etxt.exe";
+    host.conversations[0].messages[0].attachments[0] = { ...host.conversations[0].messages[0].attachments[0], name };
+    vi.mocked(bridge.save_attachment).mockRejectedValueOnce({ code: "media-pending" });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: `Save ${name}` }));
+
+    const notice = await screen.findByTestId("app-notice-action");
+    const isolatedName = notice.querySelector("bdi");
+    expect(notice).toHaveTextContent(`Downloading ${name} before saving.`);
+    expect(isolatedName?.textContent).toBe(name);
+    expect(isolatedName).toHaveStyle({ display: "inline-block" });
+    expect(notice.querySelector('[role="status"]')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss action notice" }));
+    expect(screen.queryByTestId("app-notice-action")).not.toBeInTheDocument();
+  });
+
+  it("processes overlapping pending-save hints once per attachment", async () => {
+    const firstAttachment = host.conversations[0].messages[0].attachments[0];
+    host.conversations[0].messages[0].attachments.push({ ...firstAttachment, id: "photo-2", name: "photo-two.png" });
+    const resolveSave = deferred<boolean>();
+    vi.mocked(bridge.save_attachment)
+      .mockRejectedValueOnce({ code: "media-pending" })
+      .mockImplementationOnce(() => resolveSave.promise)
       .mockRejectedValueOnce({ code: "media-pending" })
       .mockResolvedValue(true);
-    vi.spyOn(bridge, "open_media")
-      .mockImplementationOnce(() => first.promise)
-      .mockImplementationOnce(() => second.promise);
     render(<App />);
     await screen.findByRole("button", { name: "Save photo.png" });
 
     fireEvent.click(screen.getByRole("button", { name: "Save photo.png" }));
-    await screen.findByText(/Downloading photo.png/);
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo.png before saving.");
     await act(async () => hint?.());
-    await waitFor(() => expect(bridge.open_media).toHaveBeenCalledWith("photo-1"));
+    await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledTimes(2));
     await act(async () => {
       hint?.();
       hint?.();
     });
-    expect(bridge.open_media).toHaveBeenCalledTimes(1);
-
     fireEvent.click(screen.getByRole("button", { name: "Save photo-two.png" }));
-    await screen.findByText(/Downloading photo-two.png/);
-    await act(async () => first.resolve({ state: "ready", url: "file:photo-1", mediaType: "image/png", byteSize: 1 }));
-    await waitFor(() => expect(bridge.open_media).toHaveBeenCalledWith("photo-2"));
-    await act(async () => second.resolve({ state: "ready", url: "file:photo-2", mediaType: "image/png", byteSize: 1 }));
-
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo-two.png before saving.");
+    expect(bridge.save_attachment).toHaveBeenCalledTimes(3);
+    await act(async () => resolveSave.resolve(true));
     await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledWith("photo-2"));
-    expect(bridge.open_media).toHaveBeenCalledTimes(2);
     expect(bridge.save_attachment).toHaveBeenCalledTimes(4);
   });
 
   it("stops pending attachment saves after unmount", async () => {
-    const media = deferred<Awaited<ReturnType<typeof bridge.open_media>>>();
     vi.mocked(bridge.save_attachment).mockRejectedValueOnce({ code: "media-pending" });
-    vi.spyOn(bridge, "open_media").mockImplementationOnce(() => media.promise);
     const rendered = render(<App />);
     await screen.findByRole("button", { name: "Save photo.png" });
     fireEvent.click(screen.getByRole("button", { name: "Save photo.png" }));
-    await screen.findByText(/Downloading photo.png/);
-    await act(async () => hint?.());
-    await waitFor(() => expect(bridge.open_media).toHaveBeenCalledWith("photo-1"));
+    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo.png before saving.");
     rendered.unmount();
-    await act(async () => media.resolve({ state: "ready", url: "file:photo-1", mediaType: "image/png", byteSize: 1 }));
+    await act(async () => hint?.());
     expect(bridge.save_attachment).toHaveBeenCalledOnce();
   });
 
@@ -4927,9 +5050,7 @@ describe("host state display", () => {
     expect(
       screen.queryByRole("separator", { name: "Resize thread list" }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "New message window" }),
-    ).not.toBeInTheDocument();
+    expect(document.getElementById("new-composer-window")).not.toBeInTheDocument();
     expect(
       screen.getByRole("heading", { level: 1, name: "Settings" }),
     ).toBeInTheDocument();
@@ -5634,6 +5755,22 @@ describe("desktop presentation controls", () => {
       expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({
         navigationPosition: "side-rail",
       });
+    });
+
+    it("persists the pop-out mode and restores it after remounting", async () => {
+      const { unmount } = render(<App />);
+      await screen.findByText("Hello from Aurora");
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      const mode = document.getElementById("settings-popout-mode")!;
+      expect(within(mode).getByDisplayValue("bubble")).toBeChecked();
+      fireEvent.click(within(mode).getByDisplayValue("window"));
+      expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ popoutMode: "window" });
+      unmount();
+
+      render(<App />);
+      await screen.findByText("Hello from Aurora");
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      expect(within(document.getElementById("settings-popout-mode")!).getByDisplayValue("window")).toBeChecked();
     });
 
     it("moves the status trigger between the titlebar and rail", async () => {

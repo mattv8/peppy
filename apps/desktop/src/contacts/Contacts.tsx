@@ -6,6 +6,7 @@ import { ContactForm, type ContactEditDraft } from "./ContactForm";
 import { CONTACTS_PAGE_SIZE, findContactTarget } from "./contact-target";
 import { canCreateContactInBook } from "./conversation-contact";
 import { persistLayoutPatch, readContactsDetailWidth } from "../shell/layout-persistence";
+import { IsolatedText } from "../notices/IsolatedText";
 import "./contacts.css";
 
 /** Core returns at most this many contacts per page (search runs before paging). */
@@ -116,7 +117,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const [validationError, setValidationError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<ReactNode>("");
   const [offset, setOffset] = useState(0);
   const [scanStatus, setScanStatus] = useState<ContactScanStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -484,7 +485,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setSelected(null);
       setError("");
       setValidationError("");
-      setNotice(outcome.state === "pending" ? `Sent to ${editorBook.deviceName}. Waiting for the phone to apply it.` : "");
+      setNotice(outcome.state === "pending" ? <span>Sent to <IsolatedText text={editorBook.deviceName} />. Waiting for the phone to apply it.</span> : "");
       loadPage(false);
       const pending = pendingNavigationRef.current;
       if (pending) {
@@ -537,7 +538,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setSelected(null);
       setConfirmDelete(false);
       setError("");
-      setNotice(outcome.state === "pending" ? `Delete sent to ${book.deviceName}. Waiting for the phone.` : "");
+      setNotice(outcome.state === "pending" ? <span>Delete sent to <IsolatedText text={book.deviceName} />. Waiting for the phone.</span> : "");
       loadPage(false);
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
@@ -1013,7 +1014,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                   setError(`Conflict: ${outcome.conflictSummary}`);
                 } else {
                   setRestore(current => current ? { ...current, items: current.items.filter(item => item.id !== value.id) } : null);
-                  if (outcome.state === "pending") setNotice(`Restore of ${value.displayName} sent. Waiting for the phone.`);
+                  if (outcome.state === "pending") setNotice(<span>Restore of <IsolatedText text={value.displayName} /> sent. Waiting for the phone.</span>);
                   loadPage(false);
                 }
               } catch (e) {

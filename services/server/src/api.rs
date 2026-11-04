@@ -1,4 +1,5 @@
 mod account_access;
+pub(crate) mod admission;
 mod attachments;
 mod instance;
 mod key_profiles;
@@ -218,7 +219,7 @@ impl EnrollmentAuthorization for CommunityEnrollmentAuthorization {
 }
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
     extract::{ConnectInfo, FromRequestParts, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
@@ -249,7 +250,7 @@ use std::{
     convert::Infallible,
     net::{IpAddr, SocketAddr},
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 use uuid::Uuid;
 
@@ -271,7 +272,7 @@ pub(super) struct ApiState {
     vault_attachment_quota_bytes: i64,
     upload_slots: Arc<tokio::sync::Semaphore>,
     options: Arc<TransportOptions>,
-    instance_account_admissions: Arc<tokio::sync::Mutex<InstanceAccountAdmissions>>,
+    instance_account_admissions: Arc<tokio::sync::Mutex<admission::LocalAdmissions>>,
     instance_password_slots: Arc<tokio::sync::Semaphore>,
     pub(super) instance_events: tokio::sync::broadcast::Sender<()>,
     pub(super) event_stream_slots: Arc<tokio::sync::Semaphore>,
@@ -279,21 +280,12 @@ pub(super) struct ApiState {
     policy: Arc<dyn AccessPolicy>,
     push_config: PushConfig,
     row_security: bool,
+    rls_enforced: bool,
     instance_origin: Option<url::Url>,
     claim_policy: crate::instance::ClaimPolicy,
+    setup_window_started: std::time::Instant,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
 }
-struct RateAdmission {
-    window: SystemTime,
-    count: u8,
-}
-
-struct InstanceAccountAdmissions {
-    window: SystemTime,
-    count: u16,
-    sources: HashMap<[u8; 32], RateAdmission>,
-}
-
 struct PeerAddress(Option<IpAddr>);
 
 const MAX_FORWARDED_HEADER_BYTES: usize = 8192;
@@ -384,6 +376,7 @@ pub(crate) fn router_with_initialized_storage(
             claim_policy: crate::instance::configured_claim_policy(false)
                 .expect("setup token configuration must be valid"),
             row_security: false,
+            rls_enforced: false,
         },
     )
     .expect("router helper requires a valid enrollment origin");
@@ -413,6 +406,7 @@ pub fn router_with_options(db: PgPool, options: TransportOptions) -> Router {
             claim_policy: crate::instance::configured_claim_policy(false)
                 .expect("setup token configuration must be valid"),
             row_security: false,
+            rls_enforced: false,
         },
     )
     .expect("router helper requires a valid enrollment origin");
@@ -439,6 +433,7 @@ pub fn router_with_options_and_relay(
             claim_policy: crate::instance::configured_claim_policy(false)
                 .expect("setup token configuration must be valid"),
             row_security: false,
+            rls_enforced: false,
         },
     )
     .expect("router helper requires a valid enrollment origin");
@@ -451,6 +446,7 @@ pub(crate) struct RouterAuthorization {
     pub(crate) enrollment: Arc<dyn EnrollmentAuthorization>,
     pub(crate) claim_policy: crate::instance::ClaimPolicy,
     pub(crate) row_security: bool,
+    pub(crate) rls_enforced: bool,
 }
 
 pub(crate) struct Maintenance {
@@ -492,6 +488,14 @@ fn spawn_instance_maintenance(db: PgPool) {
             if let Err(error) = result {
                 tracing::warn!(%error, "instance invite retention sweep failed");
             }
+            let result = sqlx::query(
+                "DELETE FROM instance_admission_windows WHERE ctid IN (SELECT ctid FROM instance_admission_windows WHERE window_started < date_trunc('minute', now()) - interval '2 hours' ORDER BY window_started LIMIT 1000 FOR UPDATE SKIP LOCKED)",
+            )
+            .execute(&db)
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "instance admission retention sweep failed");
+            }
             let result = crate::enrollment::computers::cleanup_expired_enrollments(&db).await;
             if let Err(error) = result {
                 tracing::warn!(%error, "computer enrollment retention sweep failed");
@@ -514,6 +518,7 @@ pub(crate) fn build_router(
         enrollment: enrollment_authorization,
         claim_policy,
         row_security,
+        rls_enforced,
     } = authorization;
     let (committed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let (presence_changed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
@@ -636,11 +641,9 @@ pub(crate) fn build_router(
         vault_attachment_quota_bytes,
         upload_slots: Arc::new(tokio::sync::Semaphore::new(4)),
         options: Arc::new(options.clone()),
-        instance_account_admissions: Arc::new(tokio::sync::Mutex::new(InstanceAccountAdmissions {
-            window: SystemTime::now(),
-            count: 0,
-            sources: HashMap::new(),
-        })),
+        instance_account_admissions: Arc::new(tokio::sync::Mutex::new(
+            admission::LocalAdmissions::new(),
+        )),
         instance_password_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         instance_events: tokio::sync::broadcast::channel(64).0,
         event_stream_slots: Arc::new(tokio::sync::Semaphore::new(32)),
@@ -648,10 +651,12 @@ pub(crate) fn build_router(
         policy,
         push_config: push_config_response,
         row_security,
+        rls_enforced,
         instance_origin: config
             .as_ref()
             .and_then(|config| config.public_api_url.clone()),
         claim_policy,
+        setup_window_started: std::time::Instant::now(),
         trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs.clone()),
     });
     let manual_state = invitation_origin
@@ -664,6 +669,7 @@ pub(crate) fn build_router(
                 origin.clone(),
             )
             .map_err(|_| "PUBLIC_API_URL produced an invalid manual-enrollment origin")
+            .map(|state| state.with_rls_enforced(rls_enforced))
             .map(|state| state.with_trusted_proxy_cidrs(trusted_proxy_cidrs.clone()))
         })
         .transpose()?;
@@ -679,6 +685,8 @@ pub(crate) fn build_router(
                 row_security,
                 origin,
             )
+            .map(|state| state.with_rls_enforced(rls_enforced))
+            .map(|state| state.with_trusted_proxy_cidrs(trusted_proxy_cidrs.clone()))
             .map_err(|_| "PUBLIC_API_URL produced an invalid phone-enrollment origin")
         })
         .transpose()?;
@@ -697,6 +705,8 @@ pub(crate) fn build_router(
                 row_security,
                 origin,
             )
+            .map(|state| state.with_rls_enforced(rls_enforced))
+            .map(|state| state.with_trusted_proxy_cidrs(trusted_proxy_cidrs.clone()))
             .map_err(|_| "PUBLIC_API_URL produced an invalid computer-enrollment origin")
         })
         .transpose()?;
@@ -913,13 +923,33 @@ pub(super) fn instance_origin_matches(state: &ApiState, headers: &HeaderMap) -> 
             .is_some_and(|(host, authority)| host == authority)
 }
 
+const INSTANCE_SESSION_COOKIE: &str = "__Host-Peppy-Instance-Session";
+const LEGACY_INSTANCE_SESSION_COOKIE: &str = "Peppy-Instance-Session";
+
 fn cookie_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("cookie")?
-        .to_str()
-        .ok()?
+    let cookies = headers.get("cookie")?.to_str().ok()?;
+    cookies
         .split(';')
-        .find_map(|part| part.trim().strip_prefix("Peppy-Instance-Session="))
+        .find_map(|part| part.trim().strip_prefix("__Host-Peppy-Instance-Session="))
+        .or_else(|| {
+            cookies
+                .split(';')
+                .find_map(|part| part.trim().strip_prefix("Peppy-Instance-Session="))
+        })
+}
+
+fn instance_session_cookie(token: &str, max_age: u32) -> Result<HeaderValue, ApiError> {
+    HeaderValue::from_str(&format!(
+        "{INSTANCE_SESSION_COOKIE}={token}; Path=/; Max-Age={max_age}; Secure; HttpOnly; SameSite=Strict"
+    ))
+    .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "session_unavailable"))
+}
+
+fn clear_instance_session_cookie(name: &str) -> HeaderValue {
+    HeaderValue::from_str(&format!(
+        "{name}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+    ))
+    .expect("fixed cookie name is valid")
 }
 
 pub(super) fn instance_session_token(headers: &HeaderMap) -> Option<(&str, bool)> {
@@ -944,17 +974,10 @@ pub(super) fn instance_session_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "session_unavailable",
     ))?;
-    let cookie = format!(
-        "Peppy-Instance-Session={session_token}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Strict",
-        session.expires_in_seconds
-    );
+    let cookie = instance_session_cookie(session_token, session.expires_in_seconds)?;
     session.session_token = None;
     let mut response = Json(session).into_response();
-    response.headers_mut().insert(
-        "set-cookie",
-        HeaderValue::from_str(&cookie)
-            .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "session_unavailable"))?,
-    );
+    response.headers_mut().insert("set-cookie", cookie);
     Ok(response)
 }
 
@@ -978,10 +1001,7 @@ pub(super) fn instance_claim_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "session_unavailable",
     ))?;
-    let cookie = format!(
-        "Peppy-Instance-Session={session_token}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Strict",
-        session.expires_in_seconds
-    );
+    let cookie = instance_session_cookie(session_token, session.expires_in_seconds)?;
     session.session_token = None;
     let mut response = Json(ClaimInstanceResponse {
         vault_id,
@@ -990,17 +1010,13 @@ pub(super) fn instance_claim_response(
         session,
     })
     .into_response();
-    response.headers_mut().insert(
-        "set-cookie",
-        HeaderValue::from_str(&cookie)
-            .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "session_unavailable"))?,
-    );
+    response.headers_mut().insert("set-cookie", cookie);
     Ok(response)
 }
 
 async fn replay_existing_instance_claim(
     state: &ApiState,
-    mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    transaction: sqlx::Transaction<'_, sqlx::Postgres>,
     existing: sqlx::postgres::PgRow,
     request: &ClaimInstanceRequest,
     request_digest: [u8; 32],
@@ -1011,6 +1027,9 @@ async fn replay_existing_instance_claim(
     if operation_id != request.operation_id || previous_digest.as_slice() != request_digest {
         return Err(ApiError(StatusCode::CONFLICT, "instance_already_claimed"));
     }
+    // Do not retain the owner lock while durable admission obtains a pooled
+    // connection. Under replay load that otherwise exhausts the pool.
+    drop(transaction);
     instance_account_admission(
         state,
         peer,
@@ -1018,6 +1037,11 @@ async fn replay_existing_instance_claim(
         "instance_claim_replay_limited",
     )
     .await?;
+    let mut transaction = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_claim_replay_begin"))?;
     let password_hash: String = existing.get("password_hash");
     if !password_matches_admin(
         state.instance_password_slots.clone(),
@@ -1082,14 +1106,13 @@ async fn claim_instance(
     // Fresh claims consume a bounded admission before token validation or expensive
     // material/password work. Replays intentionally retain their separate path.
     instance_account_admission(&state, peer, b"claim", "instance_claim_limited").await?;
-    match state.claim_policy {
-        crate::instance::ClaimPolicy::Disabled => {
-            return Err(ApiError(StatusCode::CONFLICT, "instance_already_claimed"));
-        }
-        policy if !policy.authorizes(&request.setup_token) => {
-            return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid_setup_token"));
-        }
-        _ => {}
+    if !fresh_claim_is_authorized(
+        state.claim_policy,
+        state.setup_window_started,
+        std::time::Instant::now(),
+        &request.setup_token,
+    ) {
+        return Err(claim_policy_error(state.claim_policy, &request.setup_token));
     }
     let username = instance::normalize_claim_username(&request.username)?;
     let (admission_public_key, credential_digest) = validate_claim_material(&request)?;
@@ -1119,6 +1142,14 @@ async fn claim_instance(
             peer,
         )
         .await;
+    }
+    if !fresh_claim_is_authorized(
+        state.claim_policy,
+        state.setup_window_started,
+        std::time::Instant::now(),
+        &request.setup_token,
+    ) {
+        return Err(claim_policy_error(state.claim_policy, &request.setup_token));
     }
     let password_hash = hash_admin_password(
         state.instance_password_slots.clone(),
@@ -1236,11 +1267,13 @@ pub(super) async fn instance_logout(
         .map_err(|error| database_unavailable(&error, "instance_logout"))?;
     let mut response = StatusCode::NO_CONTENT.into_response();
     if browser {
-        response.headers_mut().insert(
+        response.headers_mut().append(
             "set-cookie",
-            HeaderValue::from_static(
-                "Peppy-Instance-Session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
-            ),
+            clear_instance_session_cookie(INSTANCE_SESSION_COOKIE),
+        );
+        response.headers_mut().append(
+            "set-cookie",
+            clear_instance_session_cookie(LEGACY_INSTANCE_SESSION_COOKIE),
         );
     }
     Ok(response)
@@ -1272,9 +1305,15 @@ fn client_kind(kind: String) -> Result<ClientKind, ApiError> {
 }
 
 async fn instance_devices(db: &PgPool, vault_id: Uuid) -> ApiResult<Vec<EnrollmentDevice>> {
+    let mut tx = scope::begin(db, vault_id)
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_devices_begin"))?;
     let rows = sqlx::query("SELECT d.device_id, COALESCE(d.name, 'Unnamed device') name, COALESCE(d.kind, 'desktop') kind, d.role, d.revoked_at IS NOT NULL revoked, EXISTS(SELECT 1 FROM device_wake_routes routes WHERE routes.vault_id=d.vault_id AND routes.device_id=d.device_id AND routes.revoked_at IS NULL) gateway_online FROM devices d WHERE d.vault_id=$1 ORDER BY d.created_at")
-        .bind(vault_id).fetch_all(db).await
+        .bind(vault_id).fetch_all(&mut *tx).await
         .map_err(|error| database_unavailable(&error, "instance_devices"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_devices_commit"))?;
     let presence_by_device = crate::presence::lookup_many_best_effort(
         db,
         vault_id,
@@ -1312,9 +1351,15 @@ pub(super) async fn instance_account(
     let vault_id = instance::require_session(&state, &headers, false)
         .await?
         .vault_id;
+    let mut tx = scope::begin(&state.db, vault_id)
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_account_begin"))?;
     let row = sqlx::query("SELECT v.public_key_profile, v.encrypted_vault_check_header, v.profile_fingerprint, v.key_epoch, keys.admission_public_key FROM vaults v JOIN vault_admission_keys keys ON keys.vault_id=v.vault_id AND keys.key_epoch=v.key_epoch WHERE v.vault_id=$1")
-        .bind(vault_id).fetch_one(&state.db).await
+        .bind(vault_id).fetch_one(&mut *tx).await
         .map_err(|error| database_unavailable(&error, "instance_account"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_account_commit"))?;
     Ok(Json(InstanceAccount {
         vault_id,
         material: VaultMaterial {
@@ -1344,13 +1389,19 @@ pub(super) async fn instance_management(
             }
         })?;
     let vault_id = session.vault_id;
+    let mut tx = scope::begin(&state.db, vault_id)
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_storage_begin"))?;
     let storage_bytes: i64 = sqlx::query_scalar(
         "SELECT COALESCE(sum(ciphertext_bytes), 0)::bigint FROM attachments WHERE vault_id=$1",
     )
     .bind(vault_id)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "instance_storage"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_storage_commit"))?;
     Ok(Json(InstanceManagement {
         vault_id,
         devices: instance_devices(&state.db, vault_id).await?,
@@ -1410,6 +1461,9 @@ pub(super) async fn instance_revoke_device(
     .execute(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "instance_revoke_credential"))?;
+    fence_revoked_device_work(&mut tx, vault_id, device_id)
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_revoke_fence"))?;
     revoke_wake_effects(&mut tx, vault_id, device_id)
         .await
         .map_err(|error| database_unavailable(&error, "instance_revoke_wake_effects"))?;
@@ -1436,6 +1490,20 @@ async fn revoke_wake_effects(
         .bind(device_id)
         .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+async fn fence_revoked_device_work(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    vault_id: Uuid,
+    device_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE phone_invitations SET state='denied' WHERE vault_id=$1 AND owner_device_id=$2 AND state IN ('waiting','claimed','approved','confirmed')")
+        .bind(vault_id).bind(device_id).execute(&mut **tx).await?;
+    sqlx::query("UPDATE computer_enrollments SET state='cancelled' WHERE vault_id=$1 AND owner_device_id=$2 AND state IN ('waiting','approved')")
+        .bind(vault_id).bind(device_id).execute(&mut **tx).await?;
+    sqlx::query("WITH fenced AS (DELETE FROM upload_reservations WHERE vault_id=$1 AND device_id=$2 AND finalized_at IS NULL RETURNING object_key,uploaded_at) INSERT INTO storage_deletions(object_key,vault_id,reason) SELECT object_key,$1,'upload_attempt' FROM fenced WHERE uploaded_at IS NOT NULL ON CONFLICT(object_key) DO UPDATE SET not_before=now()")
+        .bind(vault_id).bind(device_id).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -1602,16 +1670,21 @@ pub(super) async fn auth_with_mode(s: &ApiState, headers: &HeaderMap) -> ApiResu
         .and_then(|h| h.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "missing_bearer"))?;
-    if !s.row_security {
+    if !s.rls_enforced {
         return auth_direct(&s.db, headers).await;
     }
     if bearer.len() != TOKEN_BYTES_HEX || !bearer.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid_bearer"));
     }
     let digest = Sha256::digest(bearer.as_bytes());
-    let row = sqlx::query(
-        "SELECT vault_id,device_id,role,token_digest FROM peppy.resolve_device_credential($1)",
-    )
+    let resolver = if s.row_security {
+        "peppy.resolve_device_credential"
+    } else {
+        "community_resolve_device_credential"
+    };
+    let row = sqlx::query(&format!(
+        "SELECT vault_id,device_id,role,token_digest FROM {resolver}($1)"
+    ))
     .bind(digest.as_slice())
     .fetch_optional(&s.db)
     .await
@@ -1774,9 +1847,32 @@ async fn vault_header(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json
     }))
 }
 
-const INSTANCE_ACCOUNT_SOURCE_LIMIT: u8 = 10;
-const INSTANCE_ACCOUNT_GLOBAL_LIMIT: u16 = 100;
-const INSTANCE_ACCOUNT_ADMISSION_WINDOW: Duration = Duration::from_secs(60);
+const SETUP_WINDOW: Duration = Duration::from_secs(60 * 60);
+
+fn fresh_claim_is_authorized(
+    policy: crate::instance::ClaimPolicy,
+    started: std::time::Instant,
+    now: std::time::Instant,
+    token: &str,
+) -> bool {
+    match policy {
+        crate::instance::ClaimPolicy::Open => now.duration_since(started) < SETUP_WINDOW,
+        _ => policy.authorizes(token),
+    }
+}
+
+fn claim_policy_error(policy: crate::instance::ClaimPolicy, token: &str) -> ApiError {
+    match policy {
+        crate::instance::ClaimPolicy::Open => {
+            ApiError(StatusCode::FORBIDDEN, "setup_window_closed")
+        }
+        crate::instance::ClaimPolicy::Disabled => {
+            ApiError(StatusCode::CONFLICT, "instance_already_claimed")
+        }
+        _ if !policy.authorizes(token) => ApiError(StatusCode::UNAUTHORIZED, "invalid_setup_token"),
+        _ => ApiError(StatusCode::FORBIDDEN, "setup_window_closed"),
+    }
+}
 
 pub(super) async fn instance_account_admission(
     state: &ApiState,
@@ -1784,47 +1880,33 @@ pub(super) async fn instance_account_admission(
     operation: &[u8],
     code: &'static str,
 ) -> ApiResult<()> {
-    let now = SystemTime::now();
     let mut admissions = state.instance_account_admissions.lock().await;
-    if now.duration_since(admissions.window).unwrap_or_default()
-        >= INSTANCE_ACCOUNT_ADMISSION_WINDOW
-    {
-        admissions.window = now;
-        admissions.count = 0;
-        admissions.sources.clear();
-    }
-    let mut source_hasher = Sha256::new();
-    source_hasher.update(b"instance-account-v1:");
-    source_hasher.update(operation);
-    match peer {
-        Some(IpAddr::V4(address)) => source_hasher.update(address.octets()),
-        Some(IpAddr::V6(address)) => source_hasher.update(address.octets()),
-        None => source_hasher.update(b"global-fallback"),
-    }
-    let source = source_hasher.finalize().into();
-    if admissions.count >= INSTANCE_ACCOUNT_GLOBAL_LIMIT {
+    let source = admission::source_digest(operation, peer);
+    let operation = match operation {
+        b"claim" => admission::AdmissionOperation::Claim,
+        b"claim-replay" => admission::AdmissionOperation::ClaimReplay,
+        b"login" => admission::AdmissionOperation::Login,
+        b"create-vault" => admission::AdmissionOperation::CreateVault,
+        b"vault-request" => admission::AdmissionOperation::VaultRequest,
+        _ => {
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "admission_unavailable",
+            ));
+        }
+    };
+    if !admissions.admit(source) {
         return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, code));
     }
-    let source_admission = admissions.sources.entry(source).or_insert(RateAdmission {
-        window: now,
-        count: 0,
-    });
-    if now
-        .duration_since(source_admission.window)
-        .unwrap_or_default()
-        >= INSTANCE_ACCOUNT_ADMISSION_WINDOW
-    {
-        *source_admission = RateAdmission {
-            window: now,
-            count: 0,
-        };
-    }
-    if source_admission.count >= INSTANCE_ACCOUNT_SOURCE_LIMIT {
-        return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, code));
-    }
-    source_admission.count += 1;
-    admissions.count += 1;
-    Ok(())
+    drop(admissions);
+    admission::admit_durably(&state.db, operation, source)
+        .await
+        .map_err(|error| match error {
+            admission::AdmissionError::Limited => ApiError(StatusCode::TOO_MANY_REQUESTS, code),
+            admission::AdmissionError::Database(error) => {
+                database_unavailable(&error, "instance_admission")
+            }
+        })
 }
 
 /// Validated, caller-selected material for an atomic owner bootstrap. Hosted
@@ -1924,6 +2006,9 @@ async fn revoke_device(
     .execute(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "revoke_credential"))?;
+    fence_revoked_device_work(&mut tx, p.vault, device_id)
+        .await
+        .map_err(|error| database_unavailable(&error, "revoke_fence"))?;
     revoke_wake_effects(&mut tx, p.vault, device_id)
         .await
         .map_err(|error| database_unavailable(&error, "revoke_wake_effects"))?;
@@ -2576,16 +2661,30 @@ fn heartbeat_action(has_outstanding_challenge: bool) -> HeartbeatAction {
 async fn websocket(
     State(s): State<ApiState>,
     headers: HeaderMap,
+    lease: Option<Extension<crate::serving::ConnectionLease>>,
+    shutdown: Option<Extension<tokio::sync::watch::Receiver<bool>>>,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<axum::response::Response> {
     let principal = authenticated(&s, &headers, Operation::Sync).await?;
     // Subscribe before replay so a commit between replay and live is never missed.
     let receiver = s.committed.subscribe();
     let presence_receiver = s.presence_changed.subscribe();
+    let lease = lease.map(|Extension(lease)| lease);
+    let shutdown = shutdown.map(|Extension(shutdown)| shutdown);
     Ok(upgrade
         .max_message_size(1_100_000)
         .max_frame_size(1_100_000)
-        .on_upgrade(move |socket| ws_session(socket, s, principal, receiver, presence_receiver))
+        .on_upgrade(move |socket| {
+            ws_session(
+                socket,
+                s,
+                principal,
+                receiver,
+                presence_receiver,
+                lease,
+                shutdown,
+            )
+        })
         .into_response())
 }
 
@@ -2601,6 +2700,7 @@ async fn ws_close(socket: &mut WebSocket, code: u16, reason: &'static str) {
 /// Why a socket stopped; mapped to one close code.
 enum WsStop {
     PolicyDenied,
+    Revoked,
     Resync(sync::Resync),
     Backpressure,
     Database,
@@ -2611,6 +2711,7 @@ impl WsStop {
     async fn close(self, socket: &mut WebSocket) {
         match self {
             Self::PolicyDenied => ws_close(socket, 1008, "access_denied").await,
+            Self::Revoked => ws_close(socket, close::REVOKED, "revoked").await,
             Self::Resync(resync) => {
                 let _ = socket.send(Message::Text(resync.ws_frame().into())).await;
                 ws_close(socket, close::RESYNC_REQUIRED, "resync_required").await;
@@ -2666,11 +2767,33 @@ async fn read_hello(socket: &mut WebSocket, timeout: Duration) -> Result<i64, He
 }
 
 async fn ws_session(
+    socket: WebSocket,
+    state: ApiState,
+    principal: Principal,
+    notices: tokio::sync::broadcast::Receiver<(Uuid, i64)>,
+    presence_notices: tokio::sync::broadcast::Receiver<Uuid>,
+    lease: Option<crate::serving::ConnectionLease>,
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+) {
+    ws_session_inner(
+        socket,
+        state,
+        principal,
+        notices,
+        presence_notices,
+        shutdown,
+    )
+    .await;
+    drop(lease);
+}
+
+async fn ws_session_inner(
     mut socket: WebSocket,
     state: ApiState,
     principal: Principal,
     mut notices: tokio::sync::broadcast::Receiver<(Uuid, i64)>,
     mut presence_notices: tokio::sync::broadcast::Receiver<Uuid>,
+    mut shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 ) {
     let options = Arc::clone(&state.options);
     let mut cursor = match read_hello(&mut socket, options.hello_timeout).await {
@@ -2738,6 +2861,7 @@ async fn ws_session(
     durable_replay.tick().await;
     loop {
         let stop = tokio::select! {
+            _ = wait_for_shutdown(&mut shutdown) => WsStop::Disconnected,
             _ = recheck.tick() => match still_active(&state, &principal).await {
                 Ok(true) => {
                     if authorize(&state, &principal, Operation::Sync).await.is_err() {
@@ -2839,6 +2963,17 @@ async fn ws_session(
         return stop.close(&mut socket).await;
     }
 }
+
+async fn wait_for_shutdown(shutdown: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    let Some(shutdown) = shutdown else {
+        std::future::pending().await
+    };
+    if *shutdown.borrow() {
+        return;
+    }
+    let _ = shutdown.changed().await;
+}
+
 async fn close_presence(state: &ApiState, principal: &Principal, connection_id: Uuid) {
     if crate::presence::close(&state.db, principal.vault, connection_id)
         .await
@@ -2847,7 +2982,7 @@ async fn close_presence(state: &ApiState, principal: &Principal, connection_id: 
         let _ = state.presence_changed.send(principal.vault);
     }
 }
-async fn still_active(state: &ApiState, p: &Principal) -> Result<bool, sqlx::Error> {
+pub(super) async fn still_active(state: &ApiState, p: &Principal) -> Result<bool, sqlx::Error> {
     let mut tx = scope::begin(&state.db, p.vault).await?;
     let active = sqlx::query_scalar::<_, i32>("SELECT 1 FROM devices d JOIN device_credentials c ON c.vault_id=d.vault_id AND c.device_id=d.device_id WHERE d.vault_id=$1 AND d.device_id=$2 AND c.token_digest=$3 AND d.revoked_at IS NULL AND c.revoked_at IS NULL")
         .bind(p.vault)
@@ -2879,6 +3014,14 @@ async fn send_replay(
     cursor: &mut i64,
 ) -> Result<(), WsStop> {
     loop {
+        match still_active(state, principal).await {
+            Ok(true) => {}
+            Ok(false) => return Err(WsStop::Revoked),
+            Err(error) => {
+                tracing::warn!(error_kind = %error, "websocket replay revalidation failed");
+                return Err(WsStop::Database);
+            }
+        }
         if authorize(state, principal, Operation::Sync).await.is_err() {
             return Err(WsStop::PolicyDenied);
         }
@@ -2948,5 +3091,49 @@ mod tests {
 
         accepts_trait_object(&CommunityAccessPolicy);
         let _ = <CommunityAccessPolicy as AccessPolicy>::attachment_storage_policy_in_transaction;
+    }
+
+    #[test]
+    fn open_setup_window_closes_after_sixty_minutes() {
+        let started = std::time::Instant::now();
+
+        assert!(fresh_claim_is_authorized(
+            crate::instance::ClaimPolicy::Open,
+            started,
+            started + Duration::from_secs(59 * 60 + 59),
+            ""
+        ));
+        assert!(!fresh_claim_is_authorized(
+            crate::instance::ClaimPolicy::Open,
+            started,
+            started + Duration::from_secs(60 * 60),
+            ""
+        ));
+    }
+
+    #[test]
+    fn configured_setup_token_is_not_limited_by_the_open_window() {
+        let started = std::time::Instant::now();
+        let token = "a".repeat(32);
+
+        assert!(fresh_claim_is_authorized(
+            crate::instance::ClaimPolicy::TokenRequired(crate::instance::digest(token.as_bytes())),
+            started,
+            started + Duration::from_secs(60 * 60),
+            &token
+        ));
+    }
+
+    #[test]
+    fn host_cookie_wins_over_a_legacy_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            HeaderValue::from_static(
+                "Peppy-Instance-Session=legacy; __Host-Peppy-Instance-Session=current",
+            ),
+        );
+
+        assert_eq!(cookie_token(&headers), Some("current"));
     }
 }

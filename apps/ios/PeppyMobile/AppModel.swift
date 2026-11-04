@@ -834,6 +834,8 @@ final class AppModel {
         switch error {
         case .server(_, "invalid_setup_token"):
             String(localized: "peppy.enrollment_error_invalid_setup_token", table: "Peppy")
+        case .server(_, "setup_window_closed"):
+            "Setup window closed. Restart the server to continue setup."
         case .server(_, "instance_already_claimed"):
             String(localized: "peppy.enrollment_error_already_claimed", table: "Peppy")
         default:

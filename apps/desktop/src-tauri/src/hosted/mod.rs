@@ -92,6 +92,18 @@ pub(crate) async fn enrollment_account_session(
     Ok(Zeroizing::new(session.bearer.to_string()))
 }
 
+/// Whether hosted enrollment at `origin` has a usable account session. An unreadable session
+/// counts as absent: sign-in is then offered again, and device-credential flows are not blocked.
+pub(crate) async fn has_enrollment_account_session(
+    state: &AppState,
+    hosted: &HostedState,
+    origin: &str,
+) -> bool {
+    enrollment_account_session(state, hosted, origin)
+        .await
+        .is_ok()
+}
+
 /// Reuses the reviewed hosted grant/checkpoint/protected-import flow for first owner creation.
 pub(crate) async fn provision_enrollment(
     app: &tauri::AppHandle,

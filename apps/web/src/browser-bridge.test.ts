@@ -936,6 +936,48 @@ describe("BrowserBridge", () => {
     vi.useRealTimers();
   });
 
+  it("does not create an inline URL for active document media", async () => {
+    const port = new TestPort();
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    const create = vi.fn(() => "blob:image");
+    const revoke = vi.fn();
+    Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke });
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const image = bridge.open_media("image");
+    port.reply({ id: 1, ok: true, value: { state: "ready", bytes: new ArrayBuffer(1), mediaType: "image/png", byteSize: 1 } });
+    await expect(image).resolves.toMatchObject({ url: "blob:image" });
+    const opened = bridge.open_media("attachment");
+
+    port.reply({ id: 2, ok: true, value: { state: "ready", bytes: new ArrayBuffer(1), mediaType: "image/svg+xml", byteSize: 1 } });
+    await Promise.resolve();
+    expect(port.sent.at(-1)).toMatchObject({ id: 3, command: "close_media", args: { id: "attachment" } });
+    port.reply({ id: 3, ok: true, value: undefined });
+
+    await expect(opened).rejects.toMatchObject({ code: "unsupported" });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(revoke).not.toHaveBeenCalled();
+    Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+  });
+
+  it("uses a cleaned desktop-equivalent name for browser downloads", async () => {
+    vi.useFakeTimers();
+    const port = new TestPort();
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:attachment"), revokeObjectURL: vi.fn() });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      expect(this.download).toBe("..invoicefdp.exe");
+    });
+    const saved = new BrowserBridge(port as unknown as MessagePort).save_attachment("attachment");
+    port.reply({ id: 1, ok: true, value: { bytes: new ArrayBuffer(1), displayName: "../invoice\u202efdp.exe", mediaType: "application/pdf" } });
+    await expect(saved).resolves.toBe(true);
+    await vi.runAllTimersAsync();
+    Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+    click.mockRestore();
+    vi.useRealTimers();
+  });
+
   it("releases only the exact media URL so stale cleanup cannot revoke a newer open", async () => {
     const port = new TestPort();
     const originalCreate = URL.createObjectURL;

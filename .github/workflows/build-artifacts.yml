@@ -253,10 +253,10 @@ jobs:
               echo "version and android_version_code must both be set" >&2
               exit 1
             fi
-            ./gradlew :app:assembleRelease :app:bundleRelease \
+            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleRelease :app:bundleRelease \
               "-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE"
           else
-            ./gradlew :app:assembleRelease :app:bundleRelease
+            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleRelease :app:bundleRelease
           fi
           mkdir -p ../../dist/android-release
           install -m 0644 app/build/outputs/apk/release/app-release-unsigned.apk ../../dist/android-release/peppy-android-unsigned.apk
@@ -290,9 +290,9 @@ jobs:
               echo "version and android_version_code must both be set" >&2
               exit 1
             fi
-            ./gradlew :app:assembleDebug :app:assembleRelease :app:bundleRelease "-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE"
+            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleRelease :app:bundleRelease "-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE"
           else
-            ./gradlew :app:assembleDebug :app:assembleRelease :app:bundleRelease
+            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleRelease :app:bundleRelease
           fi
           mkdir -p ../../dist/android-release
           install -m 0644 app/build/outputs/apk/debug/app-debug.apk ../../dist/android-release/peppy-android-debug.apk

@@ -21,10 +21,10 @@ android_packaging = android_ci_steps.find { |step| step['name'] == 'Lint and ass
 assert.call(!android_packaging.nil?, 'public CI must retain the Android lint and packaging step')
 android_packaging_command = Shellwords.shellsplit(android_packaging.fetch('run'))
 android_packaging_flags = android_packaging_command.reject { |token| token.start_with?(':') }
-expected_android_packaging_flags = ['./gradlew', '--console=plain', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2']
-assert.call(android_packaging_flags == expected_android_packaging_flags, 'public CI Android packaging must use the 4 GiB JVM override, two-worker bound, and diagnostic flags')
+expected_android_packaging_flags = ['./gradlew', '--console=plain', '--dependency-verification=strict', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2']
+assert.call(android_packaging_flags == expected_android_packaging_flags, 'public CI Android packaging must use strict dependency verification, the 4 GiB JVM override, two-worker bound, and diagnostic flags')
 android_packaging_tasks = android_packaging_command.select { |token| token.start_with?(':') }
-assert.call(android_packaging_tasks == %w[:app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest], 'public CI Android packaging must retain lint, debug APK, and debug test APK tasks')
+assert.call(android_packaging_tasks == %w[:app:verifyReleaseManifestSecurity :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest], 'public CI Android packaging must verify the merged release manifest before linting and debug artifacts')
 handoff = ci_jobs.fetch('notify-hosted-production')
 assert.call(handoff.fetch('if') == "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'", 'hosted dispatch must require a successful production push gate and both publishers')
 assert.call(handoff.fetch('needs').sort == %w[gate publish-production-relay publish-production-server], 'hosted dispatch must wait for the gate and both publishers')
@@ -180,7 +180,7 @@ end
 
 stable = ci_jobs.fetch('stable-release')
 assert.call(stable.fetch('needs').sort == %w[gate publish-production-relay publish-production-server version], 'stable release must wait for the gate and both edge publishers')
-assert.call(stable.fetch('permissions') == { 'contents' => 'write', 'actions' => 'read' }, 'stable release needs only contents write and actions read')
+assert.call(stable.fetch('permissions') == { 'contents' => 'write', 'actions' => 'read', 'attestations' => 'write', 'id-token' => 'write' }, 'stable release must grant its nested publisher provenance permissions')
 assert.call(stable.fetch('concurrency').fetch('group') == 'stable-release', 'automatic stable release must serialize with manual release')
 assert.call(stable.fetch('with') == { 'bump' => 'auto', 'version' => '', 'dry_run' => false }, 'automatic release must use the safe automatic inputs')
 
@@ -203,9 +203,29 @@ assert.call(!desktop_checkout_index.nil? && !desktop_guard_index.nil? && desktop
 
 publisher = load_workflow.call('publish-release.yml')
 publisher_steps = publisher.fetch('jobs').fetch('publish').fetch('steps')
+publisher_permissions = publisher.fetch('jobs').fetch('publish').fetch('permissions')
+assert.call(publisher_permissions == { 'contents' => 'write', 'attestations' => 'write', 'id-token' => 'write' }, 'publisher must hold only release and provenance permissions')
 publisher_checkout_index = publisher_steps.index { |step| step['uses']&.start_with?('actions/checkout@') }
 publisher_guard_index = publisher_steps.index { |step| step['run'] == 'bash .github/scripts/release-context-guard.sh' }
 assert.call(!publisher_checkout_index.nil? && !publisher_guard_index.nil? && publisher_checkout_index < publisher_guard_index, 'publish context helper must run after checkout')
+attestation_index = publisher_steps.index { |step| step['uses']&.start_with?('actions/attest-build-provenance@') }
+assert.call(!attestation_index.nil? && publisher_guard_index < attestation_index, 'release artifacts must be attested only after the trusted context guard')
+assert.call(publisher_steps.fetch(attestation_index).fetch('if') == "steps.guard.outputs.skip != 'true'", 'skipped releases must not mint provenance credentials')
+sbom_index = publisher_steps.index { |step| step['uses']&.start_with?('anchore/sbom-action@') }
+sbom_attestation_index = publisher_steps.index { |step| step['uses']&.start_with?('actions/attest-sbom@') }
+assert.call(!sbom_index.nil? && publisher_guard_index < sbom_index, 'SBOM generation must run only after the trusted context guard')
+assert.call(!sbom_attestation_index.nil? && sbom_index < sbom_attestation_index, 'staged release artifacts must receive the generated SBOM attestation')
+assert.call(publisher_steps.fetch(sbom_attestation_index).fetch('with').fetch('subject-checksums') == 'dist/STAGED-ARTIFACT-SHA256SUMS', 'SBOM attestation must bind the immutable staged-artifact digest list')
+sbom_generator = publisher_steps.fetch(sbom_index)
+assert.call(sbom_generator.fetch('with').fetch('path') == 'dist/release', 'SBOM generation must scan only staged release artifacts')
+assert.call(sbom_generator.fetch('with').fetch('upload-artifact') == false && sbom_generator.fetch('with').fetch('upload-release-assets') == false, 'SBOM generation must not alter release assets or upload an unaudited artifact')
+publisher_steps.each_with_index.select { |step, _index| step['uses']&.start_with?('anchore/sbom-action@') }.each do |step, index|
+  output_file = step.fetch('with').fetch('output-file')
+  output_directory_step = publisher_steps.fetch(index - 1)
+  assert.call(output_directory_step.fetch('name') == 'Create staged release artifact SBOM directory', 'SBOM generation must create its output directory immediately before running')
+  assert.call(output_directory_step.fetch('if') == step.fetch('if'), 'SBOM output directory creation must use the SBOM guard')
+  assert.call(Shellwords.shellsplit(output_directory_step.fetch('run')) == ['mkdir', '-p', File.dirname(output_file)], 'SBOM output directory creation must make the parent of the configured output file')
+end
 desktop_download = publisher_steps.find { |step| step.dig('with', 'pattern') == 'desktop-*-release-artifacts' }
 android_download = publisher_steps.find { |step| step.dig('with', 'name') == 'android-release-artifacts' }
 assert.call(!desktop_download.nil? && desktop_download.fetch('if').include?("inputs.component == 'desktop'"), 'desktop publisher must download only desktop release artifacts')
@@ -213,6 +233,14 @@ assert.call(!desktop_download.dig('with', 'pattern').include?('android-release-a
 assert.call(!android_download.nil? && android_download.fetch('if').include?("inputs.component == 'android'"), 'Android publisher must download exactly Android release artifacts')
 # A by-name download extracts straight into path; only pattern downloads add a per-artifact directory.
 assert.call(android_download.dig('with', 'path') == 'dist/download/android-release-artifacts', 'Android download must land where stage-assets.sh reads android-release-artifacts')
+
+publisher_call_permissions = { 'contents' => 'write', 'attestations' => 'write', 'id-token' => 'write' }
+%w[publish-prerelease publish-prerelease-android].each do |job_name|
+  assert.call(ci_jobs.fetch(job_name).fetch('permissions') == publisher_call_permissions, "#{job_name} must grant the reusable publisher provenance permissions")
+end
+%w[publish publish-android].each do |job_name|
+  assert.call(release.fetch('jobs').fetch(job_name).fetch('permissions') == publisher_call_permissions, "#{job_name} must grant the nested publisher provenance permissions")
+end
 
 trusted_contexts = 'workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging'
 helper = File.read(File.join(__dir__, 'release-context-guard.sh'))
@@ -285,6 +313,7 @@ assert.call(notes_env.fetch('PEPPY_WINDOWS_SIGNING_MODE').include?("vars.PEPPY_W
 android_notes_step = publisher_steps.find { |step| step['run'] == 'infra/release/release-notes.sh "$VERSION" --component android > dist/notes.md' }
 assert.call(android_notes_step&.dig('env', 'TRUSTED_UPDATE_BUILD') == '${{ inputs.trusted_update_build }}', 'Android release notes must receive trusted-build status')
 publisher_group = publisher.fetch('jobs').fetch('publish').fetch('concurrency').fetch('group')
+assert.call(!publisher.fetch('jobs').fetch('publish').key?('needs'), 'attestation must run in the protected publisher job without a second environment approval')
 assert.call(publisher_group == "${{ inputs.component == 'android' && 'release-publish-android' || 'release-publish' }}", 'desktop publishing must keep the release-publish group while Android queues separately')
 
 dev_artifacts_with = ci_jobs.fetch('development-artifacts').fetch('with')
@@ -363,7 +392,7 @@ assert.call(android_steps.any? { |step| step.dig('with', 'path') == 'dist/androi
 assert.call(android_steps.any? { |step| step.dig('with', 'path') == "dist/android-release/peppy-android.apk\ndist/android-release/peppy-android.aab\n" }, 'release Android artifact must contain only signed assets')
 android_development_build = android_steps.find { |step| step['name'] == 'Build development Android debug APK' }
 assert.call(android_development_build.fetch('env').fetch('PEPPY_ANDROID_NATIVE_PROFILE') == 'release', 'development Android builds must retain release native compilation')
-assert.call(android_development_build.fetch('run').include?(':app:assembleDebug :app:assembleRelease :app:bundleRelease'), 'development Android builds must retain release variant compilation')
+assert.call(android_development_build.fetch('run').include?('--dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleRelease :app:bundleRelease'), 'development Android builds must verify release dependencies and the merged manifest before producing artifacts')
 
 stage_script = File.read(File.join(root, '..', 'infra', 'release', 'stage-assets.sh'))
 assert.call(stage_script.include?("peppy-android.apk") && stage_script.include?("peppy-android.aab"), 'staging must require signed Android artifact names')

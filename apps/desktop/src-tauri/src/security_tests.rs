@@ -244,6 +244,82 @@ fn allow(command: &str) -> String {
     format!("allow-{}", command.replace('_', "-"))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CommandWindowRisk {
+    Main,
+    MainAndComposer,
+    MainComposerAndMedia,
+    Composer,
+}
+
+#[test]
+fn update_activity_reporting_is_allowed_from_main_and_composer_windows() {
+    assert_eq!(
+        command_window_risk("report_update_activity"),
+        CommandWindowRisk::MainAndComposer
+    );
+}
+
+/// Explicit window-risk registry. New commands default to main-only, the least-privileged window.
+fn command_window_risk(command: &str) -> CommandWindowRisk {
+    if [
+        "media_page",
+        "media_page_around",
+        "media_page_newer",
+        "open_media",
+        "load_media",
+        "close_media",
+        "save_attachment",
+        "copy_attachment_image",
+    ]
+    .contains(&command)
+    {
+        CommandWindowRisk::MainComposerAndMedia
+    } else if ["close_composer", "close_head_panel", "open_media_viewer"].contains(&command) {
+        CommandWindowRisk::Composer
+    } else if command == "report_update_activity" || crate::COMPOSER_COMMANDS.contains(&command) {
+        CommandWindowRisk::MainAndComposer
+    } else {
+        CommandWindowRisk::Main
+    }
+}
+
+#[test]
+fn command_risk_registry_classifies_every_declared_command_and_its_window_acl() {
+    let main = permissions(include_str!("../capabilities/default.json"));
+    let composer = permissions(include_str!("../capabilities/composer.json"));
+    let media = permissions(include_str!("../capabilities/media.json"));
+
+    for command in declared_commands() {
+        let permission = allow(&command);
+        match command_window_risk(&command) {
+            CommandWindowRisk::Main => {
+                assert!(main.contains(&permission), "main lacks {command}");
+                assert!(
+                    !composer.contains(&permission),
+                    "composer can call {command}"
+                );
+                assert!(!media.contains(&permission), "media can call {command}");
+            }
+            CommandWindowRisk::MainAndComposer => {
+                assert!(main.contains(&permission), "main lacks {command}");
+                assert!(composer.contains(&permission), "composer lacks {command}");
+                assert!(!media.contains(&permission), "media can call {command}");
+            }
+            CommandWindowRisk::MainComposerAndMedia => {
+                assert!(main.contains(&permission), "main lacks {command}");
+                assert!(composer.contains(&permission), "composer lacks {command}");
+                assert!(media.contains(&permission), "media lacks {command}");
+            }
+            CommandWindowRisk::Composer => {
+                assert!(!main.contains(&permission), "main can call {command}");
+                assert!(composer.contains(&permission), "composer lacks {command}");
+                assert!(!media.contains(&permission), "media can call {command}");
+            }
+        }
+    }
+}
+
 #[test]
 fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let commands = declared_commands();

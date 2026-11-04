@@ -54,8 +54,10 @@ pub struct EnrollmentRouterState {
     pub db: PgPool,
     pub authorization: Arc<dyn EnrollmentAuthorization>,
     pub hosted: bool,
+    pub rls_enforced: bool,
     canonical_origin: String,
     manual_owner_admissions: Arc<std::sync::Mutex<HashMap<IpAddr, ManualOwnerAdmission>>>,
+    proof_admissions: Arc<tokio::sync::Mutex<crate::api::admission::LocalAdmissions>>,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
 }
 
@@ -75,10 +77,19 @@ impl EnrollmentRouterState {
             db,
             authorization,
             hosted,
+            rls_enforced: false,
             canonical_origin: canonical_configured_origin(&configured_origin)?,
             manual_owner_admissions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            proof_admissions: Arc::new(tokio::sync::Mutex::new(
+                crate::api::admission::LocalAdmissions::new(),
+            )),
             trusted_proxy_cidrs: Arc::new(Vec::new()),
         })
+    }
+
+    pub fn with_rls_enforced(mut self, enabled: bool) -> Self {
+        self.rls_enforced = enabled;
+        self
     }
 
     pub fn with_trusted_proxy_cidrs(mut self, trusted_proxy_cidrs: Vec<IpNet>) -> Self {
@@ -108,6 +119,9 @@ async fn create_challenge(
     headers: HeaderMap,
     Json(request): Json<AdmissionChallengeRequest>,
 ) -> Result<Json<AdmissionChallenge>, ManualError> {
+    let source_peer = peer.as_ref().map(|Extension(ConnectInfo(peer))| {
+        resolve_client_ip(*peer, &headers, &state.trusted_proxy_cidrs)
+    });
     let community_origin = (!state.hosted)
         .then(|| request_origin(&state, &headers))
         .transpose()?;
@@ -152,6 +166,25 @@ async fn create_challenge(
         ),
     };
     let origin = community_origin.unwrap_or_else(|| state.canonical_origin.clone());
+    let source = crate::api::admission::source_digest(b"manual-challenge", source_peer);
+    if !state.proof_admissions.lock().await.admit(source) {
+        return Err(ManualError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "challenge_limited",
+        ));
+    }
+    crate::api::admission::admit_durably(
+        &state.db,
+        crate::api::admission::AdmissionOperation::ManualChallenge,
+        source,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::api::admission::AdmissionError::Limited => {
+            ManualError(StatusCode::TOO_MANY_REQUESTS, "challenge_limited")
+        }
+        crate::api::admission::AdmissionError::Database(error) => database_error(error),
+    })?;
     if !state.hosted
         && request
             .vault_id
@@ -389,6 +422,7 @@ async fn create_challenge(
 
 async fn complete_challenge(
     State(state): State<EnrollmentRouterState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Path(enrollment_id): Path<Uuid>,
     Json(request): Json<CompleteAdmissionRequest>,
@@ -397,6 +431,18 @@ async fn complete_challenge(
         .then(|| request_origin(&state, &headers))
         .transpose()?;
     let credential_digest = credential_digest(&request.credential_digest)?;
+    let source = crate::api::admission::source_digest(
+        b"manual-proof",
+        peer.as_ref().map(|Extension(ConnectInfo(peer))| {
+            resolve_client_ip(*peer, &headers, &state.trusted_proxy_cidrs)
+        }),
+    );
+    if !state.proof_admissions.lock().await.admit(source) {
+        return Err(ManualError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "challenge_proof_limited",
+        ));
+    }
     let admission_signature = decode_base64url::<64>(&request.admission_signature)
         .map_err(|_| ManualError(StatusCode::UNAUTHORIZED, "invalid_admission_proof"))?;
     let device_signature = decode_base64url::<64>(&request.device_signature)
@@ -421,6 +467,13 @@ async fn complete_challenge(
     };
     let vault_id = if let Some(context) = hosted_context.as_ref() {
         context.vault_id
+    } else if state.rls_enforced {
+        sqlx::query_scalar::<_, Uuid>("SELECT vault_id FROM community_resolve_device_admission($1)")
+            .bind(enrollment_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(database_error)?
+            .ok_or(ManualError(StatusCode::UNAUTHORIZED, "challenge_invalid"))?
     } else {
         sqlx::query_scalar::<_, Uuid>("SELECT vault_id FROM device_admissions WHERE id = $1")
             .bind(enrollment_id)
@@ -430,6 +483,43 @@ async fn complete_challenge(
             .ok_or(ManualError(StatusCode::UNAUTHORIZED, "challenge_invalid"))?
     };
     let origin = community_origin.unwrap_or_else(|| state.canonical_origin.clone());
+    let target = crate::api::admission::targeted_source_digest(
+        b"manual-proof",
+        peer.map(|Extension(ConnectInfo(peer))| {
+            resolve_client_ip(peer, &headers, &state.trusted_proxy_cidrs)
+        }),
+        enrollment_id.as_bytes(),
+    );
+    if !state.proof_admissions.lock().await.admit(target) {
+        return Err(ManualError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "challenge_proof_limited",
+        ));
+    }
+    crate::api::admission::admit_durably(
+        &state.db,
+        crate::api::admission::AdmissionOperation::ManualProof,
+        source,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::api::admission::AdmissionError::Limited => {
+            ManualError(StatusCode::TOO_MANY_REQUESTS, "challenge_proof_limited")
+        }
+        crate::api::admission::AdmissionError::Database(error) => database_error(error),
+    })?;
+    crate::api::admission::admit_durably(
+        &state.db,
+        crate::api::admission::AdmissionOperation::ManualProof,
+        target,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::api::admission::AdmissionError::Limited => {
+            ManualError(StatusCode::TOO_MANY_REQUESTS, "challenge_proof_limited")
+        }
+        crate::api::admission::AdmissionError::Database(error) => database_error(error),
+    })?;
 
     let mut transaction = scope::begin(&state.db, vault_id)
         .await
@@ -466,7 +556,6 @@ async fn complete_challenge(
         .map_err(database_error)?;
     }
     if row.get::<String, _>("origin") != origin
-        || row.get::<i32, _>("failed_attempts") >= MAX_FAILED_PROOFS
         || row.get::<Vec<u8>, _>("credential_digest").as_slice() != credential_digest
     {
         record_failed_proof(&mut transaction, enrollment_id).await?;
@@ -711,13 +800,17 @@ fn admit_manual_owner_source(
     Ok(())
 }
 
-fn resolve_client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -> IpAddr {
+pub(crate) fn resolve_client_ip(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    trusted: &[IpNet],
+) -> IpAddr {
     if !trusted.iter().any(|network| network.contains(&peer.ip())) {
-        return peer.ip();
+        return peer.ip().to_canonical();
     }
     let forwarded: Vec<_> = headers.get_all("x-forwarded-for").iter().collect();
     if forwarded.len() != 1 || forwarded[0].as_bytes().len() > 8192 {
-        return peer.ip();
+        return peer.ip().to_canonical();
     }
     let Some(hops) = std::str::from_utf8(forwarded[0].as_bytes())
         .ok()
@@ -734,12 +827,13 @@ fn resolve_client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -
                 .collect::<Option<Vec<IpAddr>>>()
         })
     else {
-        return peer.ip();
+        return peer.ip().to_canonical();
     };
     hops.into_iter()
         .rev()
         .find(|hop| !trusted.iter().any(|network| network.contains(hop)))
         .unwrap_or_else(|| peer.ip())
+        .to_canonical()
 }
 
 fn validate_device(device: &ProposedDevice) -> Result<[u8; 32], ManualError> {
@@ -773,6 +867,7 @@ fn credential_digest(value: &str) -> Result<[u8; 32], ManualError> {
             "invalid_credential_digest",
         ))
 }
+
 fn parse_fingerprint(value: String) -> Result<[u8; 32], ManualError> {
     credential_digest(&value)
         .map_err(|_| ManualError(StatusCode::CONFLICT, "invalid_vault_fingerprint"))
@@ -860,9 +955,8 @@ async fn record_failed_proof(
 ) -> Result<(), ManualError> {
     sqlx::query(
         "UPDATE device_admissions
-         SET failed_attempts = failed_attempts + 1,
-             expires_at = CASE WHEN failed_attempts + 1 >= $2 THEN now() ELSE expires_at END
-         WHERE id = $1 AND consumed_at IS NULL",
+          SET failed_attempts = (failed_attempts + 1) % $2
+          WHERE id = $1 AND consumed_at IS NULL",
     )
     .bind(enrollment_id)
     .bind(MAX_FAILED_PROOFS)
@@ -887,5 +981,24 @@ impl axum::response::IntoResponse for ManualError {
             Json(serde_json::json!({"error": self.1, "code": self.1})),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_owner_limiter_canonicalizes_ipv4_mapped_ipv6() {
+        let headers = HeaderMap::new();
+        let ipv4 = resolve_client_ip("192.0.2.1:443".parse().unwrap(), &headers, &[]);
+        let mapped = resolve_client_ip("[::ffff:192.0.2.1]:443".parse().unwrap(), &headers, &[]);
+        assert_eq!(ipv4, mapped);
+
+        let admissions = std::sync::Mutex::new(HashMap::new());
+        for _ in 0..MANUAL_OWNER_LIMIT {
+            assert!(admit_manual_owner_source(&admissions, ipv4).is_ok());
+        }
+        assert!(admit_manual_owner_source(&admissions, mapped).is_err());
     }
 }

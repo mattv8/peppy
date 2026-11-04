@@ -8,7 +8,7 @@ let snapshot: DesktopSnapshot;
 
 beforeEach(async () => {
   vi.restoreAllMocks();
-  snapshot = structuredClone(await fixtureBridge.load_state());
+  snapshot = { ...structuredClone(await fixtureBridge.load_state()), mode: "native" };
   vi.spyOn(bridge, "load_state").mockImplementation(async (conversationId) => ({
     ...structuredClone(snapshot),
     activeConversationId: conversationId ?? snapshot.activeConversationId,
@@ -27,7 +27,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("App mark-all-read boundary", () => {
+describe("App mark-all-read titlebar action", () => {
   it("derives availability from the full conversation snapshot rather than mirrored notifications", async () => {
     snapshot = {
       ...snapshot,
@@ -35,11 +35,12 @@ describe("App mark-all-read boundary", () => {
     };
     render(<App hostKind="browser" />);
 
-    await screen.findByRole("toolbar", { name: "Thread list toolbar" });
-    expect(screen.queryByRole("button", { name: "Mark all as read" })).not.toBeInTheDocument();
+    const action = await screen.findByRole("button", { name: "Mark all as read" });
+    expect(action).toBeDisabled();
+    expect(document.getElementById("titlebar-actions")).toContainElement(action);
   });
 
-  it("marks the full snapshot count after filtering and removes only the trigger after an authoritative zero refresh", async () => {
+  it("marks the full snapshot count after filtering and keeps its toast in the visible thread list", async () => {
     snapshot = {
       ...snapshot,
       notifications: [],
@@ -62,7 +63,9 @@ describe("App mark-all-read boundary", () => {
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Mark all as read" }));
 
     await waitFor(() => expect(bridge.mark_all_read).toHaveBeenCalledOnce());
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Mark all as read" })).not.toBeInTheDocument());
-    expect(document.getElementById("thread-list-action-notice")).toHaveTextContent(/Marked/);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Mark all as read" })).toBeDisabled());
+    const notice = document.getElementById("thread-list-action-notice")!;
+    expect(notice).toHaveTextContent(/Marked/);
+    expect(document.getElementById("thread-list")).toContainElement(notice);
   });
 });

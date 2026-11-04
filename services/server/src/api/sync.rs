@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use super::{
     ApiError, ApiResult, ApiState, Operation, auth_with_mode, authorize, database_unavailable,
+    still_active,
 };
 use crate::storage::Storage;
 
@@ -379,6 +380,12 @@ pub(super) async fn events(
 ) -> Result<Response, ApiError> {
     let p = auth_with_mode(&s, &h).await?;
     authorize(&s, &p, Operation::Sync).await?;
+    if !still_active(&s, &p)
+        .await
+        .map_err(|error| database_unavailable(&error, "events_replay_revalidate"))?
+    {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid_bearer"));
+    }
     let after = parse_cursor(q.after.as_deref().unwrap_or("0"))?;
     match replay_page(&s.db, p.vault, after, page_limit(q.limit))
         .await

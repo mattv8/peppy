@@ -283,8 +283,15 @@ async fn vaults(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<VaultSummary>>> {
     require_admin(&state, &headers, false).await?;
-    let rows = sqlx::query("SELECT owners.vault_id, owners.username, owners.is_admin, to_char(owners.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') created_at, (SELECT count(*) FROM devices WHERE vault_id=owners.vault_id)::bigint device_count, (SELECT COALESCE(sum(ciphertext_bytes),0)::bigint FROM attachments WHERE vault_id=owners.vault_id) storage_bytes FROM vault_owners owners ORDER BY owners.created_at")
-        .fetch_all(&state.db).await.map_err(|error| super::super::database_unavailable(&error, "vault_list"))?;
+    let query = if state.rls_enforced && !state.row_security {
+        "SELECT vault_id,username,is_admin,created_at,device_count,storage_bytes FROM community_admin_vault_summaries()"
+    } else {
+        "SELECT owners.vault_id, owners.username, owners.is_admin, to_char(owners.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') created_at, (SELECT count(*) FROM devices WHERE vault_id=owners.vault_id)::bigint device_count, (SELECT COALESCE(sum(ciphertext_bytes),0)::bigint FROM attachments WHERE vault_id=owners.vault_id) storage_bytes FROM vault_owners owners ORDER BY owners.created_at"
+    };
+    let rows = sqlx::query(query)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| super::super::database_unavailable(&error, "vault_list"))?;
     Ok(Json(
         rows.into_iter()
             .map(|row| VaultSummary {
@@ -341,6 +348,11 @@ async fn create_vault(
         request.material.key_epoch,
     )
     .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "invalid_vault_material"))?;
+    if state.rls_enforced {
+        crate::scope::set(&mut tx, vault_id)
+            .await
+            .map_err(|error| super::super::database_unavailable(&error, "create_vault_scope"))?;
+    }
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM vaults WHERE vault_id=$1)")
         .bind(vault_id)
         .fetch_one(&mut *tx)

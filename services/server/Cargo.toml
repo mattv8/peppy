@@ -19,6 +19,9 @@ hex.workspace = true
 quick-xml = "=0.41.0"
 # Unused since health signing moved to the aws-sigv4 adapter; removal needs a root Cargo.lock refresh.
 hmac.workspace = true
+http-body-util.workspace = true
+hyper = { version = "=1.11.1", features = ["server", "http1"] }
+hyper-util = { version = "=0.1.21", features = ["server", "tokio", "service"] }
 ipnet.workspace = true
 libsodium-rs.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
@@ -43,7 +46,6 @@ peppy-client-core.workspace = true
 peppy-hosted-client = { path = "../../crates/hosted-client", version = "0.1.0" }
 peppy-crypto.workspace = true
 tempfile.workspace = true
-http-body-util.workspace = true
 tower.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 tokio-tungstenite.workspace = true

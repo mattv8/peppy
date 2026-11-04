@@ -23,10 +23,21 @@ impl ClaimPolicy {
     pub fn authorizes(self, token: &str) -> bool {
         match self {
             Self::Open => true,
-            Self::TokenRequired(expected) => expected == digest(token.as_bytes()),
+            Self::TokenRequired(expected) => {
+                constant_time_digest_eq(expected, digest(token.as_bytes()))
+            }
             Self::Disabled => false,
         }
     }
+}
+
+fn constant_time_digest_eq(left: [u8; 32], right: [u8; 32]) -> bool {
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 pub fn validate_password(password: &str) -> Result<(), &'static str> {
