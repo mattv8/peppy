@@ -31,6 +31,7 @@ export function MarkAllReadAction({ unreadCount, enabled, markAllRead, refresh, 
   const inFlightRef = useRef(false);
   const mountedRef = useRef(true);
   const focusOwnedRef = useRef(false);
+  const restoreFocusAfterPendingRef = useRef(false);
   const focusFallbackRef = useRef(onFocusFallback);
   focusFallbackRef.current = onFocusFallback;
 
@@ -62,6 +63,11 @@ export function MarkAllReadAction({ unreadCount, enabled, markAllRead, refresh, 
       if (confirming) closeConfirmation();
     }
   }, [enabled, pending, confirming]);
+  useEffect(() => {
+    if (pending || !restoreFocusAfterPendingRef.current) return;
+    restoreFocusAfterPendingRef.current = false;
+    deferRestoredFocus();
+  }, [pending]);
   useEffect(() => {
     if (unreadCount || pending) return;
     const ownedFocus = focusOwnedRef.current;
@@ -127,7 +133,7 @@ export function MarkAllReadAction({ unreadCount, enabled, markAllRead, refresh, 
       if (mountedRef.current) await refreshAfterAcknowledgement("mutation");
     } finally {
       if (mountedRef.current) {
-        restoreFocus(ownedFocus);
+        restoreFocusAfterPendingRef.current = ownedFocus;
         setPending(false);
         setConfirming(false);
       }
