@@ -11,11 +11,15 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -43,6 +47,14 @@ import dev.peppy.mobile.gateway.GatewayStatus
 import dev.peppy.mobile.gateway.SyncPhase
 import dev.peppy.mobile.granted
 import dev.peppy.mobile.mms.MmsSettings
+import dev.peppy.mobile.mms.RestrictedMessageAccess
+import dev.peppy.mobile.advanced.AdvancedFeatureState
+import dev.peppy.mobile.advanced.readAdvancedAccess
+import dev.peppy.mobile.advanced.readAdvancedFeatureState
+import dev.peppy.mobile.advanced.markAdvancedFeaturesSeen
+import dev.peppy.mobile.advanced.showNewFeatureHint
+import dev.peppy.mobile.restrictedsetup.restrictedSetupAvailable
+import dev.peppy.mobile.restrictedsetup.RestrictedSetupEntry
 import dev.peppy.mobile.phoneread.PhoneReadSettings
 import dev.peppy.mobile.syncMessage
 import dev.peppy.mobile.telephony.SimRoutes
@@ -91,6 +103,7 @@ internal fun SmsTab(
     var permissionDenied by remember { mutableStateOf(false) }
     var detailsOpen by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf(SmsHistoryState.WAITING_FOR_VAULT) }
+    var advancedFeatures by remember { mutableStateOf<AdvancedFeatureState?>(null) }
     val deniedHint = stringResource(R.string.peppy_toggle_android_sms_denied_hint)
     val guardFailedHint = stringResource(R.string.peppy_toggle_android_sms_guard_failed)
     val allGranted = SMS_PERMISSIONS.all { granted(context, it) }
@@ -144,7 +157,7 @@ internal fun SmsTab(
     val settingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         consumePermissionResult(SMS_PERMISSIONS.all { granted(context, it) })
     }
-    androidx.compose.runtime.LaunchedEffect(refresh) {
+    LaunchedEffect(refresh) {
         policy = withContext(Dispatchers.IO) { GatewayPolicyHost(context).smsCaptureEnabled }
         history = withContext(Dispatchers.IO) {
             val fallback = smsHistoryState(
@@ -154,12 +167,18 @@ internal fun SmsTab(
             )
             readSmsHistoryState(context, fallback)
         }
+        advancedFeatures = withContext(Dispatchers.IO) { readAdvancedFeatureState(context) }
     }
     DisposableEffect(detailsOpen) {
         onDetailsChanged(detailsOpen)
         onDispose {
             consent = consent.cancel()
             onDetailsChanged(false)
+        }
+    }
+    LaunchedEffect(detailsOpen) {
+        if (!detailsOpen) {
+            advancedFeatures = withContext(Dispatchers.IO) { readAdvancedFeatureState(context) }
         }
     }
     fun beginEnable() {
@@ -221,6 +240,7 @@ internal fun SmsTab(
                     syncMessage(it),
                 )
             }
+            if (restrictedSetupAvailable(context)) AdvancedFeaturesSection(context, refresh, onChanged)
             MmsSettings(context, refresh, databaseOpen, onChanged, detailsOnly = true)
             SmsSettings(context, history)
         }
@@ -274,6 +294,16 @@ internal fun SmsTab(
             gatewayStatus?.let { !it.databaseOpen || !it.sharedKeysReady || it.syncPhase != SyncPhase.LIVE || it.outboxRejection != null || it.softRejection != null } == true
         if (attention) Text(stringResource(smsHistoryLabel(history)), Modifier.testTag("sms-details-attention"))
         gatewayStatus?.takeIf { attention }?.let { Text(syncMessage(it), Modifier.testTag("sms-gateway-attention")) }
+        advancedFeatures?.let { features ->
+            if (restrictedSetupAvailable(context) && showNewFeatureHint(features.access.first, features.access.second, features.seen)) {
+                TextButton(onClick = { detailsOpen = true }, modifier = Modifier.fillMaxWidth().testTag("sms-advanced-features-summary")) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(stringResource(R.string.peppy_advanced_features_title))
+                        Text(stringResource(R.string.peppy_advanced_features_new_available))
+                    }
+                }
+            }
+        }
         OutlinedButton(onClick = { detailsOpen = true }, modifier = Modifier.testTag("sms-details-row")) { Text(stringResource(R.string.peppy_toggle_android_sync_details)) }
         }
     }
@@ -316,6 +346,19 @@ internal fun SmsTab(
         showPrivacyPolicy = false,
         dismissLabel = stringResource(R.string.peppy_toggle_android_keep_on),
     )
+}
+
+@Composable
+private fun AdvancedFeaturesSection(context: Context, refresh: Int, onChanged: () -> Unit) {
+    var capabilities by remember { mutableStateOf<Pair<RestrictedMessageAccess, RestrictedMessageAccess>?>(null) }
+    LaunchedEffect(refresh) {
+        capabilities = withContext(Dispatchers.IO) { readAdvancedAccess(context).also { markAdvancedFeaturesSeen(context) } }
+    }
+    val (restricted, blocked) = capabilities ?: return
+    if (restricted == RestrictedMessageAccess.UNSUPPORTED && blocked == RestrictedMessageAccess.UNSUPPORTED) return
+    Column(Modifier.testTag("advanced-features-section")) {
+        RestrictedSetupEntry(onAccessChanged = onChanged)
+    }
 }
 
 @Composable

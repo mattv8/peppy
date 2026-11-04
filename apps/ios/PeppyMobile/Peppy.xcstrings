@@ -1021,32 +1021,112 @@
         }
       }
     },
-    "peppy.restricted_setup_title": {
+    "peppy.advanced_features_title": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Set up on this phone"
+            "value": "Advanced features"
           }
         }
       }
     },
-    "peppy.restricted_setup_idle_body": {
+    "peppy.advanced_features_body": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use Wireless debugging to let Android allow Peppy's restricted message access, without a computer. You pair this phone with itself, then Peppy asks Android for that one setting."
+            "value": "Optional features that need one extra permission from Android. Peppy asks for it on this phone using Wireless debugging, without a computer."
           }
         }
       }
     },
-    "peppy.restricted_setup_idle_bridge": {
+    "peppy.advanced_features_blocked_title": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "In the Peppy app you downloaded directly, you can allow it on this phone instead."
+            "value": "Honor blocked senders"
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_restricted_desc": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recover RCS and MMS content your messaging app restricts. Peppy cannot send RCS."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_blocked_desc": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hide conversations with numbers you blocked in your messaging app, and unblock a number when you choose Not spam."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_action_setup": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set up advanced features"
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_action_finish": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish setup"
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_partial": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One of two features is on."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_all_on": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Both features are on."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_unsupported_help": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Android version does not offer one of these settings. The other can still be turned on."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_new_available": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 new feature available"
           }
         }
       }
@@ -1067,36 +1147,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "The pairing box is no longer ready. Open it again and try the new code."
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_wifi_off_option": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Turn Wireless debugging off when done"
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_wifi_off_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This also ends any Wireless debugging session from a computer."
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_start": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Set up on this phone"
           }
         }
       }
@@ -1126,7 +1176,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy will use it for one thing: allow its own restricted message access. It runs this command:"
+            "value": "Peppy will use it for one thing: allow two of its own settings on Android. It runs these commands:"
           }
         }
       }
@@ -1137,6 +1187,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Then it turns Wireless debugging off with this command:"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_capabilities": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restricted message access lets Peppy read RCS and MMS content your messaging app restricts. Honor blocked senders lets Peppy read the numbers you blocked in your messaging app and hide those conversations."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_write_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android has no read-only version of the blocked-senders setting. The same access could also change your blocked list and text messages. Peppy reads your blocked list, and removes a number only when you choose Unblock. It never edits, sends or deletes text messages with it."
           }
         }
       }
@@ -1166,7 +1236,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android may keep this pairing under Paired devices in Wireless debugging, as an entry named Peppy. Peppy does not keep its key, so you do not need to remove it. Removing it does not turn the restricted access off."
+            "value": "Android may keep this pairing under Paired devices in Wireless debugging, as an entry named Peppy. Peppy does not keep its key, so you do not need to remove it. Removing it does not turn the access off."
           }
         }
       }
@@ -1546,7 +1616,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Access allowed"
+            "value": "Advanced features are on"
           }
         }
       }
@@ -1556,7 +1626,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android reports that Peppy can read restricted messages on this phone. This shows the setting only. It does not promise that any particular RCS message or history is available."
+            "value": "Android reports the settings below as allowed. This shows the settings only. It does not promise that any particular RCS message, history or blocked number is available."
           }
         }
       }
@@ -1776,7 +1846,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android still reports restricted message access as not allowed."
+            "value": "Android still reports one or more features as not allowed."
           }
         }
       }

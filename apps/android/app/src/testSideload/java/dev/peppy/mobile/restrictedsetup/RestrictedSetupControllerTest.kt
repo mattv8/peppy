@@ -27,7 +27,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, discovery, transport, notifier)
-            assertTrue(controller.begin(RestrictedSetupOptions()))
+            assertTrue(controller.begin())
             discovery.pairing.value = 37122
             await(controller) { it.pairingPort == 37122 }
             val code = "123456".toCharArray()
@@ -44,7 +44,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, FakeDiscovery(), FakeTransport(), FakeNotifier())
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             val code = "12x456".toCharArray()
             assertEquals(CodeSubmitResult.INVALID_FORMAT, controller.submitCode(code, 37122))
             assertTrue(code.all { it == '\u0000' })
@@ -57,7 +57,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, discovery, FakeTransport(), FakeNotifier())
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
             discovery.pairing.value = null
@@ -71,7 +71,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, discovery, FakeTransport(), FakeNotifier(), RestrictedSetupDeadlines(pairingServiceHintMillis = 1))
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             await(controller) { it.discovery == RestrictedSetupDiscovery.TIMED_OUT }
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
@@ -83,7 +83,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, discovery, FakeNotifier(), FakeWireless(true))
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
 
             await(controller) { it.activeHint == RestrictedSetupHint.NETWORK_NOT_ALLOWED }
         } finally { scope.cancel() }
@@ -95,7 +95,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, discovery, notifier, FakeWireless(true))
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             await(controller) { it.activeHint == RestrictedSetupHint.NETWORK_NOT_ALLOWED }
 
             discovery.connect.value = 37123
@@ -118,7 +118,7 @@ class RestrictedSetupControllerTest {
         try {
             val notifier = FakeNotifier()
             val controller = controller(scope, discovery, first, notifier, factory = RestrictedSetupTransportFactory { if (creates++ == 0) first else second })
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
             assertEquals(CodeSubmitResult.ACCEPTED, controller.submitCode("123456".toCharArray()))
@@ -140,7 +140,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, discovery, FakeTransport(), FakeNotifier(), RestrictedSetupDeadlines(connectServiceMillis = 1))
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
             controller.submitCode("123456".toCharArray())
@@ -156,14 +156,102 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, discovery, transport, FakeNotifier())
-            controller.begin(RestrictedSetupOptions(turnOffWirelessDebugging = true))
+            controller.begin()
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
             controller.submitCode("123456".toCharArray())
             discovery.connect.value = 37123
             await(controller) { it.stage == RestrictedSetupStage.COMPLETE }
             assertEquals(WirelessDebuggingOutcome.REQUESTED, controller.state.value.wirelessDebugging)
-            assertEquals(listOf("pair", "connect", "grant", "readback", "off"), transport.events)
+            assertEquals(listOf("pair", "connect", "grant-restricted", "grant-blocked", "readback", "off"), transport.events)
+        } finally { scope.cancel() }
+    }
+
+    @Test fun `partial readback fails verification after both grants`() = runBlocking {
+        val discovery = FakeDiscovery()
+        val transport = FakeTransport()
+        val scope = CoroutineScope(Dispatchers.Default)
+        try {
+            val controller = controller(
+                scope, discovery, transport, FakeNotifier(),
+                readback = RestrictedSetupReadback(RestrictedSetupAccess.ALLOWED, RestrictedSetupAccess.NOT_ALLOWED),
+            )
+            controller.begin()
+            discovery.pairing.value = 37122
+            await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
+            controller.submitCode("123456".toCharArray())
+            discovery.connect.value = 37123
+            await(controller) { it.stage == RestrictedSetupStage.FAILED }
+            assertEquals(RestrictedSetupFailure.NOT_VERIFIED, controller.state.value.failure)
+            assertEquals(RestrictedSetupAccess.NOT_ALLOWED, controller.state.value.blockedSendersAccess)
+            assertEquals(listOf("pair", "connect", "grant-restricted", "grant-blocked", "readback", "off"), transport.events)
+        } finally { scope.cancel() }
+    }
+
+    @Test fun `unsupported capability is skipped during verification`() = runBlocking {
+        val discovery = FakeDiscovery()
+        val transport = FakeTransport()
+        val scope = CoroutineScope(Dispatchers.Default)
+        try {
+            val controller = controller(
+                scope, discovery, transport, FakeNotifier(),
+                readback = RestrictedSetupReadback(RestrictedSetupAccess.ALLOWED, RestrictedSetupAccess.UNSUPPORTED),
+            )
+            controller.begin()
+            discovery.pairing.value = 37122
+            await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
+            controller.submitCode("123456".toCharArray())
+            discovery.connect.value = 37123
+            await(controller) { it.stage == RestrictedSetupStage.COMPLETE }
+            assertEquals(RestrictedSetupAccess.UNSUPPORTED, controller.state.value.blockedSendersAccess)
+        } finally { scope.cancel() }
+    }
+
+    @Test fun `hung grant still reads back and turns wireless debugging off`() = runBlocking {
+        val discovery = FakeDiscovery()
+        val transport = FakeTransport().apply { grantDelayMillis = 100 }
+        val scope = CoroutineScope(Dispatchers.Default)
+        try {
+            val controller = controller(scope, discovery, transport, FakeNotifier(), RestrictedSetupDeadlines(grantAndReadbackMillis = 1))
+            completeAttempt(controller, discovery)
+            assertTrue(transport.events.contains("readback"))
+            assertTrue(transport.events.contains("off"))
+        } finally { scope.cancel() }
+    }
+
+    @Test fun `hung readback fails after turning wireless debugging off`() = runBlocking {
+        val discovery = FakeDiscovery()
+        val transport = FakeTransport()
+        val scope = CoroutineScope(Dispatchers.Default)
+        try {
+            val controller = controller(scope, discovery, transport, FakeNotifier(), RestrictedSetupDeadlines(grantAndReadbackMillis = 1), readbackDelayMillis = 100)
+            completeAttempt(controller, discovery)
+            assertEquals(RestrictedSetupFailure.TIMED_OUT, controller.state.value.failure)
+            assertTrue(controller.state.value.wirelessDebugging != WirelessDebuggingOutcome.NOT_REQUESTED)
+        } finally { scope.cancel() }
+    }
+
+    @Test fun `hung turn off completes with wireless debugging still requested`() = runBlocking {
+        val discovery = FakeDiscovery()
+        val transport = FakeTransport().apply { turnOffDelayMillis = 100 }
+        val scope = CoroutineScope(Dispatchers.Default)
+        try {
+            val controller = controller(scope, discovery, transport, FakeNotifier(), RestrictedSetupDeadlines(turnOffMillis = 1))
+            completeAttempt(controller, discovery)
+            assertEquals(RestrictedSetupStage.COMPLETE, controller.state.value.stage)
+            assertEquals(WirelessDebuggingOutcome.REQUESTED, controller.state.value.wirelessDebugging)
+        } finally { scope.cancel() }
+    }
+
+    @Test fun `throwing grant leaves readback to decide outcome and turns wireless debugging off`() = runBlocking {
+        val discovery = FakeDiscovery()
+        val transport = FakeTransport().apply { grantFails = true }
+        val scope = CoroutineScope(Dispatchers.Default)
+        try {
+            val controller = controller(scope, discovery, transport, FakeNotifier())
+            completeAttempt(controller, discovery)
+            assertEquals(RestrictedSetupStage.COMPLETE, controller.state.value.stage)
+            assertTrue(transport.events.containsAll(listOf("readback", "off")))
         } finally { scope.cancel() }
     }
 
@@ -173,7 +261,7 @@ class RestrictedSetupControllerTest {
         try {
             val notifier = FakeNotifier()
             val controller = controller(scope, discovery, FakeTransport(), notifier)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             controller.cancel()
             val code = "123456".toCharArray()
             assertEquals(CodeSubmitResult.NOT_WAITING, RestrictedSetupCodeInbox.deliver(code))
@@ -190,7 +278,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, discovery, notifier, wireless, networkMillis = 50)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             awaitReads(wireless, 60)
             assertNull(controller.state.value.activeHint)
             assertFalse(notifier.notices.contains(RestrictedSetupNotice.NETWORK_NOT_ALLOWED))
@@ -203,7 +291,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, FakeDiscovery(), notifier, wireless)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             awaitReads(wireless, 10)
             assertNull(controller.state.value.activeHint)
             assertFalse(notifier.notices.contains(RestrictedSetupNotice.NETWORK_NOT_ALLOWED))
@@ -216,7 +304,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, FakeDiscovery(), notifier, wireless)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             awaitReads(wireless, 10)
             assertNull(controller.state.value.activeHint)
             assertFalse(notifier.notices.contains(RestrictedSetupNotice.NETWORK_NOT_ALLOWED))
@@ -229,7 +317,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, FakeDiscovery(), notifier, wireless)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             await(controller) { it.activeHint == RestrictedSetupHint.NETWORK_NOT_ALLOWED }
 
             wireless.value = false
@@ -250,7 +338,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, discovery, notifier, wireless, networkMillis = 20, checkMillis = 5)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             awaitReads(wireless, 10)
 
             discovery.connect.value = 37123
@@ -269,7 +357,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, FakeDiscovery(), notifier, wireless, networkMillis = 0)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             awaitReads(wireless, 10)
             assertNull(controller.state.value.activeHint)
             assertFalse(notifier.notices.contains(RestrictedSetupNotice.NETWORK_NOT_ALLOWED))
@@ -288,7 +376,7 @@ class RestrictedSetupControllerTest {
         }
         try {
             subject = controller(scope, discovery, FakeTransport(), notifier, RestrictedSetupDeadlines(networkAllowedHintMillis = 1, networkAllowedHintCheckMillis = 1), wireless = wireless)
-            subject.begin(RestrictedSetupOptions())
+            subject.begin()
             await(subject) { it.hint == RestrictedSetupHint.NO_WIFI }
             await(subject) { it.networkNotAllowed }
             assertEquals(RestrictedSetupHint.NO_WIFI, subject.state.value.activeHint)
@@ -302,7 +390,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, FakeDiscovery(), notifier, wireless)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             await(controller) { it.activeHint == RestrictedSetupHint.NETWORK_NOT_ALLOWED }
             awaitNotices(notifier, 2)
 
@@ -324,7 +412,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, FakeDiscovery(), notifier, wireless)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             await(controller) { it.activeHint == RestrictedSetupHint.NETWORK_NOT_ALLOWED }
             awaitNotices(notifier, 2)
 
@@ -349,7 +437,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, discovery, notifier, wireless, transport = transport)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             await(controller) { it.activeHint == RestrictedSetupHint.NETWORK_NOT_ALLOWED }
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
@@ -373,7 +461,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, discovery, transport, notifier)
-            assertTrue(controller.begin(RestrictedSetupOptions()))
+            assertTrue(controller.begin())
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
             assertEquals(CodeSubmitResult.ACCEPTED, controller.submitCode("123456".toCharArray()))
@@ -381,7 +469,7 @@ class RestrictedSetupControllerTest {
             await(controller) { it.stage == RestrictedSetupStage.FAILED && it.retryBlocked }
             assertEquals(RestrictedSetupFailure.TRANSPORT, controller.state.value.failure)
             awaitUntil("FAILED notice") { notifier.notices.contains(RestrictedSetupNotice.FAILED) }
-            assertFalse(controller.begin(RestrictedSetupOptions()))
+            assertFalse(controller.begin())
             assertNull(RestrictedSetupCodeInbox.sink)
         } finally { scope.cancel() }
     }
@@ -392,7 +480,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, discovery, transport, FakeNotifier())
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
             controller.submitCode("123456".toCharArray())
@@ -402,7 +490,7 @@ class RestrictedSetupControllerTest {
             await(controller) { it.retryBlocked }
             assertEquals(RestrictedSetupStage.COMPLETE, controller.state.value.stage)
             assertNull(controller.state.value.failure)
-            assertFalse(controller.begin(RestrictedSetupOptions()))
+            assertFalse(controller.begin())
         } finally { scope.cancel() }
     }
 
@@ -413,7 +501,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, discovery, notifier, wireless)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             await(controller) { it.activeHint == RestrictedSetupHint.NETWORK_NOT_ALLOWED }
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
@@ -436,7 +524,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, discovery, FakeTransport(), notifier)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
             awaitNotices(notifier, 2)
@@ -458,7 +546,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = networkController(scope, discovery, notifier, wireless)
-            controller.begin(RestrictedSetupOptions())
+            controller.begin()
             await(controller) { it.activeHint == RestrictedSetupHint.NETWORK_NOT_ALLOWED }
             discovery.pairing.value = 37122
             await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
@@ -488,7 +576,7 @@ class RestrictedSetupControllerTest {
         val scope = CoroutineScope(Dispatchers.Default)
         try {
             val controller = controller(scope, FakeDiscovery(), FakeTransport(), notifier)
-            assertTrue(controller.begin(RestrictedSetupOptions()))
+            assertTrue(controller.begin())
 
             controller.reportForegroundUnavailable()
 
@@ -496,7 +584,7 @@ class RestrictedSetupControllerTest {
             assertEquals(RestrictedSetupFailure.TRANSPORT, controller.state.value.failure)
             assertFalse(controller.state.value.retryBlocked)
             assertEquals(RestrictedSetupNotice.FAILED, notifier.notices.last())
-            assertTrue(controller.begin(RestrictedSetupOptions()))
+            assertTrue(controller.begin())
             controller.cancel()
         } finally { scope.cancel() }
     }
@@ -510,8 +598,10 @@ class RestrictedSetupControllerTest {
         factory: RestrictedSetupTransportFactory = RestrictedSetupTransportFactory { transport },
         wireless: RestrictedSetupWirelessReadback = RestrictedSetupWirelessReadback { null },
         addresses: Set<InetAddress> = setOf(loopback),
+        readback: RestrictedSetupReadback = RestrictedSetupReadback(RestrictedSetupAccess.ALLOWED, RestrictedSetupAccess.ALLOWED),
+        readbackDelayMillis: Long = 0,
     ) = RestrictedSetupController(
-        scope, factory, RestrictedSetupAccessReadback { transport.events += "readback"; true }, LocalAddressSupplier { addresses }, discovery, notifier, wireless, deadlines,
+        scope, factory, RestrictedSetupAccessReadback { transport.events += "readback"; if (readbackDelayMillis > 0) delay(readbackDelayMillis); readback }, LocalAddressSupplier { addresses }, discovery, notifier, wireless, deadlines,
     )
 
     /** LAN address (not loopback), so NO_WIFI does not interfere with network-hint tests. */
@@ -534,6 +624,15 @@ class RestrictedSetupControllerTest {
         withTimeout(5_000) { while (!predicate(controller.state.value)) delay(1) }
     } catch (_: TimeoutCancellationException) {
         fail("Timed out in state ${controller.state.value}")
+    }
+
+    private suspend fun completeAttempt(controller: RestrictedSetupController, discovery: FakeDiscovery) {
+        controller.begin()
+        discovery.pairing.value = 37122
+        await(controller) { it.discovery == RestrictedSetupDiscovery.FOUND }
+        controller.submitCode("123456".toCharArray())
+        discovery.connect.value = 37123
+        await(controller) { it.stage == RestrictedSetupStage.COMPLETE || it.stage == RestrictedSetupStage.FAILED }
     }
 
     private suspend fun awaitUntil(description: String, predicate: () -> Boolean) = try {
@@ -578,14 +677,17 @@ class RestrictedSetupControllerTest {
         val events = mutableListOf<String>()
         var rejectPair = false
         var turnOffFails = false
+        var grantFails = false
+        var grantDelayMillis = 0L
+        var turnOffDelayMillis = 0L
         var closeFails = false
         var onPair: () -> Unit = {}
         @Volatile var closed = false
         val closeAttempts = AtomicInteger()
         override suspend fun pair(endpoint: LocalEndpoint, code: CharArray) { events += "pair"; onPair(); if (rejectPair) throw PairingRejectedException() }
         override suspend fun connect(endpoint: LocalEndpoint) { events += "connect" }
-        override suspend fun grantOwnRestrictedAccess() { events += "grant" }
-        override suspend fun turnWirelessDebuggingOff() { events += "off"; if (turnOffFails) error("failed") }
+        override suspend fun grantAdvancedFeatures() { events += "grant-restricted"; events += "grant-blocked"; if (grantDelayMillis > 0) delay(grantDelayMillis); if (grantFails) error("failed") }
+        override suspend fun turnWirelessDebuggingOff() { events += "off"; if (turnOffDelayMillis > 0) delay(turnOffDelayMillis); if (turnOffFails) error("failed") }
         override fun close() {
             closeAttempts.incrementAndGet()
             closed = true

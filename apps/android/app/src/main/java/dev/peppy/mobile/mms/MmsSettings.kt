@@ -45,7 +45,7 @@ import dev.peppy.mobile.granted
 import dev.peppy.mobile.sms.SmsCapturePolicyAction
 import dev.peppy.mobile.sms.contextActivity
 import dev.peppy.mobile.sms.smsReadGranted
-import dev.peppy.mobile.restrictedsetup.RestrictedSetupEntry
+import dev.peppy.mobile.restrictedsetup.restrictedSetupAvailable
 import dev.peppy.mobile.telephony.OwnNumberSettings
 import dev.peppy.mobile.telephony.SimRoutes
 import dev.peppy.mobile.ui.ConsentSheet
@@ -183,6 +183,7 @@ internal fun MmsSettings(
     var permissionHint by remember { mutableStateOf<String?>(null) }
     var permissionDenied by remember { mutableStateOf(false) }
     var restrictedAccess by remember { mutableStateOf(RestrictedMessageAccess.UNKNOWN) }
+    val hasAdvancedFeaturesSetup = restrictedSetupAvailable(context)
     var rescanFeedback by remember { mutableStateOf<String?>(null) }
     var rescanPending by remember { mutableStateOf(false) }
     val rescanQueued = stringResource(R.string.peppy_mms_restricted_rescan_queued)
@@ -283,6 +284,7 @@ internal fun MmsSettings(
         RestrictedMessageAccessControls(
             context = context,
             access = restrictedAccess,
+            showAccessStatus = !hasAdvancedFeaturesSetup,
             enabled = canRequestProviderRescan(enabled, receiveGranted, databaseOpen, restrictedAccess),
             pending = rescanPending,
             feedback = rescanFeedback,
@@ -333,7 +335,6 @@ internal fun MmsSettings(
                 }
             },
         )
-        RestrictedSetupEntry(onAccessChanged = { permissionRefresh++; onChanged() })
         Column(Modifier.fillMaxWidth().testTag("mms-health-list"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             when {
                 health.databaseUnavailable -> Text("Encrypted database unavailable. Acquisition health cannot be read.")
@@ -412,6 +413,7 @@ internal fun MmsSettings(
 private fun RestrictedMessageAccessControls(
     context: Context,
     access: RestrictedMessageAccess,
+    showAccessStatus: Boolean,
     enabled: Boolean,
     pending: Boolean,
     feedback: String?,
@@ -425,23 +427,25 @@ private fun RestrictedMessageAccessControls(
     }
     val command = remember(context.packageName) { restrictedMessageAppOpCommand(context.packageName) }
     var commandCopied by remember { mutableStateOf(false) }
-    StatusRow(
-        "mms-restricted-message-access",
-        stringResource(R.string.peppy_mms_restricted_title),
-        status,
-    )
-    Text(
-        stringResource(R.string.peppy_mms_restricted_help),
-        Modifier.testTag("mms-restricted-message-help"),
-        style = MaterialTheme.typography.bodySmall,
-    )
+    if (showAccessStatus) {
+        StatusRow(
+            "mms-restricted-message-access",
+            stringResource(R.string.peppy_mms_restricted_title),
+            status,
+        )
+        Text(
+            stringResource(R.string.peppy_mms_restricted_help),
+            Modifier.testTag("mms-restricted-message-help"),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
     if (access == RestrictedMessageAccess.ALLOWED) {
         OutlinedButton(
             onClick = startRescan,
             enabled = enabled && !pending,
             modifier = Modifier.testTag("mms-restricted-message-rescan"),
         ) { Text(stringResource(R.string.peppy_mms_restricted_rescan)) }
-    } else if (access == RestrictedMessageAccess.NOT_ALLOWED) {
+    } else if (showAccessStatus && access == RestrictedMessageAccess.NOT_ALLOWED) {
         Text(command, Modifier.testTag("mms-restricted-message-command"), style = MaterialTheme.typography.bodySmall)
         OutlinedButton(
             onClick = {
@@ -456,14 +460,14 @@ private fun RestrictedMessageAccessControls(
             modifier = Modifier.testTag("mms-restricted-message-copy-command"),
         ) { Text(stringResource(R.string.peppy_mms_restricted_copy_command)) }
     }
-    if (access == RestrictedMessageAccess.UNSUPPORTED) {
+    if (showAccessStatus && access == RestrictedMessageAccess.UNSUPPORTED) {
         Text(
             stringResource(R.string.peppy_mms_restricted_unsupported_help),
             Modifier.testTag("mms-restricted-message-unsupported-help"),
             style = MaterialTheme.typography.bodySmall,
         )
     }
-    if (commandCopied) Text(stringResource(R.string.peppy_mms_restricted_command_copied), Modifier.testTag("mms-restricted-message-command-copied"), style = MaterialTheme.typography.bodySmall)
+    if (showAccessStatus && commandCopied) Text(stringResource(R.string.peppy_mms_restricted_command_copied), Modifier.testTag("mms-restricted-message-command-copied"), style = MaterialTheme.typography.bodySmall)
     feedback?.let { Text(it, Modifier.testTag("mms-restricted-message-feedback"), style = MaterialTheme.typography.bodySmall) }
 }
 

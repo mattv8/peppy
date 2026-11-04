@@ -305,9 +305,16 @@ This reference records non-obvious Peppy domain constraints.
 ## Android carrier companion
 
 - Android is a companion to the default messaging app: do not request the
-  default-SMS role or `WRITE_SMS`, use hidden APIs, or imply general RCS
-  support. Default-app status alone does not grant RCS access. See
-  [Android limits](apps/android.md).
+  default-SMS role or declare `WRITE_SMS`, use hidden APIs, or imply general
+  RCS support. Default-app status alone does not grant RCS access. The sideload
+  Advanced features setup may set the `WRITE_SMS` AppOp through its fixed
+  Wireless-debugging shell commands, solely to read `BlockedNumberContract` and
+  to remove a number after the user confirms Unblock; it never writes the
+  SMS/MMS provider. See [Android limits](apps/android.md).
+- Google Messages' archive state is read from `threads.archived` through
+  `content://mms-sms/conversations?simple=true` with `READ_SMS` only. It does
+  not distinguish archived from blocked or spam threads; when the blocklist is
+  allowed, it classifies blocked threads.
 - MMS capture reconciles content already downloaded by the default messaging
   app's provider; it does not make Peppy the carrier/default app. Provider
   acquisition is offline reconciliation, separate from gateway upload. See

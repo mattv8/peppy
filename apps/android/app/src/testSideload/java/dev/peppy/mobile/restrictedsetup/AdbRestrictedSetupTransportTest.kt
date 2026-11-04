@@ -11,7 +11,7 @@ class AdbRestrictedSetupTransportTest {
     @Test fun `runs only the fixed commands and closes once`() = runBlocking {
         val manager = FakeManager()
         val transport = AdbRestrictedSetupTransport("dev.peppy.mobile", managerFactory = { manager })
-        transport.grantOwnRestrictedAccess()
+        transport.grantAdvancedFeatures()
         transport.turnWirelessDebuggingOff()
         transport.close()
         transport.close()
@@ -19,6 +19,7 @@ class AdbRestrictedSetupTransportTest {
         assertEquals(
             listOf(
                 "appops set dev.peppy.mobile READ_RESTRICTED_MESSAGES allow",
+                "appops set dev.peppy.mobile WRITE_SMS allow",
                 "settings put global adb_wifi_enabled 0",
             ),
             manager.commands,

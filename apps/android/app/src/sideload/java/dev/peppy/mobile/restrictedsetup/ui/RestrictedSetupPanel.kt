@@ -13,9 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -36,7 +34,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
@@ -52,7 +49,6 @@ import dev.peppy.mobile.restrictedsetup.CodeSubmitResult
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupAccess
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupFailure
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupHint
-import dev.peppy.mobile.restrictedsetup.RestrictedSetupOptions
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupStage
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupState
 import dev.peppy.mobile.restrictedsetup.WirelessDebuggingOutcome
@@ -64,7 +60,7 @@ internal fun RestrictedSetupPanel(
     state: RestrictedSetupState,
     onAccessChanged: () -> Unit,
     modifier: Modifier = Modifier,
-    begin: (RestrictedSetupOptions) -> Boolean,
+    begin: () -> Boolean,
     submitCode: (CharArray, Int?) -> CodeSubmitResult,
     submitConnectPort: (Int) -> Boolean,
     showCodePromptAgain: () -> Unit,
@@ -72,12 +68,12 @@ internal fun RestrictedSetupPanel(
     startService: () -> Unit,
 ) {
     var showConsent by remember { mutableStateOf(false) }
-    var turnOffWirelessDebugging by rememberSaveable { mutableStateOf(false) }
     var fallbackShown by rememberSaveable { mutableStateOf(false) }
     var cancelled by remember { mutableStateOf(false) }
     var accessDelivered by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(state.stage, state.access) {
-        if (state.stage == RestrictedSetupStage.COMPLETE && state.access == RestrictedSetupAccess.ALLOWED && !accessDelivered) {
+        if (state.stage == RestrictedSetupStage.AWAITING_PAIRING) accessDelivered = false
+        if (state.stage in setOf(RestrictedSetupStage.COMPLETE, RestrictedSetupStage.FAILED) && !accessDelivered) {
             accessDelivered = true
             onAccessChanged()
         }
@@ -86,7 +82,10 @@ internal fun RestrictedSetupPanel(
         HorizontalDivider()
         if (cancelled) Text(stringResource(R.string.peppy_restricted_setup_cancelled), Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         when (state.stage) {
-            RestrictedSetupStage.INTRODUCTION -> if (state.access != RestrictedSetupAccess.ALLOWED) IdleCard(turnOffWirelessDebugging, { turnOffWirelessDebugging = it }, { showConsent = true })
+            RestrictedSetupStage.INTRODUCTION -> when {
+                state.showsSetupCard -> IdleCard(state, { showConsent = true })
+                state.allSupportedCapabilitiesAllowed -> OnCard(state)
+            }
             RestrictedSetupStage.AWAITING_PAIRING -> PairingPanel(state, fallbackShown, { fallbackShown = it }, submitCode, showCodePromptAgain, { cancelled = true; cancel() })
             RestrictedSetupStage.PAIRING, RestrictedSetupStage.CONNECTING, RestrictedSetupStage.APPLYING, RestrictedSetupStage.VERIFYING, RestrictedSetupStage.TURNING_OFF -> ProgressPanel(state, submitConnectPort, { cancelled = true; cancel() })
             RestrictedSetupStage.COMPLETE -> CompletePanel(state)
@@ -94,57 +93,80 @@ internal fun RestrictedSetupPanel(
         }
     }
     if (showConsent) Consent(
-        turnOffWirelessDebugging = turnOffWirelessDebugging,
         onDismiss = { showConsent = false },
         onConfirm = {
             showConsent = false
-            if (begin(RestrictedSetupOptions(turnOffWirelessDebugging))) { cancelled = false; startService() }
+            if (begin()) { cancelled = false; startService() }
         },
     )
 }
 
 @Composable
-private fun IdleCard(checked: Boolean, onCheckedChange: (Boolean) -> Unit, onStart: () -> Unit) {
+private fun IdleCard(state: RestrictedSetupState, onStart: () -> Unit) {
     Column(Modifier.testTag("restricted-setup-idle"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Heading(R.string.peppy_restricted_setup_title)
-        Text(stringResource(R.string.peppy_restricted_setup_idle_body))
-        Text(stringResource(R.string.peppy_restricted_setup_idle_bridge), style = MaterialTheme.typography.bodySmall)
-        Row(
-            Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("restricted-setup-wifi-off-option")
-                .toggleable(checked, role = Role.Checkbox, onValueChange = onCheckedChange),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Checkbox(checked = checked, onCheckedChange = null)
-            Column(Modifier.padding(start = 8.dp)) {
-                Text(stringResource(R.string.peppy_restricted_setup_wifi_off_option))
-                Text(stringResource(R.string.peppy_restricted_setup_wifi_off_hint), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-            }
-        }
-        Button(onClick = onStart, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("restricted-setup-start")) { Text(stringResource(R.string.peppy_restricted_setup_start)) }
+        Heading(R.string.peppy_advanced_features_title)
+        Text(stringResource(R.string.peppy_advanced_features_body))
+        CapabilityRow(R.string.peppy_mms_restricted_title, R.string.peppy_advanced_features_restricted_desc, state.access)
+        CapabilityRow(R.string.peppy_advanced_features_blocked_title, R.string.peppy_advanced_features_blocked_desc, state.blockedSendersAccess)
+        if (state.isPartialSetup) Text(stringResource(R.string.peppy_advanced_features_partial), style = MaterialTheme.typography.bodySmall)
+        if (state.hasUnsupportedCapabilityWithoutAllowedOther) Text(stringResource(R.string.peppy_advanced_features_unsupported_help), style = MaterialTheme.typography.bodySmall)
+        val action = if (state.isPartialSetup) R.string.peppy_advanced_features_action_finish else R.string.peppy_advanced_features_action_setup
+        Button(onClick = onStart, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("advanced-features-start")) { Text(stringResource(action)) }
     }
 }
 
 @Composable
-private fun Consent(turnOffWirelessDebugging: Boolean, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+private fun OnCard(state: RestrictedSetupState) {
+    Column(Modifier.testTag("advanced-features-on-card"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Heading(R.string.peppy_advanced_features_title)
+        CapabilityRow(R.string.peppy_mms_restricted_title, R.string.peppy_advanced_features_restricted_desc, state.access)
+        CapabilityRow(R.string.peppy_advanced_features_blocked_title, R.string.peppy_advanced_features_blocked_desc, state.blockedSendersAccess)
+        if (state.access == RestrictedSetupAccess.ALLOWED && state.blockedSendersAccess == RestrictedSetupAccess.ALLOWED) {
+            Text(stringResource(R.string.peppy_advanced_features_all_on), style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun CapabilityRow(title: Int, description: Int, access: RestrictedSetupAccess) {
+    val status = stringResource(
+        when (access) {
+            RestrictedSetupAccess.ALLOWED -> R.string.peppy_mms_restricted_status_allowed
+            RestrictedSetupAccess.NOT_ALLOWED -> R.string.peppy_mms_restricted_status_not_allowed
+            RestrictedSetupAccess.UNSUPPORTED -> R.string.peppy_mms_restricted_status_unsupported
+            RestrictedSetupAccess.UNKNOWN -> R.string.peppy_mms_restricted_status_unknown
+        },
+    )
+    Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) { stateDescription = status }) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(stringResource(title), style = MaterialTheme.typography.bodyLarge)
+            Text(status, style = MaterialTheme.typography.bodyLarge)
+        }
+        Text(stringResource(description), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun Consent(onDismiss: () -> Unit, onConfirm: () -> Unit) {
     val context = LocalContext.current
     val activity = context.contextActivity()
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { onConfirm() }
-    val command = remember(context.packageName) { "appops set ${context.packageName} READ_RESTRICTED_MESSAGES allow" }
+    val command = remember(context.packageName) { "appops set ${context.packageName} READ_RESTRICTED_MESSAGES allow\nappops set ${context.packageName} WRITE_SMS allow" }
     val wifiOffCommand = "settings put global adb_wifi_enabled 0"
     val commandParagraph = buildString {
         append(stringResource(R.string.peppy_restricted_setup_consent_p_command))
         append("\n")
         append(command)
-        if (turnOffWirelessDebugging) {
-            append("\n\n")
-            append(stringResource(R.string.peppy_restricted_setup_consent_p_command_wifi_off))
-            append("\n")
-            append(wifiOffCommand)
-        }
+        append("\n\n")
+        append(stringResource(R.string.peppy_restricted_setup_consent_p_command_wifi_off))
+        append("\n")
+        append(wifiOffCommand)
     }
     val paragraphs = listOf(
         stringResource(R.string.peppy_restricted_setup_consent_p_power),
         commandParagraph,
+        stringResource(R.string.peppy_restricted_setup_consent_p_capabilities),
+        stringResource(R.string.peppy_restricted_setup_consent_p_write_access),
         stringResource(R.string.peppy_restricted_setup_consent_p_notification),
         stringResource(R.string.peppy_restricted_setup_consent_p_scope),
         stringResource(R.string.peppy_restricted_setup_consent_p_pairing_stays),
@@ -254,6 +276,8 @@ private fun CompletePanel(state: RestrictedSetupState) {
     Column(Modifier.testTag("restricted-setup-complete"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(stringResource(R.string.peppy_restricted_setup_complete_title), Modifier.semantics { heading(); liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.titleMedium)
         Text(stringResource(R.string.peppy_restricted_setup_complete_body))
+        CapabilityRow(R.string.peppy_mms_restricted_title, R.string.peppy_advanced_features_restricted_desc, state.access)
+        CapabilityRow(R.string.peppy_advanced_features_blocked_title, R.string.peppy_advanced_features_blocked_desc, state.blockedSendersAccess)
         when (state.wirelessDebugging) {
             WirelessDebuggingOutcome.OFF -> Text(stringResource(R.string.peppy_restricted_setup_complete_wifi_off_confirmed))
             WirelessDebuggingOutcome.REQUESTED -> Text(stringResource(R.string.peppy_restricted_setup_complete_wifi_off_requested))
@@ -278,10 +302,34 @@ private fun FailedPanel(state: RestrictedSetupState, retry: () -> Unit) {
     }
     Column(Modifier.testTag("restricted-setup-failed"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(stringResource(error), Modifier.testTag("restricted-setup-error").semantics { liveRegion = LiveRegionMode.Assertive })
+        CapabilityRow(R.string.peppy_mms_restricted_title, R.string.peppy_advanced_features_restricted_desc, state.access)
+        CapabilityRow(R.string.peppy_advanced_features_blocked_title, R.string.peppy_advanced_features_blocked_desc, state.blockedSendersAccess)
+        if (state.wirelessDebugging == WirelessDebuggingOutcome.REQUESTED) Text(stringResource(R.string.peppy_restricted_setup_complete_wifi_still_on))
         if (state.retryBlocked) Text(stringResource(R.string.peppy_restricted_setup_restart_peppy))
         else Button(onClick = retry, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("restricted-setup-retry")) { Text(stringResource(R.string.peppy_restricted_setup_start_over)) }
     }
 }
+
+private val RestrictedSetupState.showsSetupCard: Boolean
+    get() = listOf(access, blockedSendersAccess).any {
+        it == RestrictedSetupAccess.NOT_ALLOWED || it == RestrictedSetupAccess.UNKNOWN
+    }
+
+private val RestrictedSetupState.isPartialSetup: Boolean
+    get() = listOf(access, blockedSendersAccess).let { accesses ->
+        accesses.any { it == RestrictedSetupAccess.ALLOWED } &&
+            accesses.any { it == RestrictedSetupAccess.NOT_ALLOWED || it == RestrictedSetupAccess.UNKNOWN }
+    }
+
+private val RestrictedSetupState.hasUnsupportedCapabilityWithoutAllowedOther: Boolean
+    get() = (access == RestrictedSetupAccess.UNSUPPORTED && blockedSendersAccess != RestrictedSetupAccess.ALLOWED) ||
+        (blockedSendersAccess == RestrictedSetupAccess.UNSUPPORTED && access != RestrictedSetupAccess.ALLOWED)
+
+private val RestrictedSetupState.allSupportedCapabilitiesAllowed: Boolean
+    get() = listOf(access, blockedSendersAccess).let { accesses ->
+        accesses.any { it == RestrictedSetupAccess.ALLOWED } &&
+            accesses.all { it == RestrictedSetupAccess.ALLOWED || it == RestrictedSetupAccess.UNSUPPORTED }
+    }
 
 @Composable
 private fun CancelButton(cancel: () -> Unit, disabled: Boolean) = TextButton(onClick = cancel, enabled = !disabled, modifier = Modifier.heightIn(min = 48.dp).testTag("restricted-setup-cancel")) { Text(stringResource(if (disabled) R.string.peppy_restricted_setup_checking else R.string.peppy_cancel)) }
