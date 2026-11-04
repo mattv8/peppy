@@ -479,6 +479,12 @@ impl Client {
         {
             return Err(Error::MmsAcquisitionLimit);
         }
+        if input.imported
+            && state == MmsAcquisitionState::Pending
+            && !crate::mms_backfill::imported_mms_acquisition_capacity_available(&tx)?
+        {
+            return Err(Error::MmsAcquisitionLimit);
+        }
         let mapped = mapped_thread_conversation(&tx, &ctx.device_id.to_string(), &input.source)?;
         let conversation_id = if let Some(mapped) = mapped {
             mapped

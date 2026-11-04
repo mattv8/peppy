@@ -290,6 +290,75 @@ class MmsCaptureOrchestrationTest {
         assertTrue(core.inputs.any { it.source.providerMessageId == "3" && it.source.subscriptionId == "android-mms-unknown-subscription" })
     }
 
+    @Test fun revokedAccessDuringDescendingRescanPageDoesNotCreateAnAcquisitionOrCommit() {
+        var access = dev.peppy.mobile.mms.RestrictedMessageAccess.ALLOWED
+        val core = FakeCore(historyUpperBound = "5", providerRescanToken = "token")
+        val provider = FakeProvider((1L..5L).map(::record)).also {
+            it.onDescendingPage = { access = dev.peppy.mobile.mms.RestrictedMessageAccess.NOT_ALLOWED }
+        }
+
+        val result = MmsCapture.run(
+            plan(), core, provider, temp(),
+            restrictedAccess = { access },
+        )
+
+        assertTrue(core.inputs.isEmpty())
+        assertTrue(core.rescanCommits.isEmpty())
+        assertFalse(result.more)
+    }
+
+    @Test fun revokedAccessDuringStableReadDoesNotPersistProviderRowMissingOrCommit() {
+        var access = dev.peppy.mobile.mms.RestrictedMessageAccess.ALLOWED
+        val core = FakeCore(historyUpperBound = "1", providerRescanToken = "token", initialReason = "preview_deferred")
+        val provider = FakeProvider(listOf(record(1))).also {
+            it.onRead = { access = dev.peppy.mobile.mms.RestrictedMessageAccess.NOT_ALLOWED }
+        }
+
+        MmsCapture.run(plan(), core, provider, temp(), restrictedAccess = { access })
+
+        assertTrue(core.reasons.none { it == "provider_row_missing" })
+        assertTrue(core.rescanCommits.isEmpty())
+    }
+
+    @Test fun revokedAccessDuringPartReadIsNotClassifiedAsTextUnavailable() {
+        var access = dev.peppy.mobile.mms.RestrictedMessageAccess.ALLOWED
+        val core = FakeCore(historyUpperBound = "1", providerRescanToken = "token", initialReason = "preview_deferred")
+        val provider = FakeProvider(listOf(record(1))).also {
+            it.onReadPartText = { access = dev.peppy.mobile.mms.RestrictedMessageAccess.NOT_ALLOWED }
+        }
+
+        MmsCapture.run(plan(), core, provider, temp(), restrictedAccess = { access })
+
+        assertTrue(core.reasons.none { it == "text_unavailable" })
+        assertTrue(core.rescanCommits.isEmpty())
+    }
+
+    @Test fun providerRescanReadsDescendingAsImportedWithoutSettlingOrdinaryHistory() {
+        val core = FakeCore(historyUpperBound = "1", providerRescanToken = "token", initialReason = "preview_deferred")
+        val provider = FakeProvider(listOf(record(1)))
+
+        MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(1, provider.descendingPageCount)
+        assertTrue(core.inputs.all { it.imported })
+        assertEquals(listOf("token:null:1:true"), core.rescanCommits)
+        assertTrue(core.finished.isEmpty())
+    }
+
+    @Test fun failedProviderRescanPageDoesNotBlockHistoryOrCommitTheRescan() {
+        val core = FakeCore(
+            historyUpperBound = "1",
+            providerRescanToken = "token",
+            providerRescanAlongsideOrdinaryPlans = true,
+        )
+        val provider = FakeProvider(listOf(record(1)), descendingPageError = MmsProviderException("unavailable"))
+
+        MmsCapture.run(plan(), core, provider, temp())
+
+        assertTrue(core.advanced.contains(MmsBackfillPhase.HISTORY to "1"))
+        assertTrue(core.rescanCommits.isEmpty())
+    }
+
     @Test fun shortDescendingPageWithBlockedCheckpointDoesNotFinishHistory() {
         val core = FakeCore(
             initialLiveCursor = "5",
@@ -777,9 +846,14 @@ class MmsCaptureOrchestrationTest {
         private val previewLimit: Int = MmsMediaPreview.MAX_JPEG_BYTES,
         private val previewResult: MmsMediaPreviewResult? = null,
         private val failHighWater: Boolean = false,
+        private val descendingPageError: Exception? = null,
     ) : MmsCaptureProvider {
         var copyCount = 0
+        var descendingPageCount = 0
         var previewError: Exception? = null
+        var onDescendingPage: (() -> Unit)? = null
+        var onRead: (() -> Unit)? = null
+        var onReadPartText: (() -> Unit)? = null
         override fun inspectMedia(file: File, contentType: String?): MmsMediaPreviewResult {
             previewError?.let { throw it }
             return previewResult ?: MmsMediaPreview(previewLimit).inspect(file, contentType)
@@ -790,14 +864,16 @@ class MmsCaptureOrchestrationTest {
         }
         override fun page(afterId: Long, limit: Int) = MmsProviderPage(records.filter { it.id > afterId }.take(limit), afterId)
         override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): MmsProviderPage {
+            descendingPageCount++
+            descendingPageError?.let { throw it }
             val ceiling = cursor ?: upperBound
             val page = records.filter { it.id <= ceiling && it.id > (floor ?: 0L) }.sortedByDescending { it.id }.take(limit)
-            return MmsProviderPage(page, page.lastOrNull()?.id ?: ceiling)
+            return MmsProviderPage(page, page.lastOrNull()?.id ?: ceiling).also { onDescendingPage?.invoke() }
         }
-        override fun read(id: Long) = records.firstOrNull { it.id == id }
+        override fun read(id: Long) = records.firstOrNull { it.id == id }.also { onRead?.invoke() }
         override fun readPartText(part: MmsProviderPart, byteLimit: Int): String? {
             textReadError?.let { throw it }
-            return part.text
+            return part.text.also { onReadPartText?.invoke() }
         }
         override fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long): Long {
             copyCount++
@@ -825,6 +901,8 @@ class MmsCaptureOrchestrationTest {
         private val quarantinedProviderIds: Set<String> = emptySet(),
         private val failBeginProviderIds: Set<String> = emptySet(),
         private val failManualRecheck: Boolean = false,
+        private val providerRescanToken: String? = null,
+        private val providerRescanAlongsideOrdinaryPlans: Boolean = false,
         initialPreviewStates: Map<String, NativeMmsPreviewState> = emptyMap(),
         var pendingBytes: Long = 0,
         private val initialReason: String = "settling",
@@ -834,6 +912,7 @@ class MmsCaptureOrchestrationTest {
         val reasons = mutableListOf<String?>()
         val advanced = mutableListOf<Pair<MmsBackfillPhase, String>>()
         val finished = mutableListOf<String>()
+        val rescanCommits = mutableListOf<String>()
         val inputs = mutableListOf<NativeMmsAcquisitionInput>()
         var completed = 0
         var manualRecheckLimit: Int? = null
@@ -848,6 +927,16 @@ class MmsCaptureOrchestrationTest {
         override fun plans(generation: String, scope: String, observedMaxId: String): List<MmsBackfillScanPlan> {
             val bound = baseline ?: observedMaxId.also { baseline = it }
             if (liveCursor == null) liveCursor = bound
+            providerRescanToken?.let {
+                val rescan = MmsBackfillScanPlan(MmsBackfillPhase.PROVIDER_RESCAN, null, bound, false, false, 50, true, null, it)
+                if (!providerRescanAlongsideOrdinaryPlans) return listOf(rescan)
+                return listOf(
+                    MmsBackfillScanPlan(MmsBackfillPhase.LIVE, liveCursor, bound, historyComplete, false, 50),
+                    rescan,
+                    MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, historyCursor, bound, historyComplete, false, 50, historyDescending, historyFloor),
+                    MmsBackfillScanPlan(MmsBackfillPhase.RECHECK, null, null, historyComplete, false, 50),
+                )
+            }
             if (recheckRequests.isNotEmpty()) return listOf(MmsBackfillScanPlan(MmsBackfillPhase.RECHECK, null, null, false, false, 50))
             return listOf(
                 MmsBackfillScanPlan(MmsBackfillPhase.LIVE, liveCursor, bound, historyComplete, false, 50),
@@ -860,6 +949,7 @@ class MmsCaptureOrchestrationTest {
             when (phase) {
                 MmsBackfillPhase.LIVE -> liveCursor = providerId
                 MmsBackfillPhase.HISTORY -> historyCursor = providerId
+                MmsBackfillPhase.PROVIDER_RESCAN -> error("provider rescan uses its tokened commit")
                 MmsBackfillPhase.RECHECK -> error("recheck has no page checkpoint")
             }
         }
@@ -868,6 +958,17 @@ class MmsCaptureOrchestrationTest {
             finished += bound
             historyComplete = bound == baseline && pendingAcquisitions().isEmpty()
             return historyComplete
+        }
+        override fun commitProviderRescanPage(
+            generation: String,
+            scope: String,
+            token: String,
+            expectedCursor: String?,
+            lastDurableId: String?,
+            exhausted: Boolean,
+        ): Boolean {
+            rescanCommits += "$token:$expectedCursor:$lastDurableId:$exhausted"
+            return true
         }
         val dueConditions = mutableListOf<MmsBackfillRecheckConditions>()
         val recheckOutcomes = mutableListOf<MmsBackfillRecheckOutcome>()

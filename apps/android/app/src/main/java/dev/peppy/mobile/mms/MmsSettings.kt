@@ -2,6 +2,8 @@ package dev.peppy.mobile.mms
 
 import android.Manifest
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -43,6 +45,7 @@ import dev.peppy.mobile.granted
 import dev.peppy.mobile.sms.SmsCapturePolicyAction
 import dev.peppy.mobile.sms.contextActivity
 import dev.peppy.mobile.sms.smsReadGranted
+import dev.peppy.mobile.restrictedsetup.RestrictedSetupEntry
 import dev.peppy.mobile.telephony.OwnNumberSettings
 import dev.peppy.mobile.telephony.SimRoutes
 import dev.peppy.mobile.ui.ConsentSheet
@@ -179,6 +182,13 @@ internal fun MmsSettings(
     var consent by remember { mutableStateOf(ConsentGatedToggle()) }
     var permissionHint by remember { mutableStateOf<String?>(null) }
     var permissionDenied by remember { mutableStateOf(false) }
+    var restrictedAccess by remember { mutableStateOf(RestrictedMessageAccess.UNKNOWN) }
+    var rescanFeedback by remember { mutableStateOf<String?>(null) }
+    var rescanPending by remember { mutableStateOf(false) }
+    val rescanQueued = stringResource(R.string.peppy_mms_restricted_rescan_queued)
+    val rescanAlreadyQueued = stringResource(R.string.peppy_mms_restricted_rescan_already_queued)
+    val rescanUnavailable = stringResource(R.string.peppy_mms_restricted_rescan_unavailable)
+    val rescanFailed = stringResource(R.string.peppy_mms_restricted_rescan_failed)
     val deniedHint = stringResource(R.string.peppy_toggle_android_mms_denied_hint)
     val smsGuardFailedHint = stringResource(R.string.peppy_toggle_android_sms_guard_failed)
     val smsPolicyAction = remember(context) {
@@ -224,6 +234,9 @@ internal fun MmsSettings(
     LaunchedEffect(refresh, enabled, databaseOpen) {
         health = withContext(Dispatchers.IO) { loadMmsHealth(context, databaseOpen) }
     }
+    LaunchedEffect(permissionRefresh, refresh) {
+        restrictedAccess = withContext(Dispatchers.IO) { restrictedMessageAccess(context) }
+    }
 
     Section(if (detailsOnly) "mms-details-section" else "mms-settings-section", stringResource(R.string.peppy_toggle_android_mms_title), helpBody = stringResource(R.string.peppy_help_android_mms_wifi)) {
         if (!detailsOnly) {
@@ -267,6 +280,60 @@ internal fun MmsSettings(
             enabled = enabled && receiveGranted,
             modifier = Modifier.testTag("mms-refresh-pending"),
         ) { Text("Refresh pending MMS") }
+        RestrictedMessageAccessControls(
+            context = context,
+            access = restrictedAccess,
+            enabled = canRequestProviderRescan(enabled, receiveGranted, databaseOpen, restrictedAccess),
+            pending = rescanPending,
+            feedback = rescanFeedback,
+            startRescan = {
+                rescanPending = true
+                scope.launch {
+                    val outcome = withContext(Dispatchers.IO) {
+                        val currentAccess = restrictedMessageAccess(context)
+                        if (!canRequestProviderRescan(preferences.enabled, mmsReceiveGranted(context), databaseOpen, currentAccess) ||
+                            GatewayPolicyHost(context).decision()?.captureMms != true
+                        ) {
+                            ProviderRescanRequestOutcome.UNAVAILABLE
+                        } else {
+                            val client = NativeGateway.producerClient(context)
+                                ?: return@withContext ProviderRescanRequestOutcome.UNAVAILABLE
+                            requestProviderRescan(
+                                currentAccess,
+                                observedMaxId = { MmsCapture.currentHighWater(context) },
+                                request = { observedMaxId ->
+                                    if (!canRequestProviderRescan(
+                                            preferences.enabled,
+                                            mmsReceiveGranted(context),
+                                            databaseOpen,
+                                            restrictedMessageAccess(context),
+                                        ) || GatewayPolicyHost(context).decision()?.captureMms != true ||
+                                        NativeGateway.producerClient(context) !== client
+                                    ) {
+                                        throw SecurityException("MMS capture is no longer available")
+                                    }
+                                    client.requestMmsProviderRescan(
+                                        preferences.sourceGeneration,
+                                        MmsCapture.PROVIDER_SCOPE,
+                                        observedMaxId,
+                                    )
+                                },
+                                enqueue = { MmsCaptureWork.enqueue(context.applicationContext) },
+                            )
+                        }
+                    }
+                    restrictedAccess = withContext(Dispatchers.IO) { restrictedMessageAccess(context) }
+                    rescanFeedback = when (outcome) {
+                        ProviderRescanRequestOutcome.QUEUED -> rescanQueued
+                        ProviderRescanRequestOutcome.ALREADY_QUEUED -> rescanAlreadyQueued
+                        ProviderRescanRequestOutcome.UNAVAILABLE -> rescanUnavailable
+                        ProviderRescanRequestOutcome.FAILED -> rescanFailed
+                    }
+                    rescanPending = false
+                }
+            },
+        )
+        RestrictedSetupEntry(onAccessChanged = { permissionRefresh++; onChanged() })
         Column(Modifier.fillMaxWidth().testTag("mms-health-list"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             when {
                 health.databaseUnavailable -> Text("Encrypted database unavailable. Acquisition health cannot be read.")
@@ -339,6 +406,65 @@ internal fun MmsSettings(
             if (!smsReadGranted(context)) "\n\n" + stringResource(R.string.peppy_toggle_android_mms_sms_stays_off) else "",
         disclosureTag = "mms-capture-disclosure",
     )
+}
+
+@Composable
+private fun RestrictedMessageAccessControls(
+    context: Context,
+    access: RestrictedMessageAccess,
+    enabled: Boolean,
+    pending: Boolean,
+    feedback: String?,
+    startRescan: () -> Unit,
+) {
+    val status = when (access) {
+        RestrictedMessageAccess.ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_allowed)
+        RestrictedMessageAccess.NOT_ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_not_allowed)
+        RestrictedMessageAccess.UNSUPPORTED -> stringResource(R.string.peppy_mms_restricted_status_unsupported)
+        RestrictedMessageAccess.UNKNOWN -> stringResource(R.string.peppy_mms_restricted_status_unknown)
+    }
+    val command = remember(context.packageName) { restrictedMessageAppOpCommand(context.packageName) }
+    var commandCopied by remember { mutableStateOf(false) }
+    StatusRow(
+        "mms-restricted-message-access",
+        stringResource(R.string.peppy_mms_restricted_title),
+        status,
+    )
+    Text(
+        stringResource(R.string.peppy_mms_restricted_help),
+        Modifier.testTag("mms-restricted-message-help"),
+        style = MaterialTheme.typography.bodySmall,
+    )
+    if (access == RestrictedMessageAccess.ALLOWED) {
+        OutlinedButton(
+            onClick = startRescan,
+            enabled = enabled && !pending,
+            modifier = Modifier.testTag("mms-restricted-message-rescan"),
+        ) { Text(stringResource(R.string.peppy_mms_restricted_rescan)) }
+    } else if (access == RestrictedMessageAccess.NOT_ALLOWED) {
+        Text(command, Modifier.testTag("mms-restricted-message-command"), style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(
+            onClick = {
+                val clipboard = context.getSystemService(ClipboardManager::class.java)
+                commandCopied = try {
+                    clipboard?.setPrimaryClip(ClipData.newPlainText("Restricted message access command", command))
+                    clipboard != null
+                } catch (_: Exception) {
+                    false
+                }
+            },
+            modifier = Modifier.testTag("mms-restricted-message-copy-command"),
+        ) { Text(stringResource(R.string.peppy_mms_restricted_copy_command)) }
+    }
+    if (access == RestrictedMessageAccess.UNSUPPORTED) {
+        Text(
+            stringResource(R.string.peppy_mms_restricted_unsupported_help),
+            Modifier.testTag("mms-restricted-message-unsupported-help"),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+    if (commandCopied) Text(stringResource(R.string.peppy_mms_restricted_command_copied), Modifier.testTag("mms-restricted-message-command-copied"), style = MaterialTheme.typography.bodySmall)
+    feedback?.let { Text(it, Modifier.testTag("mms-restricted-message-feedback"), style = MaterialTheme.typography.bodySmall) }
 }
 
 @Composable

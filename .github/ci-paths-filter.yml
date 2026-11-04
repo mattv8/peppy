@@ -68,6 +68,9 @@ android:
   - 'apps/android/**'
   - 'packages/mobile-design/**'
   - 'infra/compose/verify-android-native.sh'
+  - 'infra/dev/android.sh'
+  - 'infra/release/*android*'
+  - 'tests/dev/test_android.py'
 
 ios:
   - 'apps/ios/**'

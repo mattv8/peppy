@@ -238,9 +238,9 @@ jobs:
             gradle_args+=("-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE")
           fi
           mkdir -p ../../dist/android-release
-          ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:lintRelease :app:assembleRelease -PpeppyDistribution=direct "${gradle_args[@]}"
-          install -m 0644 app/build/outputs/apk/release/app-release-unsigned.apk ../../dist/android-release/peppy-android-unsigned.apk
-          ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:bundleRelease -PpeppyDistribution=play "${gradle_args[@]}"
+          ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:lintSideload :app:assembleSideload -PpeppyDistribution=direct "${gradle_args[@]}"
+          install -m 0644 app/build/outputs/apk/sideload/app-sideload-unsigned.apk ../../dist/android-release/peppy-android-unsigned.apk
+          ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease -PpeppyDistribution=play "${gradle_args[@]}"
           install -m 0644 app/build/outputs/bundle/release/app-release.aab ../../dist/android-release/peppy-android-unsigned.aab
           install -m 0644 app/build/outputs/native-debug-symbols/release/native-debug-symbols.zip ../../dist/android-release/peppy-android-native-debug-symbols.zip
       - name: Stop Android Gradle daemon before signing
@@ -279,9 +279,9 @@ jobs:
               echo "version and android_version_code must both be set" >&2
               exit 1
             fi
-            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleRelease :app:bundleRelease "-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE"
+            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleSideload :app:bundleRelease "-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE"
           else
-            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleRelease :app:bundleRelease
+            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleSideload :app:bundleRelease
           fi
           mkdir -p ../../dist/android-release
           install -m 0644 app/build/outputs/apk/debug/app-debug.apk ../../dist/android-release/peppy-android-debug.apk
