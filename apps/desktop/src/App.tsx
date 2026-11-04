@@ -2760,6 +2760,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, [active?.id, appLock?.locked, snapshot?.encryption.state]);
   const conversationLoaded =
     Boolean(active) && snapshot?.activeConversationId === slotKey;
+  const conversationTabsShown = Boolean(composerConversation) || conversationLoaded;
   const seenReactions = useMemo(() => createSeenReactionLedger({ mode: snapshot?.mode ?? "", origin: snapshot?.connection.origin }), [snapshot?.mode, snapshot?.connection.origin]);
   const reactionScopeKey = JSON.stringify([renderedSearchSessionKey, slotKey]);
   const reactionReadEnabled = conversationLoaded && activeView === "conversations" && conversationTab === "messages" && snapshot?.encryption.state === "unlocked" && !appLock?.locked;
@@ -4199,8 +4200,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const messages = (
     <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()} copyNativeImage={copyNativeImage} hydrateMediaPreview={hydrateMediaPreview}>
-      {!composerConversation && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="text" />}
-      <div id="tabpanel-messages" role="tabpanel" aria-labelledby="tab-messages" hidden={conversationTab !== "messages"}>
+      <div id="tabpanel-messages" role={conversationTabsShown ? "tabpanel" : undefined} aria-labelledby={conversationTabsShown ? "tab-messages" : undefined} hidden={conversationTab !== "messages"}>
       <MessageList
       key={reactionScopeKey}
       conversation={active}
@@ -4342,13 +4342,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         >
           {!headPanel && <AppTitlebar
             isComposer platform={platform} title={title}
-            viewSwitch={<ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="icons" />}
+            viewSwitch={<ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
             status={composerConnectionDot}
             onMinimize={browserHost ? undefined : () => {}} onMaximize={browserHost ? undefined : () => {}} onClose={browserHost ? undefined : handlers.current.close}
           />}
           {headPanel && <header id="head-panel-header" aria-label={`Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
             <strong data-tauri-drag-region>{title ?? "Conversation"}</strong>
-            <ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="icons" />
+            <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />
             <span className="head-panel-status">{composerConnectionDot}</span>
             <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}><Minus size={14} strokeWidth={1.75} aria-hidden /></button>
             <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} strokeWidth={1.75} aria-hidden /></button>
@@ -4561,6 +4561,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             </div>
             {contactsOpen && <div id="contacts-header-slot" className="header-actions" ref={setContactsHeaderHost} />}
             <div className="header-actions" hidden={settingsOpen || notificationsOpen || contactsOpen}>
+              {conversationLoaded && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
               {addConversationContactAddress && <button
                 id="add-conversation-contact"
                 aria-label={`Add ${formatPhoneNumber(addConversationContactAddress)} to contacts`}

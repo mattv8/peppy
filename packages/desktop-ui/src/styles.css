@@ -226,8 +226,8 @@ select:focus-visible {
   align-items: center;
   margin-right: 4px;
 }
-#titlebar-view-switch [data-variant="icons"] [role="tab"]:hover { background: var(--peppy-surface-hover); }
-#titlebar-view-switch [data-variant="icons"] [role="tab"][aria-selected="true"] { background: var(--peppy-surface-active); }
+#titlebar-view-switch [role="tab"]:hover { background: var(--peppy-surface-hover); }
+#titlebar-view-switch [role="tab"][aria-selected="true"] { background: var(--peppy-surface-active); }
 .titlebar-status + .window-controls-windows {
   margin-left: 4px;
 }
