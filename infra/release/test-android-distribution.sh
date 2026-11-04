@@ -79,6 +79,16 @@ printf fixture > "$root/symbols/arm64-v8a/libpeppy_mobile_bindings.so.sym"
 printf fixture > "$root/symbols/x86_64/libpeppy_mobile_bindings.so.sym"
 (cd "$root/symbols" && zip -q "$symbols" arm64-v8a/libpeppy_mobile_bindings.so.sym x86_64/libpeppy_mobile_bindings.so.sym)
 
+expect_failure_reason 'BUNDLETOOL_JAR must name the verified bundletool JAR' \
+  env -u BUNDLETOOL_JAR ANDROID_HOME="$sdk" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct" "$play" "$symbols"
+expect_failure_reason 'BUNDLETOOL_JAR must name the verified bundletool JAR' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR= PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct" "$play" "$symbols"
+expect_failure_reason 'BUNDLETOOL_JAR must name the verified bundletool JAR' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/missing-bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct" "$play" "$symbols"
+
 env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play" "$symbols"
 

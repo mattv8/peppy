@@ -6,6 +6,9 @@ import type { SyncProgress as SyncProgressSnapshot } from "./bridge-contracts";
 type SyncPhase = SyncProgressSnapshot["phase"];
 type ActivePhase = Exclude<SyncPhase, "current">;
 
+export const SHOW_DELAY_MS = 500;
+export const HIDE_LINGER_MS = 3000;
+
 export type SyncProgressProps = {
   /** Canonical `snapshot.syncProgress`; absent or `current` shows no banner. */
   progress?: SyncProgressSnapshot;
@@ -18,7 +21,6 @@ const TITLES: Record<ActivePhase, string> = {
   waitingForKeys: "Waiting for vault keys to continue loading history…",
 };
 
-/** Polite announcements fire only when the phase changes, never on cursor updates. */
 const PHASE_ANNOUNCEMENTS: Record<SyncPhase, string> = {
   receiving: "Loading your history.",
   applying: "Organizing downloaded history.",
@@ -26,44 +28,110 @@ const PHASE_ANNOUNCEMENTS: Record<SyncPhase, string> = {
   current: "Your history is up to date.",
 };
 
-function usePhaseAnnouncement(phase: SyncPhase | undefined): string {
-  const lastPhaseRef = useRef(phase);
-  const [announcement, setAnnouncement] = useState("");
-  useEffect(() => {
-    if (lastPhaseRef.current === phase) return;
-    lastPhaseRef.current = phase;
-    if (phase) setAnnouncement(PHASE_ANNOUNCEMENTS[phase]);
-  }, [phase]);
-  return announcement;
+function activePhase(phase: SyncPhase | undefined): ActivePhase | undefined {
+  return phase === undefined || phase === "current" ? undefined : phase;
 }
 
 export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
   const phase = progress?.phase;
-  const announcement = usePhaseAnnouncement(phase);
-  const active = phase !== undefined && phase !== "current" ? phase : undefined;
+  const active = activePhase(phase);
+  const initialActive = active;
+  const [displayedPhase, setDisplayedPhase] = useState<ActivePhase | undefined>(initialActive);
+  const [announcement, setAnnouncement] = useState(initialActive ? PHASE_ANNOUNCEMENTS[initialActive] : "");
+  const showTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const latestPhaseRef = useRef(phase);
+  const latestProgressRef = useRef(progress);
+  const lastActiveProgressRef = useRef<SyncProgressSnapshot | undefined>(initialActive ? progress : undefined);
+  const inactivePhaseRef = useRef<"current" | "absent" | undefined>(undefined);
+
+  useEffect(() => {
+    latestPhaseRef.current = phase;
+    latestProgressRef.current = progress;
+    if (active) lastActiveProgressRef.current = progress;
+
+    if (displayedPhase) {
+      if (active) {
+        if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = undefined;
+        inactivePhaseRef.current = undefined;
+        if (displayedPhase !== active) {
+          setDisplayedPhase(active);
+          setAnnouncement(PHASE_ANNOUNCEMENTS[active]);
+        }
+        return;
+      }
+
+      const inactivePhase = phase === "current" ? "current" : "absent";
+      inactivePhaseRef.current = inactivePhase;
+      if (!hideTimerRef.current) {
+        hideTimerRef.current = setTimeout(() => {
+          setDisplayedPhase(undefined);
+          if (inactivePhaseRef.current === "current") setAnnouncement(PHASE_ANNOUNCEMENTS.current);
+          hideTimerRef.current = undefined;
+          inactivePhaseRef.current = undefined;
+        }, HIDE_LINGER_MS);
+      }
+      return;
+    }
+
+    if (!active) {
+      if (showTimerRef.current) clearTimeout(showTimerRef.current);
+      showTimerRef.current = undefined;
+      return;
+    }
+
+    if (active === "waitingForKeys") {
+      if (showTimerRef.current) clearTimeout(showTimerRef.current);
+      showTimerRef.current = undefined;
+      setDisplayedPhase(active);
+      setAnnouncement(PHASE_ANNOUNCEMENTS[active]);
+      return;
+    }
+
+    if (!showTimerRef.current) {
+      showTimerRef.current = setTimeout(() => {
+        const delayedPhase = activePhase(latestPhaseRef.current);
+        if (delayedPhase) {
+          setDisplayedPhase(delayedPhase);
+          setAnnouncement(PHASE_ANNOUNCEMENTS[delayedPhase]);
+        }
+        showTimerRef.current = undefined;
+      }, SHOW_DELAY_MS);
+    }
+  }, [active, displayedPhase, phase, progress]);
+
+  useEffect(() => () => {
+    if (showTimerRef.current) clearTimeout(showTimerRef.current);
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+    showTimerRef.current = undefined;
+    hideTimerRef.current = undefined;
+  }, []);
+
+  const cursorProgress = progress ?? lastActiveProgressRef.current;
   return <>
-    {progress && active && <section
+    {displayedPhase && cursorProgress && <section
       id="sync-progress"
       className="sync-progress"
       aria-label="History sync"
       data-sync-progress
-      data-sync-phase={active}
+      data-sync-phase={displayedPhase}
     >
-      {active === "waitingForKeys"
+      {displayedPhase === "waitingForKeys"
         ? <Lock className="sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />
         : <LoaderCircle className="busy-indicator-icon sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />}
       <div className="sync-progress-main">
-        <p className="sync-progress-title" data-sync-title>{TITLES[active]}</p>
+        <p className="sync-progress-title" data-sync-title>{TITLES[displayedPhase]}</p>
         <details className="sync-progress-details" data-sync-details>
           <summary>Sync details</summary>
           <dl className="sync-progress-cursors">
             <dt>Received through</dt>
-            <dd data-sync-received>{progress.receivedThrough}</dd>
+            <dd data-sync-received>{cursorProgress.receivedThrough}</dd>
             <dt>Processed through</dt>
-            <dd data-sync-processed>{progress.processedThrough}</dd>
-            {progress.targetHighWater !== undefined && <>
+            <dd data-sync-processed>{cursorProgress.processedThrough}</dd>
+            {cursorProgress.targetHighWater !== undefined && <>
               <dt>Target</dt>
-              <dd data-sync-target>{progress.targetHighWater}</dd>
+              <dd data-sync-target>{cursorProgress.targetHighWater}</dd>
             </>}
           </dl>
           <p className="sync-progress-note">You can use conversations as they become available.</p>

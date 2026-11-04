@@ -109,6 +109,20 @@ describe("MarkAllReadAction contract", () => {
     expect(focusFallback).not.toHaveBeenCalled();
   });
 
+  it("closes confirmation when focus tabs outside without moving that focus", async () => {
+    render(<><input aria-label="Elsewhere" /><MarkAllReadAction unreadCount={1} enabled markAllRead={vi.fn()} refresh={vi.fn()} onFocusFallback={vi.fn()} /></>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Mark all as read" }));
+    const confirmation = within(screen.getByRole("dialog")).getByRole("button", { name: "Mark all as read" });
+    await waitFor(() => expect(confirmation).toHaveFocus());
+    const elsewhere = screen.getByRole("textbox", { name: "Elsewhere" });
+    fireEvent.blur(confirmation, { relatedTarget: elsewhere });
+    elsewhere.focus();
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(elsewhere).toHaveFocus();
+  });
+
   it("does not run a deferred fallback after another control gains focus", () => {
     const animationFrames: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {

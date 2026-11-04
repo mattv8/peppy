@@ -20,10 +20,10 @@ apkanalyzer="$sdk_root/cmdline-tools/latest/bin/apkanalyzer"
 [ -x "$apkanalyzer" ] || { echo "apkanalyzer not found: $apkanalyzer" >&2; exit 1; }
 
 bundletool_jar=${BUNDLETOOL_JAR:-}
-[ -n "$bundletool_jar" ] && [ -f "$bundletool_jar" ] || {
+if [ -z "$bundletool_jar" ] || [ ! -f "$bundletool_jar" ]; then
   echo 'BUNDLETOOL_JAR must name the verified bundletool JAR' >&2
   exit 1
-}
+fi
 
 temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/peppy-android-distribution.XXXXXX")
 trap 'rm -rf "$temporary_dir"' EXIT
