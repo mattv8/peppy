@@ -43,12 +43,12 @@ validate_build_options() {
     validate_android_abi
     validate_native_clean_selector
     case ${PEPPY_ANDROID_BUILD_BACKEND:-auto} in auto|native|docker) ;; *) die "PEPPY_ANDROID_BUILD_BACKEND must be auto, native, or docker" ;; esac
-    case $ANDROID_BUILD_VARIANT in debug|development) ;; *) die "PEPPY_ANDROID_BUILD_VARIANT must be debug or development" ;; esac
-    if [[ $command == test && $ANDROID_BUILD_VARIANT == development ]]; then
-        die "PEPPY_ANDROID_BUILD_VARIANT=development supports build only; test and smoke require debug"
+    case $ANDROID_BUILD_VARIANT in debug|sideload) ;; *) die "PEPPY_ANDROID_BUILD_VARIANT must be debug or sideload" ;; esac
+    if [[ $command == test && $ANDROID_BUILD_VARIANT == sideload ]]; then
+        die "PEPPY_ANDROID_BUILD_VARIANT=sideload supports build only; test and smoke require debug"
     fi
 }
-android_variant_task_suffix() { case $ANDROID_BUILD_VARIANT in debug) printf Debug ;; development) printf Development ;; esac; }
+android_variant_task_suffix() { case $ANDROID_BUILD_VARIANT in debug) printf Debug ;; sideload) printf Sideload ;; esac; }
 android_apk_name() { printf 'app-%s.apk\n' "$ANDROID_BUILD_VARIANT"; }
 android_test_apk_name() { printf 'app-%s-androidTest.apk\n' "$ANDROID_BUILD_VARIANT"; }
 selected_rust_targets() {
@@ -257,6 +257,9 @@ run_build_body() {
     variant_task_suffix=$(android_variant_task_suffix)
     apk_name=$(android_apk_name)
     test_apk_name=$(android_test_apk_name)
+    if [[ $command == build && $ANDROID_BUILD_VARIANT == sideload ]]; then
+        gradle_args+=("-PpeppySideloadDebugSigning=true")
+    fi
     bash "$SOURCE_ROOT/infra/compose/verify-android-native.sh"
     if [[ $command == build ]]; then
         if (( ${#gradle_args[@]} )); then
@@ -462,8 +465,8 @@ open() {
 }
 smoke() {
     local serial output status apk_name test_apk_name
-    if [[ $ANDROID_BUILD_VARIANT == development ]]; then
-        die "PEPPY_ANDROID_BUILD_VARIANT=development supports build only; test and smoke require debug"
+    if [[ $ANDROID_BUILD_VARIANT == sideload ]]; then
+        die "PEPPY_ANDROID_BUILD_VARIANT=sideload supports build only; test and smoke require debug"
     fi
     serial=$(adb_serial)
     apk_name=$(android_apk_name)

@@ -39,6 +39,7 @@ fun strictBooleanProperty(name: String): Boolean = providers.gradleProperty(name
 } ?: false
 
 val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
+val peppySideloadDebugSigning = strictBooleanProperty("peppySideloadDebugSigning")
 require(!providers.gradleProperty("peppySmsDiagnostics").isPresent) {
     "peppySmsDiagnostics was removed; enable diagnostics at runtime in Settings"
 }
@@ -225,10 +226,13 @@ android {
         getByName("debug") {
             buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
-        create("development") {
-            initWith(getByName("debug"))
-            signingConfig = signingConfigs.getByName("debug")
-            isDebuggable = true
+        create("sideload") {
+            initWith(getByName("release"))
+            matchingFallbacks += listOf("release")
+            // CI intentionally leaves this unsigned for infra/release/sign-android-artifacts.sh.
+            if (peppySideloadDebugSigning) {
+                signingConfig = signingConfigs.getByName("debug")
+            }
         }
         getByName("release") {
             isDebuggable = false
@@ -246,8 +250,7 @@ android {
     sourceSets {
         getByName("main").jniLibs.srcDir("src/main/jniLibs")
         getByName("debug").res.srcDir(developmentTlsResources)
-        getByName("development").res.srcDir(developmentTlsResources)
-        getByName("development").manifest.srcFile("src/development/AndroidManifest.xml")
+        getByName("sideload").manifest.srcFile("src/sideload/AndroidManifest.xml")
     }
 
     testOptions {
@@ -319,6 +322,15 @@ dependencies {
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.10.01"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+    add("sideloadImplementation", project(":libadb"))
+}
+
+configurations.configureEach {
+    if (name == "sideloadUnitTestRuntimeClasspath") {
+        exclude(group = "org.bouncycastle", module = "bcprov-jdk18on")
+        exclude(group = "org.bouncycastle", module = "bcpkix-jdk18on")
+        exclude(group = "org.bouncycastle", module = "bcutil-jdk18on")
+    }
 }
 
 val generateDebugNetworkSecurityConfig = tasks.register("generateDebugNetworkSecurityConfig") {
@@ -386,19 +398,6 @@ val debugResourceConsumerTasks = setOf(
     "generateDebugAndroidTestResources",
     "mergeDebugAndroidTestResources",
     "processDebugAndroidTestResources",
-    "preDevelopmentBuild",
-    "mapDevelopmentSourceSetPaths",
-    "generateDevelopmentResources",
-    "packageDevelopmentResources",
-    "extractDeepLinksDevelopment",
-    "parseDevelopmentLocalResources",
-    "mergeDevelopmentResources",
-    "processDevelopmentResources",
-    "preDevelopmentAndroidTestBuild",
-    "mapDevelopmentAndroidTestSourceSetPaths",
-    "generateDevelopmentAndroidTestResources",
-    "mergeDevelopmentAndroidTestResources",
-    "processDevelopmentAndroidTestResources",
 )
 
 tasks.matching { it.name in debugResourceConsumerTasks }.configureEach {
@@ -481,34 +480,27 @@ val permittedReleaseExports = setOf(
     Triple("receiver", "androidx.profileinstaller.ProfileInstallReceiver", "android.permission.DUMP"),
 )
 
-val verifyReleaseManifestSecurity = tasks.register("verifyReleaseManifestSecurity") {
-    dependsOn("processReleaseManifest")
-
-    doLast {
-        val mergedManifest = layout.buildDirectory
-            .file("intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml")
-            .get()
-            .asFile
-        check(mergedManifest.isFile) { "Expected merged release manifest at $mergedManifest" }
+fun verifyManifestSecurity(mergedManifest: File, label: String) {
+        check(mergedManifest.isFile) { "Expected merged $label manifest at $mergedManifest" }
         val parserFactory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
         val manifest = parserFactory.newDocumentBuilder().parse(mergedManifest)
         val application = manifest.getElementsByTagName("application").item(0) as? org.w3c.dom.Element
-            ?: throw GradleException("Merged release manifest has no application element")
+            ?: throw GradleException("Merged $label manifest has no application element")
         check(application.getAttributeNS(androidNamespace, "debuggable").ifEmpty { "false" } == "false") {
-            "Release manifest must set android:debuggable=false"
+            "$label manifest must set android:debuggable=false"
         }
         check(application.getAttributeNS(androidNamespace, "usesCleartextTraffic").ifEmpty { "false" } == "false") {
-            "Release manifest must deny cleartext traffic"
+            "$label manifest must deny cleartext traffic"
         }
         check(application.getAttributeNS(androidNamespace, "networkSecurityConfig") == "@xml/network_security_config") {
-            "Release manifest must use the restrictive network security configuration"
+            "$label manifest must use the restrictive network security configuration"
         }
         val networkConfig = file("src/main/res/xml/network_security_config.xml")
         val networkConfigDocument = parserFactory.newDocumentBuilder().parse(networkConfig)
         val baseConfig = networkConfigDocument.getElementsByTagName("base-config").item(0)
             ?: throw GradleException("Release network security configuration has no base-config")
         check(baseConfig.attributes.getNamedItem("cleartextTrafficPermitted")?.nodeValue == "false") {
-            "Release network security configuration must deny cleartext traffic"
+            "$label network security configuration must deny cleartext traffic"
         }
         val exportedComponents = buildSet {
             val childNodes = application.childNodes
@@ -525,8 +517,19 @@ val verifyReleaseManifestSecurity = tasks.register("verifyReleaseManifestSecurit
             }
         }
         check(exportedComponents == permittedReleaseExports) {
-            "Release manifest exported components differ from the reviewed allowlist: $exportedComponents"
+            "$label manifest exported components differ from the reviewed allowlist: $exportedComponents"
         }
+}
+
+val verifyReleaseManifestSecurity = tasks.register("verifyReleaseManifestSecurity") {
+    dependsOn("processReleaseManifest")
+
+    doLast {
+        val mergedManifest = layout.buildDirectory
+            .file("intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml")
+            .get()
+            .asFile
+        verifyManifestSecurity(mergedManifest, "Release")
     }
 }
 
@@ -536,6 +539,7 @@ tasks.matching { it.name in setOf("assembleRelease", "bundleRelease") }.configur
 
 val restrictedSetupPackagePath = "dev/peppy/mobile/restrictedsetup/"
 val restrictedSetupDexPrefix = "L$restrictedSetupPackagePath"
+val restrictedSetupDexPrefixes = setOf(restrictedSetupDexPrefix, "Lio/github/muntashirakon/")
 val permittedRestrictedSetupDexClasses = Regex(
     "${Regex.escape(restrictedSetupDexPrefix)}RestrictedSetupEntryKt(?:\\${'$'}\\${'$'}ExternalSyntheticLambda\\d+)?;",
 )
@@ -543,6 +547,7 @@ val restrictedSetupDependencyGroups = setOf(
     "com.github.MuntashirAkon",
     "io.github.muntashirakon",
     "org.conscrypt",
+    "org.bouncycastle",
 )
 // Extend these deny lists before approving any future restricted-setup transport dependency.
 val restrictedSetupDependencyCoordinates = setOf(
@@ -550,7 +555,7 @@ val restrictedSetupDependencyCoordinates = setOf(
     "com.github.MuntashirAkon:spake2-android",
     "org.conscrypt:conscrypt-android",
 )
-val restrictedSetupNativeLibraryNames = setOf("libadb", "libspake2", "libconscrypt")
+val restrictedSetupNativeLibraryNames = setOf("libadb", "libspake2.so", "libconscrypt_jni.so")
 
 fun apksFromMetadata(metadataFile: File, variant: String): List<File> {
     check(metadataFile.isFile) { "Expected $variant APK metadata at $metadataFile" }
@@ -573,13 +578,13 @@ fun apksFromMetadata(metadataFile: File, variant: String): List<File> {
 }
 
 fun restrictedSetupDexClasses(apks: List<File>): Set<String> = buildSet {
-    val classDescriptor = Regex("L${Regex.escape(restrictedSetupPackagePath)}[^;]+;")
+    val classDescriptor = Regex("L(?:${restrictedSetupDexPrefixes.joinToString("|") { Regex.escape(it.removePrefix("L")) }})[^;]+;")
     apks.forEach { apk ->
         ZipFile(apk).use { archive ->
             val entries = archive.entries()
             while (entries.hasMoreElements()) {
                 val entry = entries.nextElement()
-                if (entry.name.matches(Regex("classes(\\d+)?\\.dex"))) {
+                if (entry.name.matches(Regex("(?:base/)?dex/classes(\\d+)?\\.dex")) || entry.name.matches(Regex("classes(\\d+)?\\.dex"))) {
                     classDescriptor.findAll(archive.getInputStream(entry).readBytes().toString(Charsets.ISO_8859_1))
                         .forEach { add(it.value) }
                 }
@@ -588,15 +593,36 @@ fun restrictedSetupDexClasses(apks: List<File>): Set<String> = buildSet {
     }
 }
 
-fun restrictedSetupNativeLibraries(apks: List<File>): Set<String> = apks.flatMap { apk ->
+fun restrictedSetupNativeLibraryPaths(apks: List<File>): Set<String> = apks.flatMap { apk ->
     ZipFile(apk).use { archive ->
         archive.entries().asSequence()
-            .filter { it.name.startsWith("lib/") }
-            .map { it.name.substringAfterLast('/').lowercase() }
-            .filter { nativeLibrary -> restrictedSetupNativeLibraryNames.any(nativeLibrary::contains) }
+            .map(ZipEntry::getName)
+            .filter { it.matches(Regex("(?:base/)?lib/[^/]+/[^/]+")) }
+            .filter { path -> restrictedSetupNativeLibraryNames.any(path.substringAfterLast('/').lowercase()::contains) }
             .toList()
     }
 }.toSet()
+
+fun restrictedSetupNativeLibraries(archives: List<File>): Set<String> =
+    restrictedSetupNativeLibraryPaths(archives).map { it.substringAfterLast('/').lowercase() }.toSet()
+
+fun archiveDexContains(archives: List<File>, value: String): Boolean = archives.any { archiveFile ->
+    ZipFile(archiveFile).use { archive ->
+        archive.entries().asSequence().filter { entry ->
+            entry.name.matches(Regex("(?:base/)?dex/classes(\\d+)?\\.dex")) || entry.name.matches(Regex("classes(\\d+)?\\.dex"))
+        }.any { entry ->
+            archive.getInputStream(entry).use { input -> input.readBytes().toString(Charsets.ISO_8859_1).contains(value) }
+        }
+    }
+}
+
+fun archiveEntryContains(archives: List<File>, entryName: String, value: String): Boolean = archives.any { archiveFile ->
+    ZipFile(archiveFile).use { archive ->
+        archive.getEntry(entryName)?.let { entry ->
+            archive.getInputStream(entry).use { input -> input.readBytes().toString(Charsets.ISO_8859_1).contains(value) }
+        } ?: false
+    }
+}
 
 fun verifyRestrictedSetupManifest(mergedManifest: File, variant: String) {
     check(mergedManifest.isFile) { "Expected merged $variant manifest at $mergedManifest" }
@@ -615,6 +641,64 @@ fun verifyRestrictedSetupManifest(mergedManifest: File, variant: String) {
         check(!name.startsWith("dev.peppy.mobile.restrictedsetup.")) {
             "$variant manifest must not contain restricted setup component $name"
         }
+    }
+    val restrictedPermissions = setOf(
+        "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+        "android.permission.CHANGE_NETWORK_STATE",
+    )
+    val permissions = manifest.getElementsByTagName("uses-permission")
+    for (index in 0 until permissions.length) {
+        val permission = permissions.item(index) as? org.w3c.dom.Element ?: continue
+        check(permission.getAttributeNS(androidNamespace, "name") !in restrictedPermissions) {
+            "$variant manifest must not contain restricted setup permission ${permission.getAttributeNS(androidNamespace, "name")}"
+        }
+    }
+}
+
+fun verifySideloadManifestSecurity(mergedManifest: File) {
+    val parserFactory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+    val manifest = parserFactory.newDocumentBuilder().parse(mergedManifest)
+    verifyManifestSecurity(mergedManifest, "Sideload")
+    val permissions = (0 until manifest.getElementsByTagName("uses-permission").length).asSequence()
+        .map { manifest.getElementsByTagName("uses-permission").item(it) as? org.w3c.dom.Element }
+        .filterNotNull()
+        .map { it.getAttributeNS(androidNamespace, "name") }
+        .toSet()
+    val requiredPermissions = setOf(
+        "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+        "android.permission.CHANGE_NETWORK_STATE",
+    )
+    val releaseManifest = layout.buildDirectory
+        .file("intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml").get().asFile
+    val releasePermissions = parserFactory.newDocumentBuilder().parse(releaseManifest)
+        .getElementsByTagName("uses-permission").let { nodes ->
+            (0 until nodes.length).map { nodes.item(it) as? org.w3c.dom.Element }
+                .filterNotNull()
+                .map { it.getAttributeNS(androidNamespace, "name") }
+                .toSet()
+        }
+    check(permissions - releasePermissions == requiredPermissions) {
+        "Sideload manifest must add exactly the reviewed restricted setup permissions"
+    }
+    val restrictedComponents = (0 until manifest.getElementsByTagName("*").length).asSequence()
+        .map { manifest.getElementsByTagName("*").item(it) as? org.w3c.dom.Element }
+        .filterNotNull()
+        .filter { it.nodeName in componentElementNames }
+        .filter { it.getAttributeNS(androidNamespace, "name").startsWith("dev.peppy.mobile.restrictedsetup.") }
+        .associateBy { it.getAttributeNS(androidNamespace, "name") }
+    val serviceName = "dev.peppy.mobile.restrictedsetup.RestrictedSetupService"
+    val receiverName = "dev.peppy.mobile.restrictedsetup.RestrictedSetupReplyReceiver"
+    val service = restrictedComponents[serviceName]
+    val receiver = restrictedComponents[receiverName]
+    check(restrictedComponents.keys == setOf(serviceName, receiverName)) {
+        "Sideload manifest must contain only the reviewed restricted setup components"
+    }
+    check(service?.nodeName == "service" && service.getAttributeNS(androidNamespace, "exported") == "false" &&
+        service.getAttributeNS(androidNamespace, "foregroundServiceType") == "connectedDevice") {
+        "Sideload restricted setup service must be non-exported and connectedDevice"
+    }
+    check(receiver?.nodeName == "receiver" && receiver.getAttributeNS(androidNamespace, "exported") == "false") {
+        "Sideload restricted setup receiver must be non-exported"
     }
 }
 
@@ -637,8 +721,10 @@ fun verifyRestrictedSetupExclusionTask(variant: String) = tasks.register(
         verifyRestrictedSetupManifest(mergedManifest, variant)
         val prohibitedDependencies = configurations.getByName("${variant}RuntimeClasspath")
             .resolvedConfiguration.resolvedArtifacts
-            .map { artifact -> artifact.moduleVersion.id.group to "${artifact.moduleVersion.id.group}:${artifact.name}" }
-            .filter { (group, coordinate) -> group in restrictedSetupDependencyGroups || coordinate in restrictedSetupDependencyCoordinates }
+            .map { artifact -> Triple(artifact.moduleVersion.id.group, "${artifact.moduleVersion.id.group}:${artifact.name}", artifact.id.componentIdentifier.displayName) }
+            .filter { (group, coordinate, component) ->
+                group in restrictedSetupDependencyGroups || coordinate in restrictedSetupDependencyCoordinates || component == "project :libadb"
+            }
             .toSet()
         check(prohibitedDependencies.isEmpty()) {
             "$variant runtime dependencies must not contain restricted setup transport groups: $prohibitedDependencies"
@@ -650,8 +736,56 @@ fun verifyRestrictedSetupExclusionTask(variant: String) = tasks.register(
     }
 }
 
+fun verifyReleaseRestrictedSetupAabExclusion() {
+    val releaseAab = layout.buildDirectory.file("outputs/bundle/release/app-release.aab").get().asFile
+    check(releaseAab.isFile) { "Expected release AAB at $releaseAab" }
+    val archives = listOf(releaseAab)
+    val prohibitedClasses = restrictedSetupDexClasses(archives).filterNot(permittedRestrictedSetupDexClasses::matches)
+    check(prohibitedClasses.isEmpty()) { "Release AAB DEX must not contain restricted setup classes: $prohibitedClasses" }
+    check(restrictedSetupNativeLibraries(archives).isEmpty()) {
+        "Release AAB must not contain restricted setup transport native libraries"
+    }
+    check(!archiveEntryContains(archives, "base/manifest/AndroidManifest.xml", "dev.peppy.mobile.restrictedsetup") &&
+        !archiveEntryContains(archives, "base/manifest/AndroidManifest.xml", "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE") &&
+        !archiveEntryContains(archives, "base/manifest/AndroidManifest.xml", "android.permission.CHANGE_NETWORK_STATE")) {
+        "Release AAB manifest must not contain restricted setup content"
+    }
+}
+
 val verifyReleaseRestrictedSetupExclusion = verifyRestrictedSetupExclusionTask("release")
 val verifyDebugRestrictedSetupExclusion = verifyRestrictedSetupExclusionTask("debug")
+
+val verifySideloadRestrictedSetupInclusion = tasks.register("verifySideloadRestrictedSetupInclusion") {
+    dependsOn("packageSideload", "processSideloadManifest", "processReleaseManifest")
+
+    doLast {
+        val metadata = layout.buildDirectory.file("outputs/apk/sideload/output-metadata.json").get().asFile
+        val apks = apksFromMetadata(metadata, "sideload")
+        check(restrictedSetupDexClasses(apks).any { it.contains("RestrictedSetupService") }) {
+            "Sideload APK must contain RestrictedSetupService"
+        }
+        check(archiveDexContains(apks, "Lio/github/muntashirakon/adb/")) {
+            "Sideload APK must contain libadb classes"
+        }
+        val nativeLibraryPaths = restrictedSetupNativeLibraryPaths(apks)
+        val expectedAbis = selectedAndroidAbi?.let(::setOf) ?: setOf("arm64-v8a", "x86_64")
+        expectedAbis.forEach { abi ->
+            check(listOf("libspake2.so", "libconscrypt_jni.so").all { library -> "lib/$abi/$library" in nativeLibraryPaths }) {
+                "Sideload APK must contain libspake2.so and libconscrypt_jni.so for $abi"
+            }
+        }
+    }
+}
+
+val verifySideloadManifestSecurity = tasks.register("verifySideloadManifestSecurity") {
+    dependsOn("processSideloadManifest", "processReleaseManifest")
+
+    doLast {
+        val sideloadManifest = layout.buildDirectory
+            .file("intermediates/merged_manifests/sideload/processSideloadManifest/AndroidManifest.xml").get().asFile
+        verifySideloadManifestSecurity(sideloadManifest)
+    }
+}
 
 val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleaseRestrictedSetupExclusionFixtures") {
     doLast {
@@ -685,6 +819,21 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
             "Synthetic restricted setup native library must be detected"
         }
 
+        val fixtureAab = fixtureDirectory.resolve("app-release.aab")
+        ZipOutputStream(fixtureAab.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("base/dex/classes.dex"))
+            archive.write("Lio/github/muntashirakon/adb/AdbManager;".toByteArray())
+            archive.closeEntry()
+            archive.putNextEntry(ZipEntry("base/lib/arm64-v8a/libspake2.so"))
+            archive.closeEntry()
+        }
+        check(restrictedSetupDexClasses(listOf(fixtureAab)).isNotEmpty()) {
+            "Synthetic libadb class must fail the release AAB DEX exclusion guard"
+        }
+        check(restrictedSetupNativeLibraries(listOf(fixtureAab)).contains("libspake2.so")) {
+            "Synthetic restricted setup native library must fail the release AAB exclusion guard"
+        }
+
         ZipOutputStream(fixtureApk.outputStream()).use { archive ->
             archive.putNextEntry(ZipEntry("classes.dex"))
             archive.write("${restrictedSetupDexPrefix}RestrictedSetupEntryKt;${restrictedSetupDexPrefix}RestrictedSetupEntryKt${'$'}${'$'}ExternalSyntheticLambda0;".toByteArray())
@@ -693,15 +842,54 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
         check(restrictedSetupDexClasses(apksFromMetadata(metadata, "release")).all(permittedRestrictedSetupDexClasses::matches)) {
             "Synthetic no-op entry classes must remain allowed"
         }
+
+        val sideloadFixture = fixtureDirectory.resolve("app-sideload-unsigned.apk")
+        ZipOutputStream(sideloadFixture.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("classes.dex"))
+            archive.write("${restrictedSetupDexPrefix}RestrictedSetupService;Lio/github/muntashirakon/adb/AdbManager;".toByteArray())
+            archive.closeEntry()
+            for (library in listOf("libspake2.so", "libconscrypt_jni.so")) {
+                archive.putNextEntry(ZipEntry("lib/arm64-v8a/$library"))
+                archive.closeEntry()
+            }
+        }
+        val sideloadArchives = listOf(sideloadFixture)
+        check(restrictedSetupDexClasses(sideloadArchives).any { it.contains("RestrictedSetupService") })
+        check(archiveDexContains(sideloadArchives, "Lio/github/muntashirakon/adb/"))
+        check(setOf("libspake2.so", "libconscrypt_jni.so").all(restrictedSetupNativeLibraries(sideloadArchives)::contains))
+
+        ZipOutputStream(sideloadFixture.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("classes.dex"))
+            archive.write("${restrictedSetupDexPrefix}RestrictedSetupService;".toByteArray())
+            archive.closeEntry()
+        }
+        check(!archiveDexContains(listOf(sideloadFixture), "Lio/github/muntashirakon/adb/")) {
+            "Synthetic sideload fixture without libadb classes must fail inclusion"
+        }
     }
 }
 
-tasks.matching { it.name in setOf("assembleRelease", "bundleRelease") }.configureEach {
+tasks.matching { it.name == "assembleRelease" }.configureEach {
     dependsOn(verifyReleaseRestrictedSetupExclusion)
+}
+
+tasks.matching { it.name == "bundleRelease" }.configureEach {
+    dependsOn(verifyReleaseRestrictedSetupExclusion)
+    doLast { verifyReleaseRestrictedSetupAabExclusion() }
 }
 
 tasks.matching { it.name == "assembleDebug" }.configureEach {
     dependsOn(verifyDebugRestrictedSetupExclusion)
+}
+
+tasks.matching { it.name == "assembleSideload" }.configureEach {
+    dependsOn(verifySideloadRestrictedSetupInclusion, verifySideloadManifestSecurity)
+}
+
+gradle.projectsEvaluated {
+    setOf("testSideloadUnitTest", "lintSideload", "assembleSideload").forEach { taskName ->
+        check(tasks.names.contains(taskName)) { "Expected sideload task $taskName" }
+    }
 }
 
 tasks.matching { it.name == "check" }.configureEach {
