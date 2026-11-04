@@ -32,6 +32,7 @@ import dev.peppy.mobile.mms.MmsProviderPart
 import dev.peppy.mobile.mms.MmsProviderRecord
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import org.junit.Assert.*
@@ -50,6 +51,7 @@ import uniffi.peppy_mobile_bindings.NativeMmsBeginOutcome
 import uniffi.peppy_mobile_bindings.NativeMmsPreviewState
 import uniffi.peppy_mobile_bindings.NativeMmsProviderIdentityQuarantine
 import uniffi.peppy_mobile_bindings.NativeMmsSource
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 
 
 
@@ -57,6 +59,117 @@ import uniffi.peppy_mobile_bindings.NativeMmsSource
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class MmsCaptureOrchestrationTest {
+    @Test fun recheckCompletesExistingPartUnavailableSentSmilAcquisition() {
+        val smil = MmsProviderPart(10, -1, "application/smil", null, null, "<smil/>", Uri.parse("content://mms/part/10"))
+        val text = MmsProviderPart(11, 0, "text/plain", null, 106, "sent body", Uri.parse("content://mms/part/11"))
+        val sent = record(1).copy(
+            messageBox = 2,
+            messageType = 128,
+            sender = listOf("+15550001"),
+            toRecipients = listOf("+15550002"),
+            parts = listOf(smil, text),
+        )
+        val core = FakeCore(
+            initialReason = "part_unavailable",
+            recheckRequests = listOf(MmsBackfillRecheckRequest("1", false)),
+        )
+        core.seed("1", incoming = false)
+        val provider = FakeProvider(listOf(sent), copyErrorFor = { part ->
+            if (part.providerPartId == smil.providerPartId) FileNotFoundException("Column _data not found") else null
+        })
+
+        MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(1, core.completed)
+        assertFalse(provider.copiedPartIds.contains(smil.providerPartId))
+        assertFalse(core.mappedProviderPartIds.contains(smil.providerPartId.toString()))
+    }
+
+    @Test fun smilOnlyMessageWithEmptyTextBecomesUnavailableWhenTheCoreRejectsIt() {
+        val smil = MmsProviderPart(10, -1, "application/smil", null, null, "<smil/>", Uri.parse("content://mms/part/10"))
+        val core = FakeCore(completeError = MobileBindingsException.InvalidRequest())
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(smil))), copyErrorFor = { part ->
+            if (part.providerPartId == smil.providerPartId) FileNotFoundException("Column _data not found") else null
+        })
+
+        MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(NativeMmsAcquisitionState.UNAVAILABLE, core.state("acq-1"))
+        assertEquals("invalid_mms_metadata", core.reasons.last())
+        assertFalse(provider.copiedPartIds.contains(smil.providerPartId))
+    }
+
+    @Test fun uppercaseSmilMediaTypeIsSkipped() {
+        val smil = MmsProviderPart(10, -1, "APPLICATION/SMIL", null, null, "<smil/>", Uri.parse("content://mms/part/10"))
+        val text = MmsProviderPart(11, 0, "text/plain", null, 106, "body", Uri.parse("content://mms/part/11"))
+        val core = FakeCore()
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(smil, text))), copyErrorFor = { part ->
+            if (part.providerPartId == smil.providerPartId) FileNotFoundException("Column _data not found") else null
+        })
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(1, result.captured)
+        assertEquals(1, core.completed)
+        assertFalse(provider.copiedPartIds.contains(smil.providerPartId))
+    }
+
+    @Test fun sentSmilWithInlineTextCompletesWithoutCopyingOrMappingSmil() {
+        val smil = MmsProviderPart(10, -1, "application/smil", null, null, "<smil/>", Uri.parse("content://mms/part/10"))
+        val text = MmsProviderPart(11, 0, "text/plain", null, 106, "sent body", Uri.parse("content://mms/part/11"))
+        val sent = record(1).copy(
+            messageBox = 2,
+            messageType = 128,
+            sender = listOf("+15550001"),
+            toRecipients = listOf("+15550002"),
+            parts = listOf(smil, text),
+        )
+        val core = FakeCore()
+        val provider = FakeProvider(listOf(sent), copyErrorFor = { part ->
+            if (part.providerPartId == smil.providerPartId) FileNotFoundException("Column _data not found") else null
+        })
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(1, result.captured)
+        assertEquals(1, core.completed)
+        assertFalse(provider.copiedPartIds.contains(smil.providerPartId))
+        assertFalse(core.mappedProviderPartIds.contains(smil.providerPartId.toString()))
+        assertTrue(core.preparedMediaTypes.isEmpty())
+    }
+
+    @Test fun imageMmsMapsOnlyTheImageWhenItAlsoContainsSmilAndText() {
+        val smil = MmsProviderPart(10, -1, "application/smil", null, null, "<smil/>", Uri.parse("content://mms/part/10"))
+        val image = pngPart(11)
+        val text = MmsProviderPart(12, 1, "text/plain", null, 106, "body", Uri.parse("content://mms/part/12"))
+        val core = FakeCore()
+
+        val provider = FakeProvider(
+            listOf(record(1).copy(parts = listOf(smil, image, text))),
+            imageBytes = png(),
+            previewResult = MmsMediaPreviewResult(MmsMediaMetadata(), null, MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW),
+        )
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(1, result.captured)
+        assertEquals(1, core.completed)
+        assertEquals(listOf("image/png"), core.preparedMediaTypes)
+        assertEquals(listOf(image.providerPartId.toString()), core.mappedProviderPartIds)
+    }
+
+    @Test fun smilDoesNotCountTowardTheBinaryAttachmentLimit() {
+        val smil = MmsProviderPart(10, -1, "application/smil", null, null, "<smil/>", Uri.parse("content://mms/part/10"))
+        val images = (11L..20L).map(::pngPart)
+        val core = FakeCore()
+
+        val result = MmsCapture.run(plan(), core, FakeProvider(listOf(record(1).copy(parts = listOf(smil) + images)), imageBytes = png()), temp())
+
+        assertEquals(1, result.captured)
+        assertEquals(1, core.completed)
+        assertEquals(images.map { it.providerPartId.toString() }, core.mappedProviderPartIds)
+    }
+
     @Test fun deterministicUnsafePreviewCompletesWithTheOriginalMapped() {
         val core = FakeCore(initialReason = "preview_deferred")
         val provider = FakeProvider(
@@ -842,6 +955,7 @@ class MmsCaptureOrchestrationTest {
         private val imageBytes: ByteArray? = null,
         private val failCopy: Boolean = false,
         private val copyError: Exception? = null,
+        private val copyErrorFor: (MmsProviderPart) -> Exception? = { null },
         private val textReadError: Exception? = null,
         private val previewLimit: Int = MmsMediaPreview.MAX_JPEG_BYTES,
         private val previewResult: MmsMediaPreviewResult? = null,
@@ -849,6 +963,7 @@ class MmsCaptureOrchestrationTest {
         private val descendingPageError: Exception? = null,
     ) : MmsCaptureProvider {
         var copyCount = 0
+        val copiedPartIds = mutableListOf<Long>()
         var descendingPageCount = 0
         var previewError: Exception? = null
         var onDescendingPage: (() -> Unit)? = null
@@ -877,7 +992,9 @@ class MmsCaptureOrchestrationTest {
         }
         override fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long): Long {
             copyCount++
+            copiedPartIds += part.providerPartId
             copyError?.let { throw it }
+            copyErrorFor(part)?.let { throw it }
             if (failCopy) error("provider read failed")
             val bytes = imageBytes ?: byteArrayOf()
             destination.writeBytes(bytes)
@@ -907,6 +1024,7 @@ class MmsCaptureOrchestrationTest {
         var pendingBytes: Long = 0,
         private val initialReason: String = "settling",
         private val initialState: NativeMmsAcquisitionState = NativeMmsAcquisitionState.PENDING,
+        private val completeError: Exception? = null,
     ) : MmsCaptureCore {
         var migrations = 0
         val reasons = mutableListOf<String?>()
@@ -917,6 +1035,7 @@ class MmsCaptureOrchestrationTest {
         var completed = 0
         var manualRecheckLimit: Int? = null
         val preparedMediaTypes = mutableListOf<String>()
+        val mappedProviderPartIds = mutableListOf<String>()
         private val previewStates = initialPreviewStates.toMutableMap()
         private val acquisitions = mutableMapOf<String, NativeMmsAcquisition>()
         private var liveCursor = initialLiveCursor
@@ -987,6 +1106,28 @@ class MmsCaptureOrchestrationTest {
             .filterKeys { it !in quarantinedProviderIds }
             .values
             .filter { it.state == NativeMmsAcquisitionState.PENDING }
+        fun seed(providerMessageId: String, incoming: Boolean) {
+            val input = NativeMmsAcquisitionInput(
+                NativeMmsSource("generation", "route", providerMessageId, null),
+                incoming,
+                null,
+                emptyList(),
+                null,
+                "",
+                false,
+                0,
+                null,
+            )
+            acquisitions[providerMessageId] = NativeMmsAcquisition(
+                "acq-$providerMessageId",
+                "conversation",
+                input,
+                initialState,
+                initialReason,
+                emptyList(),
+            )
+        }
+        fun state(acquisitionId: String) = acquisitions.values.first { it.acquisitionId == acquisitionId }.state
         override fun begin(input: NativeMmsAcquisitionInput): NativeMmsBeginOutcome {
             inputs += input
             if (input.source.providerMessageId in failBeginProviderIds) error("core unavailable")
@@ -1016,13 +1157,16 @@ class MmsCaptureOrchestrationTest {
             preparedMediaTypes += mediaType
             return "attachment-${preparedMediaTypes.size}"
         }
-        override fun mapPart(id: String, providerPartId: String, attachmentId: String) = Unit
+        override fun mapPart(id: String, providerPartId: String, attachmentId: String) {
+            mappedProviderPartIds += providerPartId
+        }
         override fun setPartMetadata(id: String, providerPartId: String, width: Int?, height: Int?, durationMs: Long?, thumbnailAttachmentId: String?) = Unit
         override fun setPartPreviewState(id: String, providerPartId: String, state: NativeMmsPreviewState) {
             previewStates[providerPartId] = state
         }
         override fun discardAttachment(id: String) = Unit
         override fun complete(id: String) {
+            completeError?.let { throw it }
             check(previewStates.values.none { it == NativeMmsPreviewState.DEFERRED })
             val entry = acquisitions.entries.firstOrNull { it.value.acquisitionId == id } ?: return
             entry.setValue(entry.value.copy(state = NativeMmsAcquisitionState.COMPLETE))

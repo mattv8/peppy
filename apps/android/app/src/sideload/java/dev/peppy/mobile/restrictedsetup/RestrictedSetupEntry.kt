@@ -53,7 +53,6 @@ internal fun RestrictedSetupEntry(onAccessChanged: () -> Unit) {
         submitConnectPort = controller::submitConnectPort,
         showCodePromptAgain = controller::showCodePromptAgain,
         cancel = controller::cancel,
-        acknowledgeCleanup = controller::acknowledgeCleanup,
         startService = { RestrictedSetupRuntime.startService(context) },
     )
 }

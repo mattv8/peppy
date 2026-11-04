@@ -734,7 +734,7 @@ internal object MmsCapture {
         var binary = 0
         var hasDeferredPreview = false
         for (part in ordered(record.parts)) {
-            if (part.mediaType.equals("text/plain", true)) continue
+            if (part.mediaType.equals("text/plain", true) || part.mediaType.equals(SMIL_MEDIA_TYPE, true)) continue
             if (++binary > MAX_BINARY) {
                 core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.BLOCKED, "too_many_attachments")
                 return ProcessResult(true, pending = 1)
@@ -921,6 +921,7 @@ internal object MmsCapture {
     private const val SEND_REQ = 128
     private const val NOTIFICATION_IND = 130
     private const val RETRIEVE_CONF = 132
+    private const val SMIL_MEDIA_TYPE = "application/smil"
     private const val UNKNOWN_PROVIDER_DATE_MS = 0L
     private const val UNKNOWN_SUBSCRIPTION = "android-mms-unknown-subscription"
 

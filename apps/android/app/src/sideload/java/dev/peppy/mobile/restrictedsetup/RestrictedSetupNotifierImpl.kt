@@ -59,10 +59,11 @@ internal class RestrictedSetupNotifierImpl(private val context: Context) : Restr
     private fun notification(notice: RestrictedSetupNotice): Notification {
         val isPrompt = notice in setOf(RestrictedSetupNotice.CODE_PROMPT, RestrictedSetupNotice.CODE_INVALID, RestrictedSetupNotice.CODE_REJECTED)
         val acceptsReply = notice != RestrictedSetupNotice.CODE_REJECTED && isPrompt
-        val hasCancelAction = isPrompt || notice == RestrictedSetupNotice.SEARCHING
+        val hasCancelAction = isPrompt || notice in setOf(RestrictedSetupNotice.SEARCHING, RestrictedSetupNotice.NETWORK_NOT_ALLOWED)
         val isResult = notice in setOf(RestrictedSetupNotice.DONE, RestrictedSetupNotice.FAILED)
         val text = when (notice) {
             RestrictedSetupNotice.SEARCHING -> context.getString(R.string.peppy_restricted_setup_discovery_searching)
+            RestrictedSetupNotice.NETWORK_NOT_ALLOWED -> context.getString(R.string.peppy_restricted_setup_notif_network_not_allowed)
             RestrictedSetupNotice.CODE_PROMPT -> context.getString(R.string.peppy_restricted_setup_notif_prompt_text)
             RestrictedSetupNotice.CODE_INVALID -> context.getString(R.string.peppy_restricted_setup_notif_code_invalid)
             RestrictedSetupNotice.CODE_REJECTED -> context.getString(R.string.peppy_restricted_setup_notif_code_rejected)
