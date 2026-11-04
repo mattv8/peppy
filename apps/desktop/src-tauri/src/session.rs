@@ -2552,6 +2552,7 @@ mod tests {
                 body: "storage policy projection".into(),
                 imported: false,
                 observed_at_ms: 1,
+                is_sent_box: false,
                 transaction_id: None,
             })
             .unwrap();

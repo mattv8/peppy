@@ -77,5 +77,6 @@ private fun mmsInput(transactionId: String) = NativeMmsAcquisitionInput(
     body = "message body",
     imported = false,
     observedAtMs = 1L,
+    isSentBox = false,
     transactionId = transactionId,
 )
