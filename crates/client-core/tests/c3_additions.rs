@@ -472,6 +472,7 @@ fn authenticated_status_with_out_of_range_sequence_is_quarantined_not_stalled() 
         purpose: EnvelopePurpose::Event,
         route: None,
         compaction: None,
+        origin_tag: None,
         ciphertext: Vec::new(),
     };
     let plain = serde_json::to_vec(&PrivatePayload::SendStatus {
@@ -538,6 +539,7 @@ fn authenticated_read_state_with_out_of_range_supersedes_is_quarantined_not_stal
         purpose: EnvelopePurpose::Event,
         route: None,
         compaction: Some(compaction.clone()),
+        origin_tag: None,
         ciphertext: Vec::new(),
     };
     let mut plain = serde_json::to_value(PrivatePayload::ReadState {

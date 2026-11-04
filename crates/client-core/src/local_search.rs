@@ -737,8 +737,9 @@ fn contact_hits(
     limit: usize,
     cursor: Option<&SearchCursor>,
 ) -> Result<Vec<(LocalSearchHit, String)>, Error> {
+    let visible_book_ids = crate::contacts::visible_book_ids(&store.conn)?;
     let mut statement = store.conn.prepare(
-        "SELECT c.book_id,c.id,c.body,b.body FROM contacts c JOIN contact_books b ON b.id=c.book_id \
+        "SELECT c.book_id,c.id,c.body,b.owner_device_id,b.state,b.body FROM contacts c JOIN contact_books b ON b.id=c.book_id \
          WHERE b.forgotten=0 AND c.deleted_at IS NULL ORDER BY c.book_id,c.id",
     )?;
     let rows = statement
@@ -748,11 +749,16 @@ fn contact_hits(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut matches = Vec::new();
-    for (book_id, contact_id, contact_body, book_body) in rows {
+    for (book_id, contact_id, contact_body, _owner, _state, book_body) in rows {
+        if !visible_book_ids.contains(&book_id) {
+            continue;
+        }
         let Ok(contact) = serde_json::from_str::<Value>(&contact_body) else {
             continue;
         };

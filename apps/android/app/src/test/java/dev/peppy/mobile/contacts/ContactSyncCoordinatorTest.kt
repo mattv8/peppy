@@ -32,6 +32,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeClient
+import uniffi.peppy_mobile_bindings.NativeContactBookSelection
 
 
 /**
@@ -46,10 +47,12 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
     private val os = FakeContactsOs()
     private var access = ContactsAccess(read = true, write = true)
 
-    private fun coordinator(client: NativeClient) = ContactSyncCoordinator(
-        NativeContactCore(client), os, deviceId, { access }, java.io.File(context.cacheDir, "photos"),
-        deviceName = "Pixel Test", region = "us",
-    )
+    private fun coordinator(client: NativeClient) = coordinator(SelectingCore(NativeContactCore(client)) {
+        val books = it.listBooks().getJSONArray("books")
+        val owned = (0 until books.length()).map { index -> books.getJSONObject(index) }
+            .firstOrNull { book -> book.optString("owner_device_id") == deviceId && book.optString("state") != "retired" }
+        owned?.let { book -> NativeContactBookSelection.Owned(book.getString("id")) } ?: NativeContactBookSelection.Mint
+    })
 
     private fun coordinator(core: ContactCore) = ContactSyncCoordinator(
         core, os, deviceId, { access }, java.io.File(context.cacheDir, "photos"),
@@ -70,6 +73,13 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
             if (failBegin) throw IllegalStateException("simulated process death")
             return delegate.beginScan(input)
         }
+    }
+
+    private class SelectingCore(
+        private val delegate: ContactCore,
+        private val selection: (ContactCore) -> NativeContactBookSelection,
+    ) : ContactCore by delegate {
+        override fun contactBookSelection() = selection(delegate)
     }
 
     private fun view(client: NativeClient, bookId: String): JSONArray =
@@ -161,6 +171,67 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
         assertEquals(outbox, gateway.pendingOutboxJson().size)
     }
 
+    @Test fun contactBookSelectionWaitDefersWithoutMinting() {
+        val gateway = enrollAndUnlock()
+        val core = SelectingCore(NativeContactCore(gateway)) { NativeContactBookSelection.Wait }
+
+        val report = coordinator(core).run(charging = false)
+
+        assertEquals(ContactPassReport.Outcome.WAITING, report.outcome)
+        assertFalse(report.more)
+        assertEquals(0, JSONObject(gateway.listContactBooksJson()).getJSONArray("books").length())
+    }
+
+    @Test fun contactBookSelectionMintCreatesBook() {
+        val gateway = enrollAndUnlock()
+        gateway.setServerCompactionState(true, true)
+        val core = SelectingCore(NativeContactCore(gateway)) { NativeContactBookSelection.Mint }
+
+        val report = coordinator(core).run(charging = false)
+
+        assertTrue(report.scanComplete)
+        assertNotNull(report.bookId)
+        assertEquals(1, JSONObject(gateway.listContactBooksJson()).getJSONArray("books").length())
+    }
+
+    @Test fun contactBookSelectionOwnedReusesBook() {
+        val (gateway, bookId) = setUpBook()
+        val core = SelectingCore(NativeContactCore(gateway)) { NativeContactBookSelection.Owned(bookId) }
+
+        val report = coordinator(core).run(charging = false, forceFull = true)
+
+        assertEquals(bookId, report.bookId)
+        assertEquals(1, JSONObject(gateway.listContactBooksJson()).getJSONArray("books").length())
+    }
+
+    @Test fun contactBookSelectionInheritedRemovesOldBookMembersBeforeRetiring() {
+        val (gateway, oldBookId) = setUpBook()
+        repeat(9) { index -> os.add((index + 3).toLong(), "Old Contact $index", "+12025550${(200 + index).toString().padStart(3, '0')}") }
+        assertTrue(coordinator(gateway).run(charging = false, forceFull = true).scanComplete)
+        val inheritedBookId = UUID.randomUUID().toString()
+        val core = SelectingCore(NativeContactCore(gateway)) {
+            NativeContactBookSelection.Inherited(inheritedBookId, listOf(oldBookId))
+        }
+
+        val report = coordinator(core).run(charging = false)
+
+        assertTrue(report.scanComplete)
+        assertEquals(inheritedBookId, report.bookId)
+        val books = JSONObject(gateway.listContactBooksJson()).getJSONArray("books")
+        val oldBook = (0 until books.length()).map { books.getJSONObject(it) }.single { it.getString("id") == oldBookId }
+        assertEquals("active", oldBook.getString("state"))
+        val holds = JSONObject(gateway.listContactRequestsJson(JSONObject().put("book_id", oldBookId).toString()))
+            .getJSONArray("requests")
+        val hold = (0 until holds.length()).map { holds.getJSONObject(it) }.single { it.getString("kind") == "scan_deletions" }
+        gateway.contactApprovalJson(JSONObject().put("scan_id", hold.getString("scan_id")).put("approve", true).toString())
+
+        assertTrue(coordinator(core).run(charging = false).scanComplete)
+        val retiredBooks = JSONObject(gateway.listContactBooksJson()).getJSONArray("books")
+        val retiredBook = (0 until retiredBooks.length()).map { retiredBooks.getJSONObject(it) }
+            .single { it.getString("id") == oldBookId }
+        assertEquals("retired", retiredBook.getString("state"))
+    }
+
     @Test fun remotePendingRequestRunsFreshNoChangeFullScanAndCompletes() {
         val (gateway, bookId) = setUpBook()
         val before = view(gateway, bookId).toString()
@@ -179,10 +250,11 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
     }
 
     @Test fun checkpointIsSavedBeforeBeginAndRestartReclaimsTheScan() {
-        val (gateway, _) = setUpBook()
+        val (gateway, bookId) = setUpBook()
         val recording = BeginRecordingCore(NativeContactCore(gateway))
+        val core = SelectingCore(recording) { NativeContactBookSelection.Owned(bookId) }
 
-        assertThrows(IllegalStateException::class.java) { coordinator(recording).run(charging = false, forceFull = true) }
+        assertThrows(IllegalStateException::class.java) { coordinator(core).run(charging = false, forceFull = true) }
         assertTrue(recording.checkpointSaved)
 
         val resumed = coordinator(gateway).run(charging = false)

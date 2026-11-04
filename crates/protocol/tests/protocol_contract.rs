@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use peppy_domain::{CommandId, DeviceId, EnvelopeId, SourceSequence, VaultId};
 use peppy_protocol::{
     CompactionMetadata, CompactionReference, Envelope, EnvelopeError, EnvelopePurpose,
@@ -25,8 +26,45 @@ fn envelope() -> Envelope {
             subscription_id: "sim:42:generation:7".into(),
         }),
         compaction: None,
+        origin_tag: None,
         ciphertext: vec![1, 2, 3],
     }
+}
+
+#[test]
+fn origin_tag_round_trips_is_omitted_and_does_not_change_digest() {
+    let mut event = envelope();
+    event.purpose = EnvelopePurpose::Event;
+    event.command_id = None;
+    event.route = None;
+    let digest = event.wire_digest().unwrap();
+    assert!(
+        serde_json::to_value(&event)
+            .unwrap()
+            .get("origin_tag")
+            .is_none()
+    );
+    event.origin_tag = Some([7; 32]);
+    assert_eq!(event.wire_digest().unwrap(), digest);
+    let encoded = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Envelope>(&encoded)
+            .unwrap()
+            .origin_tag,
+        Some([7; 32])
+    );
+}
+
+#[test]
+fn origin_tag_rejects_commands_and_wrong_lengths() {
+    let mut command = envelope();
+    command.origin_tag = Some([7; 32]);
+    assert_eq!(command.validate(), Err(EnvelopeError::UnexpectedOriginTag));
+
+    let mut value = serde_json::to_value(envelope()).unwrap();
+    value["origin_tag"] =
+        serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode([7; 31]));
+    assert!(serde_json::from_value::<Envelope>(value).is_err());
 }
 
 #[test]

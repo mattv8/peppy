@@ -4,11 +4,11 @@
 use peppy_client_core::{
     AttachmentInfo, AttachmentRetentionClass, AttachmentRetentionState, AttachmentState,
     AttachmentUseKind, AttachmentUseOperationKind, AttachmentUseResponse, AttachmentUseState,
-    Captured, CipherObject, Client, ClientConfig, ComposeDraftUpdate, DatabaseKey, DeviceId,
-    Error as CoreError, GatewayHostFacts, GatewayMmsCleanup, GatewayPlatform, GatewaySettings,
-    HistoryImportConditions, IncomingSms, KeyProfile, MAX_SEAL_BATCH, Message, MessageId,
-    MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause, MmsBackfillPhase,
-    MmsBackfillRecheck, MmsBackfillRecheckConditions, MmsBackfillRecheckOutcome,
+    Captured, CipherObject, Client, ClientConfig, ComposeDraftUpdate, ContactBookSelection,
+    DatabaseKey, DeviceId, Error as CoreError, GatewayHostFacts, GatewayMmsCleanup,
+    GatewayPlatform, GatewaySettings, HistoryImportConditions, IncomingSms, KeyProfile,
+    MAX_SEAL_BATCH, Message, MessageId, MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause,
+    MmsBackfillPhase, MmsBackfillRecheck, MmsBackfillRecheckConditions, MmsBackfillRecheckOutcome,
     MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome, MmsLegacyBackfillState,
     MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource, NativeKeyCache, NotificationCapture,
     NotificationCaptureOutcome, NotificationTarget, PermitBlock, PermitDecision,
@@ -67,6 +67,19 @@ pub struct NativeGatewaySettings {
 pub enum NativeGatewayPlatform {
     Android,
     Ios,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeContactBookSelection {
+    Inherited {
+        book_id: String,
+        retire_book_ids: Vec<String>,
+    },
+    Owned {
+        book_id: String,
+    },
+    Wait,
+    Mint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -2564,6 +2577,56 @@ impl NativeClient {
             client.record_recovery_snapshot_capacity(cursor, record_count)
         })
     }
+
+    /// Records the first server replay watermark observed by the host.
+    pub fn observe_server_high_water(
+        &self,
+        high_water_cursor: String,
+    ) -> Result<(), MobileBindingsError> {
+        let cursor = parse_cursor(high_water_cursor)?;
+        with_client(&self.client, |client| {
+            client.observe_server_high_water(cursor)
+        })
+    }
+
+    pub fn initial_replay_caught_up(&self) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, Client::initial_replay_caught_up)
+    }
+
+    /// Call after unlock and before choosing or minting a native contact book.
+    pub fn register_device_hint(
+        &self,
+        platform: String,
+        hint: Vec<u8>,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.register_device_hint(&platform, &hint)
+        })
+    }
+
+    /// Call when the host cannot read or create its reinstall-stable hint.
+    pub fn register_no_device_hint(&self) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, Client::register_no_device_hint)
+    }
+
+    pub fn contact_book_selection(
+        &self,
+    ) -> Result<NativeContactBookSelection, MobileBindingsError> {
+        with_client(&self.client, Client::contact_book_selection).map(|selection| match selection {
+            ContactBookSelection::Inherited {
+                book_id,
+                retire_book_ids,
+            } => NativeContactBookSelection::Inherited {
+                book_id,
+                retire_book_ids,
+            },
+            ContactBookSelection::Owned { book_id } => {
+                NativeContactBookSelection::Owned { book_id }
+            }
+            ContactBookSelection::Wait => NativeContactBookSelection::Wait,
+            ContactBookSelection::Mint => NativeContactBookSelection::Mint,
+        })
+    }
     /// Returns the core-filtered upload set for this Android gateway pass.
     pub fn pending_gateway_media_uploads(
         &self,
@@ -3172,6 +3235,15 @@ impl NativeClient {
     ) -> Result<(), MobileBindingsError> {
         with_client(&self.client, |client| {
             client.set_server_compaction_supported(supported)
+        })
+    }
+
+    pub fn set_server_origin_tags_supported(
+        &self,
+        supported: bool,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_server_origin_tags_supported(supported)
         })
     }
 

@@ -284,6 +284,10 @@ pub(crate) fn pending(
     let candidates = request_ids(&body)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     settle(&tx, &owner, Some(generation), None)?;
+    if !crate::initial_replay::caught_up(&tx)? {
+        tx.commit()?;
+        return Ok(Value::Null.to_string());
+    }
     let needs_sms = needs_transport(&tx, &owner, generation, "sms", &candidates)?;
     let needs_mms = needs_transport(&tx, &owner, generation, "mms", &candidates)?;
     tx.commit()?;
@@ -1079,6 +1083,8 @@ mod client_tests {
             .unlock(&vault.profile, &vault.header, PASSPHRASE)
             .unwrap();
         client.set_server_compaction_state(true, true).unwrap();
+        client.observe_server_high_water(Cursor(0)).unwrap();
+        assert!(client.initial_replay_caught_up().unwrap());
         Member { client, device }
     }
 

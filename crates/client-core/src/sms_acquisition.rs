@@ -212,6 +212,7 @@ impl Client {
         }
         let reconciliation = reconcile_provider_sms(&tx, &ctx.device_id, &evidence(&input))?;
         if let SmsReconciliation::Matched(existing) = reconciliation {
+            publish_reconciliation_alias(&tx, &ctx, &existing.message_id, &input)?;
             let acquisition = matched_acquisition(&input, existing.conversation_id);
             persist_acquisition(
                 &tx,
@@ -285,6 +286,7 @@ impl Client {
             SmsReconciliation::Matched(existing)
                 if existing.message_id.to_string() != stored_message =>
             {
+                publish_reconciliation_alias(&tx, &ctx, &existing.message_id, &input)?;
                 tx.execute("UPDATE sms_acquisitions SET conversation_id=?,source_sequence=?,state='complete',reason=NULL,message_id=? WHERE acquisition_id=?", params![existing.conversation_id.to_string(), crate::to_i64(existing.source_sequence.0)?, existing.message_id.to_string(), id])?;
                 persist_alias_for_id(&tx, &input, &existing.message_id.to_string())?;
                 tx.commit()?;
@@ -348,11 +350,24 @@ impl Client {
                 .then(crate::notifications::now_ms),
             mms_context: None,
         };
+        if let Some(message_id) = crate::message_origin::claim(&tx, &payload, true)? {
+            let (conversation_id, source_sequence) =
+                crate::message_origin::message_identity(&tx, &message_id)?;
+            tx.execute("UPDATE sms_acquisitions SET state='complete',reason=NULL,message_id=?,conversation_id=?,source_sequence=? WHERE acquisition_id=?", params![message_id.to_string(), conversation_id.to_string(), crate::to_i64(source_sequence.0)?, id])?;
+            persist_alias_for_id(&tx, &input, &message_id.to_string())?;
+            tx.commit()?;
+            return Ok(Captured {
+                message_id,
+                conversation_id,
+                duplicate: true,
+            });
+        }
         match crate::insert_message(&tx, &payload)? {
             Inserted::New => {}
             Inserted::Same => return Err(Error::Database),
             Inserted::Conflict => return Err(Error::Conflict),
         }
+        crate::message_origin::mark_claimed(&tx, &message_id)?;
         crate::enqueue(
             &tx,
             &ctx,
@@ -531,7 +546,11 @@ impl Client {
         }
         let history_incomplete: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=1 AND history_complete=0)", params![generation, scope], |row| row.get(0))?;
         let gate_open = if history_incomplete {
-            crate::history_import::history_import_gate_open(&tx, crate::notifications::now_ms())?
+            crate::initial_replay::caught_up(&tx)?
+                && crate::history_import::history_import_gate_open(
+                    &tx,
+                    crate::notifications::now_ms(),
+                )?
         } else {
             true
         };
@@ -1215,6 +1234,45 @@ fn evidence(input: &SmsAcquisitionInput) -> ProviderSmsEvidence {
         broadcast_id: input.source.broadcast_id.clone(),
     }
 }
+fn publish_reconciliation_alias(
+    conn: &Connection,
+    ctx: &crate::Ctx<'_>,
+    message_id: &MessageId,
+    input: &SmsAcquisitionInput,
+) -> Result<(), Error> {
+    let encoded: String = conn.query_row(
+        "SELECT payload FROM messages WHERE id=?",
+        params![message_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let mut matched: MessagePayload = crate::decode(encoded.as_bytes())?;
+    if matched.direction == Direction::Outgoing && matched.sent_at_ms.is_none() {
+        matched.sent_at_ms = display_time(input);
+        if let Some(origin_key) = crate::message_origin::exact_key(conn, &matched)? {
+            let already_published: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM message_origin_aliases WHERE origin_key=? AND message_id=?)",
+                params![origin_key, message_id.to_string()],
+                |row| row.get(0),
+            )?;
+            crate::message_origin::apply_alias(conn, message_id, &origin_key)?;
+            if !already_published {
+                crate::enqueue(
+                    conn,
+                    ctx,
+                    crate::EnvelopePurpose::Event,
+                    None,
+                    None,
+                    &PrivatePayload::MessageOriginAlias {
+                        message_id: *message_id,
+                        origin_key,
+                    },
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn matched_acquisition(
     input: &SmsAcquisitionInput,
     conversation_id: ConversationId,
@@ -1312,7 +1370,7 @@ fn link_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ClientConfig, DatabaseKey, DeviceId, VaultId};
+    use crate::{ClientConfig, Cursor, DatabaseKey, DeviceId, VaultId};
 
     fn client(dir: &tempfile::TempDir) -> Client {
         Client::open(
@@ -1351,6 +1409,7 @@ mod tests {
     fn recovery_capacity_pauses_history_in_the_provider_scope_until_capacity_returns() {
         let dir = tempfile::tempdir().unwrap();
         let client = client(&dir);
+        client.observe_server_high_water(Cursor(0)).unwrap();
         let tight = Limits {
             pending: MAX_PENDING_SMS_ACQUISITIONS,
             pending_bytes: MAX_PENDING_SMS_ACQUISITION_BYTES,

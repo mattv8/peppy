@@ -488,11 +488,13 @@ class GatewaySync(
             stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false)
             return true
         }
-        val events = JSONObject(checkBody(response)).getJSONArray("events")
+        val page = JSONObject(checkBody(response))
+        val events = page.getJSONArray("events")
         for (index in 0 until events.length()) {
             val event = events.getJSONObject(index)
             client.ingestRaw(event.getJSONObject("envelope").toString().toByteArray(Charsets.UTF_8), event.getString("cursor"))
         }
+        page.optString("high_water_cursor").takeIf { it.isNotBlank() }?.let(client::observeServerHighWater)
         if (diagnosticsEnabled) received += events.length().toLong()
         return events.length() >= EVENT_PAGE
     }
@@ -510,6 +512,7 @@ class GatewaySync(
     private fun probeSnapshotCapability() {
         snapshotForRepair = null
         client.setServerCompactionSupported(false)
+        client.setServerOriginTagsSupported(false)
         val declaration = http.postJson("/v1/compaction/capability", "{}")
         if (declaration.isAccountPolicyDenial()) return pauseCompactionProbe()
         if (declaration.code == 401 || declaration.code == 403) throw GatewayAuthException()
@@ -529,12 +532,14 @@ class GatewaySync(
         val readinessJson = try {
             val cut = JSONObject(checkBody(response))
             val state = snapshotCompactionState(cut)
+            client.setServerOriginTagsSupported(snapshotOriginTagsSupported(cut))
             val readiness = client.setServerCompactionState(state.generation != null, state.active)
             capacityCut = cut
             if (state.generation != null) snapshotForRepair = cut
             readiness
         } catch (error: Exception) {
             client.setServerCompactionState(false, false)
+            client.setServerOriginTagsSupported(false)
             throw error
         }
         // Local admission bookkeeping must not revoke an independently verified server capability.
@@ -572,6 +577,12 @@ class GatewaySync(
         val generation = start.opt("compaction_generation") as? String ?: throw JSONException("compaction_generation")
         if (generation.toULongOrNull()?.toString() != generation) throw JSONException("compaction_generation")
         return SnapshotCompactionState(generation, active)
+    }
+
+    private fun snapshotOriginTagsSupported(start: JSONObject): Boolean = when (val value = start.opt("origin_tags_supported")) {
+        null, JSONObject.NULL -> false
+        is Boolean -> value
+        else -> throw JSONException("origin_tags_supported")
     }
 
     /**

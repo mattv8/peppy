@@ -148,6 +148,10 @@ extension AppModel {
         contacts.lastReport = report
         if report.outcome != .busy && report.outcome != .disabled { contacts.lastPassDate = Date() }
         contacts.error = report.syncError
+        if report.outcome == .waitingForReplay, contacts.enabled {
+            // Let the existing discretionary BackgroundTasks cadence retry after replay advances.
+            scheduleContactsBackgroundWork()
+        }
         if report.remoteScanPending, contacts.enabled, !remoteScanFollowUpQueued {
             remoteScanFollowUpQueued = true
             scheduleContactsBackgroundWork()

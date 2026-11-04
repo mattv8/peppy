@@ -331,6 +331,7 @@ mod tests {
                 purpose: EnvelopePurpose::Event,
                 route: None,
                 compaction: None,
+                origin_tag: None,
                 ciphertext: Vec::new(),
             };
             envelope.ciphertext =
