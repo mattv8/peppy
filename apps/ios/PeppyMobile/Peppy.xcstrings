@@ -441,6 +441,256 @@
         }
       }
     },
+    "peppy.about_row_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "About"
+          }
+        }
+      }
+    },
+    "peppy.about_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "About Peppy"
+          }
+        }
+      }
+    },
+    "peppy.about_section_build": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Build"
+          }
+        }
+      }
+    },
+    "peppy.about_version_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Version"
+          }
+        }
+      }
+    },
+    "peppy.about_build_number_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Build number"
+          }
+        }
+      }
+    },
+    "peppy.about_source_commit_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source commit"
+          }
+        }
+      }
+    },
+    "peppy.about_source_modified": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This build was made from modified source code."
+          }
+        }
+      }
+    },
+    "peppy.about_section_links": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Legal and source"
+          }
+        }
+      }
+    },
+    "peppy.about_source_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source code"
+          }
+        }
+      }
+    },
+    "peppy.about_open_source_licenses": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open-source licenses"
+          }
+        }
+      }
+    },
+    "peppy.about_opens_in_browser": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens in your browser"
+          }
+        }
+      }
+    },
+    "peppy.about_licenses_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open-source licenses"
+          }
+        }
+      }
+    },
+    "peppy.about_notices_heading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notices"
+          }
+        }
+      }
+    },
+    "peppy.about_license_texts_heading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "License texts"
+          }
+        }
+      }
+    },
+    "peppy.about_license_lgpl_3_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GNU Lesser General Public License v3.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_lgpl_2_1": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GNU Lesser General Public License v2.1"
+          }
+        }
+      }
+    },
+    "peppy.about_license_gpl_3_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GNU General Public License v3.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_apache_2_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apache License 2.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_bsd_3_clause": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "BSD 3-Clause License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_mit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MIT License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_bouncy_castle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bouncy Castle license"
+          }
+        }
+      }
+    },
+    "peppy.about_license_conscrypt": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conscrypt notice"
+          }
+        }
+      }
+    },
+    "peppy.about_license_boringssl": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "BoringSSL, OpenSSL and ISC licenses"
+          }
+        }
+      }
+    },
+    "peppy.about_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading…"
+          }
+        }
+      }
+    },
+    "peppy.about_license_load_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This text couldn’t be loaded. Try again."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_account_devices": {
       "localizations": {
         "en": {
