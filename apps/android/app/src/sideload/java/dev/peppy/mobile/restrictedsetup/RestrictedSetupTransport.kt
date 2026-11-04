@@ -7,7 +7,7 @@ package dev.peppy.mobile.restrictedsetup
 internal interface RestrictedSetupTransport : AutoCloseable {
     suspend fun pair(endpoint: LocalEndpoint, code: CharArray)
     suspend fun connect(endpoint: LocalEndpoint)
-    suspend fun grantOwnRestrictedAccess()
+    suspend fun grantAdvancedFeatures()
     suspend fun turnWirelessDebuggingOff()
 
     override fun close()

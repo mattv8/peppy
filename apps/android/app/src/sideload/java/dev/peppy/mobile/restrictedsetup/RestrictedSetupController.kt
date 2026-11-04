@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,26 +17,30 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import dev.peppy.mobile.mms.RestrictedMessageAccess
 
 internal enum class RestrictedSetupStage { INTRODUCTION, AWAITING_PAIRING, PAIRING, CONNECTING, APPLYING, VERIFYING, TURNING_OFF, COMPLETE, FAILED }
-internal enum class RestrictedSetupAccess { UNKNOWN, ALLOWED, NOT_ALLOWED }
+internal enum class RestrictedSetupAccess { UNKNOWN, ALLOWED, NOT_ALLOWED, UNSUPPORTED }
 internal enum class RestrictedSetupFailure { INVALID_ENDPOINT, TIMED_OUT, TRANSPORT, NOT_VERIFIED, PAIRING_FAILED, CONNECT_FAILED }
 internal enum class RestrictedSetupDiscovery { SEARCHING, FOUND, TIMED_OUT }
 internal enum class RestrictedSetupHint { NO_WIFI, NETWORK_NOT_ALLOWED, CODE_REJECTED, PAIRING_BOX_CLOSED }
 internal enum class WirelessDebuggingOutcome { NOT_REQUESTED, OFF, REQUESTED }
 internal enum class CodeSubmitResult { ACCEPTED, INVALID_FORMAT, NO_PAIRING_PORT, NOT_WAITING }
 
-internal data class RestrictedSetupOptions(val turnOffWirelessDebugging: Boolean = false)
+internal data class RestrictedSetupReadback(
+    val restrictedMessages: RestrictedSetupAccess,
+    val blockedSenders: RestrictedSetupAccess,
+)
 internal data class RestrictedSetupState(
     val stage: RestrictedSetupStage,
     val access: RestrictedSetupAccess = RestrictedSetupAccess.UNKNOWN,
+    val blockedSendersAccess: RestrictedSetupAccess = RestrictedSetupAccess.UNKNOWN,
     val failure: RestrictedSetupFailure? = null,
     val discovery: RestrictedSetupDiscovery? = null,
     val pairingPort: Int? = null,
     val notificationAvailable: Boolean = false,
     val hint: RestrictedSetupHint? = null,
     val networkNotAllowed: Boolean = false,
-    val turnOffWirelessDebugging: Boolean = false,
     val wirelessDebugging: WirelessDebuggingOutcome = WirelessDebuggingOutcome.NOT_REQUESTED,
     val retryBlocked: Boolean = false,
 ) {
@@ -43,6 +48,8 @@ internal data class RestrictedSetupState(
     /** Hint precedence: NO_WIFI > NETWORK_NOT_ALLOWED > CODE_REJECTED/PAIRING_BOX_CLOSED. */
     val activeHint get() = if (hint == RestrictedSetupHint.NO_WIFI) hint else if (networkNotAllowed) RestrictedSetupHint.NETWORK_NOT_ALLOWED else hint
 }
+
+private const val TRANSPORT_CLOSE_GRACE_MILLIS = 5_000L
 
 internal data class RestrictedSetupDeadlines(
     val pairingServiceHintMillis: Long = 60_000,
@@ -56,7 +63,7 @@ internal data class RestrictedSetupDeadlines(
     val totalMillis: Long = 10 * 60_000,
 )
 
-internal fun interface RestrictedSetupAccessReadback { suspend fun isAllowed(): Boolean }
+internal fun interface RestrictedSetupAccessReadback { suspend fun read(): RestrictedSetupReadback }
 /** Process-scoped state machine. Pairing codes and ADB keys are never persisted. */
 internal class RestrictedSetupController(
     private val controllerScope: CoroutineScope,
@@ -76,15 +83,14 @@ internal class RestrictedSetupController(
     private val mutableState = MutableStateFlow(RestrictedSetupState(RestrictedSetupStage.INTRODUCTION))
     val state: StateFlow<RestrictedSetupState> = mutableState.asStateFlow()
 
-    fun begin(options: RestrictedSetupOptions): Boolean = synchronized(lock) {
+    fun begin(): Boolean = synchronized(lock) {
         if (teardownFailed || active != null || mutableState.value.stage !in setOf(RestrictedSetupStage.INTRODUCTION, RestrictedSetupStage.FAILED)) return false
-        val candidate = Attempt(++epoch, options, notifier.canPrompt())
+        val candidate = Attempt(++epoch, notifier.canPrompt())
         active = candidate
         mutableState.value = RestrictedSetupState(
             stage = RestrictedSetupStage.AWAITING_PAIRING,
             discovery = RestrictedSetupDiscovery.SEARCHING,
             notificationAvailable = candidate.notificationAvailable,
-            turnOffWirelessDebugging = options.turnOffWirelessDebugging,
         )
         RestrictedSetupCodeInbox.sink = { code -> submitCode(code) }
         notifier.clear()
@@ -144,7 +150,7 @@ internal class RestrictedSetupController(
     fun reportForegroundUnavailable() {
         val candidate = synchronized(lock) { active } ?: return
         notifier.clear()
-        if (terminal(candidate, RestrictedSetupStage.FAILED, RestrictedSetupFailure.TRANSPORT, RestrictedSetupAccess.UNKNOWN, WirelessDebuggingOutcome.NOT_REQUESTED)) {
+        if (terminal(candidate, RestrictedSetupStage.FAILED, RestrictedSetupFailure.TRANSPORT, RestrictedSetupAccess.UNKNOWN, RestrictedSetupAccess.UNKNOWN, WirelessDebuggingOutcome.NOT_REQUESTED)) {
             post(candidate, RestrictedSetupNotice.FAILED)
         }
     }
@@ -316,21 +322,31 @@ internal class RestrictedSetupController(
             withDeadline(candidate, deadlines.connectMillis) { transport.connect(endpoint(port)) }
             if (stopDiscovery) candidate.connectDiscovery?.cancel()
             update(candidate) { it.copy(stage = RestrictedSetupStage.APPLYING, discovery = null) }
-            try { withDeadline(candidate, deadlines.grantAndReadbackMillis) { transport.grantOwnRestrictedAccess() } } catch (error: CancellationException) { throw error } catch (_: Exception) { }
-            verify(candidate)
+            try {
+                withDeadline(candidate, deadlines.grantAndReadbackMillis, closeGraceMillis = TRANSPORT_CLOSE_GRACE_MILLIS) { transport.grantAdvancedFeatures() }
+            } catch (_: TimeoutCancellationException) {
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+            }
+            val readback = verify(candidate)
+            val wireless = turnWirelessDebuggingOff(candidate)
+            if (readback == null) fail(candidate, RestrictedSetupFailure.TIMED_OUT, wireless = wireless)
+            else if (!readback.isComplete) fail(candidate, RestrictedSetupFailure.NOT_VERIFIED, readback.restrictedMessages, readback.blockedSenders, wireless)
+            else complete(candidate, readback, wireless)
         } catch (error: CancellationException) { throw error }
         catch (error: SetupException) { fail(candidate, error.failure) }
         catch (_: Exception) { fail(candidate, RestrictedSetupFailure.CONNECT_FAILED) }
     }
 
-    private suspend fun verify(candidate: Attempt) {
+    private suspend fun verify(candidate: Attempt): RestrictedSetupReadback? {
         update(candidate) { it.copy(stage = RestrictedSetupStage.VERIFYING) }
-        val allowed = try { withTimeout(deadlines.grantAndReadbackMillis) { accessReadback.isAllowed() } } catch (error: CancellationException) { throw error } catch (_: Exception) { fail(candidate, RestrictedSetupFailure.TIMED_OUT); return }
-        if (!allowed) { fail(candidate, RestrictedSetupFailure.NOT_VERIFIED, RestrictedSetupAccess.NOT_ALLOWED); return }
-        if (!candidate.options.turnOffWirelessDebugging) { complete(candidate, WirelessDebuggingOutcome.NOT_REQUESTED); return }
-        update(candidate) { it.copy(stage = RestrictedSetupStage.TURNING_OFF, access = RestrictedSetupAccess.ALLOWED) }
-        val outcome = try { withDeadline(candidate, deadlines.turnOffMillis) { candidate.transport!!.turnWirelessDebuggingOff() }; if (wirelessDebuggingReadback.isOn() == false) WirelessDebuggingOutcome.OFF else WirelessDebuggingOutcome.REQUESTED } catch (error: CancellationException) { throw error } catch (_: Exception) { WirelessDebuggingOutcome.REQUESTED }
-        complete(candidate, outcome)
+        return try { withTimeout(deadlines.grantAndReadbackMillis) { accessReadback.read() } } catch (_: TimeoutCancellationException) { null } catch (error: CancellationException) { throw error } catch (_: Exception) { null }
+    }
+
+    private suspend fun turnWirelessDebuggingOff(candidate: Attempt): WirelessDebuggingOutcome {
+        update(candidate) { it.copy(stage = RestrictedSetupStage.TURNING_OFF) }
+        return try { withDeadline(candidate, deadlines.turnOffMillis, closeGraceMillis = TRANSPORT_CLOSE_GRACE_MILLIS) { candidate.transport!!.turnWirelessDebuggingOff() }; if (wirelessDebuggingReadback.isOn() == false) WirelessDebuggingOutcome.OFF else WirelessDebuggingOutcome.REQUESTED } catch (_: TimeoutCancellationException) { WirelessDebuggingOutcome.REQUESTED } catch (error: CancellationException) { throw error } catch (_: Exception) { WirelessDebuggingOutcome.REQUESTED }
     }
 
     private suspend fun endpoint(port: Int): LocalEndpoint {
@@ -338,19 +354,20 @@ internal class RestrictedSetupController(
         return LocalEndpoint.parse("127.0.0.1", port, addresses) ?: throw SetupException(RestrictedSetupFailure.INVALID_ENDPOINT)
     }
 
-    private suspend fun <T> withDeadline(candidate: Attempt, timeout: Long, action: suspend () -> T): T {
-        val watchdog = watchdogScope.launch { delay(timeout); candidate.closeTransport() }
+    private suspend fun <T> withDeadline(candidate: Attempt, timeout: Long, closeGraceMillis: Long = 0, action: suspend () -> T): T {
+        // A blocking ADB read ignores coroutine cancellation; closing the transport is what releases it.
+        val watchdog = watchdogScope.launch { delay(timeout + closeGraceMillis); candidate.closeTransport() }
         return try { withTimeout(timeout) { withContext(Dispatchers.IO) { action() } } } finally { watchdog.cancel() }
     }
 
     private fun timeout(candidate: Attempt) { candidate.closeTransport(); fail(candidate, RestrictedSetupFailure.TIMED_OUT); candidate.cancel() }
     private fun attach(candidate: Attempt, transport: RestrictedSetupTransport) { synchronized(lock) { if (active === candidate) candidate.transport = transport else transport.close() } }
-    private fun complete(candidate: Attempt, wireless: WirelessDebuggingOutcome) { if (terminal(candidate, RestrictedSetupStage.COMPLETE, null, RestrictedSetupAccess.ALLOWED, wireless)) post(candidate, RestrictedSetupNotice.DONE) }
-    private fun fail(candidate: Attempt, failure: RestrictedSetupFailure, access: RestrictedSetupAccess = RestrictedSetupAccess.UNKNOWN) { if (terminal(candidate, RestrictedSetupStage.FAILED, failure, access, WirelessDebuggingOutcome.NOT_REQUESTED)) post(candidate, RestrictedSetupNotice.FAILED) }
-    private fun terminal(candidate: Attempt, stage: RestrictedSetupStage, failure: RestrictedSetupFailure?, access: RestrictedSetupAccess, wireless: WirelessDebuggingOutcome): Boolean {
+    private fun complete(candidate: Attempt, readback: RestrictedSetupReadback, wireless: WirelessDebuggingOutcome) { if (terminal(candidate, RestrictedSetupStage.COMPLETE, null, readback.restrictedMessages, readback.blockedSenders, wireless)) post(candidate, RestrictedSetupNotice.DONE) }
+    private fun fail(candidate: Attempt, failure: RestrictedSetupFailure, access: RestrictedSetupAccess = RestrictedSetupAccess.UNKNOWN, blockedSendersAccess: RestrictedSetupAccess = RestrictedSetupAccess.UNKNOWN, wireless: WirelessDebuggingOutcome = WirelessDebuggingOutcome.NOT_REQUESTED) { if (terminal(candidate, RestrictedSetupStage.FAILED, failure, access, blockedSendersAccess, wireless)) post(candidate, RestrictedSetupNotice.FAILED) }
+    private fun terminal(candidate: Attempt, stage: RestrictedSetupStage, failure: RestrictedSetupFailure?, access: RestrictedSetupAccess, blockedSendersAccess: RestrictedSetupAccess, wireless: WirelessDebuggingOutcome): Boolean {
         val terminal = synchronized(lock) {
             if (active !== candidate || candidate.epoch != epoch) return@synchronized false
-            mutableState.value = mutableState.value.copy(stage = stage, failure = failure, access = access, discovery = null, pairingPort = null, wirelessDebugging = wireless, networkNotAllowed = false)
+            mutableState.value = mutableState.value.copy(stage = stage, failure = failure, access = access, blockedSendersAccess = blockedSendersAccess, discovery = null, pairingPort = null, wirelessDebugging = wireless, networkNotAllowed = false)
             RestrictedSetupCodeInbox.sink = null
             true
         }
@@ -365,7 +382,7 @@ internal class RestrictedSetupController(
     private fun CharArray.zeroed(result: CodeSubmitResult): CodeSubmitResult { fill('\u0000'); return result }
     private class SetupException(val failure: RestrictedSetupFailure) : Exception()
 
-    private inner class Attempt(val epoch: Long, val options: RestrictedSetupOptions, val notificationAvailable: Boolean) {
+    private inner class Attempt(val epoch: Long, val notificationAvailable: Boolean) {
         var code: CharArray? = null
         var transport: RestrictedSetupTransport? = null
         var pairingDiscovery: Job? = null
@@ -405,4 +422,20 @@ internal class RestrictedSetupController(
             post(candidate, RestrictedSetupNotice.FAILED)
         }
     }
+}
+
+private val RestrictedSetupReadback.isComplete: Boolean
+    get() = listOf(restrictedMessages, blockedSenders).let { accesses ->
+        accesses.any { it != RestrictedSetupAccess.UNSUPPORTED } &&
+            accesses.all { it == RestrictedSetupAccess.ALLOWED || it == RestrictedSetupAccess.UNSUPPORTED }
+    }
+
+internal fun Pair<RestrictedMessageAccess, RestrictedMessageAccess>.toSetupReadback() =
+    RestrictedSetupReadback(first.toSetupAccess(), second.toSetupAccess())
+
+internal fun RestrictedMessageAccess.toSetupAccess(): RestrictedSetupAccess = when (this) {
+    RestrictedMessageAccess.ALLOWED -> RestrictedSetupAccess.ALLOWED
+    RestrictedMessageAccess.NOT_ALLOWED -> RestrictedSetupAccess.NOT_ALLOWED
+    RestrictedMessageAccess.UNSUPPORTED -> RestrictedSetupAccess.UNSUPPORTED
+    RestrictedMessageAccess.UNKNOWN -> RestrictedSetupAccess.UNKNOWN
 }

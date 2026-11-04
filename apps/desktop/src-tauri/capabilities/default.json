@@ -54,6 +54,8 @@
     "allow-dismiss-all-notifications",
     "allow-set-app-muted",
     "allow-set-conversation-pinned",
+    "allow-request-sender-unblock",
+    "allow-set-conversation-folder",
     "allow-set-conversation-tone",
     "allow-mark-notifications-seen",
     "allow-set-notification-preferences",

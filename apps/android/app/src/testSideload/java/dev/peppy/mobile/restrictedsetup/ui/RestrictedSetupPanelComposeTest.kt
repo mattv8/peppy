@@ -5,6 +5,8 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.performClick
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupAccess
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupDiscovery
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupStage
@@ -25,7 +27,50 @@ class RestrictedSetupPanelComposeTest {
     private val compose = createComposeRule()
     @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
-    @Test fun idleRenders() = render(RestrictedSetupState(RestrictedSetupStage.INTRODUCTION)) { compose.onNodeWithTag("restricted-setup-idle").fetchSemanticsNode() }
+    @Test fun advancedFeaturesCardShowsCapabilitiesAndSetupAction() = render(RestrictedSetupState(RestrictedSetupStage.INTRODUCTION)) {
+        compose.onNodeWithTag("restricted-setup-idle").fetchSemanticsNode()
+        compose.onNodeWithText("Restricted message access").fetchSemanticsNode()
+        compose.onNodeWithText("Honor blocked senders").fetchSemanticsNode()
+        compose.onNodeWithTag("advanced-features-start").performClick()
+        compose.onNodeWithTag("restricted-setup-consent-sheet").fetchSemanticsNode()
+        compose.onNodeWithText("appops set dev.peppy.mobile READ_RESTRICTED_MESSAGES allow", substring = true).fetchSemanticsNode()
+        compose.onNodeWithText("appops set dev.peppy.mobile WRITE_SMS allow", substring = true).fetchSemanticsNode()
+        compose.onNodeWithText("Android has no read-only version of the blocked-senders setting.", substring = true).fetchSemanticsNode()
+    }
+
+    @Test fun advancedFeaturesCardUsesFinishActionForPartialAccess() = render(
+        RestrictedSetupState(RestrictedSetupStage.INTRODUCTION, access = RestrictedSetupAccess.ALLOWED),
+    ) {
+        compose.onNodeWithText("Finish setup").fetchSemanticsNode()
+        compose.onNodeWithText("One of two features is on.").fetchSemanticsNode()
+        assertTrue(compose.onAllNodesWithText("Advanced features").fetchSemanticsNodes().size == 1)
+    }
+
+    @Test fun advancedFeaturesCardHidesWhenAllCapabilitiesAreOn() = render(
+        RestrictedSetupState(RestrictedSetupStage.INTRODUCTION, RestrictedSetupAccess.ALLOWED, RestrictedSetupAccess.ALLOWED),
+    ) {
+        assertMissing("restricted-setup-idle")
+        compose.onNodeWithTag("advanced-features-on-card").fetchSemanticsNode()
+        compose.onNodeWithText("Both features are on.").fetchSemanticsNode()
+    }
+
+    @Test fun onCardDoesNotClaimBothFeaturesWhenOneIsUnsupported() = render(
+        RestrictedSetupState(RestrictedSetupStage.INTRODUCTION, RestrictedSetupAccess.UNSUPPORTED, RestrictedSetupAccess.ALLOWED),
+    ) {
+        compose.onNodeWithTag("advanced-features-on-card").fetchSemanticsNode()
+        assertTrue(compose.onAllNodesWithText("Both features are on.").fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test fun advancedFeaturesCardHidesWhenAllCapabilitiesAreUnsupported() = render(
+        RestrictedSetupState(RestrictedSetupStage.INTRODUCTION, RestrictedSetupAccess.UNSUPPORTED, RestrictedSetupAccess.UNSUPPORTED),
+    ) { assertMissing("restricted-setup-idle") }
+
+    @Test fun advancedFeaturesCardExplainsUnsupportedCapabilityBeforeAction() = render(
+        RestrictedSetupState(RestrictedSetupStage.INTRODUCTION, RestrictedSetupAccess.UNSUPPORTED, RestrictedSetupAccess.NOT_ALLOWED),
+    ) {
+        compose.onNodeWithText("This Android version does not offer one of these settings. The other can still be turned on.").fetchSemanticsNode()
+        compose.onNodeWithText("Set up advanced features").fetchSemanticsNode()
+    }
 
     @Test fun pairingUsesNotificationOrFallback() = render(RestrictedSetupState(RestrictedSetupStage.AWAITING_PAIRING, discovery = RestrictedSetupDiscovery.FOUND, pairingPort = 37123, notificationAvailable = true)) { compose.onNodeWithTag("restricted-setup-pairing").fetchSemanticsNode(); compose.onNodeWithTag("restricted-setup-notification-resend").fetchSemanticsNode() }
 

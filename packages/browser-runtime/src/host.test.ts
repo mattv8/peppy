@@ -349,6 +349,26 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([{ command: "set_conversation_pinned", args, mutation: true }]);
   });
 
+  it("routes conversation folder changes through the checkpointed mutation allowlist", async () => {
+    const session = new FakeSession();
+    const args = { conversationId: "conversation", folder: "archived" };
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "set_conversation_folder", args }))
+      .resolves.toMatchObject({ ok: true });
+
+    expect(session.calls).toEqual([{ command: "set_conversation_folder", args, mutation: true }]);
+  });
+
+  it("routes sender unblock requests through the checkpointed mutation allowlist", async () => {
+    const session = new FakeSession();
+    const args = { conversationId: "conversation" };
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "request_sender_unblock", args }))
+      .resolves.toMatchObject({ ok: true });
+
+    expect(session.calls).toEqual([{ command: "request_sender_unblock", args, mutation: true }]);
+  });
+
   it("routes tone reset through the checkpointed mutation allowlist", async () => {
     const session = new FakeSession();
     const args = { seed: "contact:+15555550100", paletteIndex: null };

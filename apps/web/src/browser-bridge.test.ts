@@ -67,6 +67,29 @@ describe("BrowserBridge", () => {
     bridge.dispose();
   });
 
+  it("forwards conversation folder mutations and rejects unknown folders before the worker", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const folder = bridge.set_conversation_folder("conversation-1", "spam");
+
+    expect(port.sent).toEqual([{ id: 1, command: "set_conversation_folder", args: { conversationId: "conversation-1", folder: "spam" } }]);
+    port.reply({ id: 1, ok: true, value: {} });
+    await expect(folder).resolves.toEqual({});
+    await expect(bridge.set_conversation_folder("conversation-1", "trash" as never)).rejects.toMatchObject({ code: "invalid-request", message: "Invalid conversation folder." });
+    expect(port.sent).toHaveLength(1);
+    bridge.dispose();
+  });
+
+  it("forwards sender unblock requests", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const request = bridge.request_sender_unblock("conversation-1");
+    expect(port.sent).toEqual([{ id: 1, command: "request_sender_unblock", args: { conversationId: "conversation-1" } }]);
+    port.reply({ id: 1, ok: true, value: {} });
+    await expect(request).resolves.toEqual({});
+    bridge.dispose();
+  });
+
   it("forwards the account-access notice request without arguments", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

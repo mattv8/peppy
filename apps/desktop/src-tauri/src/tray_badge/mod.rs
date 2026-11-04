@@ -9,6 +9,7 @@ use crate::{
     session::{encryption_state, EncryptionState, Session},
     AppState, STATE_EVENT,
 };
+use peppy_client_core::{Conversation, ConversationFolder};
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -283,9 +284,7 @@ fn candidate_for_session(session: Arc<Session>) -> BridgeResult<Candidate> {
                 .client
                 .list_conversations()
                 .map_err(core_error)
-                .map(|conversations| {
-                    unread_total(conversations.into_iter().map(|item| item.unread_count))
-                })?;
+                .map(inbox_unread_total)?;
             if total == 0 {
                 TrayBadge::Hidden
             } else {
@@ -308,6 +307,15 @@ fn unread_total(counts: impl IntoIterator<Item = u64>) -> u64 {
     counts
         .into_iter()
         .fold(0_u64, |total, count| total.saturating_add(count))
+}
+
+fn inbox_unread_total(conversations: impl IntoIterator<Item = Conversation>) -> u64 {
+    unread_total(
+        conversations
+            .into_iter()
+            .filter(|conversation| conversation.folder == ConversationFolder::Inbox)
+            .map(|conversation| conversation.unread_count),
+    )
 }
 
 fn classify_session_security(
@@ -455,12 +463,12 @@ fn apply(tray: &tauri::tray::TrayIcon<tauri::Wry>, badge: &TrayBadge) -> tauri::
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_fence_accepts_parts, classify_session_security, observe_lock, observe_slot,
-        same_session, should_retry_busy, unread_total, ApplyFence, RefreshState, TrayBadge,
-        MAX_BUSY_RETRIES,
+        apply_fence_accepts_parts, classify_session_security, inbox_unread_total, observe_lock,
+        observe_slot, same_session, should_retry_busy, unread_total, ApplyFence, RefreshState,
+        TrayBadge, MAX_BUSY_RETRIES,
     };
     use crate::session::{encryption_state, EncryptionState, VaultSummary};
-    use peppy_client_core::KeyStatus;
+    use peppy_client_core::{Conversation, ConversationFolder, ConversationId, KeyStatus};
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -489,6 +497,29 @@ mod tests {
         }
         assert_eq!(TrayBadge::Hidden.tooltip(), "Peppy");
         assert_eq!(TrayBadge::Locked.tooltip(), "Peppy – Locked");
+    }
+
+    #[test]
+    fn inbox_unread_total_excludes_archived_and_spam_conversations() {
+        let conversations = [
+            conversation_with(2, ConversationFolder::Inbox),
+            conversation_with(3, ConversationFolder::Archived),
+            conversation_with(5, ConversationFolder::Spam),
+        ];
+
+        assert_eq!(inbox_unread_total(conversations), 2);
+    }
+
+    fn conversation_with(unread_count: u64, folder: ConversationFolder) -> Conversation {
+        Conversation {
+            conversation_id: ConversationId::new(),
+            unread_count,
+            pinned: false,
+            folder,
+            folder_reason: None,
+            unblock: None,
+            can_unblock: false,
+        }
     }
 
     #[test]

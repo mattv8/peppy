@@ -347,6 +347,17 @@ export const fixtureBridge: DesktopBridge = {
     if (!conversation) throw fixtureError("not-found", "The requested stored item was not found.");
     conversation.pinned = pinned;
   },
+  set_conversation_folder: async (conversationId, folder) => {
+    const conversation = fixtureSnapshot.conversations.find(item => item.id === conversationId);
+    if (!conversation) throw fixtureError("not-found", "The requested stored item was not found.");
+    conversation.folder = folder;
+  },
+  request_sender_unblock: async conversationId => {
+    const conversation = fixtureSnapshot.conversations.find(item => item.id === conversationId);
+    if (!conversation) throw fixtureError("not-found", "The requested stored item was not found.");
+    conversation.folder = "inbox";
+    conversation.unblock = "pending";
+  },
   set_conversation_tone: async (seed, paletteIndex) => {
     if (!seed || (paletteIndex !== null && (!Number.isInteger(paletteIndex) || paletteIndex < 0 || paletteIndex > 119))) {
       throw fixtureError("invalid-request", "The request is invalid.");
@@ -559,6 +570,8 @@ export const tauriBridge: DesktopBridge = {
   enrollment_confirm_computer: confirmComputerClaimant,
   enrollment_cancel_computer: cancelComputerClaimant,
   set_conversation_pinned: (conversationId, pinned) => invoke("set_conversation_pinned", { conversationId, pinned }),
+  set_conversation_folder: (conversationId, folder) => invoke("set_conversation_folder", { conversationId, folder }),
+  request_sender_unblock: conversationId => invoke("request_sender_unblock", { conversationId }),
   set_conversation_tone: (seed, paletteIndex) => invoke("set_conversation_tone", { seed, paletteIndex }),
   async window(action) { const w = (await import("@tauri-apps/api/window")).getCurrentWindow(); if (action === "minimize") await w.minimize(); else if (action === "maximize") await w.toggleMaximize(); else await w.close(); },
 };

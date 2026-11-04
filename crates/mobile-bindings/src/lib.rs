@@ -13,8 +13,9 @@ use peppy_client_core::{
     MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource, NativeKeyCache, NotificationCapture,
     NotificationCaptureOutcome, NotificationTarget, PermitBlock, PermitDecision,
     PhoneReadCandidate, PhoneReadTransport, ProviderRowRef, QuarantineReason, ReceivedCommand,
-    SendResult, SendState, SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus,
-    SmsReconciliationPlan, SmsScanPlan, SmsSource, Transport, VaultCheckHeader, VaultId,
+    SendResult, SendState, SenderUnblockOutcome, SmsAcquisitionInput, SmsAcquisitionState,
+    SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource, Transport, VaultCheckHeader,
+    VaultId,
 };
 use std::{
     fmt,
@@ -498,6 +499,20 @@ pub struct NativeConversation {
     pub conversation_id: String,
     pub unread_count: u64,
     pub pinned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSenderUnblockWork {
+    pub request_id: String,
+    pub numbers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeSenderUnblockOutcome {
+    Unblocked,
+    NotBlocked,
+    NotAllowed,
+    Failed,
 }
 
 /// Sanitized message presentation data. Database keys, passphrases, purpose keys,
@@ -3105,6 +3120,75 @@ impl NativeClient {
         })
     }
 
+    pub fn publish_sender_blocklist(
+        &self,
+        numbers: Option<Vec<String>>,
+        can_unblock: bool,
+    ) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.publish_sender_blocklist(numbers, can_unblock)
+        })
+    }
+
+    pub fn reconcile_provider_archive(
+        &self,
+        archived_thread_ids: Vec<String>,
+    ) -> Result<u32, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.reconcile_provider_archive(archived_thread_ids)
+        })
+    }
+
+    pub fn pending_sender_unblocks(
+        &self,
+    ) -> Result<Vec<NativeSenderUnblockWork>, MobileBindingsError> {
+        with_client(&self.client, Client::pending_sender_unblocks).map(|items| {
+            items
+                .into_iter()
+                .map(|item| NativeSenderUnblockWork {
+                    request_id: item.request_id,
+                    numbers: item.numbers,
+                })
+                .collect()
+        })
+    }
+
+    pub fn begin_sender_unblock(&self, request_id: String) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.begin_sender_unblock(&request_id)
+        })
+    }
+
+    pub fn interrupted_sender_unblocks(
+        &self,
+    ) -> Result<Vec<NativeSenderUnblockWork>, MobileBindingsError> {
+        with_client(&self.client, Client::interrupted_sender_unblocks).map(|items| {
+            items
+                .into_iter()
+                .map(|item| NativeSenderUnblockWork {
+                    request_id: item.request_id,
+                    numbers: item.numbers,
+                })
+                .collect()
+        })
+    }
+
+    pub fn complete_sender_unblock(
+        &self,
+        request_id: String,
+        outcome: NativeSenderUnblockOutcome,
+    ) -> Result<(), MobileBindingsError> {
+        let outcome = match outcome {
+            NativeSenderUnblockOutcome::Unblocked => SenderUnblockOutcome::Unblocked,
+            NativeSenderUnblockOutcome::NotBlocked => SenderUnblockOutcome::NotBlocked,
+            NativeSenderUnblockOutcome::NotAllowed => SenderUnblockOutcome::NotAllowed,
+            NativeSenderUnblockOutcome::Failed => SenderUnblockOutcome::Failed,
+        };
+        with_client(&self.client, |client| {
+            client.complete_sender_unblock(&request_id, outcome)
+        })
+    }
+
     pub fn set_conversation_pinned(
         &self,
         conversation_id: String,
@@ -4043,6 +4127,44 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sender_blocklist_gateway_methods_forward_to_core() {
+        let path = TempDatabase::new(format!(
+            "peppy-mobile-sender-blocklist-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let client = open_native_client(NativeOpenConfig {
+            database_path: path.to_string_lossy().into_owned(),
+            vault_id,
+            device_id: uuid::Uuid::new_v4().to_string(),
+            database_key: vec![7; 32],
+        })
+        .unwrap();
+        client
+            .unlock(
+                material.profile_json,
+                material.header_json,
+                "test passphrase".into(),
+            )
+            .unwrap();
+
+        assert!(
+            client
+                .publish_sender_blocklist(Some(vec!["+15555550100".into()]), true)
+                .unwrap()
+        );
+        assert!(
+            !client
+                .publish_sender_blocklist(Some(vec!["+15555550100".into()]), true)
+                .unwrap()
+        );
+        assert_eq!(client.reconcile_provider_archive(Vec::new()).unwrap(), 0);
+        assert!(client.pending_sender_unblocks().unwrap().is_empty());
+        assert!(client.interrupted_sender_unblocks().unwrap().is_empty());
     }
 
     #[test]

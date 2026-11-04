@@ -30,6 +30,7 @@ mod contact_source;
 mod contact_state;
 mod contact_sync_requests;
 mod contacts;
+mod conversation_folders;
 mod conversation_match;
 mod conversation_pinning;
 mod conversation_tones;
@@ -46,6 +47,7 @@ mod message_history_protocol;
 mod message_history_requests;
 mod message_origin;
 mod notification_preferences;
+mod sender_blocklist;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
 mod media_paging;
 mod mms;
@@ -121,7 +123,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 42;
+const SCHEMA_VERSION: i64 = 45;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -406,6 +408,35 @@ pub enum PrivatePayload {
         conversation_id: ConversationId,
         pinned: bool,
         logical_revision: u64,
+        writer_device_id: String,
+    },
+    ConversationFolder {
+        conversation_id: ConversationId,
+        folder: ConversationFolder,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        archived_through_ms: Option<i64>,
+        logical_revision: u64,
+        writer_device_id: String,
+    },
+    SenderBlocklist {
+        numbers: Vec<String>,
+        can_unblock: bool,
+        logical_revision: u64,
+        writer_device_id: String,
+    },
+    SenderUnblockRequest {
+        request_id: uuid::Uuid,
+        conversation_id: ConversationId,
+        numbers: Vec<String>,
+        target_device_id: String,
+        writer_device_id: String,
+        /// Authenticated writer timestamp; legacy payloads default to non-actionable.
+        #[serde(default)]
+        created_at_ms: i64,
+    },
+    SenderUnblockResult {
+        request_id: uuid::Uuid,
+        outcome: SenderUnblockOutcome,
         writer_device_id: String,
     },
     ConversationTone {
@@ -726,6 +757,42 @@ pub struct Conversation {
     pub conversation_id: ConversationId,
     pub unread_count: u64,
     pub pinned: bool,
+    pub folder: ConversationFolder,
+    pub folder_reason: Option<ConversationFolderReason>,
+    pub unblock: Option<SenderUnblockStatus>,
+    pub can_unblock: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationFolder {
+    Inbox,
+    Archived,
+    Spam,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationFolderReason {
+    Marked,
+    Blocked,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderUnblockStatus {
+    Pending,
+    Failed,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderUnblockOutcome {
+    Unblocked,
+    NotBlocked,
+    NotAllowed,
+    Failed,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SenderUnblockWork {
+    pub request_id: String,
+    pub numbers: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Draft {
@@ -3217,7 +3284,7 @@ impl Client {
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(
-            "WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0) FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC",
+            &format!("WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0),{} FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id LEFT JOIN conversation_folders f ON f.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC", conversation_folders::effective_folder_sql("c.sort_at_ms")),
         )?;
         let rows = query
             .query_map([], |r| {
@@ -3225,15 +3292,25 @@ impl Client {
                     r.get::<_, String>(0)?,
                     r.get::<_, i64>(1)?,
                     r.get::<_, bool>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let mut folder_context = sender_blocklist::FolderContext::default();
         rows.into_iter()
-            .map(|(id, unread, pinned)| {
+            .map(|(id, unread, pinned, folder)| {
+                let conversation_id = parse(&id)?;
+                let folder = ConversationFolder::from_db(&folder)?;
+                let (folder_reason, unblock, can_unblock) =
+                    folder_context.state(&s.conn, conversation_id, folder)?;
                 Ok(Conversation {
-                    conversation_id: parse(&id)?,
+                    conversation_id,
                     unread_count: u64::try_from(unread).map_err(|_| Error::Database)?,
                     pinned,
+                    folder,
+                    folder_reason,
+                    unblock,
+                    can_unblock,
                 })
             })
             .collect()
@@ -3494,7 +3571,7 @@ impl Client {
     /// Freezes the IDs currently unread in batches that keep later writes bounded.
     pub fn unread_message_batches(&self) -> Result<Vec<Vec<MessageId>>, Error> {
         let store = self.lock()?;
-        let mut query = store.conn.prepare("SELECT id FROM messages WHERE seen=0")?;
+        let mut query = store.conn.prepare(&format!("SELECT id FROM messages WHERE seen=0 AND conversation_id NOT IN (SELECT f.conversation_id FROM conversation_folders f WHERE ({})!='inbox')", conversation_folders::effective_folder_sql("(SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.conversation_id=f.conversation_id)")))?;
         let ids = query
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -5493,6 +5570,33 @@ CREATE TABLE IF NOT EXISTS phone_read_effects(message_id TEXT PRIMARY KEY, sourc
 CREATE INDEX IF NOT EXISTS phone_read_effects_created ON phone_read_effects(created_at_ms);
 CREATE TABLE IF NOT EXISTS phone_read_effect_terminals(message_id TEXT PRIMARY KEY);
 ";
+const MIGRATION_43: &str = "
+CREATE TABLE IF NOT EXISTS conversation_folders(conversation_id TEXT PRIMARY KEY,
+  folder TEXT NOT NULL CHECK(folder IN ('inbox','archived','spam')), archived_through_ms INTEGER,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
+  producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
+";
+const MIGRATION_44: &str = "
+CREATE TABLE IF NOT EXISTS sender_blocklists(producer_device_id TEXT PRIMARY KEY, numbers TEXT NOT NULL, can_unblock INTEGER NOT NULL,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sender_unblock_requests(request_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, target_device_id TEXT NOT NULL,
+  numbers TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','unblocked','not_blocked','not_allowed','failed')),
+  historical INTEGER NOT NULL DEFAULT 0, created_at_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS sender_unblock_requests_conversation ON sender_unblock_requests(conversation_id);
+CREATE TABLE IF NOT EXISTS sender_unblock_attempts(request_id TEXT PRIMARY KEY, begun_at_ms INTEGER NOT NULL, completed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS provider_archive_observed(thread_id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS provider_folder_writes(conversation_id TEXT PRIMARY KEY, folder TEXT NOT NULL,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sender_blocklist_unmapped(number TEXT PRIMARY KEY);
+CREATE INDEX IF NOT EXISTS mms_thread_conversations_thread ON mms_thread_conversations(source_device_id, provider_thread_id);
+";
+fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(
+        conn,
+        "sender_unblock_requests",
+        "key_epoch INTEGER NOT NULL DEFAULT 0",
+    )
+}
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "outbox", "origin_tag TEXT")
@@ -5525,7 +5629,7 @@ fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Re
 }
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
 // Revision 8 reprojects retained control wires that older clients consumed as unknown.
-const DECODER_REVISION: &str = "8";
+const DECODER_REVISION: &str = "11";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -5624,6 +5728,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_39)?;
             apply_migration_40(&tx)?;
             apply_migration_42(&tx)?;
+            tx.execute_batch(MIGRATION_43)?;
+            tx.execute_batch(MIGRATION_44)?;
+            apply_migration_45(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5632,7 +5739,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=41)) => {
+        Some(version @ (4..=44)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5743,6 +5850,15 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 41 {
                 apply_migration_42(&tx)?;
+            }
+            if version <= 42 {
+                tx.execute_batch(MIGRATION_43)?;
+            }
+            if version <= 43 {
+                tx.execute_batch(MIGRATION_44)?;
+            }
+            if version <= 44 {
+                apply_migration_45(&tx)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -5861,6 +5977,8 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                                     value.get("kind").and_then(|kind| kind.as_str()),
                                     Some(
                                         "conversation_pin"
+                                            | "conversation_folder"
+                                            | "sender_blocklist"
                                             | "conversation_tone"
                                             | "notification_preferences"
                                     )
@@ -5977,6 +6095,159 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         &platform,
                         &hint_tag,
                         key_epoch,
+                    )?;
+                }
+                (
+                    "quarantined",
+                    PrivatePayload::ConversationFolder {
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) if conversation_folders::valid_event(
+                    conversation_id,
+                    folder,
+                    archived_through_ms,
+                    logical_revision,
+                    &writer_device_id,
+                    &envelope.producer_device_id.to_string(),
+                ) =>
+                {
+                    conn.execute("UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=? AND status='quarantined' AND reason='invalid_payload'", params![cursor])?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::ConversationFolder {
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) => {
+                    let producer = envelope.producer_device_id.to_string();
+                    if !conversation_folders::valid_event(
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                    ) {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                        continue;
+                    }
+                    conversation_folders::apply(
+                        conn,
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                        envelope.producer_sequence.0,
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("conversation-folder:{conversation_id}")),
+                        &producer,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::SenderBlocklist {
+                        numbers,
+                        can_unblock,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) => {
+                    let producer = envelope.producer_device_id.to_string();
+                    if !sender_blocklist::valid_blocklist(
+                        &numbers,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                    ) {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                        continue;
+                    }
+                    sender_blocklist::apply_blocklist(
+                        conn,
+                        &numbers,
+                        can_unblock,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                        envelope.producer_sequence.0,
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("sender-blocklist:{producer}")),
+                        &producer,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
+                }
+                // Requests an older decoder skipped are history: recorded, never actionable.
+                (
+                    "applied",
+                    PrivatePayload::SenderUnblockRequest {
+                        request_id,
+                        conversation_id,
+                        numbers,
+                        target_device_id,
+                        writer_device_id,
+                        created_at_ms,
+                    },
+                ) if sender_blocklist::valid_request(
+                    conversation_id,
+                    &numbers,
+                    &target_device_id,
+                    &writer_device_id,
+                    &envelope.producer_device_id.to_string(),
+                    created_at_ms,
+                ) =>
+                {
+                    sender_blocklist::apply_request(
+                        conn,
+                        request_id,
+                        conversation_id,
+                        &numbers,
+                        &target_device_id,
+                        sender_blocklist::RequestFreshness {
+                            historical: true,
+                            created_at_ms,
+                            key_epoch: envelope.key_epoch,
+                        },
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("sender-unblock:{request_id}")),
+                        &writer_device_id,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::SenderUnblockResult {
+                        request_id,
+                        outcome,
+                        writer_device_id,
+                    },
+                ) if writer_device_id == envelope.producer_device_id.to_string() => {
+                    sender_blocklist::apply_result(conn, request_id, outcome, &writer_device_id)?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("sender-unblock:{request_id}")),
+                        &writer_device_id,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
                     )?;
                 }
                 (
@@ -6290,6 +6561,10 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "notification_dismiss"
             | "app_filter"
             | "conversation_pin"
+            | "conversation_folder"
+            | "sender_blocklist"
+            | "sender_unblock_request"
+            | "sender_unblock_result"
             | "conversation_tone"
             | "notification_preferences"
             | "mms_own_address"
@@ -6635,6 +6910,113 @@ fn apply_record(
         }
         (
             EnvelopePurpose::Event,
+            PrivatePayload::SenderBlocklist {
+                numbers,
+                can_unblock,
+                logical_revision,
+                writer_device_id,
+            },
+        ) => {
+            let producer = producer.to_string();
+            if !sender_blocklist::valid_blocklist(
+                &numbers,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            sender_blocklist::apply_blocklist(
+                conn,
+                &numbers,
+                can_unblock,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+                envelope.producer_sequence.0,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::SenderUnblockRequest {
+                request_id,
+                conversation_id,
+                numbers,
+                target_device_id,
+                writer_device_id,
+                created_at_ms,
+            },
+        ) => {
+            if !sender_blocklist::valid_request(
+                conversation_id,
+                &numbers,
+                &target_device_id,
+                &writer_device_id,
+                &producer.to_string(),
+                created_at_ms,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            sender_blocklist::apply_request(
+                conn,
+                request_id,
+                conversation_id,
+                &numbers,
+                &target_device_id,
+                sender_blocklist::RequestFreshness {
+                    historical,
+                    created_at_ms,
+                    key_epoch: envelope.key_epoch,
+                },
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::SenderUnblockResult {
+                request_id,
+                outcome,
+                writer_device_id,
+            },
+        ) => {
+            if writer_device_id != producer.to_string() {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            sender_blocklist::apply_result(conn, request_id, outcome, &writer_device_id)?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::ConversationFolder {
+                conversation_id,
+                folder,
+                archived_through_ms,
+                logical_revision,
+                writer_device_id,
+            },
+        ) => {
+            let producer = producer.to_string();
+            if !conversation_folders::valid_event(
+                conversation_id,
+                folder,
+                archived_through_ms,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            conversation_folders::apply(
+                conn,
+                conversation_id,
+                folder,
+                archived_through_ms,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+                envelope.producer_sequence.0,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
             PrivatePayload::ConversationPin {
                 conversation_id,
                 pinned,
@@ -6919,7 +7301,7 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
 
 fn queue_message_banner(conn: &Connection, message: &MessagePayload) -> Result<(), Error> {
     notifications::prune_banners(conn)?;
-    if message.direction != Direction::Incoming || message.imported {
+    if message.direction != Direction::Incoming || message.imported || conn.query_row("SELECT EXISTS(SELECT 1 FROM conversation_folders WHERE conversation_id=? AND folder='spam')", [message.record.conversation_id.to_string()], |row| row.get::<_, bool>(0))? {
         return Ok(());
     }
     conn.execute(
@@ -7776,12 +8158,36 @@ fn compaction_group(
             ],
             false,
         ),
+        PrivatePayload::ConversationFolder {
+            conversation_id, ..
+        } => (
+            b"conversation-folder",
+            vec![conversation_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::ConversationPin {
             conversation_id, ..
         } => (
             b"conversation-pin",
             vec![conversation_id.to_string().into_bytes()],
             false,
+        ),
+        PrivatePayload::SenderBlocklist {
+            writer_device_id, ..
+        } => (
+            b"sender-blocklist",
+            vec![writer_device_id.as_bytes().to_vec()],
+            false,
+        ),
+        PrivatePayload::SenderUnblockRequest { request_id, .. } => (
+            b"sender-unblock-request",
+            vec![request_id.to_string().into_bytes()],
+            true,
+        ),
+        PrivatePayload::SenderUnblockResult { request_id, .. } => (
+            b"sender-unblock-result",
+            vec![request_id.to_string().into_bytes()],
+            true,
         ),
         PrivatePayload::ConversationTone { seed, .. } => {
             (b"conversation-tone", vec![seed.as_bytes().to_vec()], false)
@@ -7886,9 +8292,19 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             "app-filter:{}:{}",
             filter.source_device_id, filter.package_name
         )),
+        PrivatePayload::ConversationFolder {
+            conversation_id, ..
+        } => Some(format!("conversation-folder:{conversation_id}")),
         PrivatePayload::ConversationPin {
             conversation_id, ..
         } => Some(format!("conversation-pin:{conversation_id}")),
+        PrivatePayload::SenderBlocklist {
+            writer_device_id, ..
+        } => Some(format!("sender-blocklist:{writer_device_id}")),
+        PrivatePayload::SenderUnblockRequest { request_id, .. }
+        | PrivatePayload::SenderUnblockResult { request_id, .. } => {
+            Some(format!("sender-unblock:{request_id}"))
+        }
         PrivatePayload::ConversationTone { seed, .. } => Some(format!("conversation-tone:{seed}")),
         PrivatePayload::NotificationPreferences { .. } => {
             Some(notification_preferences::IDENTITY.to_owned())
@@ -9118,6 +9534,40 @@ mod tests {
         assert!(is_known_private_payload_kind("contact_scan_request"));
         assert!(is_known_private_payload_kind("contact_scan_result"));
         assert!(!is_known_private_payload_kind("future_contact_event"));
+    }
+
+    #[test]
+    fn schema_44_upgrade_preserves_unblock_requests_with_nonactionable_epoch() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-44.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = DatabaseKey::new(&[45; 32]).unwrap();
+        let request_id = uuid::Uuid::new_v4();
+        let client = Client::open(config.clone(), key).unwrap();
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) VALUES(?,?,?,?, 'pending',0,1)",
+                params![request_id.to_string(), ConversationId::new().to_string(), DeviceId::new().to_string(), "[\"+15555550100\"]"],
+            ).unwrap();
+            store
+                .conn
+                .execute("UPDATE schema_meta SET version=44", [])
+                .unwrap();
+        }
+        drop(client);
+
+        let upgraded = Client::open(config, DatabaseKey::new(&[45; 32]).unwrap()).unwrap();
+        let store = upgraded.lock().unwrap();
+        let (version, epoch): (i64, i64) = store.conn.query_row(
+            "SELECT (SELECT version FROM schema_meta),key_epoch FROM sender_unblock_requests WHERE request_id=?",
+            [request_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((version, epoch), (SCHEMA_VERSION, 0));
     }
 
     #[test]

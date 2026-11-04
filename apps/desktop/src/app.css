@@ -77,10 +77,10 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 #head-panel-header strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 #head-panel-header button { display: grid; width: 26px; height: 26px; place-items: center; border: 0; border-radius: 4px; background: transparent; color: inherit; font-size: 20px; }
 #head-panel-header button:hover { background: color-mix(in srgb, #000 14%, transparent); }
-#head-panel-header #conversation-tabs[data-variant="icons"] [role="tab"] { border-radius: 4px; font-size: inherit; }
-#head-panel-header #conversation-tabs[data-variant="icons"] [role="tab"]:hover { background: color-mix(in srgb, #000 14%, transparent); }
-#head-panel-header #conversation-tabs[data-variant="icons"] [role="tab"][aria-selected="true"] { background: color-mix(in srgb, #000 16%, transparent); }
-#head-panel-header #conversation-tabs[data-variant="icons"] [role="tab"]:focus-visible { outline-color: currentColor; }
+#head-panel-header #conversation-tabs [role="tab"] { border-radius: 4px; font-size: inherit; }
+#head-panel-header #conversation-tabs [role="tab"]:hover { background: color-mix(in srgb, #000 14%, transparent); }
+#head-panel-header #conversation-tabs [role="tab"][aria-selected="true"] { background: color-mix(in srgb, #000 16%, transparent); }
+#head-panel-header #conversation-tabs [role="tab"]:focus-visible { outline-color: currentColor; }
 .head-panel-status { display: flex; flex: 0 0 auto; min-width: 0; }
 .head-panel-status [data-connection-state] { display: grid; width: 22px; height: 22px; place-items: center; }
 .head-panel-status .connection-dot { box-shadow: 0 0 0 1px var(--peppy-accent-text); }
@@ -166,7 +166,9 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .header-actions button:hover {
   background: var(--peppy-surface-hover);
 }
-#mark-all-read-confirmation {
+#mark-all-read-confirmation,
+#conversation-folder-confirmation,
+#sender-unblock-confirmation {
   position: absolute;
   z-index: 35;
   top: calc(100% + 6px);
@@ -180,11 +182,15 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   color: var(--peppy-text-primary);
   box-shadow: var(--peppy-shadow-floating);
 }
-#mark-all-read-confirmation p {
+#mark-all-read-confirmation p,
+#conversation-folder-confirmation p,
+#sender-unblock-confirmation p {
   margin: 0 0 8px;
   font-size: 12px;
 }
-#mark-all-read-confirmation div {
+#mark-all-read-confirmation div,
+#conversation-folder-confirmation div,
+#sender-unblock-confirmation div {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -232,8 +238,38 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 }
 .mark-all-read-toast-dismiss { display: grid; width: 24px; height: 24px; flex: 0 0 24px; place-items: center; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: inherit; }
 .mark-all-read-toast-dismiss:hover { background: var(--peppy-surface-hover); }
+#conversation-folder-confirmation, #sender-unblock-confirmation { position: fixed; overflow: auto; }
+#conversation-folder-confirmation .conversation-folder-confirmation-note, #sender-unblock-confirmation .conversation-folder-confirmation-note { color: var(--peppy-text-secondary); font-size: 11px; }
+#conversation-spam-notice { flex: none; min-height: 16px; box-sizing: border-box; margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--peppy-border); background: var(--peppy-surface-chrome); color: var(--peppy-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+/* The live region stays mounted for reliable announcements but takes no space while empty. */
+#conversation-spam-notice:empty { min-height: 0; padding: 0; border: 0; background: none; }
 @media (max-width: 640px) { #mark-all-read-confirmation { right: 0; left: auto; } }
-@media (forced-colors: active) { #mark-all-read-confirmation, .mark-all-read-toast, .mark-all-read-toast-dismiss { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; } }
+@media (forced-colors: active) { #mark-all-read-confirmation, #conversation-folder-confirmation, #sender-unblock-confirmation, #conversation-spam-notice, .mark-all-read-toast, .mark-all-read-toast-dismiss { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; } }
+#conversation-folder-switcher { position: relative; display: flex; flex: none; min-height: 36px; box-sizing: border-box; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--peppy-border); }
+#conversation-folder-trigger { display: flex; min-width: 0; max-width: 100%; height: var(--peppy-control-height); align-items: center; gap: 4px; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-primary); font-size: 13px; font-weight: 600; }
+#conversation-folder-trigger:hover { background: var(--peppy-surface-hover); }
+#conversation-folder-trigger:focus-visible, #conversation-folder-menu button:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
+.conversation-folder-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-folder-trigger-count { color: var(--peppy-text-muted); font-size: 12px; font-weight: 400; }
+#conversation-folder-menu { position: absolute; z-index: 30; top: calc(100% - 2px); right: 8px; left: 8px; padding: 4px; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-control-radius); background: var(--peppy-surface-widget); box-shadow: var(--peppy-shadow-floating); }
+#conversation-folder-menu button { display: flex; width: 100%; height: 28px; align-items: center; justify-content: space-between; gap: 8px; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-primary); text-align: left; }
+#conversation-folder-menu button:hover, #conversation-folder-menu button:focus-visible { background: var(--peppy-surface-hover); }
+#conversation-folder-menu button[aria-checked="true"] { background: var(--peppy-surface-active); font-weight: 600; }
+.conversation-folder-menu-count { display: flex; align-items: center; gap: 4px; color: var(--peppy-text-muted); font-size: 12px; font-weight: 400; }
+.conversation-folder-unread-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--peppy-accent); }
+#conversation-folder-trigger:not([data-folder="inbox"]) { color: var(--peppy-accent); }
+#conversation-folder-notice .secondary-button { flex: none; white-space: nowrap; }
+@media (hover: none), (pointer: coarse) {
+  #conversation-folder-trigger { min-height: 36px; }
+}
+@media (max-width: 640px) and (hover: none), (max-width: 640px) and (pointer: coarse) {
+  #conversation-folder-trigger, #conversation-folder-menu button { min-height: 44px; }
+}
+@media (forced-colors: active) {
+  #conversation-folder-menu { border-color: CanvasText; background: Canvas; box-shadow: none; }
+  #conversation-folder-trigger { color: CanvasText; }
+  #conversation-folder-menu button[aria-checked="true"], #conversation-folder-menu button:hover, #conversation-folder-menu button:focus-visible { background: Highlight; color: HighlightText; }
+}
 .header-actions #conversation-delete-draft { color: var(--peppy-text-secondary); }
 .header-actions #conversation-delete-draft.confirming,
 .header-actions #conversation-delete-draft:hover { background: var(--peppy-danger-hover); color: var(--peppy-danger-text); }

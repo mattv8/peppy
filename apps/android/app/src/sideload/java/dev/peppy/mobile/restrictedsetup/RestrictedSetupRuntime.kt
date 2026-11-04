@@ -4,8 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.core.content.ContextCompat
-import dev.peppy.mobile.mms.RestrictedMessageAccess
-import dev.peppy.mobile.mms.restrictedMessageAccess
+import dev.peppy.mobile.advanced.readAdvancedAccess
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -59,7 +58,9 @@ internal object RestrictedSetupRuntime {
             controllerScope = scope,
             transportFactory = RestrictedSetupTransportFactory { AdbRestrictedSetupTransport(context.packageName) },
             accessReadback = RestrictedSetupAccessReadback {
-                withContext(Dispatchers.IO) { restrictedMessageAccess(context) == RestrictedMessageAccess.ALLOWED }
+                withContext(Dispatchers.IO) {
+                    readAdvancedAccess(context).toSetupReadback()
+                }
             },
             localAddresses = addresses,
             discovery = NsdAdbServiceDiscovery(context, addresses),

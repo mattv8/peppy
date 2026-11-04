@@ -38,8 +38,9 @@ internal class AdbRestrictedSetupTransport(
         check(manager().connectTo(LOOPBACK_HOST, endpoint.port)) { "Connection failed" }
     }
 
-    override suspend fun grantOwnRestrictedAccess() {
+    override suspend fun grantAdvancedFeatures() {
         runFixedShellCommand(FixedShellCommand.GRANT_RESTRICTED, tolerateEofAfterWrite = false)
+        runFixedShellCommand(FixedShellCommand.GRANT_BLOCKED_SENDERS, tolerateEofAfterWrite = false)
     }
 
     override suspend fun turnWirelessDebuggingOff() {
@@ -144,10 +145,12 @@ internal interface AdbRestrictedSetupManager : AutoCloseable {
 
 internal enum class FixedShellCommand {
     GRANT_RESTRICTED,
+    GRANT_BLOCKED_SENDERS,
     WIFI_OFF;
 
     fun destination(packageName: String): String = when (this) {
         GRANT_RESTRICTED -> "shell:appops set $packageName READ_RESTRICTED_MESSAGES allow"
+        GRANT_BLOCKED_SENDERS -> "shell:appops set $packageName WRITE_SMS allow"
         WIFI_OFF -> "shell:settings put global adb_wifi_enabled 0"
     }
 }

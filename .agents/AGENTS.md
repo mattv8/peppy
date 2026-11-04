@@ -305,9 +305,22 @@ This reference records non-obvious Peppy domain constraints.
 ## Android carrier companion
 
 - Android is a companion to the default messaging app: do not request the
-  default-SMS role or `WRITE_SMS`, use hidden APIs, or imply general RCS
-  support. Default-app status alone does not grant RCS access. See
-  [Android limits](apps/android.md).
+  default-SMS role or declare `WRITE_SMS`, use hidden APIs, or imply general
+  RCS support. Default-app status alone does not grant RCS access. The sideload
+  Advanced features setup may set the `WRITE_SMS` AppOp through its fixed
+  Wireless-debugging shell commands, solely to read `BlockedNumberContract` and
+  to remove a number after the user confirms Unblock; it never writes the
+  SMS/MMS provider. See [Android limits](apps/android.md).
+- Google Messages' archive state is read from `threads.archived` through
+  `content://mms-sms/conversations?simple=true` with `READ_SMS` only. It does
+  not distinguish archived from blocked or spam threads; when the blocklist is
+  allowed, it classifies blocked threads. The gateway mirrors both as ordinary
+  `conversation_folder` events on observed edges and only reverts folder
+  states it wrote itself (`provider_folder_writes`), so a user's own folder
+  choice is never undone. Blocklists sync per phone; an unblock request runs
+  only on the listing phone, behind a one-use permit, and snapshot-learned
+  requests never authorize it. See
+  [sender blocklist core](../crates/client-core/src/sender_blocklist.rs).
 - MMS capture reconciles content already downloaded by the default messaging
   app's provider; it does not make Peppy the carrier/default app. Provider
   acquisition is offline reconciliation, separate from gateway upload. See
@@ -339,8 +352,8 @@ This reference records non-obvious Peppy domain constraints.
   and must not halt the outbox. See
   [gateway state](../apps/android/app/src/main/java/dev/peppy/mobile/gateway/GatewayState.kt)
   and [gateway pass](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayWork.kt).
-- The pass order is receive/apply, contacts, media, contact photos, upload,
-  dispatch. The contact-photo phase asks the core which tracked photos an
+- The pass order is receive/apply, contacts, media, contact photos,
+  messaging app (blocklist, unblock requests, archive), upload, dispatch. The contact-photo phase asks the core which tracked photos an
   unsealed outbox row still references (`outbox_contact_photos`, filled at
   enqueue from the same slots `resolve_payload` seals). Never reintroduce a
   text scan of `outbox.plain` for that question; with a multi-day backlog it

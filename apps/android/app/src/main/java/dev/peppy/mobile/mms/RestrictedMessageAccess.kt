@@ -11,7 +11,7 @@ internal const val READ_RESTRICTED_MESSAGES_OP = "android:read_restricted_messag
 
 internal fun restrictedMessageAccess(
     context: Context,
-    check: (AppOpsManager, String, Int, String) -> Int = ::checkRestrictedMessageOp,
+    check: (AppOpsManager, String, Int, String) -> Int = ::checkAppOp,
 ): RestrictedMessageAccess {
     val appOps = context.getSystemService(AppOpsManager::class.java) ?: return RestrictedMessageAccess.UNKNOWN
     return restrictedMessageAccessForCheck {
@@ -33,7 +33,7 @@ internal fun restrictedMessageAccessForCheck(check: () -> Int): RestrictedMessag
     RestrictedMessageAccess.UNKNOWN
 }
 
-internal fun checkRestrictedMessageOp(appOps: AppOpsManager, operation: String, uid: Int, packageName: String): Int =
+internal fun checkAppOp(appOps: AppOpsManager, operation: String, uid: Int, packageName: String): Int =
     if (Build.VERSION.SDK_INT >= 36) appOps.checkOpNoThrow(operation, uid, packageName)
     else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) appOps.unsafeCheckOpNoThrow(operation, uid, packageName)
     else throw UnsupportedOperationException("AppOps check unavailable")
