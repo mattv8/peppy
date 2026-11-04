@@ -36,6 +36,7 @@ import dev.peppy.mobile.gateway.NativeGateway
 import dev.peppy.mobile.gateway.RecoveryReason
 import dev.peppy.mobile.gateway.ServerReachabilityState
 import dev.peppy.mobile.gateway.SyncPhase
+import dev.peppy.mobile.messagingapp.MessagingAppSync
 import dev.peppy.mobile.mms.AndroidMmsCarrier
 import dev.peppy.mobile.mms.MMS_ACCOUNT_PAUSED_REASON
 import dev.peppy.mobile.mms.MmsDispatcher
@@ -296,12 +297,14 @@ class GatewaySync(
     private val contactPhotos: () -> Boolean = { false },
     /** Android-only bounded cleanup after finalized outbox work. */
     private val cleanupMmsCiphertext: () -> Unit = {},
+    /** Bounded archive/blocklist reconciliation with the companion messaging app. */
+    private val messagingApp: () -> Unit = {},
     /** Fences transport completions from a vault/device binding replaced while the pass was active. */
     private val sessionCurrent: () -> Boolean = { true },
     private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     private enum class GatewayPhase(val code: Long) {
-        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE),
+        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
     }
     class PassResult(val more: Boolean, val failure: Exception?, val producersReady: Boolean, val accountPaused: Boolean = false)
 
@@ -383,6 +386,7 @@ class GatewaySync(
             }
             SyncPhase.RECOVERY_REQUIRED -> Unit
         }
+        if (mayEmit()) phase(GatewayPhase.MESSAGING_APP) { messagingApp(); false }
         if (mayEmit()) phase(GatewayPhase.UPLOAD) { upload() }
         if (mayEmit()) phase(GatewayPhase.DISPATCH) { dispatch().moreRemaining }
         // Envelopes sealed during the first upload may have produced new photo registrations.
@@ -872,6 +876,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
                 val result = session.client.cleanupUploadedGatewayMmsCiphertext(16u)
                 BackgroundDiagnostics.mmsCleanup(result.marked.toLong(), result.unlinked.toLong(), result.pendingUnlink.toLong())
             },
+            messagingApp = { MessagingAppSync.forGateway(applicationContext, session.client).run() },
             sessionCurrent = { NativeGateway.isCurrent(applicationContext, session) },
         )
         val result = try {

@@ -211,6 +211,7 @@ describe("bridge subscriptions", () => {
     await tauriBridge.mark_all_read();
     await tauriBridge.set_conversation_pinned("conversation-id", true);
     await tauriBridge.set_conversation_folder("conversation-id", "archived");
+    await tauriBridge.request_sender_unblock("conversation-id");
     await tauriBridge.set_conversation_tone("contact:+15555550100", null);
     await tauriBridge.get_history_search();
     await tauriBridge.start_history_search({ operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2", query: "must not cross the bridge" } as never);
@@ -230,12 +231,13 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(10, "mark_all_read", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(11, "set_conversation_pinned", { conversationId: "conversation-id", pinned: true });
     expect(invokeMock).toHaveBeenNthCalledWith(12, "set_conversation_folder", { conversationId: "conversation-id", folder: "archived" });
-    expect(invokeMock).toHaveBeenNthCalledWith(13, "set_conversation_tone", { seed: "contact:+15555550100", paletteIndex: null });
-    expect(invokeMock).toHaveBeenNthCalledWith(14, "get_history_search", undefined);
-    expect(invokeMock).toHaveBeenNthCalledWith(15, "start_history_search", { input: { operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
-    expect(invokeMock).toHaveBeenNthCalledWith(16, "cancel_history_search", { input: { attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
-    expect(invokeMock).toHaveBeenNthCalledWith(17, "attachment_retention_status", undefined);
-    expect(invokeMock).toHaveBeenNthCalledWith(18, "attachment_retention_state", { attachmentId: "attachment-id" });
+    expect(invokeMock).toHaveBeenNthCalledWith(13, "request_sender_unblock", { conversationId: "conversation-id" });
+    expect(invokeMock).toHaveBeenNthCalledWith(14, "set_conversation_tone", { seed: "contact:+15555550100", paletteIndex: null });
+    expect(invokeMock).toHaveBeenNthCalledWith(15, "get_history_search", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(16, "start_history_search", { input: { operationId: "d2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
+    expect(invokeMock).toHaveBeenNthCalledWith(17, "cancel_history_search", { input: { attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
+    expect(invokeMock).toHaveBeenNthCalledWith(18, "attachment_retention_status", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(19, "attachment_retention_state", { attachmentId: "attachment-id" });
   });
 
   it("opens a media viewer with its conversation, attachment, and message", async () => {
@@ -279,6 +281,12 @@ describe("fixture draft saves", () => {
     expect(after?.folder).toBe("spam");
     expect(after?.pinned).toBe(before?.pinned);
     await expect(fixtureBridge.set_conversation_folder("missing", "archived")).rejects.toMatchObject({ code: "not-found" });
+  });
+
+  it("requests a fixture sender unblock for an established conversation", async () => {
+    await fixtureBridge.request_sender_unblock("conv-aurora");
+    expect((await fixtureBridge.load_state()).conversations.find(conversation => conversation.id === "conv-aurora")?.unblock).toBe("pending");
+    await expect(fixtureBridge.request_sender_unblock("missing")).rejects.toMatchObject({ code: "not-found" });
   });
 
   it("persists fixture tone overrides and clears them with automatic", async () => {

@@ -3,7 +3,10 @@ use super::*;
 pub(super) fn handles(command: &str) -> bool {
     matches!(
         command,
-        "set_conversation_pinned" | "set_conversation_folder" | "set_conversation_tone"
+        "set_conversation_pinned"
+            | "request_sender_unblock"
+            | "set_conversation_folder"
+            | "set_conversation_tone"
     )
 }
 
@@ -26,6 +29,19 @@ impl BrowserCore {
                     ConversationId::from_str(&input.conversation_id).map_err(|_| invalid())?;
                 self.client()?
                     .set_conversation_pinned(conversation_id, input.pinned)
+                    .map_err(core)?;
+            }
+            "request_sender_unblock" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Input {
+                    conversation_id: String,
+                }
+                let input: Input = serde_json::from_value(args).map_err(|_| invalid())?;
+                let conversation_id =
+                    ConversationId::from_str(&input.conversation_id).map_err(|_| invalid())?;
+                self.client()?
+                    .request_sender_unblock(conversation_id)
                     .map_err(core)?;
             }
             "set_conversation_folder" => {
@@ -74,6 +90,7 @@ mod tests {
     #[test]
     fn exposes_only_the_conversation_commands() {
         assert!(handles("set_conversation_pinned"));
+        assert!(handles("request_sender_unblock"));
         assert!(handles("set_conversation_folder"));
         assert!(handles("set_conversation_tone"));
         assert!(!handles("set_conversation_pin"));
@@ -194,5 +211,19 @@ mod tests {
         );
 
         assert_eq!(response["error"]["code"], "invalid-request");
+    }
+
+    #[test]
+    fn unblock_mutation_accepts_the_camel_case_conversation_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(directory.path().to_owned());
+
+        let response = response(
+            &mut core,
+            "request_sender_unblock",
+            json!({"conversationId": ConversationId::new()}),
+        );
+
+        assert_eq!(response["error"]["code"], "credentials-required");
     }
 }

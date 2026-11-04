@@ -80,6 +80,16 @@ describe("BrowserBridge", () => {
     bridge.dispose();
   });
 
+  it("forwards sender unblock requests", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const request = bridge.request_sender_unblock("conversation-1");
+    expect(port.sent).toEqual([{ id: 1, command: "request_sender_unblock", args: { conversationId: "conversation-1" } }]);
+    port.reply({ id: 1, ok: true, value: {} });
+    await expect(request).resolves.toEqual({});
+    bridge.dispose();
+  });
+
   it("forwards the account-access notice request without arguments", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

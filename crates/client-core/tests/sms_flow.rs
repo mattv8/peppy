@@ -246,6 +246,9 @@ fn read_before_arrival_out_of_order_buffering_and_duplicate_replay() {
             unread_count: 1,
             pinned: false,
             folder: ConversationFolder::Inbox,
+            folder_reason: None,
+            unblock: None,
+            can_unblock: false,
         }]
     );
 

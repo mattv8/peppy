@@ -167,7 +167,8 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   background: var(--peppy-surface-hover);
 }
 #mark-all-read-confirmation,
-#conversation-folder-confirmation {
+#conversation-folder-confirmation,
+#sender-unblock-confirmation {
   position: absolute;
   z-index: 35;
   top: calc(100% + 6px);
@@ -182,12 +183,14 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   box-shadow: var(--peppy-shadow-floating);
 }
 #mark-all-read-confirmation p,
-#conversation-folder-confirmation p {
+#conversation-folder-confirmation p,
+#sender-unblock-confirmation p {
   margin: 0 0 8px;
   font-size: 12px;
 }
 #mark-all-read-confirmation div,
-#conversation-folder-confirmation div {
+#conversation-folder-confirmation div,
+#sender-unblock-confirmation div {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -235,10 +238,13 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 }
 .mark-all-read-toast-dismiss { display: grid; width: 24px; height: 24px; flex: 0 0 24px; place-items: center; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: inherit; }
 .mark-all-read-toast-dismiss:hover { background: var(--peppy-surface-hover); }
-#conversation-folder-confirmation { position: fixed; overflow: auto; }
-#conversation-folder-confirmation .conversation-folder-confirmation-note { color: var(--peppy-text-secondary); font-size: 11px; }
+#conversation-folder-confirmation, #sender-unblock-confirmation { position: fixed; overflow: auto; }
+#conversation-folder-confirmation .conversation-folder-confirmation-note, #sender-unblock-confirmation .conversation-folder-confirmation-note { color: var(--peppy-text-secondary); font-size: 11px; }
+#conversation-spam-notice { flex: none; min-height: 16px; box-sizing: border-box; margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--peppy-border); background: var(--peppy-surface-chrome); color: var(--peppy-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+/* The live region stays mounted for reliable announcements but takes no space while empty. */
+#conversation-spam-notice:empty { min-height: 0; padding: 0; border: 0; background: none; }
 @media (max-width: 640px) { #mark-all-read-confirmation { right: 0; left: auto; } }
-@media (forced-colors: active) { #mark-all-read-confirmation, #conversation-folder-confirmation, .mark-all-read-toast, .mark-all-read-toast-dismiss { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; } }
+@media (forced-colors: active) { #mark-all-read-confirmation, #conversation-folder-confirmation, #sender-unblock-confirmation, #conversation-spam-notice, .mark-all-read-toast, .mark-all-read-toast-dismiss { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; } }
 #conversation-folder-switcher { position: relative; display: flex; flex: none; min-height: 36px; box-sizing: border-box; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--peppy-border); }
 #conversation-folder-trigger { display: flex; min-width: 0; max-width: 100%; height: var(--peppy-control-height); align-items: center; gap: 4px; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-primary); font-size: 13px; font-weight: 600; }
 #conversation-folder-trigger:hover { background: var(--peppy-surface-hover); }

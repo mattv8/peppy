@@ -4484,6 +4484,28 @@ async fn set_conversation_pinned(
 }
 
 #[tauri::command]
+async fn request_sender_unblock(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    let conversation_id = ConversationId::from_str(&conversation_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+    let session = state.require_session_admitted(&operation).await?;
+    let client = session.client.clone();
+    blocking(move || {
+        client
+            .request_sender_unblock(conversation_id)
+            .map_err(core_error)
+    })
+    .await?;
+    session.notify();
+    Ok(())
+}
+
+#[tauri::command]
 async fn set_conversation_folder(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
@@ -5665,6 +5687,7 @@ pub fn run() {
         dismiss_all_notifications,
         set_app_muted,
         set_conversation_pinned,
+        request_sender_unblock,
         set_conversation_folder,
         set_conversation_tone,
         mark_notifications_seen,

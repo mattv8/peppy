@@ -56,7 +56,7 @@ export type MediaPageAround = { target: MediaPageItem; newer: MediaPageItem[]; o
 export type MediaOpen = { state: "ready"; url: string; mediaType: string; byteSize: number } | { state: "pending" };
 /** `participants` are native-provided reply addressees and exclude a confirmed self address. */
 /** Draft flags are authoritative host metadata; do not infer them from an unloaded message list. */
-export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; recipientlessDraft?: boolean; draftOnly?: boolean; pinned?: boolean; folder?: ConversationFolder };
+export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; recipientlessDraft?: boolean; draftOnly?: boolean; pinned?: boolean; folder?: ConversationFolder; folderReason?: "marked" | "blocked"; unblock?: "pending" | "failed"; canUnblock?: boolean };
 /** Effective folder from core: an archived conversation reads as `inbox` once a newer message arrives. */
 export type ConversationFolder = "inbox" | "archived" | "spam";
 export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
@@ -183,6 +183,7 @@ export interface DesktopBridge {
   mark_all_read(): Promise<string>;
   set_conversation_pinned(conversationId: string, pinned: boolean): Promise<void>;
   set_conversation_folder(conversationId: string, folder: ConversationFolder): Promise<void>;
+  request_sender_unblock(conversationId: string): Promise<void>;
   set_conversation_tone(seed: string, paletteIndex: number | null): Promise<void>;
   dismiss_notification(target: NotificationTarget): Promise<void>;
   dismiss_all_notifications(): Promise<void>;

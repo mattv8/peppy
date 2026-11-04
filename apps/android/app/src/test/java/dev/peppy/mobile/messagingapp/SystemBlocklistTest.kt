@@ -88,6 +88,17 @@ class SystemBlocklistTest {
         assertEquals(UnblockOutcome.Failed, blocklist.unblock("+12025550123"))
     }
 
+    @Test fun leavesInterruptedReconciliationForRetryWhenBlockedStatusIsUnavailable() {
+        assertEquals(
+            null,
+            SystemBlocklist(context, { true }, { throw SecurityException("denied") }).isBlocked("+12025550123"),
+        )
+        assertEquals(
+            null,
+            SystemBlocklist(context, { true }, { throw IllegalStateException("unavailable") }).isBlocked("+12025550123"),
+        )
+    }
+
     class FakeBlockedNumberProvider : ContentProvider() {
         val rows = mutableListOf<Array<String?>>()
         var deny = false

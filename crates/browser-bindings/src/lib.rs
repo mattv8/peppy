@@ -537,6 +537,9 @@ impl BrowserCore {
                 draft_only,
                 pinned: conversation.pinned,
                 folder: conversation.folder,
+                folder_reason: conversation.folder_reason,
+                unblock: conversation.unblock,
+                can_unblock: conversation.can_unblock,
             });
         }
         for draft in drafts.iter().filter(|draft| {
@@ -566,6 +569,9 @@ impl BrowserCore {
                 draft_only: true,
                 pinned: false,
                 folder: ConversationFolder::Inbox,
+                folder_reason: None,
+                unblock: None,
+                can_unblock: false,
             });
         }
         let keys = client.key_status().map_err(core)?;

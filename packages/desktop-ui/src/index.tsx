@@ -144,6 +144,9 @@ export type Conversation = {
   draftOnly?: boolean;
   pinned?: boolean;
   folder?: ConversationFolder;
+  folderReason?: "marked" | "blocked";
+  unblock?: "pending" | "failed";
+  canUnblock?: boolean;
 };
 export type Attachment = {
   id: string;
@@ -923,6 +926,7 @@ export function AppTitlebar({
 }
 
 const FOLDER_CONFIRMATION_ID = "conversation-folder-confirmation";
+const SENDER_UNBLOCK_CONFIRMATION_ID = "sender-unblock-confirmation";
 type FolderActionKind = "archive" | "restore" | "spam" | "notSpam";
 const FOLDER_ACTIONS: Record<FolderActionKind, { to: ConversationFolder; label: string; title(name: string): string; Icon: typeof Archive; hook: string; confirms: boolean }> = {
   archive: { to: "archived", label: "Archive conversation", title: (name) => `Archive ${name}`, Icon: Archive, hook: "data-archive-conversation-id", confirms: true },
@@ -1028,17 +1032,19 @@ export function ConversationList({
                   {onRequestFolderChange && !c.draftOnly && folderActionsFor(folder).map((kind) => {
                     const action = FOLDER_ACTIONS[kind];
                     const isActive = isFolderPending && (pendingFolder === undefined || pendingFolder === action.to);
-                    const isConfirming = action.confirms && confirmingFolderId === c.id && (confirmingFolder === undefined || confirmingFolder === action.to);
+                    const blockedNotSpam = kind === "notSpam" && c.folderReason === "blocked";
+                    const confirms = action.confirms || blockedNotSpam;
+                    const isConfirming = confirms && confirmingFolderId === c.id && (confirmingFolder === undefined || confirmingFolder === action.to);
                     return <button
                       key={kind}
                       type="button"
                       className={`conversation-folder-action ${isActive ? "pending" : ""}`}
                       {...{ [action.hook]: c.id }}
                       aria-label={action.label}
-                      title={action.title(c.name)}
-                      aria-haspopup={action.confirms ? "dialog" : undefined}
-                      aria-expanded={action.confirms ? isConfirming : undefined}
-                      aria-controls={isConfirming ? FOLDER_CONFIRMATION_ID : undefined}
+                      title={blockedNotSpam ? `Not spam: unblock ${c.name} on your phone` : action.title(c.name)}
+                      aria-haspopup={confirms ? "dialog" : undefined}
+                      aria-expanded={confirms ? isConfirming : undefined}
+                      aria-controls={isConfirming ? blockedNotSpam ? SENDER_UNBLOCK_CONFIRMATION_ID : FOLDER_CONFIRMATION_ID : undefined}
                       disabled={isOtherActionPending}
                       onClick={(event) => {
                         event.stopPropagation();

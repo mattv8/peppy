@@ -72,7 +72,7 @@ describe("App conversation folders", () => {
 
     await waitFor(() => expect(changeFolder).toHaveBeenCalledWith(target.id, "archived"));
     await waitFor(() => expect(document.querySelector(`[data-conversation-row="${target.id}"]`)).not.toBeInTheDocument());
-    expect(document.getElementById("conversation-folder-notice")).toHaveTextContent(/Archived .+\./);
+    await waitFor(() => expect(document.getElementById("conversation-folder-notice")).toHaveTextContent(/Archived .+\./));
     fireEvent.click(within(document.getElementById("conversation-folder-notice")!).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(changeFolder).toHaveBeenLastCalledWith(target.id, "inbox"));
   });
@@ -251,6 +251,80 @@ describe("App conversation folders", () => {
     await waitFor(() => expect(changeFolder).toHaveBeenCalledWith(target.id, "inbox"));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await waitFor(() => expect(folderNotice()).toHaveTextContent(/Moved .+ out of Spam\./));
+  });
+
+  it("moves marked spam from the row and header immediately", async () => {
+    const target = snapshot.conversations[0];
+    snapshot = { ...snapshot, conversations: snapshot.conversations.map(conversation => conversation.id === target.id ? { ...conversation, folder: "spam", folderReason: "marked" } : conversation) };
+    const changeFolder = mirrorFolderChanges();
+    render(<App hostKind="browser" />);
+    await rowButton(target.id);
+    chooseFolder(/Spam/);
+    fireEvent.click(await folderAction("data-folder-conversation-id", target.id));
+    await waitFor(() => expect(changeFolder).toHaveBeenCalledWith(target.id, "inbox"));
+
+    cleanup();
+    snapshot = { ...snapshot, conversations: snapshot.conversations.map(conversation => conversation.id === target.id ? { ...conversation, folder: "spam", folderReason: "marked" } : conversation) };
+    render(<App hostKind="browser" />);
+    await waitFor(() => expect(document.getElementById("header-not-spam")).toBeInTheDocument());
+    fireEvent.click(document.getElementById("header-not-spam")!);
+    await waitFor(() => expect(changeFolder).toHaveBeenLastCalledWith(target.id, "inbox"));
+  });
+
+  it("confirms blocked spam from the row, requests unblock, and shows the toast", async () => {
+    const target = snapshot.conversations[0];
+    snapshot = { ...snapshot, conversations: snapshot.conversations.map(conversation => conversation.id === target.id ? { ...conversation, folder: "spam", folderReason: "blocked", canUnblock: true } : conversation) };
+    const request = vi.spyOn(bridge, "request_sender_unblock").mockImplementation(async id => {
+      snapshot = { ...snapshot, conversations: snapshot.conversations.map(conversation => conversation.id === id ? { ...conversation, folder: "inbox", unblock: "pending" } : conversation) };
+    });
+    render(<App hostKind="browser" />);
+    await rowButton(target.id);
+    chooseFolder(/Spam/);
+    fireEvent.click(await folderAction("data-folder-conversation-id", target.id));
+    const dialog = await screen.findByRole("dialog", { name: /Unblock .* on your phone\?/ });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Unblock" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith(target.id));
+    await waitFor(() => expect(document.getElementById("sender-unblock-notice")).toHaveTextContent(/Unblocking .+ on your phone\./));
+  });
+
+  it("confirms blocked spam from the header", async () => {
+    const target = snapshot.conversations[0];
+    snapshot = { ...snapshot, conversations: snapshot.conversations.map(conversation => conversation.id === target.id ? { ...conversation, folder: "spam", folderReason: "blocked", canUnblock: true } : conversation) };
+    const request = vi.spyOn(bridge, "request_sender_unblock").mockResolvedValue();
+    render(<App hostKind="browser" />);
+    await waitFor(() => expect(document.getElementById("header-not-spam")).toBeInTheDocument());
+    const action = document.getElementById("header-not-spam")!;
+    expect(action).toHaveAttribute("aria-haspopup", "dialog");
+    fireEvent.click(action);
+    fireEvent.click(within(await screen.findByRole("dialog", { name: /Unblock .* on your phone\?/ })).getByRole("button", { name: "Unblock" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith(target.id));
+  });
+
+
+  it("retries a failed unblock request and offers Close only without the capability", async () => {
+    const target = snapshot.conversations[0];
+    snapshot = { ...snapshot, conversations: snapshot.conversations.map(conversation => conversation.id === target.id ? { ...conversation, folder: "spam", folderReason: "blocked", canUnblock: true } : conversation) };
+    let attempts = 0;
+    const request = vi.spyOn(bridge, "request_sender_unblock").mockImplementation(async () => { attempts += 1; if (attempts === 1) throw new Error("offline"); });
+    render(<App hostKind="browser" />);
+    await rowButton(target.id);
+    chooseFolder(/Spam/);
+    fireEvent.click(await folderAction("data-folder-conversation-id", target.id));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: /Unblock .* on your phone\?/ })).getByRole("button", { name: "Unblock" }));
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(document.getElementById("sender-unblock-notice")).toHaveTextContent(/Couldn't unblock .+\./));
+    fireEvent.click(within(document.getElementById("sender-unblock-notice")!).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+
+    cleanup();
+    snapshot = { ...snapshot, conversations: snapshot.conversations.map(conversation => conversation.id === target.id ? { ...conversation, folder: "spam", folderReason: "blocked", canUnblock: false } : conversation) };
+    render(<App hostKind="browser" />);
+    await rowButton(target.id);
+    chooseFolder(/Spam/);
+    fireEvent.click(await folderAction("data-folder-conversation-id", target.id));
+    const unavailable = await screen.findByRole("dialog", { name: /Your phone can't unblock .* yet\./ });
+    expect(within(unavailable).getByRole("button", { name: "Close" })).toBeInTheDocument();
+    expect(within(unavailable).queryByRole("button", { name: "Unblock" })).not.toBeInTheDocument();
   });
 
   it("ignores a second Not spam click on the next row within the settle window", async () => {

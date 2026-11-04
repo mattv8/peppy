@@ -516,6 +516,9 @@ mod tests {
             unread_count,
             pinned: false,
             folder,
+            folder_reason: None,
+            unblock: None,
+            can_unblock: false,
         }
     }
 

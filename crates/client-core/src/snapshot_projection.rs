@@ -108,6 +108,12 @@ CREATE TABLE IF NOT EXISTS projection_conversation_pins(generation INTEGER NOT N
 CREATE TABLE IF NOT EXISTS projection_conversation_folders(generation INTEGER NOT NULL, conversation_id TEXT NOT NULL,
     folder TEXT NOT NULL, archived_through_ms INTEGER, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, PRIMARY KEY(generation,conversation_id));
+CREATE TABLE IF NOT EXISTS projection_sender_blocklists(generation INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
+     numbers TEXT NOT NULL, can_unblock INTEGER NOT NULL, logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
+     source_sequence INTEGER NOT NULL, PRIMARY KEY(generation,producer_device_id));
+CREATE TABLE IF NOT EXISTS projection_sender_unblock_requests(generation INTEGER NOT NULL, request_id TEXT NOT NULL,
+     conversation_id TEXT NOT NULL, target_device_id TEXT NOT NULL, numbers TEXT NOT NULL, status TEXT NOT NULL,
+     created_at_ms INTEGER NOT NULL, PRIMARY KEY(generation,request_id));
 CREATE TABLE IF NOT EXISTS projection_conversation_tones(generation INTEGER NOT NULL, seed TEXT NOT NULL,
     palette_index INTEGER, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, PRIMARY KEY(generation,seed));
@@ -561,6 +567,53 @@ pub(super) fn reduce(
             conn.execute("INSERT INTO projection_conversation_folders(generation,conversation_id,folder,archived_through_ms,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(generation,conversation_id) DO UPDATE SET folder=excluded.folder,archived_through_ms=excluded.archived_through_ms,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_conversation_folders.logical_revision OR (excluded.logical_revision=projection_conversation_folders.logical_revision AND excluded.writer_device_id>projection_conversation_folders.writer_device_id)", params![generation, conversation_id.to_string(), folder.as_str(), archived_through_ms, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
             Ok(true)
         }
+        PrivatePayload::SenderBlocklist {
+            numbers,
+            can_unblock,
+            logical_revision,
+            writer_device_id,
+        } => {
+            if !crate::sender_blocklist::valid_blocklist(
+                &numbers,
+                logical_revision,
+                &writer_device_id,
+                producer,
+            ) {
+                return Ok(false);
+            }
+            conn.execute("INSERT INTO projection_sender_blocklists(generation,producer_device_id,numbers,can_unblock,logical_revision,writer_device_id,source_sequence) VALUES(?,?,?,?,?,?,?) ON CONFLICT(generation,producer_device_id) DO UPDATE SET numbers=excluded.numbers,can_unblock=excluded.can_unblock,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>projection_sender_blocklists.logical_revision OR (excluded.logical_revision=projection_sender_blocklists.logical_revision AND excluded.writer_device_id>projection_sender_blocklists.writer_device_id)", params![generation,producer,crate::json(&numbers)?,can_unblock,to_i64(logical_revision)?,writer_device_id,sequence])?;
+            Ok(true)
+        }
+        PrivatePayload::SenderUnblockRequest {
+            request_id,
+            conversation_id,
+            numbers,
+            target_device_id,
+            writer_device_id,
+        } => {
+            if !crate::sender_blocklist::valid_request(
+                conversation_id,
+                &numbers,
+                &target_device_id,
+                &writer_device_id,
+                producer,
+            ) {
+                return Ok(false);
+            }
+            conn.execute("INSERT INTO projection_sender_unblock_requests(generation,request_id,conversation_id,target_device_id,numbers,status,created_at_ms) VALUES(?,?,?,?,?,'pending',?) ON CONFLICT(generation,request_id) DO NOTHING", params![generation,request_id.to_string(),conversation_id.to_string(),target_device_id,crate::json(&numbers)?,crate::notifications::now_ms()])?;
+            Ok(true)
+        }
+        PrivatePayload::SenderUnblockResult {
+            request_id,
+            outcome,
+            writer_device_id,
+        } => {
+            if writer_device_id != producer {
+                return Ok(false);
+            }
+            conn.execute("UPDATE projection_sender_unblock_requests SET status=? WHERE generation=? AND request_id=? AND target_device_id=? AND status='pending'", params![crate::sender_blocklist::outcome_code(outcome), generation, request_id.to_string(), producer])?;
+            Ok(true)
+        }
         PrivatePayload::ConversationTone {
             seed,
             palette_index,
@@ -883,6 +936,11 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
            AND NOT (conversation_folders.producer_device_id=?1 AND EXISTS(SELECT 1 FROM outbox o WHERE o.seq=conversation_folders.source_sequence AND NOT EXISTS(SELECT 1 FROM journal j WHERE j.envelope_id=o.envelope_id AND j.cursor<=?3)))",
         params![me, generation, high_water],
     )?;
+    // This device's own list is republished from the phone; never drop it on promotion.
+    conn.execute("DELETE FROM sender_blocklists WHERE producer_device_id<>?2 AND NOT EXISTS(SELECT 1 FROM projection_sender_blocklists s WHERE s.generation=?1 AND s.producer_device_id=sender_blocklists.producer_device_id)", params![generation, me])?;
+    conn.execute("INSERT INTO sender_blocklists(producer_device_id,numbers,can_unblock,logical_revision,writer_device_id,source_sequence) SELECT producer_device_id,numbers,can_unblock,logical_revision,writer_device_id,source_sequence FROM projection_sender_blocklists WHERE generation=? ON CONFLICT(producer_device_id) DO UPDATE SET numbers=excluded.numbers,can_unblock=excluded.can_unblock,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>sender_blocklists.logical_revision OR (excluded.logical_revision=sender_blocklists.logical_revision AND excluded.writer_device_id>sender_blocklists.writer_device_id)", [generation])?;
+    conn.execute("DELETE FROM sender_unblock_requests WHERE historical=1 AND NOT EXISTS(SELECT 1 FROM projection_sender_unblock_requests s WHERE s.generation=? AND s.request_id=sender_unblock_requests.request_id)", [generation])?;
+    conn.execute("INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) SELECT request_id,conversation_id,target_device_id,numbers,status,1,created_at_ms FROM projection_sender_unblock_requests WHERE generation=? ON CONFLICT(request_id) DO UPDATE SET status=excluded.status WHERE sender_unblock_requests.status='pending' AND excluded.status<>'pending'", [generation])?;
     let mut after_folder = String::new();
     loop {
         type FolderRow = (String, String, Option<i64>, i64, String, i64, String);
@@ -1227,6 +1285,8 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
         "projection_filters",
         "projection_conversation_pins",
         "projection_conversation_folders",
+        "projection_sender_blocklists",
+        "projection_sender_unblock_requests",
         "projection_conversation_tones",
         "projection_notification_preferences",
         "projection_legacy_retained",
@@ -1249,6 +1309,8 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
            AND NOT EXISTS(SELECT 1 FROM projection_filters r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_conversation_pins r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_conversation_folders r WHERE r.generation=projection_generations.generation)
+           AND NOT EXISTS(SELECT 1 FROM projection_sender_blocklists r WHERE r.generation=projection_generations.generation)
+           AND NOT EXISTS(SELECT 1 FROM projection_sender_unblock_requests r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_notification_preferences r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_legacy_retained r WHERE r.generation=projection_generations.generation)",

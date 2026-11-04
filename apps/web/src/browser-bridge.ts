@@ -487,6 +487,7 @@ export class BrowserBridge implements DesktopBridge {
     if (!CONVERSATION_FOLDERS.includes(folder)) return Promise.reject(new BrowserBridgeError("invalid-request", "Invalid conversation folder."));
     return this.call("set_conversation_folder", { conversationId, folder });
   }
+  public request_sender_unblock(conversationId: string): Promise<void> { return this.call("request_sender_unblock", { conversationId }); }
   public set_conversation_tone(seed: string, paletteIndex: number | null): Promise<void> { return this.call("set_conversation_tone", { seed, paletteIndex }); }
   public dismiss_notification(target: NotificationTarget): Promise<void> { return this.call("dismiss_notification", { target }); }
   public dismiss_all_notifications(): Promise<void> { return this.call("dismiss_all_notifications"); }

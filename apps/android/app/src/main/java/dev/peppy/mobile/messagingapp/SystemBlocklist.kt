@@ -18,7 +18,7 @@ enum class UnblockOutcome { Unblocked, NotBlocked, NotAllowed, Failed }
 class SystemBlocklist(
     private val context: Context,
     private val access: () -> Boolean,
-    private val isBlocked: (String) -> Boolean = { BlockedNumberContract.isBlocked(context, it) },
+    private val blockedNumber: (String) -> Boolean = { BlockedNumberContract.isBlocked(context, it) },
     private val unblockNumber: (String) -> Unit = { BlockedNumberContract.unblock(context, it) },
 ) {
     fun read(): BlocklistRead {
@@ -62,13 +62,27 @@ class SystemBlocklist(
     fun unblock(number: String): UnblockOutcome {
         if (!access()) return UnblockOutcome.NotAllowed
         return try {
-            if (!isBlocked(number)) return UnblockOutcome.NotBlocked
+            if (!blockedNumber(number)) return UnblockOutcome.NotBlocked
             unblockNumber(number)
-            if (isBlocked(number)) UnblockOutcome.Failed else UnblockOutcome.Unblocked
+            if (blockedNumber(number)) UnblockOutcome.Failed else UnblockOutcome.Unblocked
         } catch (_: SecurityException) {
             UnblockOutcome.NotAllowed
         } catch (_: RuntimeException) {
             UnblockOutcome.Failed
+        }
+    }
+
+    /** Returns null when the provider cannot be queried, leaving durable work for a later pass. */
+    fun isBlocked(number: String): Boolean? {
+        if (!access()) return null
+        return try {
+            blockedNumber(number)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: SecurityException) {
+            null
+        } catch (_: RuntimeException) {
+            null
         }
     }
 
