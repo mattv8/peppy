@@ -460,6 +460,7 @@ struct ContactsSection: View {
         case .busy: "Another sync was running; contacts are checked next."
         case .serverIncompatible: "This server cannot safely compact contact history; contacts are paused."
         case .backfillPending: "Preparing existing contact history for safe sync; contacts resume on a later check."
+        case .waitingForReplay: "Waiting for this phone to finish syncing existing history; contacts start on a later check."
         case .noAccess: "Contacts access is off; nothing was removed from your other devices."
         case .partial: "The last check was interrupted or partial; nothing was removed. It continues next time."
         case .repairPending: report.projectionFailure.map { "Rebuilding contacts from the server failed (\($0)); it is retried on the next check." }
