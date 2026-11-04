@@ -64,6 +64,8 @@ func syntheticImage(_ type: UTType = .png, side: Int = 96, red: CGFloat = 0.8) -
         let server = try FakeServer(passphrase: passphrase)
         let deviceId = UUID().uuidString.lowercased()
         let client = try openUnlockedClient(server, passphrase: passphrase, deviceId: deviceId)
+        try client.registerDeviceHint(platform: "ios", hint: Data(repeating: 5, count: 32))
+        try client.observeServerHighWater(highWaterCursor: "0")
         let provider = WritableFakeProvider()
         await provider.configure { $0.book = contacts; $0.photos = photos; $0.historyEnabled = true }
         var coordinator = NativeContactsCoordinator(
@@ -142,6 +144,8 @@ func syntheticImage(_ type: UTType = .png, side: Int = 96, red: CGFloat = 0.8) -
         let server = try FakeServer(passphrase: passphrase)
         let deviceId = UUID().uuidString.lowercased()
         let client = try openUnlockedClient(server, passphrase: passphrase, deviceId: deviceId)
+        try client.registerDeviceHint(platform: "ios", hint: Data(repeating: 6, count: 32))
+        try client.observeServerHighWater(highWaterCursor: "0")
         let base = WritableFakeProvider()
         // History stays off, so every pass is a complete fetchPage scan followed by a full photo sweep.
         await base.configure { $0.book = sampleContacts(4); $0.photos = ["os-c0": syntheticImage(red: 0.1)!] }

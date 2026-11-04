@@ -140,6 +140,7 @@ fn search_further_back_roundtrips_through_phone_capture_and_local_search() {
     // The request is already encrypted in the desktop outbox; the phone admits it from the log.
     assert_eq!(server.upload(&desktop), 1);
     deliver(&server, &phone, server.log.len());
+    catch_up_initial_replay(&phone, server.log.len() as u64);
     let pending = value(phone.pending_message_history_capture_requests(PROVIDER));
     assert_eq!(pending["needsSms"], true);
     assert_eq!(pending["needsMms"], false);

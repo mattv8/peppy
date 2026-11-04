@@ -56,6 +56,7 @@ class GatewaySyncTest : GatewayTestBase() {
     private var retentionCapabilityResponse = LoopbackHttpServer.Response(404)
     private var snapshotCompactionSupported = false
     private var snapshotCompactionActive = false
+    private var snapshotOriginTagsSupported: Boolean? = null
 
     private val server = LoopbackHttpServer { request ->
         synchronized(requests) {
@@ -81,6 +82,7 @@ class GatewaySyncTest : GatewayTestBase() {
                         .put("compaction_supported", snapshotCompactionSupported)
                         .put("compaction_active", snapshotCompactionActive)
                         .apply { if (snapshotCompactionSupported) put("compaction_generation", "1") }
+                        .apply { snapshotOriginTagsSupported?.let { put("origin_tags_supported", it) } }
                         .toString()
                 },
             )
@@ -198,6 +200,54 @@ class GatewaySyncTest : GatewayTestBase() {
         assertNull(result.failure)
         assertFalse(client.serverCompactionSupported())
         assertTrue(requests.any { it.first == "GET /v1/events?after=0&limit=50" })
+    }
+
+    @Test fun snapshotOriginTagsCapabilityDefaultsToFalseWhenMissing() {
+        val client = live()
+        val values = mutableListOf<Boolean>()
+        val recordingClient = object : NativeClientInterface by client {
+            override fun setServerOriginTagsSupported(supported: Boolean) {
+                values += supported
+                client.setServerOriginTagsSupported(supported)
+            }
+        }
+
+        sync(recordingClient).run()
+
+        assertEquals(listOf(false, false), values)
+    }
+
+    @Test fun snapshotOriginTagsCapabilityRecordsTrue() {
+        val client = live()
+        snapshotOriginTagsSupported = true
+        val values = mutableListOf<Boolean>()
+        val recordingClient = object : NativeClientInterface by client {
+            override fun setServerOriginTagsSupported(supported: Boolean) {
+                values += supported
+                client.setServerOriginTagsSupported(supported)
+            }
+        }
+
+        sync(recordingClient).run()
+
+        assertEquals(listOf(false, true), values)
+    }
+
+    @Test fun snapshotOriginTagsCapabilityRecordsFalse() {
+        val client = live()
+        client.setServerOriginTagsSupported(true)
+        snapshotOriginTagsSupported = false
+        val values = mutableListOf<Boolean>()
+        val recordingClient = object : NativeClientInterface by client {
+            override fun setServerOriginTagsSupported(supported: Boolean) {
+                values += supported
+                client.setServerOriginTagsSupported(supported)
+            }
+        }
+
+        sync(recordingClient).run()
+
+        assertEquals(listOf(false, false), values)
     }
 
     @Test

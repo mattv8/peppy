@@ -647,7 +647,11 @@ fn stage_contact_payload(
             if id != *contact_id || body_revision != revision {
                 return Ok(false);
             }
-            if known_owner(conn, generation, book_id)?.as_deref() != Some(producer) {
+            if !known_owner(conn, generation, book_id)?
+                .map(|owner| contacts::owner_or_successor(conn, &owner, producer))
+                .transpose()?
+                .unwrap_or(false)
+            {
                 return Ok(true);
             }
             conn.execute(
@@ -668,11 +672,15 @@ fn stage_book(
     book: &Value,
 ) -> Result<bool, Error> {
     let id = contacts::req(book, "id")?;
-    if contacts::req(book, "owner_device_id")? != producer {
+    if !contacts::owner_or_successor(conn, contacts::req(book, "owner_device_id")?, producer)? {
         return Ok(false);
     }
     let book_generation = contacts::revision(book, "generation")?;
-    if known_owner(conn, generation, id)?.is_some_and(|owner| owner != producer) {
+    if !known_owner(conn, generation, id)?
+        .map(|owner| contacts::owner_or_successor(conn, &owner, producer))
+        .transpose()?
+        .unwrap_or(true)
+    {
         return Ok(false);
     }
     let staged: Option<(i64, String)> = conn

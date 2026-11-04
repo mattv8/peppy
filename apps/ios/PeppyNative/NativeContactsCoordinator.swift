@@ -117,6 +117,8 @@ public struct ContactsSyncReport: Sendable, Equatable {
         case backfillPending
         /// A latched projection repair has not promoted yet; no capture or OS write ran.
         case repairPending
+        /// The core is still waiting for replay or local device-hint registration. No OS read ran.
+        case waitingForReplay
         /// Access is not granted; the book was published as unavailable, never emptied.
         case noAccess
         /// OS change history showed no contact changes since the last checkpoint.
@@ -357,9 +359,27 @@ struct NativeContactsCoordinator {
             report.retentionPaused = supported && !active
             return report
         }
-        let existing = try ownedBook()
+        let selection = try client.contactBookSelection()
+        let selected: (book: OwnedBook?, id: String, retireBookIds: [String])
+        switch selection {
+        case let .owned(bookId):
+            if let existing = try book(bookId) {
+                selected = (existing, bookId, [])
+            } else {
+                selected = (nil, UUID().uuidString.lowercased(), [])
+            }
+        case let .inherited(bookId, retireBookIds):
+            selected = (try book(bookId), bookId, retireBookIds)
+        case .wait:
+            var report = ContactsSyncReport(outcome: .waitingForReplay)
+            report.retentionPaused = supported && !active
+            return report
+        case .mint:
+            selected = (nil, UUID().uuidString.lowercased(), [])
+        }
+        let existing = selected.book
         let access = try await provider.access()
-        let bookId = existing?.id ?? UUID().uuidString.lowercased()
+        let bookId = selected.id
         let generation = existing?.generation ?? "1"
         var report = ContactsSyncReport(outcome: .partial)
         report.retentionPaused = supported && !active
@@ -396,6 +416,11 @@ struct NativeContactsCoordinator {
         if !isCancelled() {
             try await processRequests(book: book, bookId: bookId, access: report.access ?? access,
                                       checkpoint: &checkpoint, report: &report, isCancelled: isCancelled)
+        }
+        if report.authoritative, !isCancelled() {
+            for retireBookId in selected.retireBookIds where retireBookId != bookId {
+                try retireAfterFullScopeRemoval(retireBookId)
+            }
         }
         report.photoWorkRemaining = !checkpoint.pendingPhotoKeys.isEmpty || checkpoint.sweepActive
         report.remoteScanPending = try hasPendingRemoteScan(bookId: bookId)
@@ -791,8 +816,28 @@ struct NativeContactsCoordinator {
 
     func retire() throws {
         guard let book = try ownedBook() else { return }
+        try retire(book)
+    }
+
+    private func retire(_ book: OwnedBook) throws {
         let body = bookBody(id: book.id, generation: book.generation, access: .denied, containers: [], state: "retired")
         _ = try capture(book: body, entries: [])
+    }
+
+    /// A takeover never hides a minted book until its existing members have gone through the same
+    /// authoritative empty-scope removal used by a normal full scan.
+    private func retireAfterFullScopeRemoval(_ bookId: String) throws {
+        guard let book = try book(bookId) else { return }
+        let scanId = UUID().uuidString.lowercased()
+        _ = try call(client.beginContactScan, [
+            "schema_version": 1, "scan_id": scanId, "book_id": book.id,
+            "generation": book.generation, "access": "full", "authoritative": true,
+        ])
+        let finished = try call(client.finishContactScan, ["schema_version": 1, "scan_id": scanId, "complete": true])
+        guard (finished["held"] as? Int ?? 0) == 0,
+              finished["state"] as? String != "awaiting_approval"
+        else { return }
+        try retire(book)
     }
 
     // MARK: Book
@@ -807,6 +852,13 @@ struct NativeContactsCoordinator {
                 return OwnedBook(id: id, generation: generation)
             }
             .first
+    }
+
+    private func book(_ id: String) throws -> OwnedBook? {
+        let books = try Self.object(client.listContactBooksJson())["books"] as? [[String: Any]] ?? []
+        guard let book = books.first(where: { $0["id"] as? String == id && $0["state"] as? String != "retired" }),
+              let generation = book["generation"] as? String else { return nil }
+        return OwnedBook(id: id, generation: generation)
     }
 
     /// The raw native book. No policy is sent (the core default is Auto and owner settings win);

@@ -7,7 +7,7 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 const PEPPY_ANDROID_PACKAGE: &str = "dev.peppy.mobile";
-const PEPPY_CLOCK_SKEW_MS: i64 = 120_000;
+pub(crate) const PEPPY_CLOCK_SKEW_MS: i64 = 120_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderSmsEvidence {

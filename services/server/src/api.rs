@@ -2272,6 +2272,12 @@ async fn update_capabilities(
 struct Accepted {
     cursor: String,
     duplicate: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    origin_duplicate: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 /// Explicit opt-in is required from every non-revoked consumer before this
 /// vault can delete immutable snapshot rows.
@@ -2354,6 +2360,7 @@ async fn ingest(
             return Ok(Json(Accepted {
                 cursor: row.get::<i64, _>("original_cursor").to_string(),
                 duplicate: true,
+                origin_duplicate: false,
             }));
         }
         return Err(ApiError(StatusCode::CONFLICT, "idempotency_conflict"));
@@ -2365,9 +2372,26 @@ async fn ingest(
             return Ok(Json(Accepted {
                 cursor: c.to_string(),
                 duplicate: true,
+                origin_duplicate: false,
             }));
         }
         return Err(ApiError(StatusCode::CONFLICT, "idempotency_conflict"));
+    }
+    if let Some(origin_tag) = e.origin_tag {
+        let existing = sqlx::query("SELECT cursor FROM encrypted_records WHERE vault_id=$1 AND origin_tag=$2 UNION ALL SELECT original_cursor AS cursor FROM compacted_records WHERE vault_id=$1 AND origin_tag=$2 LIMIT 1")
+            .bind(p.vault)
+            .bind(origin_tag.to_vec())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| database_unavailable(&error, "ingest_origin_duplicate_lookup"))?;
+        if let Some(row) = existing {
+            tracing::info!(vault_id = %p.vault, "origin tag duplicate");
+            return Ok(Json(Accepted {
+                cursor: row.get::<i64, _>("cursor").to_string(),
+                duplicate: true,
+                origin_duplicate: true,
+            }));
+        }
     }
     let current_epoch = vault_meta.get::<i32, _>("key_epoch") as u32;
     let current_fingerprint: String = vault_meta.get("profile_fingerprint");
@@ -2412,7 +2436,7 @@ async fn ingest(
         EnvelopePurpose::Command => "command",
     };
     sqlx::query("INSERT INTO event_log(vault_id,cursor,envelope_id,producer_device_id,producer_sequence,purpose,command_id,cipher_digest,envelope) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)").bind(p.vault).bind(c).bind(e.envelope_id.0).bind(p.device).bind(e.producer_sequence.0 as i64).bind(purpose).bind(e.command_id.map(|v|v.0)).bind(digest.as_slice()).bind(&payload).execute(&mut *tx).await.map_err(|error| insert_error(error, "ingest_event_insert"))?;
-    sqlx::query("INSERT INTO encrypted_records(vault_id,producer_device_id,envelope_id,cursor,producer_sequence,purpose,command_id,cipher_digest,envelope) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+    sqlx::query("INSERT INTO encrypted_records(vault_id,producer_device_id,envelope_id,cursor,producer_sequence,purpose,command_id,cipher_digest,envelope,origin_tag) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
         .bind(p.vault)
         .bind(p.device)
         .bind(e.envelope_id.0)
@@ -2422,6 +2446,7 @@ async fn ingest(
         .bind(e.command_id.map(|v| v.0))
         .bind(digest.as_slice())
         .bind(&payload)
+        .bind(e.origin_tag.map(|tag| tag.to_vec()))
         .execute(&mut *tx)
         .await
         .map_err(|error| insert_error(error, "ingest_record_insert"))?;
@@ -2486,6 +2511,7 @@ async fn ingest(
     Ok(Json(Accepted {
         cursor: c.to_string(),
         duplicate: false,
+        origin_duplicate: false,
     }))
 }
 

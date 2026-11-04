@@ -810,11 +810,29 @@ impl Client {
                 provider_thread_id: input.source.provider_thread_id.clone(),
             }),
         };
+        if let Some(existing) = crate::message_origin::claim(&tx, &payload, false)? {
+            let (conversation_id, source_sequence) =
+                crate::message_origin::message_identity(&tx, &existing)?;
+            let detached = unlink_acquisition_parts(&tx, id)?;
+            tx.execute(
+                "UPDATE mms_acquisitions SET state='complete',reason=NULL,message_id=?,conversation_id=?,source_sequence=? WHERE acquisition_id=?",
+                params![existing.to_string(), conversation_id.to_string(), super::to_i64(source_sequence.0)?, id],
+            )?;
+            tx.commit()?;
+            drop(guard);
+            discard_detached(self, detached)?;
+            return Ok(Captured {
+                message_id: existing,
+                conversation_id,
+                duplicate: true,
+            });
+        }
         match super::insert_message(&tx, &payload)? {
             Inserted::New => {}
             Inserted::Conflict => return Err(Error::Conflict),
             Inserted::Same => return Err(Error::Database),
         }
+        crate::message_origin::mark_claimed(&tx, &message_id)?;
         let thumbnail_ids: Vec<_> = parts
             .iter()
             .filter_map(|part| part.thumbnail_attachment_id)

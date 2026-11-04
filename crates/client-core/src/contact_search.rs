@@ -6,7 +6,7 @@
 //! digits), never serialized JSON keys, and numbers are normalized with the book's region; a
 //! number that cannot be normalized is returned as-is and marked `normalized:false` rather
 //! than turned into an invented E.164 value.
-use crate::{Error, contact_resolution};
+use crate::{Error, contact_resolution, contacts};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::cmp::Ordering;
@@ -95,19 +95,23 @@ pub(crate) fn search(conn: &Connection, input: &str) -> Result<String, Error> {
             .chars()
             .all(|c| c.is_ascii_digit() || matches!(c, '+' | ' ' | '(' | ')' | '.' | '-'));
 
+    let visible_book_ids = contacts::visible_book_ids(conn)?;
     let mut books = HashMap::new();
     for row in conn
-        .prepare("SELECT id,owner_device_id,body FROM contact_books WHERE forgotten=0")?
+        .prepare("SELECT id,owner_device_id,state,body FROM contact_books WHERE forgotten=0")?
         .query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })?
     {
-        let (id, owner, body) = row?;
-        books.insert(id, (owner, contact_resolution::region(&body)));
+        let (id, owner, _state, body) = row?;
+        if visible_book_ids.contains(&id) {
+            books.insert(id, (owner, contact_resolution::region(&body)));
+        }
     }
 
     let mut best = BinaryHeap::new();

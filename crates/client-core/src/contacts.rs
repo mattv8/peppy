@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 const MAX_CONTACTS: usize = 20_000;
 const MAX_VALUES: usize = 20;
@@ -382,6 +383,7 @@ CREATE TABLE IF NOT EXISTS contact_restore_claims(book_id TEXT NOT NULL, tombsto
             [],
         )?;
     }
+    crate::device_succession::initialize(conn)?;
     crate::contact_sync_requests::initialize(conn)?;
     Ok(())
 }
@@ -400,7 +402,7 @@ pub(crate) fn owned_book(
         )
         .optional()?
         .ok_or(Error::NotFound)?;
-    if owner != ctx.device_id.to_string() {
+    if !owner_or_successor(conn, &owner, &ctx.device_id.to_string())? {
         return Err(Error::InvalidRequest("not contact book owner"));
     }
     let body = serde_json::from_str(&body).map_err(|_| Error::Database)?;
@@ -642,7 +644,11 @@ pub(crate) fn capture_tx(
 ) -> Result<Vec<(String, Value, bool)>, Error> {
     require_unlocked(ctx)?;
     let book_id = req(book, "id")?;
-    if req(book, "owner_device_id")? != ctx.device_id.to_string() {
+    if !owner_or_successor(
+        tx,
+        req(book, "owner_device_id")?,
+        &ctx.device_id.to_string(),
+    )? {
         return Err(invalid());
     }
     let generation = revision(book, "generation")?;
@@ -672,7 +678,9 @@ pub(crate) fn capture_tx(
     obj.remove("state_revision");
     obj.insert("state_revision".into(), json!("0"));
     if let Some((owner, stored_generation, stored_body)) = stored {
-        if owner != ctx.device_id.to_string() || generation < stored_generation {
+        if !owner_or_successor(tx, &owner, &ctx.device_id.to_string())?
+            || generation < stored_generation
+        {
             return Err(invalid());
         }
         // Owner settings (contact_settings_json) are authoritative over captured policy;
@@ -706,7 +714,7 @@ pub(crate) fn capture_tx(
     }
     let raw_book = preserve_default_account(tx, book_id, book)?;
     tx.execute(
-        "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) VALUES(?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET generation=excluded.generation,state=excluded.state,body=excluded.body,forgotten=0",
+        "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) VALUES(?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET owner_device_id=excluded.owner_device_id,generation=excluded.generation,state=excluded.state,body=excluded.body,forgotten=0",
         params![
             book_id,
             ctx.device_id.to_string(),
@@ -996,6 +1004,7 @@ pub(crate) fn finish_scan(
     let safe = complete && access == "full" && authoritative && current_generation == generation;
     let (mut deleted, mut held) = (0usize, 0usize);
     if safe {
+        crate::device_succession::complete_takeover_scan(&tx, &book_id)?;
         // A newer complete authoritative scan supersedes every earlier pending hold.
         tx.execute(
             "UPDATE contact_scan_holds SET status='stale' WHERE book_id=? AND status='awaiting_approval' AND scan_id!=?",
@@ -2182,6 +2191,63 @@ fn stored_owner(conn: &Connection, book_id: &str) -> Result<Option<String>, Erro
         .optional()?)
 }
 
+/// A successor is allowed to take over its predecessor's address book. Following the chain
+/// keeps a delayed projection correct while `device_successions` remains retained control state.
+pub(crate) fn owner_or_successor(
+    conn: &Connection,
+    owner: &str,
+    candidate: &str,
+) -> Result<bool, Error> {
+    let mut current = owner.to_owned();
+    for _ in 0..64 {
+        if current == candidate {
+            return Ok(true);
+        }
+        let next: Option<String> = conn
+            .query_row(
+                "SELECT successor FROM device_successions WHERE predecessor=?",
+                [&current],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(next) = next else { return Ok(false) };
+        current = next;
+    }
+    Ok(false)
+}
+
+pub(crate) fn visible_book_ids(conn: &Connection) -> Result<BTreeSet<String>, Error> {
+    let books = conn
+        .prepare("SELECT id,owner_device_id,state FROM contact_books WHERE forgotten=0")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let active_owners = books
+        .iter()
+        .filter(|(_, _, state)| state == "active")
+        .map(|(_, owner, _)| owner.clone())
+        .collect::<Vec<_>>();
+    let mut visible = BTreeSet::new();
+    for (id, owner, state) in books {
+        let superseded = state == "retired"
+            && active_owners
+                .iter()
+                .map(|active_owner| owner_or_successor(conn, &owner, active_owner))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|matches| matches);
+        if !superseded {
+            visible.insert(id);
+        }
+    }
+    Ok(visible)
+}
+
 fn apply_peer(
     conn: &Connection,
     producer: &str,
@@ -2215,7 +2281,12 @@ fn apply_peer(
             {
                 return Ok(false);
             }
-            if stored_owner(conn, book_id)?.as_deref() != Some(producer) {
+            let owner = stored_owner(conn, book_id)?;
+            if !owner
+                .map(|owner| owner_or_successor(conn, &owner, producer))
+                .transpose()?
+                .unwrap_or(false)
+            {
                 return Ok(false);
             }
             let rev = revision(tombstone, "revision")?;
@@ -2312,7 +2383,7 @@ fn apply_peer(
 /// accepted as a no-op (rev-gated contacts may still apply) but never rolls state back.
 fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, Error> {
     let id = req(book, "id")?;
-    if req(book, "owner_device_id")? != producer {
+    if !owner_or_successor(conn, req(book, "owner_device_id")?, producer)? {
         return Ok(false);
     }
     let generation = revision(book, "generation")?;
@@ -2325,7 +2396,7 @@ fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, E
         )
         .optional()?;
     if let Some((owner, stored_generation, stored_body)) = stored {
-        if owner != producer {
+        if !owner_or_successor(conn, &owner, producer)? {
             return Ok(false);
         }
         let stored_body: Value = serde_json::from_str(&stored_body).map_err(|_| Error::Database)?;
@@ -2337,7 +2408,7 @@ fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, E
     let mut body = book.clone();
     strip_sources(&mut body);
     conn.execute(
-        "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) VALUES(?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET generation=excluded.generation,state=excluded.state,body=excluded.body",
+        "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) VALUES(?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET owner_device_id=excluded.owner_device_id,generation=excluded.generation,state=excluded.state,body=excluded.body",
         params![
             id,
             producer,

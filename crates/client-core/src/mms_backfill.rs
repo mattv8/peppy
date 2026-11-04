@@ -341,7 +341,11 @@ impl Client {
         let gate_open = if complete {
             true
         } else {
-            crate::history_import::history_import_gate_open(&tx, crate::notifications::now_ms())?
+            crate::initial_replay::caught_up(&tx)?
+                && crate::history_import::history_import_gate_open(
+                    &tx,
+                    crate::notifications::now_ms(),
+                )?
         };
         let outbox_backpressured =
             !complete && crate::history_import::outbox_backpressures_history(&tx)?;

@@ -126,6 +126,8 @@ internal object ContactSyncHost {
         // GatewaySync performs the fenced repair before invoking this callback. Keep this guard
         // here too so no alternate host caller can capture or apply contacts while it is held.
         if (session.client.contactRepairRequired()) return false
+        AndroidDeviceHint.read(context)?.let { hint -> session.client.registerDeviceHint("android", hint) }
+            ?: session.client.registerNoDeviceHint()
         val coordinator = coordinator(context, session.client, session.deviceId)
         if (prefs.retirePending) {
             coordinator.retire()
