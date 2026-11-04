@@ -37,6 +37,7 @@ android_bindings:
 desktop:
   - 'apps/desktop/**'
   - 'vendor/block/**'
+  - 'vendor/tauri-plugin-single-instance/**'
   - 'packaging/macos/**'
   - 'packaging/windows/**'
   - 'packages/desktop-ui/**'
@@ -99,6 +100,7 @@ unclassified:
   - '!vendor/libsodium-sys-stable/**'
   - '!vendor/phonenumber/**'
   - '!vendor/block/**'
+  - '!vendor/tauri-plugin-single-instance/**'
   - '!crates/crypto/**'
   - '!crates/domain/**'
   - '!crates/protocol/**'

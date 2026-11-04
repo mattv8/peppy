@@ -68,6 +68,11 @@ repair_macos_dmg() {
   )
 }
 
+# GNU coreutils spells decode `--decode`; older macOS base64 only accepts `-D`.
+decode_base64() {
+  printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D
+}
+
 package_app_store() {
   local bundle_output_dir profile profile_xml application_certificate installer_certificate entitlements signed_entitlements keychain keychain_password team_id application_identifier signed_team_id signed_application_identifier app pkg_dir pkg
   local -a previous_keychains
@@ -95,9 +100,9 @@ package_app_store() {
     rm -f "$profile" "$profile_xml" "$application_certificate" "$installer_certificate" "$entitlements" "$signed_entitlements"
   }
   trap cleanup_app_store_keychain RETURN
-  printf '%s' "$APPLE_MAS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$profile"
-  printf '%s' "$APPLE_MAS_CERTIFICATE_P12" | base64 -D > "$application_certificate"
-  printf '%s' "$APPLE_MAS_INSTALLER_CERTIFICATE" | base64 -D > "$installer_certificate"
+  decode_base64 "$APPLE_MAS_PROVISIONING_PROFILE_BASE64" > "$profile"
+  decode_base64 "$APPLE_MAS_CERTIFICATE_P12" > "$application_certificate"
+  decode_base64 "$APPLE_MAS_INSTALLER_CERTIFICATE" > "$installer_certificate"
   security cms -D -i "$profile" > "$profile_xml"
   team_id=$(plutil -extract Entitlements.com.apple.developer.team-identifier raw -o - "$profile_xml")
   application_identifier=$(plutil -extract Entitlements.application-identifier raw -o - "$profile_xml")

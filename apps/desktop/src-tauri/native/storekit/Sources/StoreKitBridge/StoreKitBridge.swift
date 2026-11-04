@@ -141,6 +141,7 @@ public func storekitFinish(_ request: UnsafePointer<CChar>?, _ context: UnsafeMu
     }
 }
 
+@available(macOS 12, *)
 private func transactions(_ stream: Transaction.Transactions) async -> [[String: String]] {
     var values: [[String: String]] = []
     for await result in stream {

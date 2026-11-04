@@ -18,3 +18,10 @@ file lock. Its empty `[workspace]` allows the vendored crate's own tests to run 
 to Peppy's root workspace.
 Remove this vendor patch when upstream provides equivalent bounded, sandbox-safe macOS socket
 handling.
+
+## Audit coverage
+
+`cargo-deny` skips advisories for path dependencies, so the vendored local copy
+is not covered by the desktop advisory graph. The `upstream-audit.lock` file pins
+the upstream registry package version and is validated and audited separately by
+`infra/audit/check-vendored.py`, which CI runs after `cargo-deny`.

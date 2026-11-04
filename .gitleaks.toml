@@ -1,2 +1,9 @@
 [extend]
 useDefault = true
+
+# Cargo lockfiles hold only crate names, versions and registry checksums; the
+# generic-api-key rule misreads multi-line dependency lists in them as secrets.
+[[allowlists]]
+description = "Cargo lockfiles"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)Cargo\.lock$''']
