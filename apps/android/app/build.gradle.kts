@@ -555,10 +555,11 @@ tasks.matching { it.name in setOf("assembleRelease", "bundleRelease") }.configur
 }
 
 val restrictedSetupPackagePath = "dev/peppy/mobile/restrictedsetup/"
+val replyViaGmPackagePath = "dev/peppy/mobile/replyviagm/"
 val restrictedSetupDexPrefix = "L$restrictedSetupPackagePath"
-val restrictedSetupDexPrefixes = setOf(restrictedSetupDexPrefix, "Lio/github/muntashirakon/")
+val restrictedSetupDexPrefixes = setOf(restrictedSetupDexPrefix, "L$replyViaGmPackagePath", "Lio/github/muntashirakon/")
 val permittedRestrictedSetupDexClasses = Regex(
-    "${Regex.escape(restrictedSetupDexPrefix)}RestrictedSetupEntryKt(?:\\${'$'}\\${'$'}ExternalSyntheticLambda\\d+)?;",
+    "(?:${Regex.escape(restrictedSetupDexPrefix)}RestrictedSetupEntryKt(?:\\${'$'}\\${'$'}ExternalSyntheticLambda\\d+)?|L${Regex.escape(replyViaGmPackagePath)}(?:ReplyViaGmDispatcher|ReplyViaGmSettingsEntryKt(?:\\${'$'}\\${'$'}ExternalSyntheticLambda\\d+)?));",
 )
 val restrictedSetupDependencyGroups = setOf(
     "com.github.MuntashirAkon",
@@ -794,6 +795,9 @@ val verifySideloadRestrictedSetupInclusion = tasks.register("verifySideloadRestr
         val apks = apksFromMetadata(metadata, "sideload")
         check(restrictedSetupDexClasses(apks).any { it.contains("RestrictedSetupService") }) {
             "Sideload APK must contain RestrictedSetupService"
+        }
+        check(restrictedSetupDexClasses(apks).any { it.contains("ReplyViaGmDispatcher") }) {
+            "Sideload APK must contain ReplyViaGmDispatcher"
         }
         check(archiveDexContains(apks, "Lio/github/muntashirakon/adb/")) {
             "Sideload APK must contain libadb classes"

@@ -285,7 +285,13 @@ class NotificationMirrorService : NotificationListenerService() {
 
     internal fun observedApps(): List<ObservedNotificationApp> = observed.values.sortedBy { it.label.lowercase() }
 
-    internal fun currentNotifications(): Array<StatusBarNotification>? = try { activeNotifications } catch (_: SecurityException) { null }
+    internal fun currentNotifications(): Array<StatusBarNotification> = try {
+        activeNotifications ?: emptyArray()
+    } catch (_: SecurityException) {
+        emptyArray()
+    } catch (_: RuntimeException) {
+        emptyArray()
+    }
 
     internal fun applyDismissals(): Int {
         if (!NotificationMirrorAccess.granted(this)) return 0
@@ -332,6 +338,9 @@ class NotificationMirrorService : NotificationListenerService() {
             }
         }
         fun observedApps(): List<ObservedNotificationApp> = connected?.observedApps().orEmpty()
+        /** Current listener-owned records only; null means the listener is disconnected or inaccessible. */
+        fun currentNotifications(): Array<StatusBarNotification> = connected?.currentNotifications() ?: emptyArray()
+        fun isConnected(): Boolean = connected != null
         fun reconcile() { connected?.reconcile() }
         fun clearPendingCaptures() { connected?.clearPending() }
         fun captureTest(context: Context): NotificationTestCaptureResult {

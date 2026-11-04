@@ -825,17 +825,21 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             state = GatewayStateStore(applicationContext),
             deviceId = session.deviceId,
             dispatch = {
-                val mms = MmsDispatcher(applicationContext, session.client, AndroidMmsCarrier(applicationContext), routes, sendGranted, mmsEnabled).dispatch()
-                val used = mms.submitted + mms.refusedBeforeCarrier
+                val reply = dev.peppy.mobile.replyviagm.ReplyViaGmDispatcher(applicationContext, session.client, routes = routes)
+                    .dispatch(SmsDispatcher.MAX_COMMANDS_PER_RUN)
+                val replyUsed = reply.submitted + reply.refusedBeforeCarrier
+                val mms = MmsDispatcher(applicationContext, session.client, AndroidMmsCarrier(applicationContext), routes, sendGranted, mmsEnabled)
+                    .dispatch((SmsDispatcher.MAX_COMMANDS_PER_RUN - replyUsed).coerceAtLeast(0))
+                val used = replyUsed + mms.submitted + mms.refusedBeforeCarrier
                 val sms = GatewayDispatchPolicy.sms(policy?.captureSms == true) {
                     SmsDispatcher(applicationContext, session.client, AndroidSmsCarrier(applicationContext), routes, sendGranted, callbacks)
                         .dispatch((SmsDispatcher.MAX_COMMANDS_PER_RUN - used).coerceAtLeast(0))
                 }
                 DispatchSummary(
-                    mms.submitted + sms.submitted,
-                    mms.refusedBeforeCarrier + sms.refusedBeforeCarrier,
-                    mms.waiting + sms.waiting,
-                    mms.moreRemaining || sms.moreRemaining,
+                    reply.submitted + mms.submitted + sms.submitted,
+                    reply.refusedBeforeCarrier + mms.refusedBeforeCarrier + sms.refusedBeforeCarrier,
+                    reply.waiting + mms.waiting + sms.waiting,
+                    reply.moreRemaining || mms.moreRemaining || sms.moreRemaining,
                 )
             },
             capabilities = SimRoutes.capabilityReport(routes, sendGranted, mmsEnabled, mmsReceiveGranted, session.client.mmsContentVersion()) { MmsLimits.forSubscription(applicationContext, it) },

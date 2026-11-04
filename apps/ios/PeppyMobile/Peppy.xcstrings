@@ -111,6 +111,216 @@
         }
       }
     },
+    "peppy.toggle_android_reply_via_gm_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reply through Google Messages"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_hint_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off. Replies from your other devices go by carrier SMS or MMS."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_hint_on": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On. Used only while Google Messages shows a notification with Reply."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_access_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs notification access."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_paused_access_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused: notification access is needed. Replies go by carrier SMS or MMS."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_paused_missing_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused: Google Messages isn't installed. Replies go by carrier SMS or MMS."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_not_installed_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages isn't installed on this phone."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_state_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_state_off_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off, needs notification access"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_state_off_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off, unavailable"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_state_on": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_state_on_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On, paused"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_review": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review and turn on"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_reply_via_gm_consent_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send replies through Google Messages?"
+          }
+        }
+      }
+    },
+    "peppy.reply_via_gm_consent_p_how": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When you reply from your computer or another device to a one-to-one chat that shows a Google Messages notification with a Reply button on this phone, Peppy fills in the notification's Reply and presses it. Google Messages is then expected to send it, however it chooses. Peppy does not control how."
+          }
+        }
+      }
+    },
+    "peppy.reply_via_gm_consent_p_scope": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This works only while that notification is showing, and only for text. Group chats, and chats Peppy can't match to exactly one notification, use SMS or MMS. Otherwise Peppy sends by carrier SMS or MMS, as it does now. Attachments always use SMS or MMS."
+          }
+        }
+      }
+    },
+    "peppy.reply_via_gm_consent_p_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "After Peppy presses Reply, it shows the reply as submitted until it sees the message in the phone's sent messages, then shows it as sent. If pressing Reply fails, Peppy shows the reply as failed and does not send it by SMS or MMS on its own. If Peppy cannot tell what happened, the outcome shows as unknown and is not resent. Check Google Messages before sending it again yourself."
+          }
+        }
+      }
+    },
+    "peppy.reply_via_gm_consent_p_read": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages may mark that chat as read or clear its notification when Peppy presses Reply."
+          }
+        }
+      }
+    },
+    "peppy.reply_via_gm_consent_p_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This needs notification access. Peppy uses it only to check which chat a notification belongs to and to find its Reply button. Peppy does not copy any notification contents unless Notification mirroring is on."
+          }
+        }
+      }
+    },
+    "peppy.reply_via_gm_consent_p_optin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off by default. You can turn it off at any time. This option is only in the Peppy app you downloaded directly."
+          }
+        }
+      }
+    },
+    "peppy.help_android_reply_via_gm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off by default. Applies only to text replies sent from your other devices in one-to-one chats. Phones with more than one active SIM use SMS or MMS."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_sms_label": {
       "localizations": {
         "en": {

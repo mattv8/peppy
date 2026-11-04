@@ -28,6 +28,9 @@ class GatewayPolicyHost(private val context: Context) {
     var mirroringEnabled: Boolean
         get() = settings()?.mirroringEnabled ?: false
         set(value) = update { it.mirroringEnabled = value }
+    var replyViaGoogleMessagesEnabled: Boolean
+        get() = settings()?.replyViaGoogleMessagesEnabled ?: false
+        set(value) = update { it.replyViaGoogleMessagesEnabled = value }
     var smsCaptureEnabled: Boolean
         get() = settings()?.smsSyncEnabled ?: true
         set(value) = update { it.smsSyncEnabled = value }

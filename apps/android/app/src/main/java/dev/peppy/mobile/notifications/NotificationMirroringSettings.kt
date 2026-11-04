@@ -36,6 +36,7 @@ import dev.peppy.mobile.enrollment.ConsentGatedToggle
 import dev.peppy.mobile.enrollment.ConsentPhase
 import dev.peppy.mobile.gateway.GatewayPolicyHost
 import dev.peppy.mobile.granted
+import dev.peppy.mobile.replyviagm.ReplyViaGoogleMessagesEntry
 import dev.peppy.mobile.ui.ConsentSheet
 import dev.peppy.mobile.ui.HeroBanner
 import dev.peppy.mobile.ui.ScreenBody
@@ -163,6 +164,7 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
                 NotificationTestResult(testResult)
             }
         }
+        ReplyViaGoogleMessagesEntry(refresh, onChanged)
         }
     }
 
