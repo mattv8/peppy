@@ -219,6 +219,13 @@ assert.call(publisher_steps.fetch(sbom_attestation_index).fetch('with').fetch('s
 sbom_generator = publisher_steps.fetch(sbom_index)
 assert.call(sbom_generator.fetch('with').fetch('path') == 'dist/release', 'SBOM generation must scan only staged release artifacts')
 assert.call(sbom_generator.fetch('with').fetch('upload-artifact') == false && sbom_generator.fetch('with').fetch('upload-release-assets') == false, 'SBOM generation must not alter release assets or upload an unaudited artifact')
+publisher_steps.each_with_index.select { |step, _index| step['uses']&.start_with?('anchore/sbom-action@') }.each do |step, index|
+  output_file = step.fetch('with').fetch('output-file')
+  output_directory_step = publisher_steps.fetch(index - 1)
+  assert.call(output_directory_step.fetch('name') == 'Create staged release artifact SBOM directory', 'SBOM generation must create its output directory immediately before running')
+  assert.call(output_directory_step.fetch('if') == step.fetch('if'), 'SBOM output directory creation must use the SBOM guard')
+  assert.call(Shellwords.shellsplit(output_directory_step.fetch('run')) == ['mkdir', '-p', File.dirname(output_file)], 'SBOM output directory creation must make the parent of the configured output file')
+end
 desktop_download = publisher_steps.find { |step| step.dig('with', 'pattern') == 'desktop-*-release-artifacts' }
 android_download = publisher_steps.find { |step| step.dig('with', 'name') == 'android-release-artifacts' }
 assert.call(!desktop_download.nil? && desktop_download.fetch('if').include?("inputs.component == 'desktop'"), 'desktop publisher must download only desktop release artifacts')
