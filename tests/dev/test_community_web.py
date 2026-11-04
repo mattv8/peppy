@@ -10,6 +10,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# Synthetic fixture credentials matching the documented .env.example role variables.
+RUNTIME_ROLE = "peppy_runtime_fixture"
+RUNTIME_PASSWORD = "test-runtime-password"
+MAINTENANCE_ROLE = "peppy_maintenance_fixture"
+MAINTENANCE_PASSWORD = "test-maintenance-password"
+
 
 class CommunityWebComposeTests(unittest.TestCase):
     docker = shutil.which("docker")
@@ -20,6 +26,10 @@ class CommunityWebComposeTests(unittest.TestCase):
             "POSTGRES_DB": "peppy",
             "POSTGRES_USER": "peppy",
             "POSTGRES_PASSWORD": "test-password",
+            "PEPPY_RUNTIME_DB_USER": RUNTIME_ROLE,
+            "PEPPY_RUNTIME_DB_PASSWORD": RUNTIME_PASSWORD,
+            "PEPPY_MAINTENANCE_DB_USER": MAINTENANCE_ROLE,
+            "PEPPY_MAINTENANCE_DB_PASSWORD": MAINTENANCE_PASSWORD,
             "S3_ACCESS_KEY": "test-access",
             "S3_SECRET_KEY": "test-secret",
             "PUBLIC_API_URL": "https://peppy.invalid",

@@ -164,7 +164,7 @@ The browser client uses the server's canonical API origin for enrollment and get
    cp .env.example .env
    ```
 
-    Set strong, unique values for `POSTGRES_PASSWORD`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY`. Set `PEPPY_SERVER_IMAGE` in your shell or `.env` to the release's immutable `hub.docker.visnovsky.us/library/peppy-server@sha256:...` reference. The Community overlay requires that variable. The [Community image guide](.agents/ops/backup-restore.md#prebuilt-community-edition) covers image verification. `.env.example` defaults to development; set `PEPPY_ENV=production` for production.
+    Set strong, unique values for `POSTGRES_PASSWORD`, `PEPPY_RUNTIME_DB_PASSWORD`, `PEPPY_MAINTENANCE_DB_PASSWORD`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY`. `POSTGRES_USER` is the migration/owner role; the runtime role is NOBYPASSRLS and the maintenance role is separate for cross-vault cleanup. Set `PEPPY_SERVER_IMAGE` in your shell or `.env` to the release's immutable `hub.docker.visnovsky.us/library/peppy-server@sha256:...` reference. The Community overlay requires that variable. The [Community image guide](.agents/ops/backup-restore.md#prebuilt-community-edition) covers image verification. `.env.example` defaults to development; set `PEPPY_ENV=production` for production.
 
 2. Start the Community server.
 
@@ -173,6 +173,10 @@ The browser client uses the server's canonical API origin for enrollment and get
    ```
 
    The default listener is `http://127.0.0.1:7000`. PostgreSQL and SeaweedFS do not publish host ports. The server serves the browser UI at its public root unless `WEB_UI_ENABLED=false`.
+
+   #### RLS role upgrade
+
+   The Compose bootstrap script creates the runtime and maintenance roles only for a new PostgreSQL volume. Before upgrading an existing volume to an RLS-enabled image, back it up and have a PostgreSQL administrator create the two roles using the same attributes as `infra/compose/bootstrap-roles.sh`. The migration-owner role does **not** create roles; it applies migrations and grants after the administrator bootstrap. With the stock Compose bootstrap, `POSTGRES_USER` is also PostgreSQL's initial superuser; resolver bodies therefore remain schema-qualified with hardened search paths. Operators with external PostgreSQL provisioning should prefer a distinct non-superuser schema owner and reserve the protected superuser for role/bootstrap administration. Do not point the API at the owner URL or grant the runtime role membership in it. Compose exposes the owner URL only to the one-shot migration command; the API receives only the runtime and maintenance URLs. The API must use the runtime URL and the maintenance worker must use the maintenance URL. If role validation reports missing policies, grants, or resolvers, leave the API stopped and repair the administrator bootstrap/migration step rather than bypassing RLS. The runtime role can read, insert, and update instance-control rows but cannot delete them; maintenance performs retention deletes.
 
 3. Optional: add the supplied Caddy TLS overlay. Set `PUBLIC_HOST` to the externally reachable HTTPS hostname. Set `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` to that external HTTPS origin, then run:
 
@@ -192,7 +196,7 @@ For a source-based local development stack, use `just dev-setup` and `just dev-u
 
 An unclaimed server is either **open** or **token-protected**. On an open server, the first device that completes setup becomes the administrator and creates the first vault. A token-protected server also requires the operator's setup code. Opening a page or fetching discovery data does not claim the server.
 
-Set `PEPPY_SETUP_TOKEN` to a nonempty value of at least 32 UTF-8 bytes to require a setup code. Configure the same value on every replica. An absent or empty value allows open first claim. Peppy does not generate, log, or recover a fallback token. An unclaimed installation upgraded without the setting becomes open, so set the token before upgrading when you need protected first claim.
+Set `PEPPY_SETUP_TOKEN` to a nonempty value of at least 32 UTF-8 bytes to require a setup code. Configure the same value on every replica. An absent or empty value allows open first claim only during the first 60 minutes after a server process starts; after that window, restart the server to continue setup. Peppy does not generate, log, or recover a fallback token.
 
 Use a current client for open first claim. A current client asks for a code when an older generated-code server does not advertise its setup policy. A legacy client can show or require a setup-code field for an open server; that prompt does not mean the server is token-protected.
 

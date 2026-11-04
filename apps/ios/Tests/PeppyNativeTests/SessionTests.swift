@@ -7,7 +7,7 @@ import Testing
 @Suite struct SessionTests {
     let passphrase = "io synthetic vault passphrase"
 
-    func session(_ server: FakeServer, store: InMemorySecureStore, deviceId: String, directory: URL) -> NativeSession {
+    func session(_ server: FakeServer, store: any SecureStore, deviceId: String, directory: URL) -> NativeSession {
         NativeSession(
             secureStore: store,
             transport: DeviceScopedTransport(server: server, deviceId: deviceId),
@@ -92,6 +92,39 @@ import Testing
         let session = session(server, store: store, deviceId: deviceId, directory: temporaryDirectory())
         await #expect(throws: ClientError.unauthorized) { try await session.importCredential(server.credential(deviceId: deviceId)) }
         #expect(store.accounts.isEmpty)
+    }
+
+    @Test func vaultBindingCleanupRetriesLocallyAfterConfirmedVaultDeletion() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        server.mutate { server in
+            server.override = { request in
+                request.method == "DELETE" && request.url.path == "/v1/vault"
+                    ? HTTPResponse(status: 204, url: request.url, body: Data())
+                    : nil
+            }
+        }
+        let store = BindingDeleteFaultStore()
+        let deviceId = UUID().uuidString.lowercased()
+        let nativeSession = session(server, store: store, deviceId: deviceId, directory: temporaryDirectory())
+        let imported = try await nativeSession.importCredential(server.credential(deviceId: deviceId))
+        let identity = try #require(imported.identity)
+        _ = try await nativeSession.unlock(passphrase: passphrase)
+        try store.upsert("vault-secret-pending-v2:\(identity.origin)", Data("pending recovery secret".utf8))
+        store.failingDeleteAccount = identity.account("vault-secret-v2")
+
+        await #expect(throws: ClientError.secureStorage(status: -1)) {
+            try await nativeSession.deleteVault(vaultId: identity.vaultId)
+        }
+        #expect(store.value(EnrollmentStore.activeAccount) == nil)
+        #expect(store.value(identity.account("vault-secret-v2")) != nil)
+        #expect(store.value("vault-secret-pending-v2:\(identity.origin)") == Data("pending recovery secret".utf8))
+
+        store.failingDeleteAccount = nil
+        let restored = session(server, store: store, deviceId: deviceId, directory: temporaryDirectory())
+        let status = try await restored.open()
+        #expect(status.identity == nil)
+        #expect(store.value(identity.account("vault-secret-v2")) == nil)
+        #expect(server.paths.filter { $0 == "DELETE /v1/vault" }.count == 1)
     }
 
     @Test func aSecondEnrollmentIsRefusedAndTheFirstIsKept() async throws {
@@ -358,7 +391,7 @@ private struct RecoverySessionFixture {
             clientKind: .ios,
             deviceName: "Recovery test"
         )
-        let view = provisioning.view()
+        let view = try provisioning.view()
         identity = EnrollmentIdentity(origin: origin, vaultId: view.vaultId, deviceId: view.deviceId)
         checkpoint = try provisioning.checkpoint()
         checkpointAccount = "hosted-provisioning:\(origin)"
@@ -420,6 +453,24 @@ private final class RecoverySecureStore: SecureStore, @unchecked Sendable {
 
     func delete(_ account: String) throws(ClientError) {
         if failingDelete == account { throw recoveryStoreFailure }
+        try backing.delete(account)
+    }
+}
+
+private final class BindingDeleteFaultStore: SecureStore, @unchecked Sendable {
+    private let backing = InMemorySecureStore()
+    var failingDeleteAccount: String?
+
+    func value(_ account: String) -> Data? { backing.value(account) }
+    func read(_ account: String) throws(ClientError) -> Data? { try backing.read(account) }
+    func addIfAbsent(_ account: String, _ data: Data) throws(ClientError) -> Bool {
+        try backing.addIfAbsent(account, data)
+    }
+    func upsert(_ account: String, _ data: Data) throws(ClientError) { try backing.upsert(account, data) }
+    func delete(_ account: String) throws(ClientError) {
+        if account == failingDeleteAccount {
+            throw .secureStorage(status: -1)
+        }
         try backing.delete(account)
     }
 }

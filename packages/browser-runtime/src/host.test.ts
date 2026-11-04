@@ -1604,6 +1604,22 @@ describe("browser host RPC", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it("preserves setup-window closure when an enrollment mutation throws", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, enrollmentCreateOwner: async () => { throw { code: "setup_window_closed" }; } } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_create_owner", args: { passphrase: "manual-passphrase" } });
+
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: expect.objectContaining({ code: "setup_window_closed" }) });
+  });
+
   it("replies to enrollment cancellation before terminally stopping a closed session", async () => {
     const session = new FakeSession();
     const network = {

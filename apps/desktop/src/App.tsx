@@ -147,6 +147,7 @@ import {
 import { DraftNotice } from "./drafts/DraftNotice";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
 import { measureComposerChrome } from "./conversation/composerChrome";
+import { IsolatedText } from "./notices/IsolatedText";
 
 type RefreshRequest = {
   conversationId?: string;
@@ -155,7 +156,7 @@ type RefreshRequest = {
 };
 
 type ActionNotice = Omit<AppNotice, "source">;
-type ComposerFeedback = Pick<AppNotice, "message" | "severity"> & { key: string };
+type ComposerFeedback = { key: string; message: string; severity: AppNotice["severity"] };
 type DraftNoticeState = { key: string; event: DraftNoticeEvent | "stale-send" | "send-failed" | "loading"; sequence: number; detail?: string; persistent?: boolean };
 type PinFocusRestoreIntent = {
   conversationId: string;
@@ -911,7 +912,7 @@ function MessageList({
             >
               {sender && <span className="sr-only">From {sender.label.text}: </span>}
               {message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
-              {message.subject && <p className="message-subject">Subject: {message.subject}</p>}
+              {message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
               {message.attachments.map((file) => {
                 const copy = publicCopies[file.id];
                 if (originalPending(file)) return <MediaTile key={file.id} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
@@ -940,7 +941,7 @@ function MessageList({
                     ) : (
                       <FileText size={16} aria-hidden />
                     )}
-                    <span>{file.name}</span>
+                    <span><bdi>{file.name}</bdi></span>
                     <small>
                       {fileSize(file.byteSize)}{removedRemoteOnly ? "" : ` · ${attachmentState(file)}`}
                     </small>
@@ -2025,7 +2026,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setSelected(key);
     if (narrowBrowserViewport) setMobileConversationListOpen(false);
   };
-  const setNotice = (message: string, severity: ActionNotice["severity"] = "error", persistent = false) =>
+  const setNotice = (message: ReactNode, severity: ActionNotice["severity"] = "error", persistent = false) =>
     setActionNotice(message ? { message, severity, persistent } : undefined);
   const setComposerNotice = (key: string, message: string, severity: ComposerFeedback["severity"] = "error") =>
     setComposerFeedback(message ? { key, message, severity } : undefined);
@@ -2062,10 +2063,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           if (!attachmentId) break;
           attempted.add(attachmentId);
           try {
-            const media = await bridge.open_media(attachmentId);
-            if (!mountedRef.current) return;
-            if (media.state === "pending") continue;
             await bridge.save_attachment(attachmentId);
+            if (!mountedRef.current) return;
             pendingSaveIdsRef.current.delete(attachmentId);
           } catch (error) {
             if (errorCode(error) !== "media-pending") pendingSaveIdsRef.current.delete(attachmentId);
@@ -3481,7 +3480,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     } catch (error) {
       if (errorCode(error) === "media-pending") {
         pendingSaveIdsRef.current.add(attachment.id);
-        setNotice(`Downloading ${attachment.name} before saving.`, "info");
+        setNotice(<>Downloading <IsolatedText text={attachment.name} /> before saving.</>, "info");
       } else setNotice(`Attachment save: ${errorText(error)}`);
     }
   };

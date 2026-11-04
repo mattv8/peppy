@@ -1,4 +1,6 @@
 __PEPPY_HOSTS__ {
+	header Strict-Transport-Security "max-age=15552000"
+
 	request_body {
 		max_size {$MAX_UPLOAD_BYTES:64MB}
 	}

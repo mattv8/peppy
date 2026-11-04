@@ -4,9 +4,10 @@ use base64::{
 };
 use peppy_domain::{CommandId, DeviceId, EnvelopeId, SourceSequence, VaultId};
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::fmt;
 use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -42,7 +43,7 @@ pub struct CompactionMetadata {
     pub key: Vec<u8>,
     #[serde(default)]
     pub terminal: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_compaction_supersedes")]
     pub supersedes: Vec<CompactionReference>,
     /// Authenticated maintenance marker: this record repeats its producer's current state
     /// only to fold a large unsuperseded frontier. Readers apply it as history (no OS,
@@ -299,6 +300,38 @@ where
         return Err(serde::de::Error::custom("compaction key must be 32 bytes"));
     }
     Ok(key)
+}
+fn deserialize_compaction_supersedes<'de, D>(
+    deserializer: D,
+) -> Result<Vec<CompactionReference>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct References;
+
+    impl<'de> de::Visitor<'de> for References {
+        type Value = Vec<CompactionReference>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("at most 128 compaction references")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut references = Vec::new();
+            while let Some(reference) = sequence.next_element()? {
+                if references.len() == MAX_COMPACTION_SUPERSEDES {
+                    return Err(de::Error::custom("too many compaction references"));
+                }
+                references.push(reference);
+            }
+            Ok(references)
+        }
+    }
+
+    deserializer.deserialize_seq(References)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

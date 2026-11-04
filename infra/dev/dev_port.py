@@ -186,11 +186,16 @@ def serializable_origin(parsed, name: str) -> str:
 def write_setup(dotenv: Path) -> None:
     port, configured = resolved_values(dotenv)
     public_url = f"http://127.0.0.1:{port}"
+    role_suffix = secrets.token_hex(12)
     values = {
         "PEPPY_ENV": "development",
         "POSTGRES_DB": "peppy",
         "POSTGRES_USER": "peppy",
         "POSTGRES_PASSWORD": "synthetic-" + secrets.token_urlsafe(32),
+        "PEPPY_RUNTIME_DB_USER": f"peppy_runtime_{role_suffix}",
+        "PEPPY_RUNTIME_DB_PASSWORD": "synthetic-" + secrets.token_urlsafe(32),
+        "PEPPY_MAINTENANCE_DB_USER": f"peppy_maintenance_{role_suffix}",
+        "PEPPY_MAINTENANCE_DB_PASSWORD": "synthetic-" + secrets.token_urlsafe(32),
         "S3_ACCESS_KEY": "synthetic-" + secrets.token_urlsafe(16),
         "S3_SECRET_KEY": "synthetic-" + secrets.token_urlsafe(32),
         "S3_BUCKET": "peppy-private",

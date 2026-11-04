@@ -605,16 +605,20 @@ async fn computer_qr_flow_is_bearer_bound_immutable_and_idempotent() {
     .await;
     app = next;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let (next, status, waiting) = call(
-        app,
-        Request::post(format!("/v1/enrollment/computers/{id}/status"))
-            .header("content-type", "application/json")
-            .body(Body::from(claim_body.to_string()))
-            .unwrap(),
-    )
-    .await;
-    app = next;
-    assert_eq!(status, StatusCode::OK);
+    let mut waiting = serde_json::Value::Null;
+    for _ in 0..15 {
+        let (next, status, response) = call(
+            app,
+            Request::post(format!("/v1/enrollment/computers/{id}/status"))
+                .header("content-type", "application/json")
+                .body(Body::from(claim_body.to_string()))
+                .unwrap(),
+        )
+        .await;
+        app = next;
+        assert_eq!(status, StatusCode::OK);
+        waiting = response;
+    }
     assert_eq!(waiting["state"], "waiting");
     let transcript = ComputerEnrollmentTranscript {
         origin: ORIGIN.into(),

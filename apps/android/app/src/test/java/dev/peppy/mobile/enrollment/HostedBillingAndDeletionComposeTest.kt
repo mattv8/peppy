@@ -15,9 +15,11 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performSemanticsAction
 import dev.peppy.mobile.account.HostedAccountDeletionEntry
 import dev.peppy.mobile.account.PLAY_SUBSCRIPTIONS_URL
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -27,7 +29,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class HostedBillingAndDeletionComposeTest {
-    @get:Rule val compose = createComposeRule()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     @Test fun playBillingPhaseDoesNotComposeDirectWebsiteHooks() {
         compose.setContent {

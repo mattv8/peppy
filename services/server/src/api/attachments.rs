@@ -772,6 +772,17 @@ pub(super) async fn finalize_attachment(
             .map_err(|error| database_unavailable(&error, "attachment_finalize_begin"))?;
         lock_vault(&mut tx, principal.vault).await?;
         withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
+        let active = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM devices WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL FOR UPDATE",
+        )
+        .bind(principal.vault)
+        .bind(principal.device)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_finalize_recheck_device"))?;
+        if active.is_none() {
+            return Err(ApiError(StatusCode::CONFLICT, "device_revoked"));
+        }
         removal_error(&mut tx, principal.vault, attachment_id).await?;
         let locked = sqlx::query("SELECT object_key,declared_sha256,retention_class,finalized_at IS NOT NULL AS finalized FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2 AND device_id=$3 AND deleting_at IS NULL AND (finalized_at IS NOT NULL OR expires_at > now()) FOR UPDATE")
             .bind(principal.vault).bind(attachment_id).bind(principal.device)
@@ -1514,6 +1525,8 @@ pub(super) async fn download_public_copy(
     // The resolver returns only that vault; metadata stays behind the scoped read.
     let query = if s.row_security {
         "SELECT vault_id FROM peppy.resolve_public_copy_vault($1)"
+    } else if s.rls_enforced {
+        "SELECT vault_id FROM community_resolve_public_copy_vault($1)"
     } else {
         "SELECT vault_id FROM public_attachment_copies WHERE token_digest=$1 AND revoked_at IS NULL AND retired_at IS NULL AND ready_at IS NOT NULL AND expires_at > now()"
     };

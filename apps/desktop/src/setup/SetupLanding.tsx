@@ -45,7 +45,7 @@ const diagnosticErrorCodes = new Set<string>([
   "server-required",
   "hosted-session-required", "credentials-required", "database-key-missing", "database-key-mismatch", "credential-mismatch", "origin-binding",
   "host-config", "server-response", "revoked", "wrong-passphrase", "vault-secret-mismatch", "credential-changed", "enrollment-state", "database-key-conflict",
-  "invalid_setup_token", "instance_already_claimed", "invite_invalid", "vault_owner_required",
+  "invalid_setup_token", "instance_already_claimed", "setup_window_closed", "invite_invalid", "vault_owner_required",
   "username_taken", "invalid_username", "vault_request_completed", "request_completed_without_material", "vault-secret-unavailable", "hosted-checkpoint-invalid",
   "vault_not_found", "request_not_found", "request_not_approved", "operation_conflict", "admin-password-length",
   "owner-status-pending", "identity-preserved", "computer-discard-ownership-unproven", "session-draining", "filesystem", "computer_transient",
@@ -90,6 +90,7 @@ const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "enrollment") return "Enrollment could not be matched to this device's local state or to the server's response. Check this device and the server, then try again.";
   if (errorCode === "invalid_setup_token") return copy("enrollment_error_invalid_setup_token");
   if (errorCode === "instance_already_claimed") return copy("enrollment_error_already_claimed");
+  if (errorCode === "setup_window_closed") return "Setup window closed. Restart the server to continue setup.";
   if (errorCode === "invite_invalid") return copy("enrollment_error_invite_invalid");
   if (errorCode === "vault_owner_required") return copy("enrollment_error_vault_owner_required");
   if (errorCode === "username_taken") return "That username is already in use. Choose another.";

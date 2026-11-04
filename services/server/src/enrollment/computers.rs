@@ -2,12 +2,13 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{ConnectInfo, Extension, Path, State},
     http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::{delete, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ipnet::IpNet;
 use peppy_crypto::enrollment::{
     EnrollmentContext, EnrollmentPurpose, EnrollmentRole as CryptoRole, verify_admission_signature,
     verify_device_proof,
@@ -23,7 +24,7 @@ use peppy_hosted_api::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
@@ -45,7 +46,10 @@ pub struct ComputerEnrollmentRouterState {
     pub db: PgPool,
     pub authorization: Arc<dyn EnrollmentAuthorization>,
     pub hosted: bool,
+    pub rls_enforced: bool,
     origin: String,
+    admissions: Arc<tokio::sync::Mutex<crate::api::admission::LocalAdmissions>>,
+    trusted_proxy_cidrs: Arc<Vec<IpNet>>,
 }
 
 impl ComputerEnrollmentRouterState {
@@ -59,8 +63,23 @@ impl ComputerEnrollmentRouterState {
             db,
             authorization,
             hosted,
+            rls_enforced: false,
             origin: canonical_origin(&origin)?,
+            admissions: Arc::new(tokio::sync::Mutex::new(
+                crate::api::admission::LocalAdmissions::new(),
+            )),
+            trusted_proxy_cidrs: Arc::new(Vec::new()),
         })
+    }
+
+    pub fn with_trusted_proxy_cidrs(mut self, trusted_proxy_cidrs: Vec<IpNet>) -> Self {
+        self.trusted_proxy_cidrs = Arc::new(trusted_proxy_cidrs);
+        self
+    }
+
+    pub fn with_rls_enforced(mut self, enabled: bool) -> Self {
+        self.rls_enforced = enabled;
+        self
     }
 }
 
@@ -187,6 +206,7 @@ async fn create(
 
 async fn status(
     State(state): State<ComputerEnrollmentRouterState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(request): Json<ClaimRequest>,
@@ -199,8 +219,14 @@ async fn status(
     .await?;
     request_origin(&state, &headers)?;
     let token = claim_digest(&request.claim_token)?;
-    let mut tx = match hosted.as_ref() {
-        Some(context) => scope::begin(&state.db, context.vault_id).await,
+    let operation = crate::api::admission::AdmissionOperation::ComputerStatus;
+    let source = computer_source_admission(&state, operation, peer, &headers).await?;
+    let claim_vault = resolve_computer_claim_vault(&state, id, &token, hosted.as_ref()).await?;
+    if computer_claim_exists(&state, id, &token, claim_vault).await? {
+        computer_admission(&state, operation, source, id).await?;
+    }
+    let mut tx = match claim_vault {
+        Some(vault_id) => scope::begin(&state.db, vault_id).await,
         None => state.db.begin().await,
     }
     .map_err(database)?;
@@ -283,6 +309,7 @@ async fn approve(
 
 async fn confirm(
     State(state): State<ComputerEnrollmentRouterState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(request): Json<ComputerEnrollmentConfirmRequest>,
@@ -295,11 +322,17 @@ async fn confirm(
     .await?;
     request_origin(&state, &headers)?;
     let token = claim_digest(&request.claim_token)?;
+    let operation = crate::api::admission::AdmissionOperation::ComputerConfirm;
+    let source = computer_source_admission(&state, operation, peer, &headers).await?;
+    let claim_vault = resolve_computer_claim_vault(&state, id, &token, hosted.as_ref()).await?;
+    if computer_claim_exists(&state, id, &token, claim_vault).await? {
+        computer_admission(&state, operation, source, id).await?;
+    }
     let device_signature = decode::<64>(&request.device_signature, "invalid_device_proof")?;
     let admission_signature =
         decode::<64>(&request.admission_signature, "invalid_admission_proof")?;
-    let mut tx = match hosted.as_ref() {
-        Some(context) => scope::begin(&state.db, context.vault_id).await,
+    let mut tx = match claim_vault {
+        Some(vault_id) => scope::begin(&state.db, vault_id).await,
         None => state.db.begin().await,
     }
     .map_err(database)?;
@@ -369,6 +402,123 @@ async fn confirm(
     Ok(Json(response))
 }
 
+async fn resolve_computer_claim_vault(
+    state: &ComputerEnrollmentRouterState,
+    enrollment_id: Uuid,
+    token: &[u8; 32],
+    hosted: Option<&crate::api::EnrollmentAuthContext>,
+) -> Result<Option<Uuid>, Error> {
+    if let Some(context) = hosted {
+        return Ok(Some(context.vault_id));
+    }
+    if !state.rls_enforced {
+        return Ok(None);
+    }
+    sqlx::query_scalar("SELECT vault_id FROM community_resolve_computer_enrollment($1, $2)")
+        .bind(enrollment_id)
+        .bind(token.as_slice())
+        .fetch_optional(&state.db)
+        .await
+        .map_err(database)
+}
+
+async fn computer_claim_exists(
+    state: &ComputerEnrollmentRouterState,
+    enrollment_id: Uuid,
+    token: &[u8; 32],
+    vault_id: Option<Uuid>,
+) -> Result<bool, Error> {
+    if let Some(vault_id) = vault_id {
+        let mut tx = scope::begin(&state.db, vault_id).await.map_err(database)?;
+        let exists = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM computer_enrollments WHERE id=$1 AND claim_token_digest=$2 AND vault_id=$3)")
+            .bind(enrollment_id)
+            .bind(token.as_slice())
+            .bind(vault_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database)?;
+        tx.commit().await.map_err(database)?;
+        Ok(exists)
+    } else {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM computer_enrollments WHERE id=$1 AND claim_token_digest=$2)",
+        )
+        .bind(enrollment_id)
+        .bind(token.as_slice())
+        .fetch_one(&state.db)
+        .await
+        .map_err(database)
+    }
+}
+
+async fn computer_admission(
+    state: &ComputerEnrollmentRouterState,
+    operation: crate::api::admission::AdmissionOperation,
+    source: [u8; 32],
+    enrollment_id: Uuid,
+) -> Result<(), Error> {
+    let target = crate::api::admission::targeted_source_digest(
+        operation.as_str().as_bytes(),
+        None,
+        enrollment_id.as_bytes(),
+    );
+    if !state
+        .admissions
+        .lock()
+        .await
+        .admit_with_limit(target, operation.source_limit())
+    {
+        return Err(Error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "computer_enrollment_limited",
+        ));
+    }
+    if !matches!(
+        operation,
+        crate::api::admission::AdmissionOperation::ComputerStatus
+    ) {
+        crate::api::admission::admit_durably(&state.db, operation, source)
+            .await
+            .map_err(computer_admission_error)?;
+    }
+    crate::api::admission::admit_durably(&state.db, operation, target)
+        .await
+        .map_err(computer_admission_error)
+}
+
+fn computer_admission_error(error: crate::api::admission::AdmissionError) -> Error {
+    match error {
+        crate::api::admission::AdmissionError::Limited => {
+            Error(StatusCode::TOO_MANY_REQUESTS, "computer_enrollment_limited")
+        }
+        crate::api::admission::AdmissionError::Database(error) => database(error),
+    }
+}
+
+async fn computer_source_admission(
+    state: &ComputerEnrollmentRouterState,
+    operation: crate::api::admission::AdmissionOperation,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
+) -> Result<[u8; 32], Error> {
+    let peer = peer.map(|Extension(ConnectInfo(peer))| {
+        crate::enrollment::manual::resolve_client_ip(peer, headers, &state.trusted_proxy_cidrs)
+    });
+    let source = crate::api::admission::source_digest(operation.as_str().as_bytes(), peer);
+    if !state
+        .admissions
+        .lock()
+        .await
+        .admit_with_limit(source, operation.source_prefilter_limit())
+    {
+        return Err(Error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "computer_enrollment_limited",
+        ));
+    }
+    Ok(source)
+}
+
 async fn cancel(
     State(state): State<ComputerEnrollmentRouterState>,
     headers: HeaderMap,
@@ -419,7 +569,7 @@ async fn authorize_owner(
     } else {
         None
     };
-    let owner = resolve_owner_credential(&state.db, state.hosted, headers)
+    let owner = resolve_owner_credential(&state.db, state.rls_enforced, state.hosted, headers)
         .await
         .map_err(owner_authorization)?;
     if hosted.is_some_and(|value| value.vault_id != owner.vault_id) {
