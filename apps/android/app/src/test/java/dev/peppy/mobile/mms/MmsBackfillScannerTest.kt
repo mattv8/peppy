@@ -287,6 +287,106 @@ class MmsBackfillScannerTest {
         )
     }
 
+    @Test fun providerRescanUsesTokenedCommitAndDoesNotSettleHistoryAdmission() {
+        val committed = mutableListOf<String>()
+        val core = object : MmsBackfillCore by FakeCore(
+            listOf(MmsBackfillScanPlan(MmsBackfillPhase.PROVIDER_RESCAN, "9", "20", false, false, 32, true, null, "token")),
+        ) {
+            override fun commitProviderRescanPage(
+                generation: String,
+                scope: String,
+                token: String,
+                expectedCursor: String?,
+                lastDurableId: String?,
+                exhausted: Boolean,
+            ): Boolean {
+                committed += "$token:$expectedCursor:$lastDurableId:$exhausted"
+                return true
+            }
+        }
+
+        val more = MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "20", 1L, idle,
+            scanPage = { MmsBackfillPageResult("7", exhausted = true, more = false) },
+            recheck = { error("unused") },
+            historyAdmission = recordingAdmission(mutableListOf()),
+        )
+
+        assertEquals(listOf("token:9:7:true"), committed)
+        assertFalse(more)
+    }
+
+    @Test fun staleProviderRescanCommitKeepsAContinuationWithoutAdvancing() {
+        val delegate = FakeCore(
+            listOf(MmsBackfillScanPlan(MmsBackfillPhase.PROVIDER_RESCAN, "9", "20", false, false, 32, true, null, "token")),
+        )
+        val core = object : MmsBackfillCore by delegate {
+            override fun commitProviderRescanPage(
+                generation: String,
+                scope: String,
+                token: String,
+                expectedCursor: String?,
+                lastDurableId: String?,
+                exhausted: Boolean,
+            ) = false
+        }
+
+        val more = MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "20", 1L, idle,
+            scanPage = { MmsBackfillPageResult("7", exhausted = true, more = false) },
+            recheck = { error("unused") },
+        )
+
+        assertTrue(more)
+        assertTrue(delegate.advanced.isEmpty())
+        assertTrue(delegate.finished.isEmpty())
+    }
+
+    @Test fun accessRevokedBeforeProviderRescanCommitDoesNotAdvanceOrContinue() {
+        val delegate = FakeCore(
+            listOf(MmsBackfillScanPlan(MmsBackfillPhase.PROVIDER_RESCAN, "9", "20", false, false, 32, true, null, "token")),
+        )
+
+        val more = MmsBackfillScanner(delegate).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "20", 1L, idle,
+            scanPage = { MmsBackfillPageResult("7", exhausted = true, more = false) },
+            recheck = { error("unused") },
+            canCommitProviderRescan = { false },
+        )
+
+        assertFalse(more)
+        assertTrue(delegate.advanced.isEmpty())
+        assertTrue(delegate.finished.isEmpty())
+    }
+
+    @Test fun noProgressUnexhaustedProviderRescanDoesNotAttemptAnInvalidCommit() {
+        var committed = false
+        val core = object : MmsBackfillCore by FakeCore(
+            listOf(MmsBackfillScanPlan(MmsBackfillPhase.PROVIDER_RESCAN, "9", "20", false, false, 32, true, null, "token")),
+        ) {
+            override fun commitProviderRescanPage(
+                generation: String,
+                scope: String,
+                token: String,
+                expectedCursor: String?,
+                lastDurableId: String?,
+                exhausted: Boolean,
+            ): Boolean {
+                committed = true
+                return true
+            }
+        }
+
+        val more = MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "20", 1L, idle,
+            scanPage = { MmsBackfillPageResult(null, exhausted = false, more = true) },
+            recheck = { error("unused") },
+        )
+
+        assertTrue(more)
+        assertFalse(committed)
+    }
+
     private fun recordingAdmission(calls: MutableList<String>) = object : MmsHistoryCaptureAdmission {
         override fun begin() = MessageHistoryRequestCoordinator.Admission("token", 100).also { calls += "begin" }
         override fun finish(admission: MessageHistoryRequestCoordinator.Admission, observations: Int, exhausted: Boolean, reason: String?) {
@@ -315,6 +415,14 @@ class MmsBackfillScannerTest {
             finished += bound
             return finishResult
         }
+        override fun commitProviderRescanPage(
+            generation: String,
+            scope: String,
+            token: String,
+            expectedCursor: String?,
+            lastDurableId: String?,
+            exhausted: Boolean,
+        ) = false
         override fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions) = rechecks
         override fun recordRecheckOutcome(acquisitionId: String, nowMs: Long, outcome: MmsBackfillRecheckOutcome, conditions: MmsBackfillRecheckConditions) {
             outcomes += acquisitionId to outcome

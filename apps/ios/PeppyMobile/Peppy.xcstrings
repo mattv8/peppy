@@ -631,6 +631,146 @@
         }
       }
     },
+    "peppy.mms_restricted_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restricted message access"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_status_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allowed"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_status_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not allowed"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_status_unsupported": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unsupported"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_status_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_help": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This can copy only messages the phone provider exposes. Peppy cannot grant this access. If it is not allowed, copy the command and run it with external Android Debug Bridge (adb). It does not add RCS sending support. Replies still use SMS or MMS. Phone and app versions can expose only some RCS content."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_unsupported_help": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Android version does not expose this restricted-message operation. That does not show whether any RCS content is readable."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_copy_command": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy access command"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_command_copied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Command copied."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recover skipped provider messages"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan_queued": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery queued. History capacity limits still apply."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan_already_queued": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery already queued. History capacity limits still apply."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restricted message access is no longer available."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not queue recovery. Try again."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_battery_unavailable": {
       "localizations": {
         "en": {
