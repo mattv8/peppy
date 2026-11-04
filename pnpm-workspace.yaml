@@ -5,7 +5,7 @@ packages:
 overrides:
   source-map-js: 1.2.2
 catalog:
-  '@testing-library/jest-dom': ^6.6.3
+  '@testing-library/jest-dom': ^7.0.1
   '@testing-library/react': ^16.1.0
   '@types/qrcode': ^1.5.6
   '@types/react': ^19.0.0
