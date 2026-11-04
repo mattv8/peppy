@@ -8,9 +8,12 @@ internal interface RestrictedSetupTransport : AutoCloseable {
     suspend fun pair(endpoint: LocalEndpoint, code: CharArray)
     suspend fun connect(endpoint: LocalEndpoint)
     suspend fun grantOwnRestrictedAccess()
+    suspend fun turnWirelessDebuggingOff()
 
     override fun close()
 }
+
+internal class PairingRejectedException : Exception()
 
 internal fun interface RestrictedSetupTransportFactory {
     fun create(): RestrictedSetupTransport

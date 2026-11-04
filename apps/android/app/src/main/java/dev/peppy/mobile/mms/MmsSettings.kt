@@ -45,6 +45,7 @@ import dev.peppy.mobile.granted
 import dev.peppy.mobile.sms.SmsCapturePolicyAction
 import dev.peppy.mobile.sms.contextActivity
 import dev.peppy.mobile.sms.smsReadGranted
+import dev.peppy.mobile.restrictedsetup.RestrictedSetupEntry
 import dev.peppy.mobile.telephony.OwnNumberSettings
 import dev.peppy.mobile.telephony.SimRoutes
 import dev.peppy.mobile.ui.ConsentSheet
@@ -332,6 +333,7 @@ internal fun MmsSettings(
                 }
             },
         )
+        RestrictedSetupEntry(onAccessChanged = { permissionRefresh++; onChanged() })
         Column(Modifier.fillMaxWidth().testTag("mms-health-list"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             when {
                 health.databaseUnavailable -> Text("Encrypted database unavailable. Acquisition health cannot be read.")

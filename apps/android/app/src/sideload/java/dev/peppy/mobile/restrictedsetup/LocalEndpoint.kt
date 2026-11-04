@@ -12,7 +12,11 @@ internal fun interface NumericAddressParser {
 
 internal object AndroidNumericAddressParser : NumericAddressParser {
     override fun parse(address: String): InetAddress? =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) runCatching { InetAddresses.parseNumericAddress(address) }.getOrNull() else null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching { InetAddresses.parseNumericAddress(address) }.getOrElse { runCatching { InetAddress.getByName(address) }.getOrNull() }
+        } else {
+            runCatching { InetAddress.getByName(address) }.getOrNull()
+        }
 }
 
 internal class LocalEndpoint private constructor(private val address: InetAddress, val port: Int) {
