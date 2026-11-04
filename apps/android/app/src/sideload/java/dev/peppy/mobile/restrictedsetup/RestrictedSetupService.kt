@@ -53,7 +53,6 @@ internal class RestrictedSetupService : Service() {
             RestrictedSetupStage.INTRODUCTION,
             RestrictedSetupStage.COMPLETE,
             RestrictedSetupStage.FAILED,
-            RestrictedSetupStage.CLEANUP_REQUIRED,
         )
     }
 }

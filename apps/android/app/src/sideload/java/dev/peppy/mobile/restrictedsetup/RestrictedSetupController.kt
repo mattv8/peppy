@@ -17,11 +17,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
-internal enum class RestrictedSetupStage { INTRODUCTION, AWAITING_PAIRING, PAIRING, CONNECTING, APPLYING, VERIFYING, TURNING_OFF, CLEANUP_REQUIRED, COMPLETE, FAILED }
+internal enum class RestrictedSetupStage { INTRODUCTION, AWAITING_PAIRING, PAIRING, CONNECTING, APPLYING, VERIFYING, TURNING_OFF, COMPLETE, FAILED }
 internal enum class RestrictedSetupAccess { UNKNOWN, ALLOWED, NOT_ALLOWED }
-internal enum class RestrictedSetupFailure { INVALID_ENDPOINT, CLEANUP_MARKER, TIMED_OUT, TRANSPORT, NOT_VERIFIED, PAIRING_FAILED, CONNECT_FAILED }
+internal enum class RestrictedSetupFailure { INVALID_ENDPOINT, TIMED_OUT, TRANSPORT, NOT_VERIFIED, PAIRING_FAILED, CONNECT_FAILED }
 internal enum class RestrictedSetupDiscovery { SEARCHING, FOUND, TIMED_OUT }
-internal enum class RestrictedSetupHint { NO_WIFI, CODE_REJECTED, PAIRING_BOX_CLOSED }
+internal enum class RestrictedSetupHint { NO_WIFI, NETWORK_NOT_ALLOWED, CODE_REJECTED, PAIRING_BOX_CLOSED }
 internal enum class WirelessDebuggingOutcome { NOT_REQUESTED, OFF, REQUESTED }
 internal enum class CodeSubmitResult { ACCEPTED, INVALID_FORMAT, NO_PAIRING_PORT, NOT_WAITING }
 
@@ -29,18 +29,25 @@ internal data class RestrictedSetupOptions(val turnOffWirelessDebugging: Boolean
 internal data class RestrictedSetupState(
     val stage: RestrictedSetupStage,
     val access: RestrictedSetupAccess = RestrictedSetupAccess.UNKNOWN,
-    val cleanupNeeded: Boolean,
     val failure: RestrictedSetupFailure? = null,
     val discovery: RestrictedSetupDiscovery? = null,
     val pairingPort: Int? = null,
     val notificationAvailable: Boolean = false,
     val hint: RestrictedSetupHint? = null,
+    val networkNotAllowed: Boolean = false,
     val turnOffWirelessDebugging: Boolean = false,
     val wirelessDebugging: WirelessDebuggingOutcome = WirelessDebuggingOutcome.NOT_REQUESTED,
-) { val needsConnectPort get() = stage == RestrictedSetupStage.CONNECTING && discovery == RestrictedSetupDiscovery.TIMED_OUT }
+    val retryBlocked: Boolean = false,
+) {
+    val needsConnectPort get() = stage == RestrictedSetupStage.CONNECTING && discovery == RestrictedSetupDiscovery.TIMED_OUT
+    /** Hint precedence: NO_WIFI > NETWORK_NOT_ALLOWED > CODE_REJECTED/PAIRING_BOX_CLOSED. */
+    val activeHint get() = if (hint == RestrictedSetupHint.NO_WIFI) hint else if (networkNotAllowed) RestrictedSetupHint.NETWORK_NOT_ALLOWED else hint
+}
 
 internal data class RestrictedSetupDeadlines(
     val pairingServiceHintMillis: Long = 60_000,
+    val networkAllowedHintMillis: Long = 5_000,
+    val networkAllowedHintCheckMillis: Long = 3_000,
     val pairingMillis: Long = 30_000,
     val connectServiceMillis: Long = 20_000,
     val connectMillis: Long = 30_000,
@@ -50,15 +57,12 @@ internal data class RestrictedSetupDeadlines(
 )
 
 internal fun interface RestrictedSetupAccessReadback { suspend fun isAllowed(): Boolean }
-internal interface RestrictedSetupCleanupMarker { fun needsCleanup(): Boolean; fun markCleanupNeeded(): Boolean; fun acknowledgeCleanup(): Boolean }
-
 /** Process-scoped state machine. Pairing codes and ADB keys are never persisted. */
 internal class RestrictedSetupController(
     private val controllerScope: CoroutineScope,
     private val transportFactory: RestrictedSetupTransportFactory,
     private val accessReadback: RestrictedSetupAccessReadback,
     private val localAddresses: LocalAddressSupplier,
-    private val cleanupMarker: RestrictedSetupCleanupMarker,
     private val discovery: AdbServiceDiscovery,
     private val notifier: RestrictedSetupNotifier,
     private val wirelessDebuggingReadback: RestrictedSetupWirelessReadback,
@@ -69,26 +73,26 @@ internal class RestrictedSetupController(
     private var epoch = 0L
     private var active: Attempt? = null
     private var teardownFailed = false
-    private val initialCleanup = cleanupMarker.needsCleanup()
-    private val mutableState = MutableStateFlow(RestrictedSetupState(if (initialCleanup) RestrictedSetupStage.CLEANUP_REQUIRED else RestrictedSetupStage.INTRODUCTION, cleanupNeeded = initialCleanup))
+    private val mutableState = MutableStateFlow(RestrictedSetupState(RestrictedSetupStage.INTRODUCTION))
     val state: StateFlow<RestrictedSetupState> = mutableState.asStateFlow()
 
     fun begin(options: RestrictedSetupOptions): Boolean = synchronized(lock) {
-        if (teardownFailed || active != null || mutableState.value.stage !in setOf(RestrictedSetupStage.INTRODUCTION, RestrictedSetupStage.FAILED, RestrictedSetupStage.CLEANUP_REQUIRED)) return false
+        if (teardownFailed || active != null || mutableState.value.stage !in setOf(RestrictedSetupStage.INTRODUCTION, RestrictedSetupStage.FAILED)) return false
         val candidate = Attempt(++epoch, options, notifier.canPrompt())
         active = candidate
         mutableState.value = RestrictedSetupState(
             stage = RestrictedSetupStage.AWAITING_PAIRING,
-            cleanupNeeded = cleanupMarker.needsCleanup(),
             discovery = RestrictedSetupDiscovery.SEARCHING,
             notificationAvailable = candidate.notificationAvailable,
             turnOffWirelessDebugging = options.turnOffWirelessDebugging,
         )
         RestrictedSetupCodeInbox.sink = { code -> submitCode(code) }
         notifier.clear()
-        notifier.show(RestrictedSetupNotice.SEARCHING)
+        post(candidate, RestrictedSetupNotice.SEARCHING)
         candidate.totalWatchdog = watchdogScope.launch { delay(deadlines.totalMillis); timeout(candidate) }
         candidate.pairingDiscovery = controllerScope.launch { collectPairing(candidate) }
+        candidate.connectPresenceDiscovery = controllerScope.launch { collectConnectPresence(candidate) }
+        candidate.networkHintCheck = controllerScope.launch { checkNetworkAllowed(candidate) }
         candidate.addressCheck = controllerScope.launch {
             runCatching { localAddresses.currentAddresses() }.getOrNull()
                 ?.takeIf { addresses -> addresses.none { !it.isLoopbackAddress } }
@@ -100,7 +104,7 @@ internal class RestrictedSetupController(
     fun submitCode(code: CharArray, manualPort: Int? = null): CodeSubmitResult {
         if (!code.all { it in '0'..'9' } || code.size != 6) {
             code.fill('\u0000')
-            synchronized(lock) { active?.takeIf { mutableState.value.stage == RestrictedSetupStage.AWAITING_PAIRING } }?.let { notifier.show(RestrictedSetupNotice.CODE_INVALID) }
+            synchronized(lock) { active?.takeIf { mutableState.value.stage == RestrictedSetupStage.AWAITING_PAIRING } }?.let { post(it, RestrictedSetupNotice.CODE_INVALID, force = true) }
             return CodeSubmitResult.INVALID_FORMAT
         }
         val candidate: Attempt
@@ -110,9 +114,11 @@ internal class RestrictedSetupController(
             if (mutableState.value.stage != RestrictedSetupStage.AWAITING_PAIRING || candidate.procedure != null) return code.zeroed(CodeSubmitResult.NOT_WAITING)
             port = manualPort ?: mutableState.value.pairingPort ?: return code.zeroed(CodeSubmitResult.NO_PAIRING_PORT)
             candidate.code = code
-            mutableState.value = mutableState.value.copy(stage = RestrictedSetupStage.PAIRING, discovery = null, hint = null)
+            mutableState.value = mutableState.value.copy(stage = RestrictedSetupStage.PAIRING, discovery = null, hint = null, networkNotAllowed = false)
+            candidate.connectPresenceDiscovery?.cancel()
+            candidate.networkHintCheck?.cancel()
             RestrictedSetupCodeInbox.sink = null
-            notifier.show(RestrictedSetupNotice.WORKING)
+            post(candidate, RestrictedSetupNotice.WORKING)
             candidate.procedure = controllerScope.launch { pairThenConnect(candidate, port, manualPort == null) }
         }
         return CodeSubmitResult.ACCEPTED
@@ -130,7 +136,7 @@ internal class RestrictedSetupController(
     }
 
     fun showCodePromptAgain() {
-        synchronized(lock) { mutableState.value }.takeIf { it.stage == RestrictedSetupStage.AWAITING_PAIRING && it.discovery == RestrictedSetupDiscovery.FOUND && it.notificationAvailable }?.let { notifier.show(RestrictedSetupNotice.CODE_PROMPT) }
+        synchronized(lock) { active to mutableState.value }.takeIf { (_, state) -> state.stage == RestrictedSetupStage.AWAITING_PAIRING && state.discovery == RestrictedSetupDiscovery.FOUND && state.notificationAvailable }?.first?.let { post(it, RestrictedSetupNotice.CODE_PROMPT, force = true) }
     }
 
     fun clearNotice() { if (state.value.stage != RestrictedSetupStage.AWAITING_PAIRING) notifier.clear() }
@@ -139,7 +145,7 @@ internal class RestrictedSetupController(
         val candidate = synchronized(lock) { active } ?: return
         notifier.clear()
         if (terminal(candidate, RestrictedSetupStage.FAILED, RestrictedSetupFailure.TRANSPORT, RestrictedSetupAccess.UNKNOWN, WirelessDebuggingOutcome.NOT_REQUESTED)) {
-            notifier.show(RestrictedSetupNotice.FAILED)
+            post(candidate, RestrictedSetupNotice.FAILED)
         }
     }
 
@@ -149,18 +155,11 @@ internal class RestrictedSetupController(
             epoch++
             active = null
             RestrictedSetupCodeInbox.sink = null
-            mutableState.value = mutableState.value.copy(stage = if (cleanupMarker.needsCleanup()) RestrictedSetupStage.CLEANUP_REQUIRED else RestrictedSetupStage.INTRODUCTION, cleanupNeeded = cleanupMarker.needsCleanup(), failure = null, discovery = null, pairingPort = null, hint = null)
+            mutableState.value = mutableState.value.copy(stage = RestrictedSetupStage.INTRODUCTION, failure = null, discovery = null, pairingPort = null, hint = null, networkNotAllowed = false)
             current
         }
         notifier.clear()
         candidate?.cancel()
-    }
-
-    fun acknowledgeCleanup(): Boolean = synchronized(lock) {
-        if (teardownFailed || active != null || !cleanupMarker.acknowledgeCleanup()) false else {
-            mutableState.value = RestrictedSetupState(RestrictedSetupStage.INTRODUCTION, cleanupNeeded = false)
-            true
-        }
     }
 
     override fun close() = cancel()
@@ -173,23 +172,92 @@ internal class RestrictedSetupController(
                     if (candidate.hadPairingPort) {
                         candidate.hadPairingPort = false
                         update(candidate) { it.copy(discovery = RestrictedSetupDiscovery.SEARCHING, pairingPort = null, hint = RestrictedSetupHint.PAIRING_BOX_CLOSED) }
-                        notifier.show(RestrictedSetupNotice.SEARCHING)
+                        post(candidate, RestrictedSetupNotice.SEARCHING)
                     }
                 } else {
                     candidate.hadPairingPort = true
                     hint.cancel()
                     update(candidate) { it.copy(discovery = RestrictedSetupDiscovery.FOUND, pairingPort = port, hint = null) }
-                    if (candidate.notificationAvailable) notifier.show(RestrictedSetupNotice.CODE_PROMPT)
+                    if (candidate.notificationAvailable) post(candidate, RestrictedSetupNotice.CODE_PROMPT)
                 }
             }
         } finally { hint.cancel() }
+    }
+
+    private suspend fun collectConnectPresence(candidate: Attempt) {
+        discovery.ports(AdbServiceKind.CONNECT).collect { port ->
+            candidate.hasConnectService = port != null
+            if (port != null) clearNetworkNotAllowedHint(candidate)
+        }
+    }
+
+    private suspend fun checkNetworkAllowed(candidate: Attempt) {
+        while (true) {
+            val wirelessOn = wirelessDebuggingReadback.isOn() == true
+            val now = System.nanoTime() / 1_000_000
+            val changed = synchronized(lock) {
+                if (active !== candidate || candidate.epoch != epoch || mutableState.value.stage != RestrictedSetupStage.AWAITING_PAIRING) {
+                    false
+                } else {
+                    if (!wirelessOn) {
+                        candidate.onSinceMillis = null
+                        candidate.negativeChecks = 0
+                    } else {
+                        if (candidate.onSinceMillis == null) candidate.onSinceMillis = now
+                        if (!candidate.hasConnectService) candidate.negativeChecks++ else candidate.negativeChecks = 0
+                    }
+                    val networkNotAllowed = wirelessOn && !candidate.hasConnectService && candidate.negativeChecks >= 2 && now - (candidate.onSinceMillis ?: now) >= deadlines.networkAllowedHintMillis
+                    if (mutableState.value.networkNotAllowed == networkNotAllowed) false
+                    else {
+                        mutableState.value = mutableState.value.copy(networkNotAllowed = networkNotAllowed)
+                        true
+                    }
+                }
+            }
+            if (changed) {
+                if (state.value.networkNotAllowed && state.value.hint != RestrictedSetupHint.NO_WIFI) post(candidate, RestrictedSetupNotice.NETWORK_NOT_ALLOWED)
+                else showAwaitingNotice(candidate)
+            }
+            delay(deadlines.networkAllowedHintCheckMillis)
+        }
+    }
+
+    private fun showAwaitingNotice(candidate: Attempt) {
+        val notice = synchronized(lock) {
+            if (active !== candidate || mutableState.value.stage != RestrictedSetupStage.AWAITING_PAIRING) null
+            else if (candidate.notificationAvailable && mutableState.value.pairingPort != null) RestrictedSetupNotice.CODE_PROMPT
+            else RestrictedSetupNotice.SEARCHING
+        }
+        notice?.let { post(candidate, it) }
+    }
+
+    private fun clearNetworkNotAllowedHint(candidate: Attempt) {
+        val cleared = synchronized(lock) {
+            if (active !== candidate || mutableState.value.stage != RestrictedSetupStage.AWAITING_PAIRING || !mutableState.value.networkNotAllowed) false
+            else {
+                mutableState.value = mutableState.value.copy(networkNotAllowed = false)
+                true
+            }
+        }
+        if (cleared) showAwaitingNotice(candidate)
+    }
+
+    private fun post(candidate: Attempt, notice: RestrictedSetupNotice, force: Boolean = false) {
+        val shouldPost = synchronized(lock) {
+            val outcome = notice == RestrictedSetupNotice.DONE || notice == RestrictedSetupNotice.FAILED
+            if (!outcome && (active !== candidate || candidate.epoch != epoch)) false
+            else if (!force && candidate.lastNotice == notice) false else {
+                candidate.lastNotice = notice
+                true
+            }
+        }
+        if (shouldPost) notifier.show(notice)
     }
 
     private suspend fun pairThenConnect(candidate: Attempt, requestedPort: Int, discoveredPort: Boolean) {
         try {
             if (discoveredPort && state.value.pairingPort != requestedPort) throw SetupException(RestrictedSetupFailure.PAIRING_FAILED)
             val endpoint = endpoint(requestedPort)
-            if (!cleanupMarker.markCleanupNeeded()) throw SetupException(RestrictedSetupFailure.CLEANUP_MARKER)
             val transport = transportFactory.create().also { attach(candidate, it) }
             withDeadline(candidate, deadlines.pairingMillis) { transport.pair(endpoint, candidate.code!!) }
             candidate.code?.fill('\u0000'); candidate.code = null
@@ -210,13 +278,19 @@ internal class RestrictedSetupController(
                         discovery = RestrictedSetupDiscovery.SEARCHING,
                         pairingPort = null,
                         hint = RestrictedSetupHint.CODE_REJECTED,
+                        networkNotAllowed = false,
                     )
                     RestrictedSetupCodeInbox.sink = { code -> submitCode(code) }
+                    candidate.hasConnectService = false
+                    candidate.onSinceMillis = null
+                    candidate.negativeChecks = 0
+                    candidate.connectPresenceDiscovery = controllerScope.launch { collectConnectPresence(candidate) }
+                    candidate.networkHintCheck = controllerScope.launch { checkNetworkAllowed(candidate) }
                     candidate.procedure = null
                     true
                 }
             }
-            if (retrying) notifier.show(RestrictedSetupNotice.CODE_REJECTED)
+            if (retrying) post(candidate, RestrictedSetupNotice.CODE_REJECTED)
         } catch (error: CancellationException) { throw error }
         catch (error: SetupException) { fail(candidate, error.failure) }
         catch (_: Exception) { fail(candidate, RestrictedSetupFailure.PAIRING_FAILED) }
@@ -271,12 +345,12 @@ internal class RestrictedSetupController(
 
     private fun timeout(candidate: Attempt) { candidate.closeTransport(); fail(candidate, RestrictedSetupFailure.TIMED_OUT); candidate.cancel() }
     private fun attach(candidate: Attempt, transport: RestrictedSetupTransport) { synchronized(lock) { if (active === candidate) candidate.transport = transport else transport.close() } }
-    private fun complete(candidate: Attempt, wireless: WirelessDebuggingOutcome) { if (terminal(candidate, RestrictedSetupStage.COMPLETE, null, RestrictedSetupAccess.ALLOWED, wireless)) notifier.show(RestrictedSetupNotice.DONE) }
-    private fun fail(candidate: Attempt, failure: RestrictedSetupFailure, access: RestrictedSetupAccess = RestrictedSetupAccess.UNKNOWN) { if (terminal(candidate, RestrictedSetupStage.FAILED, failure, access, WirelessDebuggingOutcome.NOT_REQUESTED)) notifier.show(RestrictedSetupNotice.FAILED) }
+    private fun complete(candidate: Attempt, wireless: WirelessDebuggingOutcome) { if (terminal(candidate, RestrictedSetupStage.COMPLETE, null, RestrictedSetupAccess.ALLOWED, wireless)) post(candidate, RestrictedSetupNotice.DONE) }
+    private fun fail(candidate: Attempt, failure: RestrictedSetupFailure, access: RestrictedSetupAccess = RestrictedSetupAccess.UNKNOWN) { if (terminal(candidate, RestrictedSetupStage.FAILED, failure, access, WirelessDebuggingOutcome.NOT_REQUESTED)) post(candidate, RestrictedSetupNotice.FAILED) }
     private fun terminal(candidate: Attempt, stage: RestrictedSetupStage, failure: RestrictedSetupFailure?, access: RestrictedSetupAccess, wireless: WirelessDebuggingOutcome): Boolean {
         val terminal = synchronized(lock) {
             if (active !== candidate || candidate.epoch != epoch) return@synchronized false
-            mutableState.value = mutableState.value.copy(stage = stage, failure = failure, access = access, discovery = null, pairingPort = null, wirelessDebugging = wireless, cleanupNeeded = cleanupMarker.needsCleanup())
+            mutableState.value = mutableState.value.copy(stage = stage, failure = failure, access = access, discovery = null, pairingPort = null, wirelessDebugging = wireless, networkNotAllowed = false)
             RestrictedSetupCodeInbox.sink = null
             true
         }
@@ -295,15 +369,40 @@ internal class RestrictedSetupController(
         var code: CharArray? = null
         var transport: RestrictedSetupTransport? = null
         var pairingDiscovery: Job? = null
+        var connectPresenceDiscovery: Job? = null
+        var networkHintCheck: Job? = null
         var connectDiscovery: Job? = null
         var procedure: Job? = null
         var totalWatchdog: Job? = null
         var addressCheck: Job? = null
         var hadPairingPort = false
+        @Volatile var hasConnectService = false
+        var onSinceMillis: Long? = null
+        var negativeChecks = 0
+        var lastNotice: RestrictedSetupNotice? = null
         var connecting = false
         private val closed = AtomicBoolean(false)
-        fun cancel() { code?.fill('\u0000'); code = null; pairingDiscovery?.cancel(); connectDiscovery?.cancel(); procedure?.cancel(); totalWatchdog?.cancel(); addressCheck?.cancel(); closeTransport(); synchronized(lock) { if (active === this) active = null } }
+        fun cancel() { code?.fill('\u0000'); code = null; cancelJobs(); closeTransport(); synchronized(lock) { if (active === this) active = null } }
+        fun cancelJobs() { pairingDiscovery?.cancel(); connectPresenceDiscovery?.cancel(); networkHintCheck?.cancel(); connectDiscovery?.cancel(); procedure?.cancel(); totalWatchdog?.cancel(); addressCheck?.cancel() }
         fun resetTransport() { closeTransport(); transport = null; closed.set(false) }
-        fun closeTransport() { val value = transport ?: return; if (closed.compareAndSet(false, true)) watchdogScope.launch(Dispatchers.IO) { val success = runCatching { value.close() }.isSuccess; if (!success) synchronized(lock) { teardownFailed = true; if (this@RestrictedSetupController.epoch == this@Attempt.epoch) mutableState.value = mutableState.value.copy(stage = RestrictedSetupStage.CLEANUP_REQUIRED, cleanupNeeded = true, failure = RestrictedSetupFailure.TRANSPORT) } } }
+        fun closeTransport() { val value = transport ?: return; if (closed.compareAndSet(false, true)) watchdogScope.launch(Dispatchers.IO) { if (runCatching { value.close() }.isFailure) handleTeardownFailure(this@Attempt) } }
+    }
+
+    private fun handleTeardownFailure(candidate: Attempt) {
+        val failed = synchronized(lock) {
+            teardownFailed = true
+            mutableState.value = mutableState.value.copy(retryBlocked = true)
+            if (mutableState.value.stage == RestrictedSetupStage.COMPLETE || active !== candidate || candidate.epoch != epoch) false
+            else {
+                mutableState.value = mutableState.value.copy(stage = RestrictedSetupStage.FAILED, failure = RestrictedSetupFailure.TRANSPORT, discovery = null, pairingPort = null, networkNotAllowed = false)
+                RestrictedSetupCodeInbox.sink = null
+                active = null
+                true
+            }
+        }
+        if (failed) {
+            candidate.cancel()
+            post(candidate, RestrictedSetupNotice.FAILED)
+        }
     }
 }

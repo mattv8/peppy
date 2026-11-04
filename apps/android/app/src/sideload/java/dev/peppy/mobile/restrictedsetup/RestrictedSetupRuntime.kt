@@ -52,7 +52,8 @@ internal object RestrictedSetupRuntime {
         }
     }
 
-    private fun createController(context: Context): RestrictedSetupController {
+    internal fun createController(context: Context): RestrictedSetupController {
+        deleteStaleCleanupPreferences(context)
         val addresses = AndroidLocalAddressSupplier(context)
         return RestrictedSetupController(
             controllerScope = scope,
@@ -61,7 +62,6 @@ internal object RestrictedSetupRuntime {
                 withContext(Dispatchers.IO) { restrictedMessageAccess(context) == RestrictedMessageAccess.ALLOWED }
             },
             localAddresses = addresses,
-            cleanupMarker = PrefsCleanupMarker(context),
             discovery = NsdAdbServiceDiscovery(context, addresses),
             notifier = notifier(context),
             wirelessDebuggingReadback = WirelessDebuggingSettingReadback(context),
@@ -75,10 +75,13 @@ internal object RestrictedSetupRuntime {
         Class.forName("org.conscrypt.Conscrypt")
     }.isSuccess
 
+    internal fun deleteStaleCleanupPreferences(context: Context) {
+        context.deleteSharedPreferences("restricted_setup")
+    }
+
     private val TERMINAL_STAGES = setOf(
         RestrictedSetupStage.INTRODUCTION,
         RestrictedSetupStage.COMPLETE,
         RestrictedSetupStage.FAILED,
-        RestrictedSetupStage.CLEANUP_REQUIRED,
     )
 }

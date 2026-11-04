@@ -8,6 +8,7 @@ import android.os.Build
 import androidx.annotation.RequiresApi
 import java.net.InetAddress
 import java.util.concurrent.Executor
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -95,9 +96,9 @@ internal interface NsdBrowser {
 }
 
 private class AndroidNsdBrowser(private val nsd: NsdManager) : NsdBrowser {
-    private val listeners = mutableMapOf<NsdBrowser.DiscoveryListener, NsdManager.DiscoveryListener>()
-    private val callbacks = mutableMapOf<NsdBrowser.ServiceInfoCallback, NsdManager.ResolveListener>()
-    private val infoCallbacks = mutableMapOf<NsdBrowser.ServiceInfoCallback, NsdManager.ServiceInfoCallback>()
+    private val listeners = ConcurrentHashMap<NsdBrowser.DiscoveryListener, NsdManager.DiscoveryListener>()
+    private val callbacks = ConcurrentHashMap<NsdBrowser.ServiceInfoCallback, NsdManager.ResolveListener>()
+    private val infoCallbacks = ConcurrentHashMap<NsdBrowser.ServiceInfoCallback, NsdManager.ServiceInfoCallback>()
     private val directExecutor = Executor { command -> command.run() }
     private val resolveLock = Any()
     private val pendingResolves = ArrayDeque<ResolveRequest>()
