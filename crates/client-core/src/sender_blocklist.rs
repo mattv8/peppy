@@ -14,6 +14,14 @@ pub(crate) const MAX_NUMBERS: usize = 5000;
 pub(crate) const MAX_NUMBER_BYTES: usize = 64;
 /// An unanswered unblock request is actionable for a week, like contact edit requests.
 const REQUEST_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// Tolerated clock skew for authenticated writer timestamps, matching contact requests.
+const REQUEST_SKEW_MS: i64 = 5 * 60 * 1000;
+
+pub(crate) struct RequestFreshness {
+    pub historical: bool,
+    pub created_at_ms: i64,
+    pub key_epoch: u32,
+}
 
 pub(crate) fn outcome_code(outcome: SenderUnblockOutcome) -> &'static str {
     match outcome {
@@ -51,6 +59,7 @@ pub(crate) fn valid_request(
     target: &str,
     writer: &str,
     producer: &str,
+    created_at_ms: i64,
 ) -> bool {
     !conversation_id.0.is_nil()
         && writer == producer
@@ -58,6 +67,8 @@ pub(crate) fn valid_request(
         && !numbers.is_empty()
         && valid_numbers(numbers)
         && numbers.windows(2).all(|w| w[0] < w[1])
+        && (created_at_ms == 0
+            || (created_at_ms > 0 && created_at_ms <= notifications::now_ms() + REQUEST_SKEW_MS))
 }
 
 pub(crate) fn apply_blocklist(
@@ -85,9 +96,9 @@ pub(crate) fn apply_request(
     conversation_id: ConversationId,
     numbers: &[String],
     target: &str,
-    historical: bool,
+    freshness: RequestFreshness,
 ) -> Result<(), Error> {
-    conn.execute("INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) VALUES(?,?,?,?,'pending',?,?) ON CONFLICT(request_id) DO NOTHING", params![request_id.to_string(), conversation_id.to_string(), target, json(&numbers)?, historical, notifications::now_ms()])?;
+    conn.execute("INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms,key_epoch) VALUES(?,?,?,?,'pending',?,?,?) ON CONFLICT(request_id) DO NOTHING", params![request_id.to_string(), conversation_id.to_string(), target, json(&numbers)?, freshness.historical, freshness.created_at_ms, freshness.key_epoch])?;
     Ok(())
 }
 
@@ -232,7 +243,7 @@ impl FolderContext {
     ) -> Result<Option<SenderUnblockStatus>, Error> {
         if self.unblock.is_none() {
             let rows: Vec<(String, String)> = conn
-                .prepare("SELECT conversation_id,status FROM (SELECT conversation_id,status,created_at_ms,historical,ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at_ms DESC,rowid DESC) AS newest FROM sender_unblock_requests) WHERE newest=1 AND (status<>'pending' OR (historical=0 AND created_at_ms>?))")?
+                .prepare("SELECT conversation_id,status FROM (SELECT conversation_id,status,created_at_ms,historical,ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at_ms DESC,rowid DESC) AS newest FROM sender_unblock_requests) WHERE newest=1 AND (status<>'pending' OR (historical=0 AND created_at_ms>0 AND created_at_ms>?))")?
                 .query_map([notifications::now_ms() - REQUEST_TTL_MS], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<Result<_, _>>()?;
             self.unblock = Some(
@@ -645,7 +656,20 @@ impl Client {
             .ok_or(Error::InvalidRequest("sender unblock"))?;
         let request_id = uuid::Uuid::new_v4();
         let numbers: Vec<String> = peers.into_iter().collect();
-        apply_request(&tx, request_id, conversation_id, &numbers, &target, false)?;
+        let created_at_ms = notifications::now_ms();
+        let key_epoch = ctx.active_epoch.ok_or(Error::KeysUnavailable)?;
+        apply_request(
+            &tx,
+            request_id,
+            conversation_id,
+            &numbers,
+            &target,
+            RequestFreshness {
+                historical: false,
+                created_at_ms,
+                key_epoch,
+            },
+        )?;
         enqueue(
             &tx,
             &ctx,
@@ -658,6 +682,7 @@ impl Client {
                 numbers,
                 target_device_id: target,
                 writer_device_id: ctx.device_id.to_string(),
+                created_at_ms,
             },
         )?;
         write_folder(&tx, &ctx, conversation_id, ConversationFolder::Inbox, false)?;
@@ -670,8 +695,8 @@ impl Client {
         let s = self.lock()?;
         let rows: Vec<(String, String)> = s
             .conn
-            .prepare("SELECT r.request_id,r.numbers FROM sender_unblock_requests r WHERE r.target_device_id=?1 AND r.historical=0 AND r.status='pending' AND r.created_at_ms>?2 AND NOT EXISTS(SELECT 1 FROM sender_unblock_attempts a WHERE a.request_id=r.request_id) ORDER BY r.created_at_ms,r.rowid")?
-            .query_map(params![s.config.device_id.to_string(), notifications::now_ms() - REQUEST_TTL_MS], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .prepare("SELECT r.request_id,r.numbers FROM sender_unblock_requests r WHERE r.target_device_id=?1 AND r.historical=0 AND r.status='pending' AND r.created_at_ms>0 AND r.created_at_ms>?2 AND r.created_at_ms<=?3 AND r.key_epoch=?4 AND NOT EXISTS(SELECT 1 FROM sender_unblock_attempts a WHERE a.request_id=r.request_id) ORDER BY r.created_at_ms,r.rowid")?
+            .query_map(params![s.config.device_id.to_string(), notifications::now_ms() - REQUEST_TTL_MS, notifications::now_ms() + REQUEST_SKEW_MS, s.active_epoch], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
         work_rows(rows)
     }
@@ -684,10 +709,11 @@ impl Client {
             .map_err(|_| Error::InvalidRequest("sender unblock"))?;
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
+        require_keys(&ctx)?;
         let device = ctx.device_id.to_string();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let numbers: Option<String> = tx
-            .query_row("SELECT r.numbers FROM sender_unblock_requests r WHERE r.request_id=? AND r.target_device_id=? AND r.historical=0 AND r.status='pending' AND r.created_at_ms>? AND NOT EXISTS(SELECT 1 FROM sender_unblock_attempts a WHERE a.request_id=r.request_id)", params![request_id, device, notifications::now_ms() - REQUEST_TTL_MS], |r| r.get(0))
+            .query_row("SELECT r.numbers FROM sender_unblock_requests r WHERE r.request_id=? AND r.target_device_id=? AND r.historical=0 AND r.status='pending' AND r.created_at_ms>0 AND r.created_at_ms>? AND r.created_at_ms<=? AND r.key_epoch=? AND NOT EXISTS(SELECT 1 FROM sender_unblock_attempts a WHERE a.request_id=r.request_id)", params![request_id, device, notifications::now_ms() - REQUEST_TTL_MS, notifications::now_ms() + REQUEST_SKEW_MS, ctx.active_epoch], |r| r.get(0))
             .optional()?;
         let Some(numbers) = numbers else {
             return Ok(false);
@@ -744,5 +770,391 @@ impl Client {
         emit_result(&tx, &ctx, request, outcome)?;
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peppy_crypto::{PurposeKey, VaultCheckHeader, create_vault_check_header, derive_root_key};
+
+    fn sealed_event(
+        vault_id: VaultId,
+        profile: &KeyProfile,
+        event_key: &PurposeKey,
+        producer: DeviceId,
+        sequence: u64,
+        payload: Vec<u8>,
+    ) -> Envelope {
+        let mut envelope = Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            envelope_id: EnvelopeId::new(),
+            command_id: None,
+            vault_id,
+            producer_device_id: producer,
+            producer_sequence: SourceSequence(sequence),
+            key_epoch: profile.key_epoch,
+            crypto_suite: profile.crypto_suite,
+            profile_fingerprint: profile.fingerprint().unwrap(),
+            purpose: EnvelopePurpose::Event,
+            route: None,
+            compaction: None,
+            origin_tag: None,
+            ciphertext: Vec::new(),
+        };
+        envelope.ciphertext =
+            seal_frame(&encrypt(&event_key, &envelope.aad_bytes().unwrap(), &payload).unwrap());
+        envelope
+    }
+
+    fn unlocked_client(
+        path: std::path::PathBuf,
+        vault_id: VaultId,
+        profile: &KeyProfile,
+        header: &VaultCheckHeader,
+        device_id: DeviceId,
+    ) -> Client {
+        let client = Client::open(
+            ClientConfig {
+                database_path: path,
+                vault_id,
+                device_id,
+            },
+            DatabaseKey::new(&[42; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(profile, header, "correct horse battery staple")
+            .unwrap();
+        client
+    }
+
+    #[test]
+    fn request_freshness_requires_a_writer_timestamp_within_skew() {
+        let conversation = ConversationId::new();
+        let target = uuid::Uuid::new_v4().to_string();
+        let writer = uuid::Uuid::new_v4().to_string();
+        let numbers = vec!["+15555550100".to_owned()];
+        let now = notifications::now_ms();
+
+        assert!(valid_request(
+            conversation,
+            &numbers,
+            &target,
+            &writer,
+            &writer,
+            now + REQUEST_SKEW_MS,
+        ));
+        assert!(
+            valid_request(conversation, &numbers, &target, &writer, &writer, 0,),
+            "legacy timestamps remain decodable but are not actionable"
+        );
+        assert!(!valid_request(
+            conversation,
+            &numbers,
+            &target,
+            &writer,
+            &writer,
+            now + REQUEST_SKEW_MS + 60_000,
+        ));
+        assert!(!valid_request(
+            conversation,
+            &numbers,
+            &target,
+            &writer,
+            &writer,
+            -1,
+        ));
+    }
+
+    #[test]
+    fn expired_authenticated_request_is_stored_but_never_actionable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let target = DeviceId::new();
+        let writer = DeviceId::new();
+        let client = unlocked_client(
+            dir.path().join("expired-request.db"),
+            vault_id,
+            &profile,
+            &header,
+            target,
+        );
+        let numbers = vec!["+15555550100".to_owned()];
+        let blocklist = sealed_event(
+            vault_id,
+            &profile,
+            &event_key,
+            target,
+            1,
+            serde_json::to_vec(&PrivatePayload::SenderBlocklist {
+                numbers: numbers.clone(),
+                can_unblock: true,
+                logical_revision: 1,
+                writer_device_id: target.to_string(),
+            })
+            .unwrap(),
+        );
+        let request_id = uuid::Uuid::new_v4();
+        let created_at_ms = notifications::now_ms() - REQUEST_TTL_MS - 1;
+        let request = sealed_event(
+            vault_id,
+            &profile,
+            &event_key,
+            writer,
+            1,
+            serde_json::to_vec(&PrivatePayload::SenderUnblockRequest {
+                request_id,
+                conversation_id: ConversationId::new(),
+                numbers,
+                target_device_id: target.to_string(),
+                writer_device_id: writer.to_string(),
+                created_at_ms,
+            })
+            .unwrap(),
+        );
+        client.ingest(&blocklist, Cursor(1)).unwrap();
+        client.ingest(&request, Cursor(2)).unwrap();
+        assert_eq!(client.apply_pending(10).unwrap().applied, 2);
+        let stored: i64 = client
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT created_at_ms FROM sender_unblock_requests WHERE request_id=?",
+                [request_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, created_at_ms);
+        assert!(client.pending_sender_unblocks().unwrap().is_empty());
+        assert!(
+            !client
+                .begin_sender_unblock(&request_id.to_string())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_request_without_timestamp_decodes_but_never_becomes_actionable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let target = DeviceId::new();
+        let writer = DeviceId::new();
+        let client = unlocked_client(
+            dir.path().join("legacy-request.db"),
+            vault_id,
+            &profile,
+            &header,
+            target,
+        );
+        let request_id = uuid::Uuid::new_v4();
+        let mut legacy = serde_json::to_value(PrivatePayload::SenderUnblockRequest {
+            request_id,
+            conversation_id: ConversationId::new(),
+            numbers: vec!["+15555550100".to_owned()],
+            target_device_id: target.to_string(),
+            writer_device_id: writer.to_string(),
+            created_at_ms: notifications::now_ms(),
+        })
+        .unwrap();
+        legacy.as_object_mut().unwrap().remove("created_at_ms");
+        let request = sealed_event(
+            vault_id,
+            &profile,
+            &event_key,
+            writer,
+            1,
+            serde_json::to_vec(&legacy).unwrap(),
+        );
+        client.ingest(&request, Cursor(1)).unwrap();
+        assert_eq!(client.apply_pending(10).unwrap().applied, 1);
+        let stored: i64 = client
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT created_at_ms FROM sender_unblock_requests WHERE request_id=?",
+                [request_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 0);
+        assert!(client.pending_sender_unblocks().unwrap().is_empty());
+        assert!(
+            !client
+                .begin_sender_unblock(&request_id.to_string())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn decoder_recovery_restores_unblock_history_without_reauthorizing_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let target = DeviceId::new();
+        let requester = DeviceId::new();
+        let config = ClientConfig {
+            database_path: dir.path().join("unblock-decoder-recovery.db"),
+            vault_id,
+            device_id: target,
+        };
+        let client = unlocked_client(
+            config.database_path.clone(),
+            vault_id,
+            &profile,
+            &header,
+            target,
+        );
+        let numbers = vec!["+15555550100".to_owned()];
+        let outstanding_request_id = uuid::Uuid::new_v4();
+        let completed_request_id = uuid::Uuid::new_v4();
+        let blocklist = sealed_event(
+            vault_id,
+            &profile,
+            &event_key,
+            target,
+            1,
+            serde_json::to_vec(&PrivatePayload::SenderBlocklist {
+                numbers: numbers.clone(),
+                can_unblock: true,
+                logical_revision: 1,
+                writer_device_id: target.to_string(),
+            })
+            .unwrap(),
+        );
+        let request = sealed_event(
+            vault_id,
+            &profile,
+            &event_key,
+            requester,
+            1,
+            serde_json::to_vec(&PrivatePayload::SenderUnblockRequest {
+                request_id: outstanding_request_id,
+                conversation_id: ConversationId::new(),
+                numbers: numbers.clone(),
+                target_device_id: target.to_string(),
+                writer_device_id: requester.to_string(),
+                created_at_ms: notifications::now_ms(),
+            })
+            .unwrap(),
+        );
+        let completed_request = sealed_event(
+            vault_id,
+            &profile,
+            &event_key,
+            requester,
+            2,
+            serde_json::to_vec(&PrivatePayload::SenderUnblockRequest {
+                request_id: completed_request_id,
+                conversation_id: ConversationId::new(),
+                numbers,
+                target_device_id: target.to_string(),
+                writer_device_id: requester.to_string(),
+                created_at_ms: notifications::now_ms(),
+            })
+            .unwrap(),
+        );
+        let result = sealed_event(
+            vault_id,
+            &profile,
+            &event_key,
+            target,
+            2,
+            serde_json::to_vec(&PrivatePayload::SenderUnblockResult {
+                request_id: completed_request_id,
+                outcome: SenderUnblockOutcome::Unblocked,
+                writer_device_id: target.to_string(),
+            })
+            .unwrap(),
+        );
+        for (cursor, envelope) in [
+            (1, &blocklist),
+            (2, &request),
+            (3, &completed_request),
+            (4, &result),
+        ] {
+            client.ingest(envelope, Cursor(cursor)).unwrap();
+        }
+        assert_eq!(client.apply_pending(10).unwrap().applied, 4);
+        {
+            let store = client.lock().unwrap();
+            let status: String = store
+                .conn
+                .query_row(
+                    "SELECT status FROM sender_unblock_requests WHERE request_id=?",
+                    [completed_request_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "unblocked");
+            store
+                .conn
+                .execute("DELETE FROM sender_blocklists", [])
+                .unwrap();
+            store
+                .conn
+                .execute("DELETE FROM sender_unblock_requests", [])
+                .unwrap();
+            set_meta(&store.conn, "decoder_revision:1", "9").unwrap();
+        }
+        drop(client);
+
+        let recovered = Client::open(config, DatabaseKey::new(&[42; 32]).unwrap()).unwrap();
+        recovered
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let store = recovered.lock().unwrap();
+        let list: (String, bool) = store
+            .conn
+            .query_row(
+                "SELECT numbers,can_unblock FROM sender_blocklists WHERE producer_device_id=?",
+                [target.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(list, ("[\"+15555550100\"]".to_owned(), true));
+        let outstanding: (String, bool) = store
+            .conn
+            .query_row(
+                "SELECT status,historical FROM sender_unblock_requests WHERE request_id=?",
+                [outstanding_request_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(outstanding, ("pending".to_owned(), true));
+        let completed: (String, bool) = store
+            .conn
+            .query_row(
+                "SELECT status,historical FROM sender_unblock_requests WHERE request_id=?",
+                [completed_request_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(completed, ("unblocked".to_owned(), true));
+        drop(store);
+        assert!(recovered.pending_sender_unblocks().unwrap().is_empty());
+        assert!(
+            !recovered
+                .begin_sender_unblock(&outstanding_request_id.to_string())
+                .unwrap()
+        );
+        assert!(
+            !recovered
+                .begin_sender_unblock(&completed_request_id.to_string())
+                .unwrap()
+        );
     }
 }

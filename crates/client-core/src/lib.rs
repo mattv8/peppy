@@ -123,7 +123,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 44;
+const SCHEMA_VERSION: i64 = 45;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -430,6 +430,9 @@ pub enum PrivatePayload {
         numbers: Vec<String>,
         target_device_id: String,
         writer_device_id: String,
+        /// Authenticated writer timestamp; legacy payloads default to non-actionable.
+        #[serde(default)]
+        created_at_ms: i64,
     },
     SenderUnblockResult {
         request_id: uuid::Uuid,
@@ -5587,6 +5590,13 @@ CREATE TABLE IF NOT EXISTS provider_folder_writes(conversation_id TEXT PRIMARY K
 CREATE TABLE IF NOT EXISTS sender_blocklist_unmapped(number TEXT PRIMARY KEY);
 CREATE INDEX IF NOT EXISTS mms_thread_conversations_thread ON mms_thread_conversations(source_device_id, provider_thread_id);
 ";
+fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(
+        conn,
+        "sender_unblock_requests",
+        "key_epoch INTEGER NOT NULL DEFAULT 0",
+    )
+}
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "outbox", "origin_tag TEXT")
@@ -5619,7 +5629,7 @@ fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Re
 }
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
 // Revision 8 reprojects retained control wires that older clients consumed as unknown.
-const DECODER_REVISION: &str = "10";
+const DECODER_REVISION: &str = "11";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -5720,6 +5730,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_migration_42(&tx)?;
             tx.execute_batch(MIGRATION_43)?;
             tx.execute_batch(MIGRATION_44)?;
+            apply_migration_45(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5728,7 +5739,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=43)) => {
+        Some(version @ (4..=44)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5845,6 +5856,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 43 {
                 tx.execute_batch(MIGRATION_44)?;
+            }
+            if version <= 44 {
+                apply_migration_45(&tx)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -6188,6 +6202,7 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         numbers,
                         target_device_id,
                         writer_device_id,
+                        created_at_ms,
                     },
                 ) if sender_blocklist::valid_request(
                     conversation_id,
@@ -6195,6 +6210,7 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                     &target_device_id,
                     &writer_device_id,
                     &envelope.producer_device_id.to_string(),
+                    created_at_ms,
                 ) =>
                 {
                     sender_blocklist::apply_request(
@@ -6203,7 +6219,11 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         conversation_id,
                         &numbers,
                         &target_device_id,
-                        true,
+                        sender_blocklist::RequestFreshness {
+                            historical: true,
+                            created_at_ms,
+                            key_epoch: envelope.key_epoch,
+                        },
                     )?;
                     learn_compaction(
                         conn,
@@ -6924,6 +6944,7 @@ fn apply_record(
                 numbers,
                 target_device_id,
                 writer_device_id,
+                created_at_ms,
             },
         ) => {
             if !sender_blocklist::valid_request(
@@ -6932,6 +6953,7 @@ fn apply_record(
                 &target_device_id,
                 &writer_device_id,
                 &producer.to_string(),
+                created_at_ms,
             ) {
                 return Ok(Some(Q::InvalidPayload));
             }
@@ -6941,7 +6963,11 @@ fn apply_record(
                 conversation_id,
                 &numbers,
                 &target_device_id,
-                historical,
+                sender_blocklist::RequestFreshness {
+                    historical,
+                    created_at_ms,
+                    key_epoch: envelope.key_epoch,
+                },
             )?;
         }
         (
@@ -9508,6 +9534,40 @@ mod tests {
         assert!(is_known_private_payload_kind("contact_scan_request"));
         assert!(is_known_private_payload_kind("contact_scan_result"));
         assert!(!is_known_private_payload_kind("future_contact_event"));
+    }
+
+    #[test]
+    fn schema_44_upgrade_preserves_unblock_requests_with_nonactionable_epoch() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-44.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = DatabaseKey::new(&[45; 32]).unwrap();
+        let request_id = uuid::Uuid::new_v4();
+        let client = Client::open(config.clone(), key).unwrap();
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) VALUES(?,?,?,?, 'pending',0,1)",
+                params![request_id.to_string(), ConversationId::new().to_string(), DeviceId::new().to_string(), "[\"+15555550100\"]"],
+            ).unwrap();
+            store
+                .conn
+                .execute("UPDATE schema_meta SET version=44", [])
+                .unwrap();
+        }
+        drop(client);
+
+        let upgraded = Client::open(config, DatabaseKey::new(&[45; 32]).unwrap()).unwrap();
+        let store = upgraded.lock().unwrap();
+        let (version, epoch): (i64, i64) = store.conn.query_row(
+            "SELECT (SELECT version FROM schema_meta),key_epoch FROM sender_unblock_requests WHERE request_id=?",
+            [request_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((version, epoch), (SCHEMA_VERSION, 0));
     }
 
     #[test]

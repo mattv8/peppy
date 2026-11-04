@@ -380,3 +380,89 @@ fn a_number_already_unblocked_in_the_messaging_app_answers_not_blocked() {
     server.sync(&desktop);
     assert_eq!(row(&desktop, conversation).unblock, None);
 }
+
+#[test]
+fn unblock_delivered_after_epoch_cutover_is_not_queued() {
+    let dir = TempDir::new().unwrap();
+    let epoch1 = Vault::new();
+    let epoch2 = Vault::epoch(epoch1.id, 2);
+    let gateway_config = config(&dir, "unblock-epoch-gateway", &epoch1);
+    let gateway = unlocked(&gateway_config, &epoch1);
+    let desktop = unlocked(&config(&dir, "unblock-epoch-desktop", &epoch1), &epoch1);
+    let conversation = provider_sms(&gateway, "epoch-1", ADDRESS, "t1");
+    gateway
+        .publish_sender_blocklist(numbers(&[ADDRESS]), true)
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    desktop.request_sender_unblock(conversation).unwrap();
+    server.upload(&desktop);
+
+    gateway
+        .unlock(&epoch2.profile, &epoch2.header, PASSPHRASE)
+        .unwrap();
+    gateway.activate_epoch(2).unwrap();
+    server.sync(&gateway);
+
+    assert!(gateway.pending_sender_unblocks().unwrap().is_empty());
+}
+
+#[test]
+fn queued_unblock_is_fenced_again_after_epoch_cutover() {
+    let dir = TempDir::new().unwrap();
+    let epoch1 = Vault::new();
+    let epoch2 = Vault::epoch(epoch1.id, 2);
+    let gateway = unlocked(&config(&dir, "queued-epoch-gateway", &epoch1), &epoch1);
+    let desktop = unlocked(&config(&dir, "queued-epoch-desktop", &epoch1), &epoch1);
+    let conversation = provider_sms(&gateway, "queued-epoch", ADDRESS, "t1");
+    gateway
+        .publish_sender_blocklist(numbers(&[ADDRESS]), true)
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    desktop.request_sender_unblock(conversation).unwrap();
+    server.upload(&desktop);
+    server.sync(&gateway);
+    let request_id = gateway.pending_sender_unblocks().unwrap()[0]
+        .request_id
+        .clone();
+
+    gateway
+        .unlock(&epoch2.profile, &epoch2.header, PASSPHRASE)
+        .unwrap();
+    gateway.activate_epoch(2).unwrap();
+
+    assert!(gateway.pending_sender_unblocks().unwrap().is_empty());
+    assert!(!gateway.begin_sender_unblock(&request_id).unwrap());
+}
+
+#[test]
+fn locked_core_cannot_acquire_an_unblock_permit() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&dir, "locked-unblock-gateway", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&config(&dir, "locked-unblock-desktop", &vault), &vault);
+    let conversation = provider_sms(&gateway, "locked-unblock", ADDRESS, "t1");
+    gateway
+        .publish_sender_blocklist(numbers(&[ADDRESS]), true)
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    desktop.request_sender_unblock(conversation).unwrap();
+    server.upload(&desktop);
+    server.sync(&gateway);
+    let request_id = gateway.pending_sender_unblocks().unwrap()[0]
+        .request_id
+        .clone();
+    drop(gateway);
+
+    let locked = open(&gateway_config);
+    assert_eq!(
+        locked.begin_sender_unblock(&request_id),
+        Err(Error::KeysUnavailable)
+    );
+}

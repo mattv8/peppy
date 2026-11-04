@@ -590,6 +590,7 @@ pub(super) fn reduce(
             numbers,
             target_device_id,
             writer_device_id,
+            created_at_ms,
         } => {
             if !crate::sender_blocklist::valid_request(
                 conversation_id,
@@ -597,10 +598,11 @@ pub(super) fn reduce(
                 &target_device_id,
                 &writer_device_id,
                 producer,
+                created_at_ms,
             ) {
                 return Ok(false);
             }
-            conn.execute("INSERT INTO projection_sender_unblock_requests(generation,request_id,conversation_id,target_device_id,numbers,status,created_at_ms) VALUES(?,?,?,?,?,'pending',?) ON CONFLICT(generation,request_id) DO NOTHING", params![generation,request_id.to_string(),conversation_id.to_string(),target_device_id,crate::json(&numbers)?,crate::notifications::now_ms()])?;
+            conn.execute("INSERT INTO projection_sender_unblock_requests(generation,request_id,conversation_id,target_device_id,numbers,status,created_at_ms) VALUES(?,?,?,?,?,'pending',?) ON CONFLICT(generation,request_id) DO NOTHING", params![generation,request_id.to_string(),conversation_id.to_string(),target_device_id,crate::json(&numbers)?,created_at_ms])?;
             Ok(true)
         }
         PrivatePayload::SenderUnblockResult {
