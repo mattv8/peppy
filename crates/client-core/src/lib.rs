@@ -30,6 +30,7 @@ mod contact_source;
 mod contact_state;
 mod contact_sync_requests;
 mod contacts;
+mod conversation_folders;
 mod conversation_match;
 mod conversation_pinning;
 mod conversation_tones;
@@ -121,7 +122,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 42;
+const SCHEMA_VERSION: i64 = 43;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -405,6 +406,14 @@ pub enum PrivatePayload {
     ConversationPin {
         conversation_id: ConversationId,
         pinned: bool,
+        logical_revision: u64,
+        writer_device_id: String,
+    },
+    ConversationFolder {
+        conversation_id: ConversationId,
+        folder: ConversationFolder,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        archived_through_ms: Option<i64>,
         logical_revision: u64,
         writer_device_id: String,
     },
@@ -726,6 +735,14 @@ pub struct Conversation {
     pub conversation_id: ConversationId,
     pub unread_count: u64,
     pub pinned: bool,
+    pub folder: ConversationFolder,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationFolder {
+    Inbox,
+    Archived,
+    Spam,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Draft {
@@ -3217,7 +3234,7 @@ impl Client {
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(
-            "WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0) FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC",
+            &format!("WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0),{} FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id LEFT JOIN conversation_folders f ON f.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC", conversation_folders::effective_folder_sql("c.sort_at_ms")),
         )?;
         let rows = query
             .query_map([], |r| {
@@ -3225,15 +3242,17 @@ impl Client {
                     r.get::<_, String>(0)?,
                     r.get::<_, i64>(1)?,
                     r.get::<_, bool>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(id, unread, pinned)| {
+            .map(|(id, unread, pinned, folder)| {
                 Ok(Conversation {
                     conversation_id: parse(&id)?,
                     unread_count: u64::try_from(unread).map_err(|_| Error::Database)?,
                     pinned,
+                    folder: ConversationFolder::from_db(&folder)?,
                 })
             })
             .collect()
@@ -3494,7 +3513,7 @@ impl Client {
     /// Freezes the IDs currently unread in batches that keep later writes bounded.
     pub fn unread_message_batches(&self) -> Result<Vec<Vec<MessageId>>, Error> {
         let store = self.lock()?;
-        let mut query = store.conn.prepare("SELECT id FROM messages WHERE seen=0")?;
+        let mut query = store.conn.prepare(&format!("SELECT id FROM messages WHERE seen=0 AND conversation_id NOT IN (SELECT f.conversation_id FROM conversation_folders f WHERE ({})!='inbox')", conversation_folders::effective_folder_sql("(SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.conversation_id=f.conversation_id)")))?;
         let ids = query
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -5493,6 +5512,12 @@ CREATE TABLE IF NOT EXISTS phone_read_effects(message_id TEXT PRIMARY KEY, sourc
 CREATE INDEX IF NOT EXISTS phone_read_effects_created ON phone_read_effects(created_at_ms);
 CREATE TABLE IF NOT EXISTS phone_read_effect_terminals(message_id TEXT PRIMARY KEY);
 ";
+const MIGRATION_43: &str = "
+CREATE TABLE IF NOT EXISTS conversation_folders(conversation_id TEXT PRIMARY KEY,
+  folder TEXT NOT NULL CHECK(folder IN ('inbox','archived','spam')), archived_through_ms INTEGER,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
+  producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
+";
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "outbox", "origin_tag TEXT")
@@ -5525,7 +5550,7 @@ fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Re
 }
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
 // Revision 8 reprojects retained control wires that older clients consumed as unknown.
-const DECODER_REVISION: &str = "8";
+const DECODER_REVISION: &str = "9";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -5624,6 +5649,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_39)?;
             apply_migration_40(&tx)?;
             apply_migration_42(&tx)?;
+            tx.execute_batch(MIGRATION_43)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5632,7 +5658,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=41)) => {
+        Some(version @ (4..=42)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5743,6 +5769,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 41 {
                 apply_migration_42(&tx)?;
+            }
+            if version <= 42 {
+                tx.execute_batch(MIGRATION_43)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -5861,6 +5890,7 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                                     value.get("kind").and_then(|kind| kind.as_str()),
                                     Some(
                                         "conversation_pin"
+                                            | "conversation_folder"
                                             | "conversation_tone"
                                             | "notification_preferences"
                                     )
@@ -5977,6 +6007,66 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         &platform,
                         &hint_tag,
                         key_epoch,
+                    )?;
+                }
+                (
+                    "quarantined",
+                    PrivatePayload::ConversationFolder {
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) if conversation_folders::valid_event(
+                    conversation_id,
+                    folder,
+                    archived_through_ms,
+                    logical_revision,
+                    &writer_device_id,
+                    &envelope.producer_device_id.to_string(),
+                ) =>
+                {
+                    conn.execute("UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=? AND status='quarantined' AND reason='invalid_payload'", params![cursor])?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::ConversationFolder {
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) => {
+                    let producer = envelope.producer_device_id.to_string();
+                    if !conversation_folders::valid_event(
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                    ) {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                        continue;
+                    }
+                    conversation_folders::apply(
+                        conn,
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                        envelope.producer_sequence.0,
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("conversation-folder:{conversation_id}")),
+                        &producer,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
                     )?;
                 }
                 (
@@ -6290,6 +6380,7 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "notification_dismiss"
             | "app_filter"
             | "conversation_pin"
+            | "conversation_folder"
             | "conversation_tone"
             | "notification_preferences"
             | "mms_own_address"
@@ -6635,6 +6726,38 @@ fn apply_record(
         }
         (
             EnvelopePurpose::Event,
+            PrivatePayload::ConversationFolder {
+                conversation_id,
+                folder,
+                archived_through_ms,
+                logical_revision,
+                writer_device_id,
+            },
+        ) => {
+            let producer = producer.to_string();
+            if !conversation_folders::valid_event(
+                conversation_id,
+                folder,
+                archived_through_ms,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            conversation_folders::apply(
+                conn,
+                conversation_id,
+                folder,
+                archived_through_ms,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+                envelope.producer_sequence.0,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
             PrivatePayload::ConversationPin {
                 conversation_id,
                 pinned,
@@ -6919,7 +7042,7 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
 
 fn queue_message_banner(conn: &Connection, message: &MessagePayload) -> Result<(), Error> {
     notifications::prune_banners(conn)?;
-    if message.direction != Direction::Incoming || message.imported {
+    if message.direction != Direction::Incoming || message.imported || conn.query_row("SELECT EXISTS(SELECT 1 FROM conversation_folders WHERE conversation_id=? AND folder='spam')", [message.record.conversation_id.to_string()], |row| row.get::<_, bool>(0))? {
         return Ok(());
     }
     conn.execute(
@@ -7776,6 +7899,13 @@ fn compaction_group(
             ],
             false,
         ),
+        PrivatePayload::ConversationFolder {
+            conversation_id, ..
+        } => (
+            b"conversation-folder",
+            vec![conversation_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::ConversationPin {
             conversation_id, ..
         } => (
@@ -7886,6 +8016,9 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             "app-filter:{}:{}",
             filter.source_device_id, filter.package_name
         )),
+        PrivatePayload::ConversationFolder {
+            conversation_id, ..
+        } => Some(format!("conversation-folder:{conversation_id}")),
         PrivatePayload::ConversationPin {
             conversation_id, ..
         } => Some(format!("conversation-pin:{conversation_id}")),

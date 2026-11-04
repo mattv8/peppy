@@ -339,6 +339,126 @@ describe("ConversationList interactions", () => {
     expect(screen.queryByRole("button", { name: /Pin / })).not.toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "Pinned" })).not.toBeInTheDocument();
   });
+
+  const folderRows = [
+    { id: "inbox-a", name: "Inbox A", preview: "", unread: 0 },
+    { id: "archived-b", name: "Archived B", preview: "", unread: 0, folder: "archived" as const },
+    { id: "spam-c", name: "Spam C", preview: "", unread: 0, folder: "spam" as const },
+  ];
+  const folderButtons = (rowId: string) => Array.from(document.querySelectorAll<HTMLButtonElement>(`[data-conversation-row='${rowId}'] .conversation-folder-action`));
+
+  it("offers the folder actions each folder calls for", () => {
+    render(<ConversationList conversations={folderRows} selectedId="" onSelect={() => {}} onRequestFolderChange={() => {}} />);
+
+    expect(folderButtons("inbox-a").map((button) => button.getAttribute("aria-label"))).toEqual(["Archive conversation", "Mark conversation as spam"]);
+    expect(folderButtons("archived-b").map((button) => button.getAttribute("aria-label"))).toEqual(["Move conversation to Inbox", "Mark conversation as spam"]);
+    expect(folderButtons("spam-c").map((button) => button.getAttribute("aria-label"))).toEqual(["Not spam"]);
+    expect(document.querySelector("[data-archive-conversation-id='inbox-a']")).toHaveAttribute("title", "Archive Inbox A");
+    expect(document.querySelector("[data-spam-conversation-id='inbox-a']")).toHaveAttribute("title", "Mark Inbox A as spam");
+    expect(document.querySelector("[data-folder-conversation-id='archived-b']")).toHaveAttribute("title", "Move Archived B to Inbox");
+    expect(document.querySelector("[data-spam-conversation-id='archived-b']")).toBeInTheDocument();
+    expect(document.querySelector("[data-folder-conversation-id='spam-c']")).toHaveAttribute("title", "Move Spam C out of Spam");
+  });
+
+  it("hides the Pin button on spam rows but keeps it on archived rows", () => {
+    render(<ConversationList conversations={folderRows} selectedId="" onSelect={() => {}} onTogglePin={() => {}} onRequestFolderChange={() => {}} />);
+
+    expect(document.querySelector("[data-pin-conversation-id='spam-c']")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-pin-conversation-id='archived-b']")).toBeInTheDocument();
+    expect(document.querySelector("[data-pin-conversation-id='inbox-a']")).toBeInTheDocument();
+  });
+
+  it("requests a folder change with the row, target folder, and trigger without selecting the row", () => {
+    const onSelect = vi.fn();
+    const onRequestFolderChange = vi.fn();
+    render(<ConversationList conversations={folderRows} selectedId="" onSelect={onSelect} onRequestFolderChange={onRequestFolderChange} />);
+
+    const archive = screen.getByRole("button", { name: "Archive conversation" });
+    fireEvent.click(archive);
+    const notSpam = screen.getByRole("button", { name: "Not spam" });
+    fireEvent.click(notSpam);
+
+    expect(onRequestFolderChange).toHaveBeenNthCalledWith(1, "inbox-a", "archived", archive);
+    expect(onRequestFolderChange).toHaveBeenNthCalledWith(2, "spam-c", "inbox", notSpam);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("omits folder actions for draft rows and when no folder handler is provided", () => {
+    const draft = { id: "draft-x", name: "Draft X", preview: "", unread: 0, recipientlessDraft: true, draftOnly: true };
+    const { unmount } = render(<ConversationList conversations={[draft]} selectedId="draft-x" onSelect={() => {}} onRequestFolderChange={() => {}} />);
+    expect(document.querySelector(".conversation-folder-action")).not.toBeInTheDocument();
+    unmount();
+
+    render(<ConversationList conversations={folderRows} selectedId="" onSelect={() => {}} />);
+    expect(document.querySelector(".conversation-folder-action")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-conversation-actions]")).not.toBeInTheDocument();
+  });
+
+  it("marks the confirming archive or spam action as an expanded dialog trigger", () => {
+    const { rerender } = render(<ConversationList conversations={folderRows} selectedId="" onSelect={() => {}} onRequestFolderChange={() => {}} />);
+    const archive = screen.getByRole("button", { name: "Archive conversation" });
+    expect(archive).toHaveAttribute("aria-haspopup", "dialog");
+    expect(archive).toHaveAttribute("aria-expanded", "false");
+    expect(archive).not.toHaveAttribute("aria-controls");
+
+    rerender(<ConversationList conversations={folderRows} selectedId="" onSelect={() => {}} onRequestFolderChange={() => {}} confirmingFolderId="inbox-a" />);
+
+    expect(archive).toHaveAttribute("aria-expanded", "true");
+    expect(archive).toHaveAttribute("aria-controls", "conversation-folder-confirmation");
+    expect(document.querySelector("[data-spam-conversation-id='inbox-a']")).toHaveAttribute("aria-expanded", "true");
+    expect(document.querySelector("[data-spam-conversation-id='archived-b']")).toHaveAttribute("aria-expanded", "false");
+    expect(document.querySelector("[data-folder-conversation-id='archived-b']")).not.toHaveAttribute("aria-haspopup");
+  });
+
+  it("expands only the confirming target when confirmingFolder is given", () => {
+    const { rerender } = render(<ConversationList conversations={folderRows} selectedId="" onSelect={() => {}} onRequestFolderChange={() => {}} confirmingFolderId="inbox-a" confirmingFolder="archived" />);
+
+    const archive = document.querySelector("[data-archive-conversation-id='inbox-a']")!;
+    const spam = document.querySelector("[data-spam-conversation-id='inbox-a']")!;
+    expect(archive).toHaveAttribute("aria-expanded", "true");
+    expect(archive).toHaveAttribute("aria-controls", "conversation-folder-confirmation");
+    expect(spam).toHaveAttribute("aria-expanded", "false");
+    expect(spam).not.toHaveAttribute("aria-controls");
+
+    rerender(<ConversationList conversations={folderRows} selectedId="" onSelect={() => {}} onRequestFolderChange={() => {}} confirmingFolderId="inbox-a" confirmingFolder="spam" />);
+    expect(archive).toHaveAttribute("aria-expanded", "false");
+    expect(spam).toHaveAttribute("aria-expanded", "true");
+    expect(spam).toHaveAttribute("aria-controls", "conversation-folder-confirmation");
+  });
+
+  it("keeps the pending folder action visible and disables folder and pin actions while a folder change is pending", () => {
+    const pinnable = [...folderRows, { id: "pin-d", name: "Pin D", preview: "", unread: 0 }];
+    const { rerender } = render(<ConversationList conversations={pinnable} selectedId="" onSelect={() => {}} onTogglePin={() => {}} onRequestFolderChange={() => {}} />);
+
+    rerender(<ConversationList conversations={pinnable} selectedId="" onSelect={() => {}} onTogglePin={() => {}} onRequestFolderChange={() => {}} pendingFolderId="inbox-a" pendingFolder="archived" />);
+
+    const archive = document.querySelector<HTMLButtonElement>("[data-archive-conversation-id='inbox-a']")!;
+    expect(archive).toBeDisabled();
+    expect(archive).toHaveClass("pending");
+    expect(archive.querySelector(".busy-indicator-icon")).toBeInTheDocument();
+    expect(document.querySelector("[data-spam-conversation-id='inbox-a']")).toBeDisabled();
+    expect(document.querySelector("[data-spam-conversation-id='inbox-a']")).not.toHaveClass("pending");
+    expect(document.querySelector("[data-folder-conversation-id='archived-b']")).toBeDisabled();
+    expect(document.querySelector("[data-pin-conversation-id='pin-d']")).toBeDisabled();
+    expect(document.querySelector("[data-pin-conversation-id='inbox-a']")).toBeDisabled();
+  });
+
+  it("disables folder actions while a pin change is pending", () => {
+    render(<ConversationList conversations={folderRows} selectedId="" onSelect={() => {}} onTogglePin={() => {}} onRequestFolderChange={() => {}} pendingPinId="archived-b" />);
+
+    expect(document.querySelector("[data-folder-conversation-id='archived-b']")).toBeDisabled();
+    expect(document.querySelector("[data-archive-conversation-id='inbox-a']")).toBeDisabled();
+    expect(document.querySelector("[data-folder-conversation-id='spam-c']")).toBeDisabled();
+  });
+
+  it("shows the empty label for an empty folder view and defaults to the inbox label", () => {
+    const { unmount } = render(<ConversationList conversations={[]} selectedId="" onSelect={() => {}} emptyLabel="No archived conversations" />);
+    expect(screen.getByText("No archived conversations")).toBeInTheDocument();
+    unmount();
+
+    render(<ConversationList conversations={[]} selectedId="" onSelect={() => {}} />);
+    expect(screen.getByText("No conversations yet")).toBeInTheDocument();
+  });
 });
 
 describe("desktop UI controls", () => {

@@ -438,6 +438,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     for command in [
         "mark_all_read",
         "set_conversation_pinned",
+        "set_conversation_folder",
         "set_conversation_tone",
     ] {
         assert!(commands.contains(&command.to_owned()));
@@ -531,6 +532,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "start_history_search",
         "cancel_history_search",
         "set_conversation_pinned",
+        "set_conversation_folder",
         "set_conversation_tone",
         "hosted_account",
         "hosted_sign_in",

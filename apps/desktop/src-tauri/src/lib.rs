@@ -85,8 +85,8 @@ use dto::{DraftView, Head, HistoryPage, PublicCopyView, SendResultView, Snapshot
 use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{
-    AttachmentId, AttachmentInfo, ConversationId, DraftId, LocalSearchRequest, MessageId,
-    NativePlaintextFile, NotificationTarget, SearchIndexState,
+    AttachmentId, AttachmentInfo, ConversationFolder, ConversationId, DraftId, LocalSearchRequest,
+    MessageId, NativePlaintextFile, NotificationTarget, SearchIndexState,
 };
 use peppy_desktop_api::compose::DiscardDraftInput;
 #[cfg(target_os = "macos")]
@@ -4484,6 +4484,67 @@ async fn set_conversation_pinned(
 }
 
 #[tauri::command]
+async fn set_conversation_folder(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    folder: String,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    let conversation_id = ConversationId::from_str(&conversation_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+    let folder = parse_conversation_folder(&folder)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let client = session.client.clone();
+    blocking(move || {
+        client
+            .set_conversation_folder(conversation_id, folder)
+            .map_err(core_error)
+    })
+    .await?;
+    session.notify();
+    Ok(())
+}
+
+fn parse_conversation_folder(value: &str) -> BridgeResult<ConversationFolder> {
+    match value {
+        "inbox" => Ok(ConversationFolder::Inbox),
+        "archived" => Ok(ConversationFolder::Archived),
+        "spam" => Ok(ConversationFolder::Spam),
+        _ => Err(BridgeError::new(
+            "invalid-request",
+            "The conversation folder is invalid.",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod conversation_folder_tests {
+    use super::parse_conversation_folder;
+    use peppy_client_core::ConversationFolder;
+
+    #[test]
+    fn conversation_folder_accepts_only_contract_values() {
+        assert_eq!(
+            parse_conversation_folder("inbox").unwrap(),
+            ConversationFolder::Inbox
+        );
+        assert_eq!(
+            parse_conversation_folder("archived").unwrap(),
+            ConversationFolder::Archived
+        );
+        assert_eq!(
+            parse_conversation_folder("spam").unwrap(),
+            ConversationFolder::Spam
+        );
+        for rejected in ["Inbox", "deleted", ""] {
+            assert!(parse_conversation_folder(rejected).is_err(), "{rejected:?}");
+        }
+    }
+}
+
+#[tauri::command]
 async fn set_conversation_tone(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
@@ -5604,6 +5665,7 @@ pub fn run() {
         dismiss_all_notifications,
         set_app_muted,
         set_conversation_pinned,
+        set_conversation_folder,
         set_conversation_tone,
         mark_notifications_seen,
         set_notification_preferences,

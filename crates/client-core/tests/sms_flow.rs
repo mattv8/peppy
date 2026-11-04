@@ -244,7 +244,8 @@ fn read_before_arrival_out_of_order_buffering_and_duplicate_replay() {
         vec![Conversation {
             conversation_id: captured.conversation_id,
             unread_count: 1,
-            pinned: false
+            pinned: false,
+            folder: ConversationFolder::Inbox,
         }]
     );
 

@@ -2,8 +2,8 @@
 //! serialized: no credentials, tokens, keys, file keys, raw paths or core records.
 use peppy_client_core::{
     AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft,
-    DeferredMediaStatus, Direction, Error, MediaPage, MediaPageAround, Message, MessageId,
-    MirroredNotification, SendState, Transport,
+    ConversationFolder, DeferredMediaStatus, Direction, Error, MediaPage, MediaPageAround, Message,
+    MessageId, MirroredNotification, SendState, Transport,
 };
 pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Preview};
 use serde::{Deserialize, Serialize};
@@ -216,6 +216,7 @@ pub struct ConversationView {
     #[serde(default)]
     pub draft_only: bool,
     pub pinned: bool,
+    pub folder: ConversationFolder,
 }
 
 #[derive(Serialize)]
@@ -725,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_view_serializes_its_durable_pin_state() {
+    fn conversation_view_serializes_its_durable_conversation_state() {
         let view = ConversationView {
             id: "conversation".into(),
             name: "Conversation".into(),
@@ -737,9 +738,12 @@ mod tests {
             recipientless_draft: false,
             draft_only: false,
             pinned: true,
+            folder: ConversationFolder::Archived,
         };
 
-        assert_eq!(serde_json::to_value(view).unwrap()["pinned"], true);
+        let value = serde_json::to_value(view).unwrap();
+        assert_eq!(value["pinned"], true);
+        assert_eq!(value["folder"], "archived");
     }
 
     #[test]

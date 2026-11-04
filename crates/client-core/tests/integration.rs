@@ -18,6 +18,7 @@ mod contact_source_photo;
 mod contact_sync_requests;
 mod contacts_flow;
 mod contacts_sort;
+mod conversation_folders;
 mod conversation_pinning;
 mod conversation_tones;
 mod deferred_media;

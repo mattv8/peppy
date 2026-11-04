@@ -1,7 +1,10 @@
 use super::*;
 
 pub(super) fn handles(command: &str) -> bool {
-    matches!(command, "set_conversation_pinned" | "set_conversation_tone")
+    matches!(
+        command,
+        "set_conversation_pinned" | "set_conversation_folder" | "set_conversation_tone"
+    )
 }
 
 impl BrowserCore {
@@ -23,6 +26,20 @@ impl BrowserCore {
                     ConversationId::from_str(&input.conversation_id).map_err(|_| invalid())?;
                 self.client()?
                     .set_conversation_pinned(conversation_id, input.pinned)
+                    .map_err(core)?;
+            }
+            "set_conversation_folder" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Input {
+                    conversation_id: String,
+                    folder: ConversationFolder,
+                }
+                let input: Input = serde_json::from_value(args).map_err(|_| invalid())?;
+                let conversation_id =
+                    ConversationId::from_str(&input.conversation_id).map_err(|_| invalid())?;
+                self.client()?
+                    .set_conversation_folder(conversation_id, input.folder)
                     .map_err(core)?;
             }
             "set_conversation_tone" => {
@@ -57,6 +74,7 @@ mod tests {
     #[test]
     fn exposes_only_the_conversation_commands() {
         assert!(handles("set_conversation_pinned"));
+        assert!(handles("set_conversation_folder"));
         assert!(handles("set_conversation_tone"));
         assert!(!handles("set_conversation_pin"));
     }
@@ -127,6 +145,18 @@ mod tests {
         assert_eq!(
             response(
                 &mut core,
+                "set_conversation_folder",
+                json!({"conversationId": conversation, "folder": "archived"}),
+            )["ok"],
+            true
+        );
+        assert_eq!(
+            response(&mut core, "snapshot", json!({}))["value"]["conversations"][0]["folder"],
+            "archived"
+        );
+        assert_eq!(
+            response(
+                &mut core,
                 "set_conversation_tone",
                 json!({"seed": "contact:+15555550100", "paletteIndex": 60}),
             )["ok"],
@@ -147,6 +177,20 @@ mod tests {
             &mut core,
             "set_conversation_tone",
             json!({"seed": "contact:+15555550100", "paletteIndex": 256}),
+        );
+
+        assert_eq!(response["error"]["code"], "invalid-request");
+    }
+
+    #[test]
+    fn folder_mutation_rejects_invalid_folder_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(directory.path().to_owned());
+
+        let response = response(
+            &mut core,
+            "set_conversation_folder",
+            json!({"conversationId": ConversationId::new(), "folder": "deleted"}),
         );
 
         assert_eq!(response["error"]["code"], "invalid-request");
