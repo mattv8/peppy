@@ -14,8 +14,8 @@ use peppy_client_core::{
     NotificationCaptureOutcome, NotificationTarget, PermitBlock, PermitDecision,
     PhoneReadCandidate, PhoneReadTransport, ProviderRowRef, QuarantineReason, ReceivedCommand,
     SendResult, SendState, SenderUnblockOutcome, SmsAcquisitionInput, SmsAcquisitionState,
-    SmsHistoryStatus,
-    SmsReconciliationPlan, SmsScanPlan, SmsSource, Transport, VaultCheckHeader, VaultId,
+    SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource, Transport, VaultCheckHeader,
+    VaultId,
 };
 use std::{
     fmt,
@@ -4152,12 +4152,16 @@ mod tests {
             )
             .unwrap();
 
-        assert!(client
-            .publish_sender_blocklist(Some(vec!["+15555550100".into()]), true)
-            .unwrap());
-        assert!(!client
-            .publish_sender_blocklist(Some(vec!["+15555550100".into()]), true)
-            .unwrap());
+        assert!(
+            client
+                .publish_sender_blocklist(Some(vec!["+15555550100".into()]), true)
+                .unwrap()
+        );
+        assert!(
+            !client
+                .publish_sender_blocklist(Some(vec!["+15555550100".into()]), true)
+                .unwrap()
+        );
         assert_eq!(client.reconcile_provider_archive(Vec::new()).unwrap(), 0);
         assert!(client.pending_sender_unblocks().unwrap().is_empty());
         assert!(client.interrupted_sender_unblocks().unwrap().is_empty());

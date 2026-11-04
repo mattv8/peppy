@@ -3,7 +3,7 @@
 use peppy_client_core::{
     AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft,
     ConversationFolder, ConversationFolderReason, DeferredMediaStatus, Direction, Error, MediaPage,
-    MediaPageAround, Message, MessageId, MirroredNotification, SenderUnblockStatus, SendState,
+    MediaPageAround, Message, MessageId, MirroredNotification, SendState, SenderUnblockStatus,
     Transport,
 };
 pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Preview};
