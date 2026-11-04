@@ -803,7 +803,7 @@ mod tests {
             ciphertext: Vec::new(),
         };
         envelope.ciphertext =
-            seal_frame(&encrypt(&event_key, &envelope.aad_bytes().unwrap(), &payload).unwrap());
+            seal_frame(&encrypt(event_key, &envelope.aad_bytes().unwrap(), &payload).unwrap());
         envelope
     }
 
