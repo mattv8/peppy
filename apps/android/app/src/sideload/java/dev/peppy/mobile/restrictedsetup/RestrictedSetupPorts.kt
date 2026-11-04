@@ -1,6 +1,6 @@
 package dev.peppy.mobile.restrictedsetup
 
-internal enum class RestrictedSetupNotice { SEARCHING, CODE_PROMPT, CODE_INVALID, CODE_REJECTED, WORKING, DONE, FAILED }
+internal enum class RestrictedSetupNotice { SEARCHING, NETWORK_NOT_ALLOWED, CODE_PROMPT, CODE_INVALID, CODE_REJECTED, WORKING, DONE, FAILED }
 
 internal interface RestrictedSetupNotifier {
     fun canPrompt(): Boolean

@@ -1,5 +1,6 @@
 package dev.peppy.mobile.restrictedsetup
 
+import android.app.Notification
 import android.app.NotificationManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -39,6 +40,15 @@ class RestrictedSetupNotifierTest {
         notifier.show(RestrictedSetupNotice.CODE_REJECTED)
 
         val notification = notifications.activeNotifications.single { it.id == RestrictedSetupNotifierImpl.NOTIFICATION_ID }.notification
+        assertEquals(1, notification.actions.size)
+        assertEquals("Cancel", notification.actions.single().title)
+    }
+
+    @Test fun `network not allowed notice has cancel without reply action`() {
+        notifier.show(RestrictedSetupNotice.NETWORK_NOT_ALLOWED)
+
+        val notification = notifications.activeNotifications.single { it.id == RestrictedSetupNotifierImpl.NOTIFICATION_ID }.notification
+        assertEquals("Wireless debugging is blocked here. Turn it off and on, then tap Allow.", notification.extras.getCharSequence(Notification.EXTRA_TEXT))
         assertEquals(1, notification.actions.size)
         assertEquals("Cancel", notification.actions.single().title)
     }

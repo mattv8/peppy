@@ -69,7 +69,6 @@ internal fun RestrictedSetupPanel(
     submitConnectPort: (Int) -> Boolean,
     showCodePromptAgain: () -> Unit,
     cancel: () -> Unit,
-    acknowledgeCleanup: () -> Boolean,
     startService: () -> Unit,
 ) {
     var showConsent by remember { mutableStateOf(false) }
@@ -87,13 +86,12 @@ internal fun RestrictedSetupPanel(
         HorizontalDivider()
         if (cancelled) Text(stringResource(R.string.peppy_restricted_setup_cancelled), Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         when (state.stage) {
-            RestrictedSetupStage.INTRODUCTION, RestrictedSetupStage.CLEANUP_REQUIRED -> if (state.access != RestrictedSetupAccess.ALLOWED) IdleCard(turnOffWirelessDebugging, { turnOffWirelessDebugging = it }, { showConsent = true })
+            RestrictedSetupStage.INTRODUCTION -> if (state.access != RestrictedSetupAccess.ALLOWED) IdleCard(turnOffWirelessDebugging, { turnOffWirelessDebugging = it }, { showConsent = true })
             RestrictedSetupStage.AWAITING_PAIRING -> PairingPanel(state, fallbackShown, { fallbackShown = it }, submitCode, showCodePromptAgain, { cancelled = true; cancel() })
             RestrictedSetupStage.PAIRING, RestrictedSetupStage.CONNECTING, RestrictedSetupStage.APPLYING, RestrictedSetupStage.VERIFYING, RestrictedSetupStage.TURNING_OFF -> ProgressPanel(state, submitConnectPort, { cancelled = true; cancel() })
             RestrictedSetupStage.COMPLETE -> CompletePanel(state)
             RestrictedSetupStage.FAILED -> FailedPanel(state, { showConsent = true })
         }
-        if (state.cleanupNeeded && state.stage in setOf(RestrictedSetupStage.COMPLETE, RestrictedSetupStage.CLEANUP_REQUIRED, RestrictedSetupStage.FAILED)) CleanupCard(state, acknowledgeCleanup)
     }
     if (showConsent) Consent(
         turnOffWirelessDebugging = turnOffWirelessDebugging,
@@ -170,8 +168,8 @@ private fun PairingPanel(state: RestrictedSetupState, fallbackShown: Boolean, on
     var code by remember { mutableStateOf("") }
     Column(Modifier.testTag("restricted-setup-pairing"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Heading(R.string.peppy_restricted_setup_pairing_title)
-        DiscoveryStatus(state)
-        state.hint?.let { Hint(it) }
+        if (state.activeHint == RestrictedSetupHint.NETWORK_NOT_ALLOWED) Hint(RestrictedSetupHint.NETWORK_NOT_ALLOWED) else DiscoveryStatus(state)
+        state.activeHint?.takeUnless { it == RestrictedSetupHint.NETWORK_NOT_ALLOWED }?.let { Hint(it) }
         Step(1, R.string.peppy_restricted_setup_step_1)
         SettingsButton("restricted-setup-open-settings")
         Step(2, R.string.peppy_restricted_setup_step_2)
@@ -179,7 +177,7 @@ private fun PairingPanel(state: RestrictedSetupState, fallbackShown: Boolean, on
         Text(stringResource(R.string.peppy_restricted_setup_dev_options_hint), style = MaterialTheme.typography.bodySmall)
         if (!state.notificationAvailable) Text(stringResource(R.string.peppy_restricted_setup_notifications_off_hint), Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         if (!fallbackShown && state.notificationAvailable) TextButton(onClick = { onFallbackShown(true) }, modifier = Modifier.heightIn(min = 48.dp).testTag("restricted-setup-code-fallback-toggle")) { Text(stringResource(R.string.peppy_restricted_setup_code_fallback_toggle)) }
-        if (fallbackShown || !state.notificationAvailable || state.discovery == dev.peppy.mobile.restrictedsetup.RestrictedSetupDiscovery.TIMED_OUT) {
+        if (fallbackShown || !state.notificationAvailable || (state.discovery == dev.peppy.mobile.restrictedsetup.RestrictedSetupDiscovery.TIMED_OUT && state.activeHint != RestrictedSetupHint.NETWORK_NOT_ALLOWED)) {
             FallbackForm(port, { port = it }, code, { code = it }, submitCode) { code = "" }
             Text(stringResource(R.string.peppy_restricted_setup_split_screen_hint), Modifier.testTag("restricted-setup-split-hint"), style = MaterialTheme.typography.bodySmall)
         }
@@ -219,10 +217,11 @@ private fun DiscoveryStatus(state: RestrictedSetupState) {
 private fun Hint(hint: RestrictedSetupHint) {
     val text = when (hint) {
         RestrictedSetupHint.NO_WIFI -> R.string.peppy_restricted_setup_hint_no_wifi
+        RestrictedSetupHint.NETWORK_NOT_ALLOWED -> R.string.peppy_restricted_setup_hint_network_not_allowed
         RestrictedSetupHint.CODE_REJECTED -> R.string.peppy_restricted_setup_hint_code_rejected
         RestrictedSetupHint.PAIRING_BOX_CLOSED -> R.string.peppy_restricted_setup_hint_box_closed
     }
-    Text(stringResource(text), Modifier.testTag("restricted-setup-hint").semantics { liveRegion = LiveRegionMode.Assertive })
+    Text(stringResource(text), Modifier.testTag("restricted-setup-hint").semantics { liveRegion = if (hint == RestrictedSetupHint.NETWORK_NOT_ALLOWED) LiveRegionMode.Polite else LiveRegionMode.Assertive })
 }
 
 @Composable
@@ -255,12 +254,15 @@ private fun CompletePanel(state: RestrictedSetupState) {
     Column(Modifier.testTag("restricted-setup-complete"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(stringResource(R.string.peppy_restricted_setup_complete_title), Modifier.semantics { heading(); liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.titleMedium)
         Text(stringResource(R.string.peppy_restricted_setup_complete_body))
-        Text(stringResource(R.string.peppy_restricted_setup_checked_when_finished), style = MaterialTheme.typography.bodySmall)
         when (state.wirelessDebugging) {
             WirelessDebuggingOutcome.OFF -> Text(stringResource(R.string.peppy_restricted_setup_complete_wifi_off_confirmed))
             WirelessDebuggingOutcome.REQUESTED -> Text(stringResource(R.string.peppy_restricted_setup_complete_wifi_off_requested))
-            else -> Unit
+            WirelessDebuggingOutcome.NOT_REQUESTED -> {
+                Text(stringResource(R.string.peppy_restricted_setup_complete_wifi_still_on))
+                SettingsButton("restricted-setup-complete-open-settings")
+            }
         }
+        Text(stringResource(R.string.peppy_restricted_setup_checked_when_finished), style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -271,40 +273,15 @@ private fun FailedPanel(state: RestrictedSetupState, retry: () -> Unit) {
         RestrictedSetupFailure.CONNECT_FAILED -> R.string.peppy_restricted_setup_error_connect_failed
         RestrictedSetupFailure.INVALID_ENDPOINT -> R.string.peppy_restricted_setup_error_endpoint
         RestrictedSetupFailure.TIMED_OUT -> R.string.peppy_restricted_setup_error_timeout
-        RestrictedSetupFailure.CLEANUP_MARKER -> R.string.peppy_restricted_setup_error_cleanup_marker
         RestrictedSetupFailure.NOT_VERIFIED -> R.string.peppy_restricted_setup_error_not_verified
         else -> R.string.peppy_restricted_setup_error_transport
     }
     Column(Modifier.testTag("restricted-setup-failed"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(stringResource(error), Modifier.testTag("restricted-setup-error").semantics { liveRegion = LiveRegionMode.Assertive })
-        Button(onClick = retry, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("restricted-setup-retry")) { Text(stringResource(R.string.peppy_restricted_setup_start_over)) }
+        if (state.retryBlocked) Text(stringResource(R.string.peppy_restricted_setup_restart_peppy))
+        else Button(onClick = retry, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("restricted-setup-retry")) { Text(stringResource(R.string.peppy_restricted_setup_start_over)) }
     }
 }
-
-@Composable
-private fun CleanupCard(state: RestrictedSetupState, acknowledge: () -> Boolean) {
-    var forgotten by remember { mutableStateOf(false) }
-    var wirelessOff by remember { mutableStateOf(false) }
-    val needsWirelessConfirmation = state.wirelessDebugging != WirelessDebuggingOutcome.OFF
-    Column(Modifier.testTag("restricted-setup-cleanup"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Heading(R.string.peppy_restricted_setup_cleanup_title)
-        Text(stringResource(R.string.peppy_restricted_setup_cleanup_body))
-        Text(stringResource(R.string.peppy_restricted_setup_cleanup_body_leftover))
-        Text(stringResource(R.string.peppy_restricted_setup_cleanup_step_1))
-        Text(stringResource(R.string.peppy_restricted_setup_cleanup_step_2))
-        if (needsWirelessConfirmation) Text(stringResource(R.string.peppy_restricted_setup_cleanup_step_3_check))
-        SettingsButton("restricted-setup-cleanup-open-settings")
-        Text(stringResource(R.string.peppy_restricted_setup_cleanup_checked_heading), Modifier.testTag("restricted-setup-cleanup-checked").semantics { heading() })
-        Text("${stringResource(R.string.peppy_restricted_setup_cleanup_access)}: ${when (state.access) { RestrictedSetupAccess.ALLOWED -> stringResource(R.string.peppy_restricted_setup_cleanup_allowed); RestrictedSetupAccess.NOT_ALLOWED -> stringResource(R.string.peppy_restricted_setup_cleanup_not_allowed); else -> stringResource(R.string.peppy_restricted_setup_cleanup_unknown) }}", Modifier.testTag("restricted-setup-checked-access"))
-        Text(stringResource(R.string.peppy_restricted_setup_cleanup_asserted_heading), Modifier.testTag("restricted-setup-cleanup-asserted").semantics { heading() })
-        CleanupCheckbox("restricted-setup-confirm-forgotten", R.string.peppy_restricted_setup_confirm_forgotten, forgotten) { forgotten = it }
-        if (needsWirelessConfirmation) CleanupCheckbox("restricted-setup-confirm-wireless-off", R.string.peppy_restricted_setup_confirm_wireless_off, wirelessOff) { wirelessOff = it }
-        Button(onClick = { acknowledge() }, enabled = forgotten && (!needsWirelessConfirmation || wirelessOff), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("restricted-setup-cleanup-acknowledge")) { Text(stringResource(R.string.peppy_restricted_setup_cleanup_acknowledge)) }
-    }
-}
-
-@Composable
-private fun CleanupCheckbox(tag: String, label: Int, checked: Boolean, onCheckedChange: (Boolean) -> Unit) = Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(tag).toggleable(checked, role = Role.Checkbox, onValueChange = onCheckedChange)) { Checkbox(checked, null); Text(stringResource(label), Modifier.padding(start = 8.dp)) }
 
 @Composable
 private fun CancelButton(cancel: () -> Unit, disabled: Boolean) = TextButton(onClick = cancel, enabled = !disabled, modifier = Modifier.heightIn(min = 48.dp).testTag("restricted-setup-cancel")) { Text(stringResource(if (disabled) R.string.peppy_restricted_setup_checking else R.string.peppy_cancel)) }

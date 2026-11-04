@@ -1166,7 +1166,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android keeps the pairing in Developer options until you remove it. Peppy cannot remove it for you. It will remind you. Each attempt may add an entry named Peppy. Removing it does not turn the restricted access off."
+            "value": "Android may keep this pairing under Paired devices in Wireless debugging, as an entry named Peppy. Peppy does not keep its key, so you do not need to remove it. Removing it does not turn the restricted access off."
           }
         }
       }
@@ -1216,7 +1216,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "1. Open Developer options and turn on Wireless debugging. Allow the network prompt."
+            "value": "1. Open Developer options and turn on Wireless debugging. If Android asks about this network, tap Allow. Keep the screen on."
           }
         }
       }
@@ -1337,6 +1337,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "This phone is not on Wi-Fi. Wireless debugging needs Wi-Fi."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_hint_network_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android did not allow Wireless debugging on this Wi-Fi. In Developer options, turn Wireless debugging off and on again, then tap Allow."
           }
         }
       }
@@ -1571,152 +1581,12 @@
         }
       }
     },
-    "peppy.restricted_setup_cleanup_title": {
+    "peppy.restricted_setup_complete_wifi_still_on": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Remove Peppy's pairing from Android"
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_body": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Android keeps this pairing until you remove it. Peppy cannot remove it for you. Removing it does not turn the restricted access off."
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_body_leftover": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Peppy does not keep the key for this entry, so it is only a leftover in the list."
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_step_1": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open Developer options, then Wireless debugging."
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_step_2": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Under Paired devices, forget every entry named Peppy."
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_step_3_check": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Make sure Wireless debugging is off."
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_checked_heading": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Checked by Peppy"
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_asserted_heading": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "You confirm. Peppy cannot check these."
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_access": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Android access now"
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_allowed": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Allowed"
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_not_allowed": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Not allowed"
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_unknown": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Unknown"
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_confirm_forgotten": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "I removed every Peppy entry from Paired devices, or there were none"
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_confirm_wireless_off": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "I turned Wireless debugging off"
-          }
-        }
-      }
-    },
-    "peppy.restricted_setup_cleanup_acknowledge": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "I have done this"
+            "value": "Wireless debugging is still on. You can turn it off in Developer options when you are done."
           }
         }
       }
@@ -1816,7 +1686,17 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Access allowed. Open Peppy to finish cleaning up."
+            "value": "Access allowed."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_network_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wireless debugging is blocked here. Turn it off and on, then tap Allow."
           }
         }
       }
@@ -1881,16 +1761,6 @@
         }
       }
     },
-    "peppy.restricted_setup_error_cleanup_marker": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Peppy could not record the cleanup reminder, so it did not start pairing."
-          }
-        }
-      }
-    },
     "peppy.restricted_setup_error_transport": {
       "localizations": {
         "en": {
@@ -1907,6 +1777,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Android still reports restricted message access as not allowed."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_restart_peppy": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close and reopen Peppy to try again."
           }
         }
       }
