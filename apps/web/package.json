@@ -21,10 +21,10 @@
     "@testing-library/react": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^6.1.2",
     "jsdom": "catalog:",
     "typescript": "catalog:",
-    "vite": "^6.4.4",
+    "vite": "^8.3.5",
     "vitest": "catalog:"
   }
 }
