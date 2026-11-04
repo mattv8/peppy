@@ -240,7 +240,7 @@ jobs:
           mkdir -p ../../dist/android-release
           ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:lintSideload :app:assembleSideload -PpeppyDistribution=direct "${gradle_args[@]}"
           install -m 0644 app/build/outputs/apk/sideload/app-sideload-unsigned.apk ../../dist/android-release/peppy-android-unsigned.apk
-          ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease -PpeppyDistribution=play "${gradle_args[@]}"
+          ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease :app:mergeReleaseNativeDebugMetadata -PpeppyDistribution=play "${gradle_args[@]}"
           install -m 0644 app/build/outputs/bundle/release/app-release.aab ../../dist/android-release/peppy-android-unsigned.aab
           install -m 0644 app/build/outputs/native-debug-symbols/release/native-debug-symbols.zip ../../dist/android-release/peppy-android-native-debug-symbols.zip
       - name: Stop Android Gradle daemon before signing
