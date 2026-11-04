@@ -727,7 +727,17 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session_renewal(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_play_billing_context(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_play_billing_link_response(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_parse_push_config(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_play_billing_context_path(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_play_billing_link_path(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_play_billing_link_request(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning(
     ): Int
@@ -1739,7 +1749,17 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session_renewal(`json`: RustBuffer.ByValue,`expectedAccountId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_play_billing_context(`json`: RustBuffer.ByValue,`expectedAccountId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_play_billing_link_response(`json`: RustBuffer.ByValue,`expectedAccountId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_parse_push_config(`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_play_billing_context_path(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_play_billing_link_path(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_play_billing_link_request(`operationId`: RustBuffer.ByValue,`productId`: RustBuffer.ByValue,`purchaseToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_prepare_hosted_provisioning(`origin`: RustBuffer.ByValue,`accountId`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,`clientKind`: RustBuffer.ByValue,`deviceName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1956,7 +1976,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session_renewal() and 0xFFFF) != 34969) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_play_billing_context() and 0xFFFF) != 14118) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_play_billing_link_response() and 0xFFFF) != 20760) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_push_config() and 0xFFFF) != 51462) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_play_billing_context_path() and 0xFFFF) != 25374) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_play_billing_link_path() and 0xFFFF) != 64957) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_play_billing_link_request() and 0xFFFF) != 52286) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning() and 0xFFFF) != 3935) {
@@ -11856,6 +11891,68 @@ public object FfiConverterTypeNativePhoneReadEffect: FfiConverterRustBuffer<Nati
 
 
 
+/**
+ * Parsed, account-bound Play billing context. `available` means a new Play
+ * purchase may begin, not merely that existing Play metadata can be restored.
+ */
+data class NativePlayBillingContext (
+    var `accountId`: kotlin.String
+    , 
+    var `available`: kotlin.Boolean
+    , 
+    var `productId`: kotlin.String?
+    , 
+    var `basePlanIds`: List<kotlin.String>
+    , 
+    var `accountBinding`: kotlin.String?
+    , 
+    var `currentProvider`: NativeBillingProvider
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePlayBillingContext: FfiConverterRustBuffer<NativePlayBillingContext> {
+    override fun read(buf: ByteBuffer): NativePlayBillingContext {
+        return NativePlayBillingContext(
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeNativeBillingProvider.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativePlayBillingContext) = (
+            FfiConverterString.allocationSize(value.`accountId`) +
+            FfiConverterBoolean.allocationSize(value.`available`) +
+            FfiConverterOptionalString.allocationSize(value.`productId`) +
+            FfiConverterSequenceString.allocationSize(value.`basePlanIds`) +
+            FfiConverterOptionalString.allocationSize(value.`accountBinding`) +
+            FfiConverterTypeNativeBillingProvider.allocationSize(value.`currentProvider`)
+    )
+
+    override fun write(value: NativePlayBillingContext, buf: ByteBuffer) {
+            FfiConverterString.write(value.`accountId`, buf)
+            FfiConverterBoolean.write(value.`available`, buf)
+            FfiConverterOptionalString.write(value.`productId`, buf)
+            FfiConverterSequenceString.write(value.`basePlanIds`, buf)
+            FfiConverterOptionalString.write(value.`accountBinding`, buf)
+            FfiConverterTypeNativeBillingProvider.write(value.`currentProvider`, buf)
+    }
+}
+
+
+
 data class NativeProviderRowRef (
     var `sourceGeneration`: kotlin.String
     , 
@@ -13502,6 +13599,46 @@ public object FfiConverterTypeNativeAttachmentUseState: FfiConverterRustBuffer<N
 
 
 
+/**
+ * Provider currently associated with the hosted account. `Unknown` is
+ * intentionally non-purchasable.
+ */
+
+enum class NativeBillingProvider {
+    
+    NONE,
+    STRIPE,
+    PLAY,
+    UNKNOWN;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeBillingProvider: FfiConverterRustBuffer<NativeBillingProvider> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeBillingProvider.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeBillingProvider) = 4UL
+
+    override fun write(value: NativeBillingProvider, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 
 enum class NativeDeviceRetentionAvailability {
     
@@ -14186,6 +14323,46 @@ public object FfiConverterTypeNativePhoneReadTransport: FfiConverterRustBuffer<N
     override fun allocationSize(value: NativePhoneReadTransport) = 4UL
 
     override fun write(value: NativePhoneReadTransport, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Non-entitling result of an account-bound Play purchase link attempt.
+ */
+
+enum class NativePlayLinkOutcome {
+    
+    LINKED,
+    PENDING,
+    BOUND_TO_OTHER_ACCOUNT,
+    NOT_ENTITLING,
+    UNKNOWN;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePlayLinkOutcome: FfiConverterRustBuffer<NativePlayLinkOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        NativePlayLinkOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativePlayLinkOutcome) = 4UL
+
+    override fun write(value: NativePlayLinkOutcome, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -15857,6 +16034,32 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
     }
     
 
+    @Throws(MobileBindingsException::class) fun `parsePlayBillingContext`(`json`: kotlin.String, `expectedAccountId`: kotlin.String): NativePlayBillingContext {
+            return FfiConverterTypeNativePlayBillingContext.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_play_billing_context(
+    
+        
+        FfiConverterString.lower(`json`),
+        FfiConverterString.lower(`expectedAccountId`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `parsePlayBillingLinkResponse`(`json`: kotlin.String, `expectedAccountId`: kotlin.String): NativePlayLinkOutcome {
+            return FfiConverterTypeNativePlayLinkOutcome.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_play_billing_link_response(
+    
+        
+        FfiConverterString.lower(`json`),
+        FfiConverterString.lower(`expectedAccountId`),_status)
+}
+    )
+    }
+    
+
     @Throws(MobileBindingsException::class) fun `parsePushConfig`(`json`: kotlin.String): NativePushConfig {
             return FfiConverterTypeNativePushConfig.lift(
     uniffiRustCallWithError(MobileBindingsException) { _status ->
@@ -15864,6 +16067,44 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
     
         
         FfiConverterString.lower(`json`),_status)
+}
+    )
+    }
+    
+ fun `playBillingContextPath`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_play_billing_context_path(
+    
+        _status)
+}
+    )
+    }
+    
+ fun `playBillingLinkPath`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_play_billing_link_path(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Builds the account-session-authenticated link body. The purchase token is
+         * not logged or retained here; server-side idempotency is bound to that token.
+         */
+    @Throws(MobileBindingsException::class) fun `playBillingLinkRequest`(`operationId`: kotlin.String, `productId`: kotlin.String, `purchaseToken`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_play_billing_link_request(
+    
+        
+        FfiConverterString.lower(`operationId`),
+        FfiConverterString.lower(`productId`),
+        FfiConverterString.lower(`purchaseToken`),_status)
 }
     )
     }

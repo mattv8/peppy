@@ -38,6 +38,7 @@
         tools:targetApi="31">
         <!-- Never acquire an FCM token merely because Firebase configuration is present. -->
         <meta-data android:name="firebase_messaging_auto_init_enabled" android:value="false" />
+        <meta-data android:name="dev.peppy.mobile.distribution" android:value="${peppyDistribution}" />
         <activity android:name=".MainActivity" android:exported="true" android:theme="@style/AppTheme">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

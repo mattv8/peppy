@@ -8,6 +8,7 @@ describe("MarkAllReadAction", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
   it("uses the full unread count, confirms once, and refreshes after acknowledgement", async () => {
     const markAllRead = vi.fn().mockResolvedValue("2");
@@ -158,7 +159,11 @@ describe("MarkAllReadAction", () => {
     expect(screen.getByRole("status")).toBeEmptyDOMElement();
   });
 
-  it("restores focus to the action after retrying from a toast", async () => {
+  it("restores focus to the action after retrying from a toast when the focus job wins the pending render race", async () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback => {
+      queueMicrotask(() => callback(performance.now()));
+      return 1;
+    });
     const markAllRead = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce("1");
     render(<MarkAllReadAction unreadCount={1} enabled markAllRead={markAllRead} refresh={vi.fn().mockResolvedValue(undefined)} onFocusFallback={vi.fn()} />);
 

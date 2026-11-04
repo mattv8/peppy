@@ -246,6 +246,9 @@ class AndroidNativeVerifierTests(unittest.TestCase):
                 script = repository / "infra/compose/verify-android-native.sh"
                 script.parent.mkdir(parents=True)
                 shutil.copy(ROOT / "infra/compose/verify-android-native.sh", script)
+                checker = repository / "infra/release/check-elf-alignment.py"
+                checker.parent.mkdir(parents=True)
+                shutil.copy(ROOT / "infra/release/check-elf-alignment.py", checker)
 
                 target_directory = repository / "target"
                 cargo_log = temporary_directory / "cargo-log.jsonl"
@@ -290,6 +293,9 @@ class AndroidNativeVerifierTests(unittest.TestCase):
                 script = repository / "infra/compose/verify-android-native.sh"
                 script.parent.mkdir(parents=True)
                 shutil.copy(ROOT / "infra/compose/verify-android-native.sh", script)
+                checker = repository / "infra/release/check-elf-alignment.py"
+                checker.parent.mkdir(parents=True)
+                shutil.copy(ROOT / "infra/release/check-elf-alignment.py", checker)
 
                 target_directory = repository / "target"
                 cargo_log = temporary_directory / "cargo-log.jsonl"
@@ -342,6 +348,9 @@ class AndroidNativeVerifierTests(unittest.TestCase):
             script = repository / "infra/compose/verify-android-native.sh"
             script.parent.mkdir(parents=True)
             shutil.copy(ROOT / "infra/compose/verify-android-native.sh", script)
+            checker = repository / "infra/release/check-elf-alignment.py"
+            checker.parent.mkdir(parents=True)
+            shutil.copy(ROOT / "infra/release/check-elf-alignment.py", checker)
 
             caller_directory = temporary_directory / "caller directory"
             caller_directory.mkdir()
@@ -419,6 +428,7 @@ class AndroidNativeVerifierTests(unittest.TestCase):
             "import json\n"
             "import os\n"
             "import pathlib\n"
+            "import struct\n"
             "import sys\n"
             "arguments = sys.argv[1:]\n"
             "target = arguments[arguments.index('--target') + 1] if '--target' in arguments else None\n"
@@ -437,7 +447,14 @@ class AndroidNativeVerifierTests(unittest.TestCase):
             "    else:\n"
             "        library = target_directory / 'debug' / 'libpeppy_mobile_bindings.dylib'\n"
             "    library.parent.mkdir(parents=True, exist_ok=True)\n"
-            "    library.write_bytes(b'library')\n"
+            "    if target:\n"
+            "        header = bytearray(64)\n"
+            "        header[:16] = b'\\x7fELF\\x02\\x01\\x01\\x00' + b'\\x00' * 8\n"
+            "        struct.pack_into('<HHIQQQIHHHHHH', header, 16, 3, 183, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0)\n"
+            "        program_header = struct.pack('<IIQQQQQQ', 1, 5, 0, 0, 0, 0, 0, 16384)\n"
+            "        library.write_bytes(header + program_header)\n"
+            "    else:\n"
+            "        library.write_bytes(b'library')\n"
         )
         path.chmod(0o755)
 
@@ -499,6 +516,9 @@ class NativeVerifierFixture:
         script = repository / "infra/compose/verify-android-native.sh"
         script.parent.mkdir(parents=True)
         shutil.copy(ROOT / "infra/compose/verify-android-native.sh", script)
+        checker = repository / "infra/release/check-elf-alignment.py"
+        checker.parent.mkdir(parents=True)
+        shutil.copy(ROOT / "infra/release/check-elf-alignment.py", checker)
         tools_directory = temporary_directory / "tools"
         tools_directory.mkdir()
         self.test_case.write_fake_cargo(tools_directory / "cargo")

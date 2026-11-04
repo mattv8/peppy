@@ -3041,6 +3041,16 @@
         }
       }
     },
+    "peppy.system_banner_opens_subscription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens subscription details"
+          }
+        }
+      }
+    },
     "peppy.system_banner_more": {
       "localizations": {
         "en": {
@@ -4321,6 +4331,16 @@
         }
       }
     },
+    "peppy.play_session_storage_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your saved sign-in session could not be read from secure storage. Try again."
+          }
+        }
+      }
+    },
     "peppy.production_no_google_account": {
       "localizations": {
         "en": {
@@ -5507,6 +5527,526 @@
           "stringUnit": {
             "state": "translated",
             "value": "Peppy apps and hosted service. Self-hosted server operators set their own privacy practices."
+          }
+        }
+      }
+    },
+    "peppy.account_delete_section": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Peppy account"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_row": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Peppy account"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete your Peppy account"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You'll finish deleting your Peppy account in your browser. You may need to sign in again there. Nothing is deleted from this app right now."
+          }
+        }
+      }
+    },
+    "peppy.account_delete_subscription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If you subscribed through Google Play, review your subscription status in Google Play, and follow the instructions on the deletion page."
+          }
+        }
+      }
+    },
+    "peppy.account_delete_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_view_subscription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View subscription"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_vault_distinct": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "To delete only the vault on this phone's server, use Delete vault in Settings."
+          }
+        }
+      }
+    },
+    "peppy.play_subscription_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscription"
+          }
+        }
+      }
+    },
+    "peppy.play_account_row": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscription"
+          }
+        }
+      }
+    },
+    "peppy.play_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking Google Play…"
+          }
+        }
+      }
+    },
+    "peppy.play_provider_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billing"
+          }
+        }
+      }
+    },
+    "peppy.play_provider_google_play": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play"
+          }
+        }
+      }
+    },
+    "peppy.play_manage_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage in Google Play"
+          }
+        }
+      }
+    },
+    "peppy.play_manage_cta_description": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage in Google Play, opens Google Play"
+          }
+        }
+      }
+    },
+    "peppy.play_other_provider_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This subscription isn't billed through Google Play, so it can't be changed in this app."
+          }
+        }
+      }
+    },
+    "peppy.play_unknown_provider_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscription details can't be shown in this version of Peppy. Update the app and try again."
+          }
+        }
+      }
+    },
+    "peppy.play_not_offered_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscriptions can't be started from this app right now."
+          }
+        }
+      }
+    },
+    "peppy.play_billing_unavailable_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play purchases aren't available on this device right now. Make sure Google Play is installed and up to date, then try again."
+          }
+        }
+      }
+    },
+    "peppy.play_plan_group_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a plan"
+          }
+        }
+      }
+    },
+    "peppy.play_plan_monthly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Monthly"
+          }
+        }
+      }
+    },
+    "peppy.play_plan_annual": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Annual"
+          }
+        }
+      }
+    },
+    "peppy.play_price_per_month": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ per month"
+          }
+        }
+      }
+    },
+    "peppy.play_price_per_year": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ per year"
+          }
+        }
+      }
+    },
+    "peppy.play_billed_monthly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billed every month"
+          }
+        }
+      }
+    },
+    "peppy.play_billed_yearly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billed once a year"
+          }
+        }
+      }
+    },
+    "peppy.play_summary_monthly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Monthly: %1$@ per month"
+          }
+        }
+      }
+    },
+    "peppy.play_summary_annual": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Annual: %1$@ per year"
+          }
+        }
+      }
+    },
+    "peppy.play_terms_monthly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billed every month. The monthly price is charged at purchase and again at each monthly renewal."
+          }
+        }
+      }
+    },
+    "peppy.play_terms_annual": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billed once a year. The full yearly price is charged at purchase and again at each yearly renewal."
+          }
+        }
+      }
+    },
+    "peppy.play_terms_renewal": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Payment is charged to your Google Play account. Your subscription renews automatically until you cancel it."
+          }
+        }
+      }
+    },
+    "peppy.play_terms_cancel": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can manage or cancel it any time in Google Play. To avoid the next charge, cancel before the renewal date."
+          }
+        }
+      }
+    },
+    "peppy.play_terms_account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your subscription is linked to the Peppy account you are signed in to."
+          }
+        }
+      }
+    },
+    "peppy.play_subscribe_description": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscribe, %1$@, %2$@"
+          }
+        }
+      }
+    },
+    "peppy.play_restore_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore purchases"
+          }
+        }
+      }
+    },
+    "peppy.play_restore_working": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking Google Play for your subscription…"
+          }
+        }
+      }
+    },
+    "peppy.play_restore_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No Peppy subscription was found on this Google Play account."
+          }
+        }
+      }
+    },
+    "peppy.play_pending_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for payment approval"
+          }
+        }
+      }
+    },
+    "peppy.play_pending_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play hasn't finished processing this payment. Peppy access starts after it completes. You can leave this screen and check again later."
+          }
+        }
+      }
+    },
+    "peppy.play_pending_check": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check again"
+          }
+        }
+      }
+    },
+    "peppy.play_active_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your subscription is active."
+          }
+        }
+      }
+    },
+    "peppy.play_link_retry_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your purchase is saved in Google Play. Try again to finish linking it to your Peppy account."
+          }
+        }
+      }
+    },
+    "peppy.play_not_active_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play didn't confirm an active subscription for this purchase. Try Restore purchases, or check the subscription in Google Play."
+          }
+        }
+      }
+    },
+    "peppy.play_other_account_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linked to a different Peppy account"
+          }
+        }
+      }
+    },
+    "peppy.play_other_account_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Google Play subscription is already linked to a different Peppy account, so it can't be used here. Sign in with that account, or manage the subscription in Google Play."
+          }
+        }
+      }
+    },
+    "peppy.play_wrong_account_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You're signed in to a different Peppy account than the one this purchase belongs to. Sign in with the original account to continue."
+          }
+        }
+      }
+    },
+    "peppy.play_vault_mismatch_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Different vault"
+          }
+        }
+      }
+    },
+    "peppy.play_vault_mismatch_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The account you're signed in to has a different vault than the one this phone is connected to. A subscription applies to the signed-in account. It doesn't change this phone's vault."
+          }
+        }
+      }
+    },
+    "peppy.play_vault_mismatch_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage signed-in account"
+          }
+        }
+      }
+    },
+    "peppy.play_switch_account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in with a different account"
+          }
+        }
+      }
+    },
+    "peppy.play_signin_required_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in to your Peppy account to subscribe or manage your subscription. Your enrolled phone and local data stay as they are."
+          }
+        }
+      }
+    },
+    "peppy.play_link_retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try again"
           }
         }
       }

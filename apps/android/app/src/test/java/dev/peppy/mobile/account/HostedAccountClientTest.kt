@@ -57,6 +57,7 @@ class HostedAccountClientTest {
         var beforeSession: (() -> Unit)? = null
         var beforeRenew: (() -> Unit)? = null
         var beforeAccount: (() -> Unit)? = null
+        var beforeBillingContext: (() -> Unit)? = null
         var renewCount = 0
         var renewResponse = 200
         var accountResponse = 200
@@ -70,6 +71,18 @@ class HostedAccountClientTest {
             calls += path
             return when (path) {
                 "/hosted/v1/auth/config" -> HttpResult(200, """{"available_providers":["google"]}""")
+                "/hosted/v1/play/billing/context" -> {
+                    assertNotNull(bearer)
+                    beforeBillingContext?.invoke()
+                    HttpResult(200, JSONObject()
+                        .put("account_id", accountId)
+                        .put("available", true)
+                        .put("product_id", "peppy.monthly")
+                        .put("base_plan_ids", org.json.JSONArray(listOf("monthly")))
+                        .put("account_binding", "binding")
+                        .put("current_provider", "none")
+                        .toString())
+                }
                 "/hosted/v1/account" -> {
                     assertNotNull(bearer)
                     val responseCode = accountResponse
@@ -140,6 +153,58 @@ class HostedAccountClientTest {
         fail("Expected ${T::class}")
     }
     private val phrase = "velvet orchard lantern canyon glacier silver"
+
+
+    @Test fun billingAccountIdReadsValidLocalSessionWithoutHttp() = runBlocking {
+        val f = Fixture()
+        f.login()
+        f.server.calls.clear()
+
+        assertEquals(f.server.accountId, f.client.billingAccountId())
+        assertTrue(f.server.calls.isEmpty())
+    }
+
+    @Test fun billingAccountIdRejectsExpiredLocalSessionWithoutHttp() = runBlocking {
+        val f = Fixture()
+        f.login()
+        f.server.calls.clear()
+        f.now = 3_600_000L
+
+        try {
+            f.client.billingAccountId()
+            fail("Expected expired session")
+        } catch (failure: HostedFailure) {
+            assertEquals(HostedFailure.Kind.SESSION_EXPIRED, failure.kind)
+        }
+        assertTrue(f.server.calls.isEmpty())
+    }
+
+    @Test fun billingSnapshotIsBoundToExactSessionTokenBeforeAndAfterHttp() = runBlocking {
+        val f = Fixture()
+        f.login()
+        val snapshot = f.client.captureBillingSession(f.server.accountId)
+        assertTrue(f.client.isBillingSessionCurrent(snapshot))
+
+        f.server.beforeBillingContext = {
+            f.store.write(
+                HostedAccountClient.SESSION_KEY,
+                JSONObject()
+                    .put("account_id", f.server.accountId)
+                    .put("bearer", "pst_${"z".repeat(64)}")
+                    .put("expires_at", 3_600_000L)
+                    .toString()
+                    .toByteArray(),
+            )
+        }
+
+        rejects<kotlinx.coroutines.CancellationException> {
+            f.client.playBillingContext(snapshot)
+        }
+        assertFalse(f.client.isBillingSessionCurrent(snapshot))
+        val replacement = f.client.captureBillingSession(f.server.accountId)
+        assertNotEquals(snapshot.fence, replacement.fence)
+        assertTrue(f.client.isBillingSessionCurrent(replacement))
+    }
 
     @Test fun usesRealRoutesAndProvisionsSubscribedFirstVault() = runBlocking {
         val f = Fixture()

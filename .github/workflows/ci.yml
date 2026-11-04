@@ -135,7 +135,9 @@ jobs:
       - run: infra/release/test-release-scripts.sh
       - run: bash infra/release/test-release-asset-groups.sh
       - run: bash infra/release/test-release-prefixes.sh
+      - run: infra/release/test-elf-alignment.sh
       - run: infra/release/test-android-signing.sh
+      - run: infra/release/test-android-distribution.sh
       - run: infra/release/linux-repository/test-linux-repository.sh
       - run: infra/release/test-desktop-bundles.sh
       - name: Test real Linux package normalization

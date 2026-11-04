@@ -205,6 +205,13 @@ jobs:
           sdkmanager_status=${PIPESTATUS[1]}
           set -e
           exit "$sdkmanager_status"
+      - name: Install verified bundletool
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/bundletool.jar" \
+            https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar
+          echo 'a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29  '"$RUNNER_TEMP/bundletool.jar" | sha256sum --check --strict
       - name: Test Firebase Android app configuration validation
         run: node --test infra/build/validate-firebase-app-config.test.mjs
       - name: Configure optional Firebase Android app
@@ -222,19 +229,20 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           infra/compose/verify-android-native.sh
           cd apps/android
+          gradle_args=()
           if [[ -n "$VERSION" || -n "$ANDROID_VERSION_CODE" ]]; then
             if [[ -z "$VERSION" || -z "$ANDROID_VERSION_CODE" ]]; then
               echo "version and android_version_code must both be set" >&2
               exit 1
             fi
-            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleSideload :app:bundleRelease \
-              "-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE"
-          else
-            ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleSideload :app:bundleRelease
+            gradle_args+=("-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE")
           fi
           mkdir -p ../../dist/android-release
+          ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:lintSideload :app:assembleSideload -PpeppyDistribution=direct "${gradle_args[@]}"
           install -m 0644 app/build/outputs/apk/sideload/app-sideload-unsigned.apk ../../dist/android-release/peppy-android-unsigned.apk
+          ./gradlew --dependency-verification=strict :app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease -PpeppyDistribution=play "${gradle_args[@]}"
           install -m 0644 app/build/outputs/bundle/release/app-release.aab ../../dist/android-release/peppy-android-unsigned.aab
+          install -m 0644 app/build/outputs/native-debug-symbols/release/native-debug-symbols.zip ../../dist/android-release/peppy-android-native-debug-symbols.zip
       - name: Stop Android Gradle daemon before signing
         if: inputs.trusted_update_build
         working-directory: apps/android
@@ -248,6 +256,13 @@ jobs:
           PEPPY_ANDROID_KEY_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_ANDROID_KEY_PASSWORD || '' }}
           PEPPY_ANDROID_SIGNING_CERT_SHA256: ${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}
         run: bash infra/release/sign-android-artifacts.sh dist/android-release/peppy-android-unsigned.apk dist/android-release/peppy-android-unsigned.aab dist/android-release
+      - name: Verify trusted Android distribution metadata and symbols
+        if: inputs.trusted_update_build
+        env:
+          BUNDLETOOL_JAR: ${{ runner.temp }}/bundletool.jar
+        run: |
+          export LLVM_NM="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          bash infra/release/verify-android-distribution.sh dist/android-release/peppy-android.apk dist/android-release/peppy-android.aab dist/android-release/peppy-android-native-debug-symbols.zip
       - name: Build development Android debug APK
         if: ${{ !inputs.trusted_update_build }}
         env:
@@ -277,6 +292,7 @@ jobs:
           path: |
             dist/android-release/peppy-android.apk
             dist/android-release/peppy-android.aab
+            dist/android-release/peppy-android-native-debug-symbols.zip
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

@@ -17,7 +17,9 @@ version *args:
 release-test:
     infra/release/test-compute-version.sh
     infra/release/test-release-scripts.sh
+    infra/release/test-elf-alignment.sh
     infra/release/test-android-signing.sh
+    infra/release/test-android-distribution.sh
     infra/release/linux-repository/test-linux-repository.sh
 
 doctor:

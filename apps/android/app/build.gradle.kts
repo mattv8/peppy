@@ -40,9 +40,21 @@ fun strictBooleanProperty(name: String): Boolean = providers.gradleProperty(name
 
 val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
 val peppySideloadDebugSigning = strictBooleanProperty("peppySideloadDebugSigning")
+val releaseTaskRequested = gradle.startParameter.taskNames.any { taskName ->
+    taskName.contains("release", ignoreCase = true) || taskName.contains("sideload", ignoreCase = true)
+}
+require(!releaseTaskRequested || !peppyHostedAuthDiagnostics) {
+    "peppyHostedAuthDiagnostics cannot be enabled for release or sideload tasks"
+}
 require(!providers.gradleProperty("peppySmsDiagnostics").isPresent) {
     "peppySmsDiagnostics was removed; enable diagnostics at runtime in Settings"
 }
+
+val peppyDistribution = providers.gradleProperty("peppyDistribution").orNull ?: "direct"
+require(peppyDistribution in setOf("direct", "play")) {
+    "peppyDistribution must be direct or play; got '$peppyDistribution'"
+}
+val jnaVersion = "5.17.0"
 
 fun gitValueOrNull(vararg arguments: String): String? = runCatching {
     ProcessBuilder("git", *arguments).directory(rootProject.projectDir.resolve("../.."))
@@ -187,6 +199,7 @@ if (file("google-services.json").isFile) {
 android {
     namespace = "dev.peppy.mobile"
     compileSdk = 36
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "dev.peppy.mobile"
@@ -209,6 +222,8 @@ android {
         buildConfigField("String", "PEPPY_SOURCE_DIRTY_STATE", "\"$sourceDirtyState\"")
         buildConfigField("String", "PEPPY_SOURCE_DIFF_SHA256", "\"$sourceDiffSha256\"")
         buildConfigField("String", "PEPPY_NATIVE_PROFILE", "\"$nativeProfile\"")
+        buildConfigField("String", "PEPPY_DISTRIBUTION", "\"$peppyDistribution\"")
+        manifestPlaceholders["peppyDistribution"] = peppyDistribution
         // Native bindings are verified and packaged for physical ARM64 and x86_64 emulators.
         ndk {
             abiFilters.clear()
@@ -226,6 +241,12 @@ android {
         getByName("debug") {
             buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
+        getByName("release") {
+            isDebuggable = false
+            isMinifyEnabled = false
+            buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", "false")
+            ndk { debugSymbolLevel = "SYMBOL_TABLE" }
+        }
         create("sideload") {
             initWith(getByName("release"))
             matchingFallbacks += listOf("release")
@@ -233,11 +254,6 @@ android {
             if (peppySideloadDebugSigning) {
                 signingConfig = signingConfigs.getByName("debug")
             }
-        }
-        getByName("release") {
-            isDebuggable = false
-            isMinifyEnabled = false
-            buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
     }
 
@@ -305,7 +321,8 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     // UniFFI-generated Kotlin uses JNA to load libpeppy_mobile_bindings.so
     // from this APK's jniLibs directory; never from an arbitrary filesystem path.
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    implementation("net.java.dev.jna:jna:$jnaVersion@aar")
+    implementation("com.android.billingclient:billing:8.3.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
@@ -314,7 +331,7 @@ dependencies {
     testImplementation(platform("androidx.compose:compose-bom:2025.10.01"))
     testImplementation("androidx.compose.ui:ui-test-junit4")
     // Desktop JNA jar (with host jnidispatch) for the JVM-hosted Robolectric runtime.
-    testImplementation("net.java.dev.jna:jna:5.14.0")
+    testImplementation("net.java.dev.jna:jna:$jnaVersion")
 
     androidTestImplementation("androidx.test:core:1.6.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
