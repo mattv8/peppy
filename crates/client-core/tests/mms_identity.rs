@@ -26,6 +26,7 @@ fn own_address_sync_excludes_self_from_an_existing_mms_group_without_rekeying_it
             body: "photo later".into(),
             imported: false,
             observed_at_ms: 1,
+            is_sent_box: true,
             transaction_id: None,
         })
         .unwrap();
@@ -72,6 +73,7 @@ fn complete_contextual(
             body: "hello".into(),
             imported: false,
             observed_at_ms: 1,
+            is_sent_box: true,
             transaction_id: None,
         })
         .unwrap();

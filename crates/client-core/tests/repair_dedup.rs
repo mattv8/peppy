@@ -71,6 +71,7 @@ fn mms_row(generation: &str, id: &str, observed_at_ms: i64) -> MmsAcquisitionInp
         body: "mms body".into(),
         imported: true,
         observed_at_ms,
+        is_sent_box: true,
         transaction_id: None,
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
     AttachmentId, Captured, Client, ConversationId, Direction, Error, Inserted, MessageId,
-    MessagePayload, MessageRecord, PrivatePayload, SourceSequence, Transport,
+    MessagePayload, MessageRecord, PrivatePayload, SendResult, SourceSequence, Transport,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,9 @@ pub struct MmsAcquisitionInput {
     pub body: String,
     pub imported: bool,
     pub observed_at_ms: i64,
+    /// Whether the provider row is in the sent box (Android `msg_box=2`).
+    #[serde(default)]
+    pub is_sent_box: bool,
     /// Provider PDU transaction identity. Peppy sends use `peppy-<canonical command UUID>`.
     #[serde(default)]
     pub transaction_id: Option<String>,
@@ -263,7 +266,7 @@ impl Client {
         }
 
         let reconciliation = if unavailable_reason.is_none() {
-            reconcile_outgoing_provider_send(&tx, ctx.device_id, &input)?
+            reconcile_outgoing_provider_send(&tx, &ctx, &input)?
         } else {
             Reconciliation::OriginalProviderMessage
         };
@@ -755,7 +758,7 @@ impl Client {
         if input.body.is_empty() && attachments.is_empty() {
             return Err(Error::InvalidRequest("MMS requires text or parts"));
         }
-        match reconcile_outgoing_provider_send(&tx, ctx.device_id, &input)? {
+        match reconcile_outgoing_provider_send(&tx, &ctx, &input)? {
             Reconciliation::Matched {
                 message_id,
                 conversation_id,
@@ -1150,6 +1153,7 @@ fn same_terminal_provider_input(
 ) -> bool {
     let mut candidate = candidate.clone();
     candidate.imported = existing.imported;
+    candidate.is_sent_box = existing.is_sent_box;
     existing == &candidate
 }
 
@@ -1460,53 +1464,153 @@ enum Reconciliation {
 
 fn reconcile_outgoing_provider_send(
     conn: &rusqlite::Connection,
-    local_device_id: crate::DeviceId,
+    ctx: &crate::Ctx,
     input: &MmsAcquisitionInput,
 ) -> Result<Reconciliation, Error> {
     if input.direction != Direction::Outgoing {
         return Ok(Reconciliation::OriginalProviderMessage);
     }
-    let Some(transaction_id) = input.transaction_id.as_deref() else {
-        return Ok(Reconciliation::OriginalProviderMessage);
-    };
-    let Some(raw_command_id) = transaction_id.strip_prefix("peppy-") else {
-        return Ok(Reconciliation::OriginalProviderMessage);
-    };
-    let Ok(command_id) = super::parse::<crate::CommandId>(raw_command_id) else {
-        return Ok(Reconciliation::OriginalProviderMessage);
-    };
-    if command_id.to_string() != raw_command_id {
+    if let Some(raw_command_id) = input
+        .transaction_id
+        .as_deref()
+        .and_then(|transaction_id| transaction_id.strip_prefix("peppy-"))
+    {
+        let Ok(command_id) = super::parse::<crate::CommandId>(raw_command_id) else {
+            return Ok(Reconciliation::OriginalProviderMessage);
+        };
+        if command_id.to_string() != raw_command_id {
+            return Ok(Reconciliation::OriginalProviderMessage);
+        }
+        let row: Option<(String, String, String, i64)> = conn
+            .query_row(
+                "SELECT m.id,m.conversation_id,m.payload,m.source_sequence
+                 FROM commands c
+                 JOIN command_ledger l ON l.command_id=c.command_id
+                 JOIN attempts a ON a.command_id=c.command_id
+                 JOIN messages m ON m.id=c.message_id
+                 WHERE c.command_id=? AND c.gateway_device_id=? AND l.subscription_id=?",
+                params![
+                    command_id.to_string(),
+                    ctx.device_id.to_string(),
+                    input.source.subscription_id
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((message_id, conversation_id, encoded, source_sequence)) = row else {
+            return Ok(Reconciliation::Ambiguous);
+        };
+        let message: MessagePayload = super::decode(encoded.as_bytes())?;
+        if message.transport != Transport::Mms || message.direction != Direction::Outgoing {
+            return Ok(Reconciliation::Ambiguous);
+        }
+        return Ok(Reconciliation::Matched {
+            message_id: super::parse(&message_id)?,
+            conversation_id: super::parse(&conversation_id)?,
+            source_sequence: SourceSequence(
+                u64::try_from(source_sequence).map_err(|_| Error::Database)?,
+            ),
+        });
+    }
+    reconcile_notification_reply_submission(conn, ctx, input)
+}
+
+fn reconcile_notification_reply_submission(
+    conn: &rusqlite::Connection,
+    ctx: &crate::Ctx,
+    input: &MmsAcquisitionInput,
+) -> Result<Reconciliation, Error> {
+    if input.imported || !input.is_sent_box {
         return Ok(Reconciliation::OriginalProviderMessage);
     }
-    let row: Option<(String, String, String, i64)> = conn
-        .query_row(
-            "SELECT m.id,m.conversation_id,m.payload,m.source_sequence
-             FROM commands c
-             JOIN command_ledger l ON l.command_id=c.command_id
-             JOIN attempts a ON a.command_id=c.command_id
-             JOIN messages m ON m.id=c.message_id
-             WHERE c.command_id=? AND c.gateway_device_id=? AND l.subscription_id=?",
+    let normalized_body = super::normalized_notification_reply_body(&input.body);
+    let lower_bound = input.observed_at_ms.saturating_sub(10 * 60 * 1000);
+    let upper_bound = input.observed_at_ms.saturating_add(5 * 1000);
+    let has_candidates: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM notification_reply_submissions s
+          JOIN attempts a ON a.command_id=s.command_id
+          JOIN command_ledger l ON l.command_id=s.command_id
+          WHERE s.resolved=0 AND s.normalized_body=? AND s.submitted_at_ms BETWEEN ? AND ?
+            AND a.state IN ('attempt_recorded','submitted_to_os','outcome_unknown')
+            AND l.subscription_id=?)",
+        params![
+            normalized_body,
+            lower_bound,
+            upper_bound,
+            input.source.subscription_id
+        ],
+        |row| row.get(0),
+    )?;
+    if !has_candidates {
+        return Ok(Reconciliation::OriginalProviderMessage);
+    }
+    let resolved_conversation =
+        mapped_thread_conversation(conn, &ctx.device_id.to_string(), &input.source)?.or(
+            conversation_for_mms_participants(conn, ctx.device_id, input)?,
+        );
+    let region = crate::conversation_match::identity_region(conn)?;
+    let provider_recipients =
+        crate::conversation_match::recipient_set(&input.recipients, Some(&region));
+    let rows = conn
+        .prepare(
+            "SELECT s.command_id,s.message_id,s.conversation_id,m.source_sequence,m.payload
+             FROM notification_reply_submissions s
+             JOIN commands c ON c.command_id=s.command_id
+             JOIN command_ledger l ON l.command_id=s.command_id
+             JOIN attempts a ON a.command_id=s.command_id
+             JOIN messages m ON m.id=s.message_id
+             WHERE s.resolved=0 AND s.normalized_body=? AND s.submitted_at_ms BETWEEN ? AND ?
+               AND c.gateway_device_id=? AND l.subscription_id=?
+               AND a.state IN ('attempt_recorded','submitted_to_os','outcome_unknown')
+               AND json_extract(m.payload,'$.direction')='outgoing'
+               AND json_extract(m.payload,'$.transport') IN ('sms','mms')",
+        )?
+        .query_map(
             params![
-                command_id.to_string(),
-                local_device_id.to_string(),
-                input.source.subscription_id
+                normalized_body,
+                lower_bound,
+                upper_bound,
+                ctx.device_id.to_string(),
+                input.source.subscription_id,
             ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    let Some((message_id, conversation_id, encoded, source_sequence)) = row else {
-        return Ok(Reconciliation::Ambiguous);
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter_map(|row| {
+            let message: MessagePayload = super::decode(row.4.as_bytes()).ok()?;
+            let matches_conversation = resolved_conversation
+                .is_some_and(|conversation_id| row.2 == conversation_id.to_string());
+            let matches_sms_recipients = message.transport == Transport::Sms
+                && crate::conversation_match::recipient_set(&message.recipients, Some(&region))
+                    == provider_recipients;
+            (matches_conversation || matches_sms_recipients).then_some(row)
+        })
+        .collect::<Vec<_>>();
+    let [row] = rows.as_slice() else {
+        return Ok(Reconciliation::OriginalProviderMessage);
     };
-    let message: MessagePayload = super::decode(encoded.as_bytes())?;
-    if message.transport != Transport::Mms || message.direction != Direction::Outgoing {
-        return Ok(Reconciliation::Ambiguous);
-    }
+    let command_id = super::parse(&row.0)?;
+    let message_id = super::parse(&row.1)?;
+    let conversation_id = super::parse(&row.2)?;
+    let source_sequence = SourceSequence(u64::try_from(row.3).map_err(|_| Error::Database)?);
+    super::record_send_result_in_transaction(conn, ctx, command_id, SendResult::Sent)?;
+    conn.execute(
+        "UPDATE notification_reply_submissions SET resolved=1 WHERE command_id=?",
+        params![command_id.to_string()],
+    )?;
     Ok(Reconciliation::Matched {
-        message_id: super::parse(&message_id)?,
-        conversation_id: super::parse(&conversation_id)?,
-        source_sequence: SourceSequence(
-            u64::try_from(source_sequence).map_err(|_| Error::Database)?,
-        ),
+        message_id,
+        conversation_id,
+        source_sequence,
     })
 }
 
@@ -1732,6 +1836,7 @@ mod tests {
             body: "body".into(),
             imported: false,
             observed_at_ms: 1,
+            is_sent_box: true,
             transaction_id: None,
         };
         (

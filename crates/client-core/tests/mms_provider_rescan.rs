@@ -33,6 +33,7 @@ fn imported_input(id: &str) -> MmsAcquisitionInput {
         body: "history".into(),
         imported: true,
         observed_at_ms: 0,
+        is_sent_box: true,
         transaction_id: None,
     }
 }

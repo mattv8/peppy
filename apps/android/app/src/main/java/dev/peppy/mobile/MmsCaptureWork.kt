@@ -855,7 +855,7 @@ internal object MmsCapture {
         return NativeMmsAcquisitionInput(
             NativeMmsSource(generation, routeId, record.id.toString(), record.threadId?.toString()),
             incoming, sender, recipients, record.subject, body, imported,
-            record.dateMs ?: UNKNOWN_PROVIDER_DATE_MS, record.transactionId,
+            record.dateMs ?: UNKNOWN_PROVIDER_DATE_MS, record.messageBox == SENT, record.transactionId,
         )
     }
 

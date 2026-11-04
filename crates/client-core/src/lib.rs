@@ -121,7 +121,8 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 42;
+const SCHEMA_VERSION: i64 = 43;
+const NOTIFICATION_REPLY_SUBMISSION_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1501,6 +1502,12 @@ impl Client {
         tx.execute(
             "INSERT INTO key_cache_checks(epoch,check_value) VALUES(?,?) ON CONFLICT(epoch) DO UPDATE SET check_value=excluded.check_value",
             params![profile.key_epoch, check.as_slice()],
+        )?;
+        tx.execute(
+            "DELETE FROM notification_reply_submissions WHERE submitted_at_ms < ?",
+            params![
+                notifications::now_ms().saturating_sub(NOTIFICATION_REPLY_SUBMISSION_RETENTION_MS)
+            ],
         )?;
         tx.commit()?;
         s.active_epoch = Some(active);
@@ -3193,24 +3200,74 @@ impl Client {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?;
-        let next = SendState::from(result);
-        if current == next {
-            return Ok(next);
+        let next = record_send_result_in_transaction(&tx, &ctx, command_id, result)?;
+        if matches!(
+            next,
+            SendState::FailedBeforeSubmission | SendState::FailedConfirmed
+        ) {
+            tx.execute(
+                "DELETE FROM notification_reply_submissions WHERE command_id=?",
+                params![command_id.to_string()],
+            )?;
         }
-        if !legal_transition(current, next) {
-            return Err(Error::IllegalTransition {
-                from: current,
-                to: next,
-            });
-        }
-        tx.execute(
-            "UPDATE attempts SET state=? WHERE command_id=?",
-            params![state_code(next), command_id.to_string()],
-        )?;
-        emit_status(&tx, &ctx, command_id, next)?;
         tx.commit()?;
         Ok(next)
+    }
+
+    /// Records a locally submitted Google Messages notification reply after this gateway received
+    /// the durable carrier permit. The submission remains local and is resolved by MMS capture.
+    pub fn record_notification_reply_submission(
+        &self,
+        command_id: CommandId,
+        submitted_at_ms: i64,
+    ) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT c.message_id,m.conversation_id,m.payload
+                 FROM commands c
+                 JOIN command_ledger l ON l.command_id=c.command_id
+                 JOIN attempts a ON a.command_id=c.command_id
+                 JOIN messages m ON m.id=c.message_id
+                 WHERE c.command_id=? AND c.gateway_device_id=? AND a.state='attempt_recorded'",
+                params![command_id.to_string(), ctx.device_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((message_id, conversation_id, encoded)) = row else {
+            return Err(Error::InvalidRequest(
+                "notification reply submission requires an active send permit",
+            ));
+        };
+        let message: MessagePayload = decode(encoded.as_bytes())?;
+        if message.direction != Direction::Outgoing
+            || !matches!(message.transport, Transport::Sms | Transport::Mms)
+        {
+            return Err(Error::InvalidRequest(
+                "notification reply submission requires an active send permit",
+            ));
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO notification_reply_submissions(command_id,message_id,conversation_id,normalized_body,submitted_at_ms,resolved)
+             VALUES(?,?,?,?,?,0)",
+            params![
+                command_id.to_string(),
+                message_id,
+                conversation_id,
+                normalized_notification_reply_body(&message.body),
+                submitted_at_ms,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM notification_reply_submissions WHERE submitted_at_ms < ?",
+            params![
+                notifications::now_ms().saturating_sub(NOTIFICATION_REPLY_SUBMISSION_RETENTION_MS)
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Conversations ordered by their most recent deterministic chronological message.
@@ -3237,6 +3294,18 @@ impl Client {
                 })
             })
             .collect()
+    }
+
+    /// Canonical E.164 phone identity for native notification matching. Short codes and other
+    /// non-phone addresses deliberately return `None`.
+    pub fn canonical_phone_e164(&self, address: &str) -> Result<Option<String>, Error> {
+        let store = self.lock()?;
+        let region = conversation_match::identity_region(&store.conn)?;
+        let canonical = conversation_match::canonical_address(address, Some(&region));
+        Ok(phonenumber::parse(None, &canonical)
+            .ok()
+            .filter(|number| number.is_valid())
+            .map(|number| number.format().mode(phonenumber::Mode::E164).to_string()))
     }
 
     pub fn messages(&self, conversation_id: ConversationId) -> Result<Vec<Message>, Error> {
@@ -5494,6 +5563,29 @@ CREATE INDEX IF NOT EXISTS phone_read_effects_created ON phone_read_effects(crea
 CREATE TABLE IF NOT EXISTS phone_read_effect_terminals(message_id TEXT PRIMARY KEY);
 ";
 
+/// Version 42 -> 43: device-local Google Messages notification reply reconciliation evidence.
+const MIGRATION_43: &str = "
+CREATE TABLE IF NOT EXISTS notification_reply_submissions(
+  command_id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  normalized_body TEXT NOT NULL,
+  submitted_at_ms INTEGER NOT NULL,
+  resolved INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS notification_reply_submissions_match
+  ON notification_reply_submissions(resolved,conversation_id,normalized_body,submitted_at_ms);
+";
+
+fn apply_migration_43(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(MIGRATION_43)?;
+    add_column_if_missing(
+        conn,
+        "gateway_settings",
+        "reply_via_google_messages_enabled INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "outbox", "origin_tag TEXT")
 }
@@ -5624,6 +5716,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_39)?;
             apply_migration_40(&tx)?;
             apply_migration_42(&tx)?;
+            apply_migration_43(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5632,7 +5725,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=41)) => {
+        Some(version @ (4..=42)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5743,6 +5836,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 41 {
                 apply_migration_42(&tx)?;
+            }
+            if version <= 42 {
+                apply_migration_43(&tx)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -7026,6 +7122,37 @@ fn emit_status(
         state,
         status_at_ms,
     )
+}
+
+pub(crate) fn record_send_result_in_transaction(
+    conn: &Connection,
+    ctx: &Ctx,
+    command_id: CommandId,
+    result: SendResult,
+) -> Result<SendState, Error> {
+    let current = attempt_state(conn, command_id)?.ok_or(Error::NoAttempt)?;
+    let next = SendState::from(result);
+    if current == next {
+        return Ok(next);
+    }
+    if !legal_transition(current, next) {
+        return Err(Error::IllegalTransition {
+            from: current,
+            to: next,
+        });
+    }
+    conn.execute(
+        "UPDATE attempts SET state=? WHERE command_id=?",
+        params![state_code(next), command_id.to_string()],
+    )?;
+    emit_status(conn, ctx, command_id, next)?;
+    Ok(next)
+}
+
+pub(crate) fn normalized_notification_reply_body(body: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+
+    body.trim().nfc().collect()
 }
 
 /// Allocates the durable producer sequence and envelope ID, stores the private payload, and seals
@@ -9876,6 +10003,7 @@ mod tests {
             body: "blocked".into(),
             imported: false,
             observed_at_ms: 1,
+            is_sent_box: true,
             transaction_id: None,
         };
         let acquisition = client.begin_mms_acquisition(input).unwrap();
@@ -11844,6 +11972,7 @@ mod tests {
                 body: "old message".into(),
                 imported: false,
                 observed_at_ms: 1,
+                is_sent_box: true,
                 transaction_id: None,
             })
             .unwrap();
@@ -11957,6 +12086,7 @@ mod tests {
                 body: "hydrate".into(),
                 imported: false,
                 observed_at_ms: 1,
+                is_sent_box: true,
                 transaction_id: None,
             })
             .unwrap();
@@ -12057,6 +12187,7 @@ mod tests {
                 body: "recover epoch two".into(),
                 imported: false,
                 observed_at_ms: 1,
+                is_sent_box: true,
                 transaction_id: None,
             })
             .unwrap();

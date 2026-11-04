@@ -19,6 +19,7 @@ fn input(provider_message_id: &str) -> MmsAcquisitionInput {
         body: "image".into(),
         imported: false,
         observed_at_ms: 1,
+        is_sent_box: true,
         transaction_id: None,
     }
 }

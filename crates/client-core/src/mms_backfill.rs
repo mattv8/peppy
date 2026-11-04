@@ -2266,6 +2266,7 @@ mod tests {
                 body: "complete".into(),
                 imported: false,
                 observed_at_ms: 1,
+                is_sent_box: true,
                 transaction_id: None,
             })
             .unwrap();

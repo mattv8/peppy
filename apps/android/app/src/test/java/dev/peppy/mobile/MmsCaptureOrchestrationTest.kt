@@ -1116,6 +1116,7 @@ class MmsCaptureOrchestrationTest {
                 "",
                 false,
                 0,
+                false,
                 null,
             )
             acquisitions[providerMessageId] = NativeMmsAcquisition(

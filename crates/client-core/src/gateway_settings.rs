@@ -17,6 +17,7 @@ pub struct GatewaySettings {
     pub mms_sync_enabled: bool,
     pub media_wifi_only: bool,
     pub phone_read_enabled: bool,
+    pub reply_via_google_messages_enabled: bool,
 }
 
 impl Default for GatewaySettings {
@@ -29,6 +30,7 @@ impl Default for GatewaySettings {
             mms_sync_enabled: true,
             media_wifi_only: true,
             phone_read_enabled: false,
+            reply_via_google_messages_enabled: false,
         }
     }
 }
@@ -153,20 +155,20 @@ pub(super) fn seed(conn: &Connection, legacy_enabled_installation: bool) -> Resu
 
 fn load(conn: &Connection) -> Result<GatewaySettings, Error> {
     conn.query_row(
-        "SELECT mirroring_enabled,mirroring_wifi_only,skip_silent,sms_sync_enabled,mms_sync_enabled,media_wifi_only,phone_read_enabled FROM gateway_settings WHERE id=1",
+        "SELECT mirroring_enabled,mirroring_wifi_only,skip_silent,sms_sync_enabled,mms_sync_enabled,media_wifi_only,phone_read_enabled,reply_via_google_messages_enabled FROM gateway_settings WHERE id=1",
         [],
         |r| Ok(GatewaySettings {
             mirroring_enabled: r.get(0)?, mirroring_wifi_only: r.get(1)?, skip_silent: r.get(2)?,
             sms_sync_enabled: r.get(3)?, mms_sync_enabled: r.get(4)?, media_wifi_only: r.get(5)?,
-            phone_read_enabled: r.get(6)?,
+            phone_read_enabled: r.get(6)?, reply_via_google_messages_enabled: r.get(7)?,
         }),
     ).map_err(Into::into)
 }
 
 fn save(conn: &Connection, settings: &GatewaySettings) -> Result<(), Error> {
     conn.execute(
-        "UPDATE gateway_settings SET mirroring_enabled=?,mirroring_wifi_only=?,skip_silent=?,sms_sync_enabled=?,mms_sync_enabled=?,media_wifi_only=?,phone_read_enabled=? WHERE id=1",
-        params![settings.mirroring_enabled, settings.mirroring_wifi_only, settings.skip_silent, settings.sms_sync_enabled, settings.mms_sync_enabled, settings.media_wifi_only, settings.phone_read_enabled],
+        "UPDATE gateway_settings SET mirroring_enabled=?,mirroring_wifi_only=?,skip_silent=?,sms_sync_enabled=?,mms_sync_enabled=?,media_wifi_only=?,phone_read_enabled=?,reply_via_google_messages_enabled=? WHERE id=1",
+        params![settings.mirroring_enabled, settings.mirroring_wifi_only, settings.skip_silent, settings.sms_sync_enabled, settings.mms_sync_enabled, settings.media_wifi_only, settings.phone_read_enabled, settings.reply_via_google_messages_enabled],
     )?;
     Ok(())
 }

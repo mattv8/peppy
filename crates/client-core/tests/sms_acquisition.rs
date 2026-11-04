@@ -44,6 +44,7 @@ fn mms_input(id: &str) -> MmsAcquisitionInput {
         body: "mms".into(),
         imported: true,
         observed_at_ms: 1,
+        is_sent_box: true,
         transaction_id: None,
     }
 }

@@ -39,7 +39,7 @@ class NativeArm64SmokeTest {
             client.unlock(material.profileJson, material.headerJson, phrase)
             val input = NativeMmsAcquisitionInput(
                 NativeMmsSource("synthetic-install", "synthetic-sim", "42", "7"),
-                true, sender, listOf(own, peer), "Group subject", "Text-only group MMS", false, 42L, null,
+                true, sender, listOf(own, peer), "Group subject", "Text-only group MMS", false, 42L, false, null,
             )
             val acquisition = client.beginMmsAcquisition(input)
             assertTrue(client.pendingOutboxJson().isEmpty())

@@ -1,6 +1,7 @@
 //! Durable, local-only provider acquisition before an immutable MMS event is published.
 use crate::common::*;
 use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 fn input(id: &str, direction: Direction) -> MmsAcquisitionInput {
@@ -26,6 +27,7 @@ fn input(id: &str, direction: Direction) -> MmsAcquisitionInput {
         body: "hello".into(),
         imported: false,
         observed_at_ms: 1,
+        is_sent_box: true,
         transaction_id: None,
     }
 }
@@ -37,6 +39,69 @@ fn attachment(client: &Client, dir: &TempDir, name: &str) -> AttachmentId {
         .prepare_attachment(&path, "image/png", name)
         .unwrap()
         .attachment_id
+}
+
+fn notification_reply_fixture(
+    name: &str,
+    body: &str,
+    transport: Transport,
+) -> (TempDir, Client, Client, QueuedSend) {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let desktop_cfg = config(&dir, &format!("desktop-{name}"), &vault);
+    let gateway_cfg = config(&dir, &format!("gateway-{name}"), &vault);
+    let desktop = unlocked(&desktop_cfg, &vault);
+    let gateway = unlocked(&gateway_cfg, &vault);
+    let conversation = ConversationId::new();
+    let queued = match transport {
+        Transport::Sms => desktop
+            .queue_send(sms(conversation, body), route(&gateway_cfg))
+            .unwrap(),
+        Transport::Mms => desktop
+            .queue_mms(
+                OutgoingMms {
+                    conversation_id: conversation,
+                    recipients: vec![ADDRESS.into()],
+                    body: body.into(),
+                    attachment_ids: vec![],
+                    subject: None,
+                },
+                route(&gateway_cfg),
+            )
+            .unwrap(),
+        _ => unreachable!("notification replies support SMS and MMS commands only"),
+    };
+    let mut server = Server::default();
+    server.upload(&desktop);
+    assert_eq!(server.sync(&gateway).applied, 1);
+    (dir, desktop, gateway, queued)
+}
+
+fn submit_notification_reply(gateway: &Client, command_id: CommandId, submitted_at_ms: i64) {
+    assert!(matches!(
+        gateway.begin_send_attempt(command_id).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+    gateway
+        .record_notification_reply_submission(command_id, submitted_at_ms)
+        .unwrap();
+}
+
+fn notification_reply_provider(id: &str, body: &str, observed_at_ms: i64) -> MmsAcquisitionInput {
+    let mut provider = input(id, Direction::Outgoing);
+    provider.transaction_id = Some("proto:google-message".into());
+    provider.body = body.into();
+    provider.observed_at_ms = observed_at_ms;
+    provider
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap()
 }
 
 #[test]
@@ -652,6 +717,488 @@ fn sent_provider_acquisition_reconciles_exact_transaction_to_existing_mms() {
 }
 
 #[test]
+fn notification_reply_submission_reconciles_an_outgoing_provider_row_once() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let desktop_cfg = config(&dir, "desktop-notification-reply", &vault);
+    let gateway_cfg = config(&dir, "gateway-notification-reply", &vault);
+    let desktop = unlocked(&desktop_cfg, &vault);
+    let gateway = unlocked(&gateway_cfg, &vault);
+    let conversation = ConversationId::new();
+    let queued = desktop
+        .queue_mms(
+            OutgoingMms {
+                conversation_id: conversation,
+                recipients: vec![ADDRESS.into()],
+                body: "  caf\u{00e9}  ".into(),
+                attachment_ids: vec![],
+                subject: None,
+            },
+            route(&gateway_cfg),
+        )
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&desktop);
+    assert_eq!(server.sync(&gateway).applied, 1);
+    assert!(matches!(
+        gateway.begin_send_attempt(queued.command_id).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+    let submitted_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    gateway
+        .record_notification_reply_submission(
+            queued.command_id,
+            submitted_at_ms - 24 * 60 * 60 * 1000 - 1,
+        )
+        .unwrap();
+    gateway
+        .record_notification_reply_submission(queued.command_id, submitted_at_ms)
+        .unwrap();
+    gateway
+        .record_notification_reply_submission(queued.command_id, submitted_at_ms)
+        .unwrap();
+
+    let mut provider = input("notification-reply", Direction::Outgoing);
+    provider.transaction_id = Some("proto:google-message".into());
+    provider.subject = Some("unrelated provider subject".into());
+    provider.body = "cafe\u{301}".into();
+    provider.observed_at_ms = submitted_at_ms + 1;
+    let acquisition = gateway.begin_mms_acquisition(provider).unwrap();
+
+    assert_eq!(acquisition.state, MmsAcquisitionState::Complete);
+    assert_eq!(acquisition.conversation_id, conversation);
+    assert_eq!(
+        gateway
+            .complete_mms_acquisition(&acquisition.acquisition_id)
+            .unwrap()
+            .message_id,
+        queued.message_id
+    );
+    assert_eq!(gateway.messages(conversation).unwrap().len(), 1);
+    assert!(matches!(
+        gateway.begin_send_attempt(queued.command_id).unwrap(),
+        PermitDecision::AlreadyAttempted(SendState::Sent)
+    ));
+}
+
+#[test]
+fn notification_reply_submission_requires_a_gateway_permit() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let desktop_cfg = config(&dir, "desktop-notification-permit", &vault);
+    let gateway_cfg = config(&dir, "gateway-notification-permit", &vault);
+    let desktop = unlocked(&desktop_cfg, &vault);
+    let gateway = unlocked(&gateway_cfg, &vault);
+    let queued = desktop
+        .queue_mms(
+            OutgoingMms {
+                conversation_id: ConversationId::new(),
+                recipients: vec![ADDRESS.into()],
+                body: "needs permit".into(),
+                attachment_ids: vec![],
+                subject: None,
+            },
+            route(&gateway_cfg),
+        )
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&desktop);
+    server.sync(&gateway);
+
+    assert_eq!(
+        gateway.record_notification_reply_submission(queued.command_id, i64::MAX),
+        Err(Error::InvalidRequest(
+            "notification reply submission requires an active send permit"
+        ))
+    );
+}
+
+#[test]
+fn canonical_phone_e164_is_strict_and_uses_the_core_region() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "canonical-phone", &vault), &vault);
+    assert_eq!(
+        client.canonical_phone_e164("+1 202-555-0100").unwrap(),
+        client.canonical_phone_e164("(202) 555-0100").unwrap()
+    );
+    assert_eq!(client.canonical_phone_e164("5550100").unwrap(), None);
+    assert_ne!(
+        client.canonical_phone_e164("(202) 555-0100").unwrap(),
+        client.canonical_phone_e164("(303) 555-0100").unwrap()
+    );
+    assert_eq!(client.canonical_phone_e164("12345").unwrap(), None);
+    assert_eq!(
+        client.canonical_phone_e164("person@example.com").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn notification_reply_rows_must_be_sent_and_unresolved() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let desktop_cfg = config(&dir, "desktop-notification-terminal", &vault);
+    let gateway_cfg = config(&dir, "gateway-notification-terminal", &vault);
+    let desktop = unlocked(&desktop_cfg, &vault);
+    let gateway = unlocked(&gateway_cfg, &vault);
+    let queued = desktop
+        .queue_mms(
+            OutgoingMms {
+                conversation_id: ConversationId::new(),
+                recipients: vec![ADDRESS.into()],
+                body: "terminal evidence".into(),
+                attachment_ids: vec![],
+                subject: None,
+            },
+            route(&gateway_cfg),
+        )
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&desktop);
+    server.sync(&gateway);
+    assert!(matches!(
+        gateway.begin_send_attempt(queued.command_id).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+    let now: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    gateway
+        .record_notification_reply_submission(queued.command_id, now)
+        .unwrap();
+    gateway
+        .record_send_result(queued.command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    let mut provider = input("terminal-notification-reply", Direction::Outgoing);
+    provider.body = "terminal evidence".into();
+    provider.observed_at_ms = now;
+    provider.is_sent_box = false;
+    assert_eq!(
+        gateway.begin_mms_acquisition(provider).unwrap().state,
+        MmsAcquisitionState::Pending
+    );
+}
+
+#[test]
+fn notification_reply_submission_does_not_reconcile_ambiguous_or_different_bodies() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let desktop_cfg = config(&dir, "desktop-notification-ambiguous", &vault);
+    let gateway_cfg = config(&dir, "gateway-notification-ambiguous", &vault);
+    let desktop = unlocked(&desktop_cfg, &vault);
+    let gateway = unlocked(&gateway_cfg, &vault);
+    let conversation = ConversationId::new();
+    let mut commands = Vec::new();
+    for _ in 0..2 {
+        commands.push(
+            desktop
+                .queue_mms(
+                    OutgoingMms {
+                        conversation_id: conversation,
+                        recipients: vec![ADDRESS.into()],
+                        body: "same body".into(),
+                        attachment_ids: vec![],
+                        subject: None,
+                    },
+                    route(&gateway_cfg),
+                )
+                .unwrap(),
+        );
+    }
+    let mut server = Server::default();
+    server.upload(&desktop);
+    assert_eq!(server.sync(&gateway).applied, 2);
+    let submitted_at_ms: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    for command in commands {
+        assert!(matches!(
+            gateway.begin_send_attempt(command.command_id).unwrap(),
+            PermitDecision::Permit(_)
+        ));
+        gateway
+            .record_notification_reply_submission(command.command_id, submitted_at_ms)
+            .unwrap();
+    }
+
+    let mut provider = input("ambiguous-notification-reply", Direction::Outgoing);
+    provider.transaction_id = Some("proto:google-message".into());
+    provider.body = "same body".into();
+    provider.observed_at_ms = submitted_at_ms;
+    let acquisition = gateway.begin_mms_acquisition(provider).unwrap();
+    assert_eq!(acquisition.state, MmsAcquisitionState::Pending);
+
+    let mut different = input("different-notification-reply", Direction::Outgoing);
+    different.transaction_id = Some("proto:google-message".into());
+    different.body = "different body".into();
+    different.observed_at_ms = submitted_at_ms;
+    assert_eq!(
+        gateway.begin_mms_acquisition(different).unwrap().state,
+        MmsAcquisitionState::Pending
+    );
+}
+
+#[test]
+fn notification_reply_reconciliation_honors_provider_date_window_boundaries() {
+    // MmsAcquisitionInput exposes provider timestamps in milliseconds, so these tests can cover
+    // the exact inclusive bounds and the adjacent millisecond without provider-date rounding.
+    let submitted_at_ms = now_ms();
+    for (name, offset_ms, matches_submission) in [
+        ("lower-bound", -5_000, true),
+        ("before-lower-bound", -5_001, false),
+        ("upper-bound", 10 * 60 * 1000, true),
+        ("after-upper-bound", 10 * 60 * 1000 + 1, false),
+    ] {
+        let (_dir, _desktop, gateway, queued) =
+            notification_reply_fixture(name, name, Transport::Mms);
+        submit_notification_reply(&gateway, queued.command_id, submitted_at_ms);
+        let acquisition = gateway
+            .begin_mms_acquisition(notification_reply_provider(
+                name,
+                name,
+                submitted_at_ms + offset_ms,
+            ))
+            .unwrap();
+
+        if matches_submission {
+            assert_eq!(acquisition.state, MmsAcquisitionState::Complete, "{name}");
+            assert_eq!(
+                gateway
+                    .complete_mms_acquisition(&acquisition.acquisition_id)
+                    .unwrap()
+                    .message_id,
+                queued.message_id,
+                "{name}"
+            );
+        } else {
+            assert_eq!(acquisition.state, MmsAcquisitionState::Pending, "{name}");
+            assert_ne!(
+                gateway
+                    .complete_mms_acquisition(&acquisition.acquisition_id)
+                    .unwrap()
+                    .message_id,
+                queued.message_id,
+                "{name}"
+            );
+            assert!(matches!(
+                gateway.begin_send_attempt(queued.command_id).unwrap(),
+                PermitDecision::AlreadyAttempted(SendState::AttemptRecorded)
+            ));
+        }
+    }
+}
+
+#[test]
+fn notification_reply_does_not_reconcile_a_same_body_row_from_another_conversation() {
+    let submitted_at_ms = now_ms();
+    let (_dir, _desktop, gateway, queued) =
+        notification_reply_fixture("wrong-conversation", "same body", Transport::Mms);
+    submit_notification_reply(&gateway, queued.command_id, submitted_at_ms);
+    let mut provider =
+        notification_reply_provider("wrong-conversation", "same body", submitted_at_ms);
+    provider.source.provider_thread_id = Some("thread-b".into());
+    provider.recipients = vec!["+15555550101".into()];
+    let acquisition = gateway.begin_mms_acquisition(provider).unwrap();
+
+    assert_eq!(acquisition.state, MmsAcquisitionState::Pending);
+    let captured = gateway
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    assert_ne!(captured.message_id, queued.message_id);
+    assert_eq!(gateway.messages(captured.conversation_id).unwrap().len(), 1);
+    assert!(matches!(
+        gateway.begin_send_attempt(queued.command_id).unwrap(),
+        PermitDecision::AlreadyAttempted(SendState::AttemptRecorded)
+    ));
+}
+
+#[test]
+fn notification_reply_reconciles_an_sms_command_with_a_matching_provider_row() {
+    let submitted_at_ms = now_ms();
+    let (_dir, _desktop, gateway, queued) =
+        notification_reply_fixture("sms-command", "SMS reply", Transport::Sms);
+    submit_notification_reply(&gateway, queued.command_id, submitted_at_ms);
+    let acquisition = gateway
+        .begin_mms_acquisition(notification_reply_provider(
+            "sms-command",
+            "SMS reply",
+            submitted_at_ms,
+        ))
+        .unwrap();
+
+    assert_eq!(acquisition.state, MmsAcquisitionState::Complete);
+    assert_eq!(
+        gateway
+            .complete_mms_acquisition(&acquisition.acquisition_id)
+            .unwrap()
+            .message_id,
+        queued.message_id
+    );
+    assert_eq!(
+        gateway.messages(acquisition.conversation_id).unwrap().len(),
+        1
+    );
+    assert!(matches!(
+        gateway.begin_send_attempt(queued.command_id).unwrap(),
+        PermitDecision::AlreadyAttempted(SendState::Sent)
+    ));
+}
+
+#[test]
+fn terminal_notification_reply_results_remove_submission_and_do_not_wedge_capture() {
+    for (name, result) in [
+        (
+            "failed-before-submission",
+            SendResult::FailedBeforeSubmission,
+        ),
+        ("failed-confirmed", SendResult::FailedConfirmed),
+    ] {
+        let submitted_at_ms = now_ms();
+        let (_dir, _desktop, gateway, queued) =
+            notification_reply_fixture(name, "terminal reply", Transport::Mms);
+        submit_notification_reply(&gateway, queued.command_id, submitted_at_ms);
+        gateway
+            .record_send_result(queued.command_id, result)
+            .unwrap();
+        let acquisition = gateway
+            .begin_mms_acquisition(notification_reply_provider(
+                name,
+                "terminal reply",
+                submitted_at_ms,
+            ))
+            .unwrap();
+
+        assert_eq!(acquisition.state, MmsAcquisitionState::Pending, "{name}");
+        assert_ne!(
+            gateway
+                .complete_mms_acquisition(&acquisition.acquisition_id)
+                .unwrap()
+                .message_id,
+            queued.message_id,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn second_identical_notification_reply_provider_row_creates_a_new_message() {
+    let submitted_at_ms = now_ms();
+    let (_dir, _desktop, gateway, queued) =
+        notification_reply_fixture("second-row", "same reply", Transport::Mms);
+    submit_notification_reply(&gateway, queued.command_id, submitted_at_ms);
+    let first = gateway
+        .begin_mms_acquisition(notification_reply_provider(
+            "first-row",
+            "same reply",
+            submitted_at_ms,
+        ))
+        .unwrap();
+    assert_eq!(first.state, MmsAcquisitionState::Complete);
+    gateway
+        .complete_mms_acquisition(&first.acquisition_id)
+        .unwrap();
+
+    let second = gateway
+        .begin_mms_acquisition(notification_reply_provider(
+            "second-row",
+            "same reply",
+            submitted_at_ms,
+        ))
+        .unwrap();
+    assert_eq!(second.state, MmsAcquisitionState::Pending);
+    assert_ne!(
+        gateway
+            .complete_mms_acquisition(&second.acquisition_id)
+            .unwrap()
+            .message_id,
+        queued.message_id
+    );
+}
+
+#[test]
+fn notification_reply_does_not_reconcile_a_row_from_another_subscription() {
+    let submitted_at_ms = now_ms();
+    let (_dir, _desktop, gateway, queued) = notification_reply_fixture(
+        "subscription-mismatch",
+        "subscription reply",
+        Transport::Mms,
+    );
+    submit_notification_reply(&gateway, queued.command_id, submitted_at_ms);
+    let mut provider = notification_reply_provider(
+        "subscription-mismatch",
+        "subscription reply",
+        submitted_at_ms,
+    );
+    provider.source.subscription_id = "sim-2".into();
+    let acquisition = gateway.begin_mms_acquisition(provider).unwrap();
+
+    assert_eq!(acquisition.state, MmsAcquisitionState::Pending);
+    assert_ne!(
+        gateway
+            .complete_mms_acquisition(&acquisition.acquisition_id)
+            .unwrap()
+            .message_id,
+        queued.message_id
+    );
+}
+
+#[test]
+fn notification_reply_does_not_reconcile_imported_provider_history() {
+    let submitted_at_ms = now_ms();
+    let (_dir, _desktop, gateway, queued) =
+        notification_reply_fixture("imported-row", "history reply", Transport::Mms);
+    submit_notification_reply(&gateway, queued.command_id, submitted_at_ms);
+    let mut provider =
+        notification_reply_provider("imported-row", "history reply", submitted_at_ms);
+    provider.imported = true;
+    let acquisition = gateway.begin_mms_acquisition(provider).unwrap();
+
+    assert_eq!(acquisition.state, MmsAcquisitionState::Pending);
+    assert_ne!(
+        gateway
+            .complete_mms_acquisition(&acquisition.acquisition_id)
+            .unwrap()
+            .message_id,
+        queued.message_id
+    );
+}
+
+#[test]
+fn notification_reply_submission_rejects_submitted_and_unknown_commands() {
+    let submitted_at_ms = now_ms();
+    let (_dir, _desktop, gateway, queued) =
+        notification_reply_fixture("submission-state", "state reply", Transport::Mms);
+    submit_notification_reply(&gateway, queued.command_id, submitted_at_ms);
+    gateway
+        .record_send_result(queued.command_id, SendResult::Submitted)
+        .unwrap();
+
+    let expected = Err(Error::InvalidRequest(
+        "notification reply submission requires an active send permit",
+    ));
+    assert_eq!(
+        gateway.record_notification_reply_submission(queued.command_id, submitted_at_ms),
+        expected
+    );
+    assert_eq!(
+        gateway.record_notification_reply_submission(CommandId::new(), submitted_at_ms),
+        expected
+    );
+}
+
+#[test]
 fn legacy_incoming_mms_capture_validates_recipients_and_subject() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
@@ -884,6 +1431,27 @@ fn ambiguous_peppy_transaction_is_terminal_without_media_quota() {
     );
     assert!(acquisition.attachment_ids.is_empty());
     assert_eq!(client.mms_pending_media_bytes().unwrap(), 0);
+}
+
+#[test]
+fn terminal_outgoing_row_ignores_sent_box_flag_on_rescan() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "terminal-sent-box", &vault), &vault);
+    let mut legacy = input("legacy-sent-box", Direction::Outgoing);
+    legacy.transaction_id = Some(format!("peppy-{}", uuid::Uuid::new_v4()));
+    legacy.is_sent_box = false;
+    let terminal = client.begin_mms_acquisition(legacy.clone()).unwrap();
+    assert_eq!(terminal.state, MmsAcquisitionState::Unavailable);
+
+    legacy.is_sent_box = true;
+    let MmsBeginOutcome::Acquired(rescanned) =
+        client.begin_mms_acquisition_outcome(legacy).unwrap()
+    else {
+        panic!("terminal rescan must return the existing acquisition, not quarantine");
+    };
+    assert_eq!(rescanned.acquisition_id, terminal.acquisition_id);
+    assert_eq!(rescanned.state, MmsAcquisitionState::Unavailable);
 }
 
 #[test]

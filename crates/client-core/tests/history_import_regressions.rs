@@ -20,6 +20,7 @@ fn mms_input(id: &str, imported: bool) -> MmsAcquisitionInput {
         body: id.into(),
         imported,
         observed_at_ms: 1,
+        is_sent_box: true,
         transaction_id: None,
     }
 }
@@ -142,7 +143,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -158,10 +159,11 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
         .execute_batch(
             "DROP INDEX outbox_pending_events_history;
              DROP INDEX contact_photo_registrations_unacknowledged;
-             DROP TABLE phone_read_effects;
-             DROP TABLE phone_read_effect_terminals;
-             ALTER TABLE gateway_settings DROP COLUMN phone_read_enabled;
-             UPDATE schema_meta SET version=39;",
+              DROP TABLE phone_read_effects;
+              DROP TABLE phone_read_effect_terminals;
+              ALTER TABLE gateway_settings DROP COLUMN phone_read_enabled;
+              ALTER TABLE gateway_settings DROP COLUMN reply_via_google_messages_enabled;
+              UPDATE schema_meta SET version=39;",
         )
         .unwrap();
     drop(connection);
@@ -202,6 +204,14 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
         )
         .unwrap();
     assert!(!phone_read_enabled);
+    let reply_via_google_messages_enabled: bool = connection
+        .query_row(
+            "SELECT reply_via_google_messages_enabled FROM gateway_settings WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!reply_via_google_messages_enabled);
     let (mirroring_enabled, skip_silent, media_wifi_only): (bool, bool, bool) = connection
         .query_row(
             "SELECT mirroring_enabled,skip_silent,media_wifi_only FROM gateway_settings WHERE id=1",
@@ -248,7 +258,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",

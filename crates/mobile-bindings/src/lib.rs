@@ -61,6 +61,7 @@ pub struct NativeGatewaySettings {
     pub mms_sync_enabled: bool,
     pub media_wifi_only: bool,
     pub phone_read_enabled: bool,
+    pub reply_via_google_messages_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -368,6 +369,7 @@ pub struct NativeMmsAcquisitionInput {
     pub body: String,
     pub imported: bool,
     pub observed_at_ms: i64,
+    pub is_sent_box: bool,
     pub transaction_id: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -927,6 +929,7 @@ fn gateway_settings_view(settings: GatewaySettings) -> NativeGatewaySettings {
         mms_sync_enabled: settings.mms_sync_enabled,
         media_wifi_only: settings.media_wifi_only,
         phone_read_enabled: settings.phone_read_enabled,
+        reply_via_google_messages_enabled: settings.reply_via_google_messages_enabled,
     }
 }
 fn gateway_settings(settings: NativeGatewaySettings) -> GatewaySettings {
@@ -938,6 +941,7 @@ fn gateway_settings(settings: NativeGatewaySettings) -> GatewaySettings {
         mms_sync_enabled: settings.mms_sync_enabled,
         media_wifi_only: settings.media_wifi_only,
         phone_read_enabled: settings.phone_read_enabled,
+        reply_via_google_messages_enabled: settings.reply_via_google_messages_enabled,
     }
 }
 fn gateway_platform(platform: NativeGatewayPlatform) -> GatewayPlatform {
@@ -1334,6 +1338,7 @@ fn mms_input(input: NativeMmsAcquisitionInput) -> MmsAcquisitionInput {
         body: input.body,
         imported: input.imported,
         observed_at_ms: input.observed_at_ms,
+        is_sent_box: input.is_sent_box,
         transaction_id: input.transaction_id,
     }
 }
@@ -1465,6 +1470,7 @@ fn mms_input_view(input: MmsAcquisitionInput) -> NativeMmsAcquisitionInput {
         body: input.body,
         imported: input.imported,
         observed_at_ms: input.observed_at_ms,
+        is_sent_box: input.is_sent_box,
         transaction_id: input.transaction_id,
     }
 }
@@ -3429,6 +3435,24 @@ impl NativeClient {
     ) -> Result<NativePermit, MobileBindingsError> {
         let command_id = parse_id(&command_id)?;
         with_client(&self.client, |client| client.begin_send_attempt(command_id)).map(permit_view)
+    }
+
+    pub fn record_notification_reply_submission(
+        &self,
+        command_id: String,
+        submitted_at_ms: i64,
+    ) -> Result<(), MobileBindingsError> {
+        let command_id = parse_id(&command_id)?;
+        with_client(&self.client, |client| {
+            client.record_notification_reply_submission(command_id, submitted_at_ms)
+        })
+    }
+
+    pub fn canonical_phone_e164(
+        &self,
+        address: String,
+    ) -> Result<Option<String>, MobileBindingsError> {
+        with_client(&self.client, |client| client.canonical_phone_e164(&address))
     }
 
     pub fn record_send_result(

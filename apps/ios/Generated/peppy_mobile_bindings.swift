@@ -685,6 +685,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func beginSnapshotWithCompaction(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose, serverCompactionGeneration: String?) throws  -> NativeSnapshotProgress
     
+    func canonicalPhoneE164(address: String) throws  -> String?
+    
     /**
      * Contact DTOs are Rust-owned JSON schemas; native hosts must not maintain a parallel wire model.
      */
@@ -988,6 +990,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func recordGatewayMediaFailure(attachmentId: String, reason: String) throws  -> Bool
     
     func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, outcome: NativeMmsBackfillRecheckOutcome, conditions: NativeMmsBackfillRecheckConditions) throws 
+    
+    func recordNotificationReplySubmission(commandId: String, submittedAtMs: Int64) throws 
     
     func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: UInt64) throws 
     
@@ -1415,6 +1419,16 @@ open func beginSnapshotWithCompaction(highWater: String, recordCount: UInt64, pu
         FfiConverterUInt64.lower(recordCount),
         FfiConverterTypeNativeSnapshotPurpose_lower(purpose),
         FfiConverterOptionString.lower(serverCompactionGeneration),uniffiCallStatus
+    )
+})
+}
+    
+open func canonicalPhoneE164(address: String)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_canonical_phone_e164(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(address),uniffiCallStatus
     )
 })
 }
@@ -2562,6 +2576,16 @@ open func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, o
         FfiConverterInt64.lower(nowMs),
         FfiConverterTypeNativeMmsBackfillRecheckOutcome_lower(outcome),
         FfiConverterTypeNativeMmsBackfillRecheckConditions_lower(conditions),uniffiCallStatus
+    )
+}
+}
+    
+open func recordNotificationReplySubmission(commandId: String, submittedAtMs: Int64)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_notification_reply_submission(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(commandId),
+        FfiConverterInt64.lower(submittedAtMs),uniffiCallStatus
     )
 }
 }
@@ -5964,10 +5988,11 @@ public struct NativeGatewaySettings: Equatable, Hashable {
     public var mmsSyncEnabled: Bool
     public var mediaWifiOnly: Bool
     public var phoneReadEnabled: Bool
+    public var replyViaGoogleMessagesEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mirroringEnabled: Bool, mirroringWifiOnly: Bool, skipSilent: Bool, smsSyncEnabled: Bool, mmsSyncEnabled: Bool, mediaWifiOnly: Bool, phoneReadEnabled: Bool) {
+    public init(mirroringEnabled: Bool, mirroringWifiOnly: Bool, skipSilent: Bool, smsSyncEnabled: Bool, mmsSyncEnabled: Bool, mediaWifiOnly: Bool, phoneReadEnabled: Bool, replyViaGoogleMessagesEnabled: Bool) {
         self.mirroringEnabled = mirroringEnabled
         self.mirroringWifiOnly = mirroringWifiOnly
         self.skipSilent = skipSilent
@@ -5975,6 +6000,7 @@ public struct NativeGatewaySettings: Equatable, Hashable {
         self.mmsSyncEnabled = mmsSyncEnabled
         self.mediaWifiOnly = mediaWifiOnly
         self.phoneReadEnabled = phoneReadEnabled
+        self.replyViaGoogleMessagesEnabled = replyViaGoogleMessagesEnabled
     }
 
     
@@ -5999,7 +6025,8 @@ public struct FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer {
                 smsSyncEnabled: FfiConverterBool.read(from: &buf), 
                 mmsSyncEnabled: FfiConverterBool.read(from: &buf), 
                 mediaWifiOnly: FfiConverterBool.read(from: &buf), 
-                phoneReadEnabled: FfiConverterBool.read(from: &buf)
+                phoneReadEnabled: FfiConverterBool.read(from: &buf), 
+                replyViaGoogleMessagesEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -6011,6 +6038,7 @@ public struct FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer {
         FfiConverterBool.write(value.mmsSyncEnabled, into: &buf)
         FfiConverterBool.write(value.mediaWifiOnly, into: &buf)
         FfiConverterBool.write(value.phoneReadEnabled, into: &buf)
+        FfiConverterBool.write(value.replyViaGoogleMessagesEnabled, into: &buf)
     }
 }
 
@@ -6680,11 +6708,12 @@ public struct NativeMmsAcquisitionInput: Equatable, Hashable {
     public var body: String
     public var imported: Bool
     public var observedAtMs: Int64
+    public var isSentBox: Bool
     public var transactionId: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(source: NativeMmsSource, incoming: Bool, senderAddress: String?, recipients: [String], subject: String?, body: String, imported: Bool, observedAtMs: Int64, transactionId: String?) {
+    public init(source: NativeMmsSource, incoming: Bool, senderAddress: String?, recipients: [String], subject: String?, body: String, imported: Bool, observedAtMs: Int64, isSentBox: Bool, transactionId: String?) {
         self.source = source
         self.incoming = incoming
         self.senderAddress = senderAddress
@@ -6693,6 +6722,7 @@ public struct NativeMmsAcquisitionInput: Equatable, Hashable {
         self.body = body
         self.imported = imported
         self.observedAtMs = observedAtMs
+        self.isSentBox = isSentBox
         self.transactionId = transactionId
     }
 
@@ -6720,6 +6750,7 @@ public struct FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer 
                 body: FfiConverterString.read(from: &buf), 
                 imported: FfiConverterBool.read(from: &buf), 
                 observedAtMs: FfiConverterInt64.read(from: &buf), 
+                isSentBox: FfiConverterBool.read(from: &buf), 
                 transactionId: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -6733,6 +6764,7 @@ public struct FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer 
         FfiConverterString.write(value.body, into: &buf)
         FfiConverterBool.write(value.imported, into: &buf)
         FfiConverterInt64.write(value.observedAtMs, into: &buf)
+        FfiConverterBool.write(value.isSentBox, into: &buf)
         FfiConverterOptionString.write(value.transactionId, into: &buf)
     }
 }
@@ -14152,6 +14184,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_compaction() != 12430) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_canonical_phone_e164() != 57296) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_contact_book() != 63925) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14462,6 +14497,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_mms_backfill_recheck_outcome() != 33966) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_notification_reply_submission() != 44507) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity() != 22677) {

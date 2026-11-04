@@ -373,6 +373,7 @@ fn mms_read_requires_mms_policy_and_uses_transaction_identity_without_fingerprin
         body: "mms".into(),
         imported: false,
         observed_at_ms: 10,
+        is_sent_box: true,
         transaction_id: Some("pdu-one".into()),
     };
     let acquisition = client.begin_mms_acquisition(input).unwrap();

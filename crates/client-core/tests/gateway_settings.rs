@@ -93,6 +93,7 @@ fn gateway_settings_defaults_persist_and_gate_host_facts() {
             mms_sync_enabled: true,
             media_wifi_only: true,
             phone_read_enabled: false,
+            reply_via_google_messages_enabled: true,
         })
         .unwrap();
     let decision = client
@@ -112,6 +113,12 @@ fn gateway_settings_defaults_persist_and_gate_host_facts() {
     );
     assert!(!decision.capture_sms);
     assert!(!decision.capture_mms);
+    assert!(
+        client
+            .gateway_settings()
+            .unwrap()
+            .reply_via_google_messages_enabled
+    );
     assert!(!decision.transfer_media);
     drop(client);
 
@@ -131,6 +138,49 @@ fn gateway_settings_defaults_persist_and_gate_host_facts() {
     assert!(!ios.capture_notification);
     assert!(!ios.capture_sms);
     assert!(!ios.rcs_supported);
+}
+
+#[test]
+fn version_42_upgrade_adds_notification_reply_submission_storage_and_default_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-settings-v42", &vault);
+    let client = open(&config);
+    drop(client);
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";
+             DROP TABLE notification_reply_submissions;
+             ALTER TABLE gateway_settings DROP COLUMN reply_via_google_messages_enabled;
+             UPDATE schema_meta SET version=42;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let upgraded = open(&config);
+    assert!(
+        !upgraded
+            .gateway_settings()
+            .unwrap()
+            .reply_via_google_messages_enabled
+    );
+    drop(upgraded);
+
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    let table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='notification_reply_submissions')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(table_exists);
 }
 
 #[test]
@@ -319,7 +369,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert_eq!(status, (42, "sent".into(), None));
 }
 

@@ -807,6 +807,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_compaction(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_canonical_phone_e164(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_contact_book(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_incoming(
@@ -1014,6 +1016,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_gateway_media_failure(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_mms_backfill_recheck_outcome(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_notification_reply_submission(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity(
     ): Int
@@ -1289,6 +1293,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_snapshot_with_compaction(`ptr`: Long,`highWater`: RustBuffer.ByValue,`recordCount`: Long,`purpose`: RustBuffer.ByValue,`serverCompactionGeneration`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_canonical_phone_e164(`ptr`: Long,`address`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_contact_book(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_incoming(`ptr`: Long,`sms`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1496,6 +1502,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_gateway_media_failure(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_mms_backfill_recheck_outcome(`ptr`: Long,`acquisitionId`: RustBuffer.ByValue,`nowMs`: Long,`outcome`: RustBuffer.ByValue,`conditions`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_notification_reply_submission(`ptr`: Long,`commandId`: RustBuffer.ByValue,`submittedAtMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_recovery_snapshot_capacity(`ptr`: Long,`highWaterCursor`: RustBuffer.ByValue,`recordCount`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2120,6 +2128,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_compaction() and 0xFFFF) != 12430) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_canonical_phone_e164() and 0xFFFF) != 57296) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_contact_book() and 0xFFFF) != 63925) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2430,6 +2441,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_mms_backfill_recheck_outcome() and 0xFFFF) != 33966) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_notification_reply_submission() and 0xFFFF) != 44507) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity() and 0xFFFF) != 22677) {
@@ -3248,6 +3262,8 @@ public interface NativeClientInterface {
     
     fun `beginSnapshotWithCompaction`(`highWater`: kotlin.String, `recordCount`: kotlin.ULong, `purpose`: NativeSnapshotPurpose, `serverCompactionGeneration`: kotlin.String?): NativeSnapshotProgress
     
+    fun `canonicalPhoneE164`(`address`: kotlin.String): kotlin.String?
+    
     /**
      * Contact DTOs are Rust-owned JSON schemas; native hosts must not maintain a parallel wire model.
      */
@@ -3551,6 +3567,8 @@ public interface NativeClientInterface {
     fun `recordGatewayMediaFailure`(`attachmentId`: kotlin.String, `reason`: kotlin.String): kotlin.Boolean
     
     fun `recordMmsBackfillRecheckOutcome`(`acquisitionId`: kotlin.String, `nowMs`: kotlin.Long, `outcome`: NativeMmsBackfillRecheckOutcome, `conditions`: NativeMmsBackfillRecheckConditions)
+    
+    fun `recordNotificationReplySubmission`(`commandId`: kotlin.String, `submittedAtMs`: kotlin.Long)
     
     fun `recordRecoverySnapshotCapacity`(`highWaterCursor`: kotlin.String, `recordCount`: kotlin.ULong)
     
@@ -4151,6 +4169,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterULong.lower(`recordCount`),
         FfiConverterTypeNativeSnapshotPurpose.lower(`purpose`),
         FfiConverterOptionalString.lower(`serverCompactionGeneration`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `canonicalPhoneE164`(`address`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_canonical_phone_e164(
+        it,
+        
+        FfiConverterString.lower(`address`),_status)
 }
     }
     )
@@ -5818,6 +5851,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterLong.lower(`nowMs`),
         FfiConverterTypeNativeMmsBackfillRecheckOutcome.lower(`outcome`),
         FfiConverterTypeNativeMmsBackfillRecheckConditions.lower(`conditions`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `recordNotificationReplySubmission`(`commandId`: kotlin.String, `submittedAtMs`: kotlin.Long)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_notification_reply_submission(
+        it,
+        
+        FfiConverterString.lower(`commandId`),
+        FfiConverterLong.lower(`submittedAtMs`),_status)
 }
     }
     
@@ -10191,6 +10239,8 @@ data class NativeGatewaySettings (
     var `mediaWifiOnly`: kotlin.Boolean
     , 
     var `phoneReadEnabled`: kotlin.Boolean
+    , 
+    var `replyViaGoogleMessagesEnabled`: kotlin.Boolean
     
 ){
     
@@ -10214,6 +10264,7 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -10224,7 +10275,8 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
             FfiConverterBoolean.allocationSize(value.`smsSyncEnabled`) +
             FfiConverterBoolean.allocationSize(value.`mmsSyncEnabled`) +
             FfiConverterBoolean.allocationSize(value.`mediaWifiOnly`) +
-            FfiConverterBoolean.allocationSize(value.`phoneReadEnabled`)
+            FfiConverterBoolean.allocationSize(value.`phoneReadEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`replyViaGoogleMessagesEnabled`)
     )
 
     override fun write(value: NativeGatewaySettings, buf: ByteBuffer) {
@@ -10235,6 +10287,7 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
             FfiConverterBoolean.write(value.`mmsSyncEnabled`, buf)
             FfiConverterBoolean.write(value.`mediaWifiOnly`, buf)
             FfiConverterBoolean.write(value.`phoneReadEnabled`, buf)
+            FfiConverterBoolean.write(value.`replyViaGoogleMessagesEnabled`, buf)
     }
 }
 
@@ -10790,6 +10843,8 @@ data class NativeMmsAcquisitionInput (
     , 
     var `observedAtMs`: kotlin.Long
     , 
+    var `isSentBox`: kotlin.Boolean
+    , 
     var `transactionId`: kotlin.String?
     
 ){
@@ -10815,6 +10870,7 @@ public object FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer<
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterLong.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
@@ -10828,6 +10884,7 @@ public object FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer<
             FfiConverterString.allocationSize(value.`body`) +
             FfiConverterBoolean.allocationSize(value.`imported`) +
             FfiConverterLong.allocationSize(value.`observedAtMs`) +
+            FfiConverterBoolean.allocationSize(value.`isSentBox`) +
             FfiConverterOptionalString.allocationSize(value.`transactionId`)
     )
 
@@ -10840,6 +10897,7 @@ public object FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer<
             FfiConverterString.write(value.`body`, buf)
             FfiConverterBoolean.write(value.`imported`, buf)
             FfiConverterLong.write(value.`observedAtMs`, buf)
+            FfiConverterBoolean.write(value.`isSentBox`, buf)
             FfiConverterOptionalString.write(value.`transactionId`, buf)
     }
 }
