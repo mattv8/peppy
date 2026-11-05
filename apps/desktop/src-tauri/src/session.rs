@@ -15,8 +15,8 @@ use crate::{
 };
 use peppy_client_core::{
     AttachmentId, AttachmentInfo, Client, ClientConfig, ConversationFolder, ConversationId, Cursor,
-    DatabaseKey, DeviceId, DraftId, MediaCursor, MediaMetadata, Message, MessageId, NativeKeyCache,
-    ReplayProgress, VaultId,
+    DatabaseKey, DeviceId, DraftId, GatewayRoute, MediaCursor, MediaMetadata, Message, MessageId,
+    NativeKeyCache, ReplayProgress, VaultId,
 };
 use peppy_desktop_api::compose::{self, ComposeError};
 use std::{
@@ -1665,10 +1665,12 @@ impl Session {
             }
         }
         for draft in &drafts {
-            let source = draft
-                .route
-                .as_ref()
-                .map(|r| r.gateway_device_id.to_string());
+            let source = draft.route.as_ref().map(|route| match route {
+                GatewayRoute::Carrier {
+                    gateway_device_id, ..
+                }
+                | GatewayRoute::RcsLink { gateway_device_id } => gateway_device_id.to_string(),
+            });
             for recipient in &draft.recipients {
                 addresses.push((recipient.clone(), source.clone()));
             }
