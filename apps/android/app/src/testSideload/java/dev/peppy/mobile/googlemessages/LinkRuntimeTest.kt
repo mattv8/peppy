@@ -3,11 +3,6 @@ package dev.peppy.mobile.googlemessages
 import android.app.NotificationManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
-import java.io.File
-import java.nio.file.Files
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import dev.peppy.mobile.security.AesGcmSecretBox
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,7 +17,6 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35])
 class LinkRuntimeTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val directory = Files.createTempDirectory("link-runtime").toFile()
 
     @After
     fun cleanUp() {
@@ -30,7 +24,6 @@ class LinkRuntimeTest {
         LinkRuntimeTestHooks.engine = null
         LinkRuntimeTestHooks.storeFactory = null
         LinkRuntimeTestHooks.eventRecorder = null
-        directory.deleteRecursively()
     }
 
     @Test
@@ -41,7 +34,7 @@ class LinkRuntimeTest {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle.also { opens++ }
         }
-        LinkRuntimeTestHooks.storeFactory = { store() }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
 
         val first = LinkRuntime.handle(context) as LinkOpenResult.Open
         val second = LinkRuntime.handle(context) as LinkOpenResult.Open
@@ -62,32 +55,30 @@ class LinkRuntimeTest {
 
     @Test
     fun `unreadable state remains until the owner resets it`() {
-        File(directory, "google-messages-link-state.bin").writeBytes(byteArrayOf(1))
+        val store = InMemoryStore(unreadable = true)
         LinkRuntimeTestHooks.engine = availableEngine(FakeHandle())
-        LinkRuntimeTestHooks.storeFactory = { LinkStateStore(directory) }
+        LinkRuntimeTestHooks.storeFactory = { store }
 
         val result = LinkRuntime.handle(context)
 
         assertTrue(result is LinkOpenResult.Unreadable)
-        assertTrue(File(directory, "google-messages-link-state.bin").isFile)
+        assertFalse(store.wiped)
     }
 
     @Test
     fun `reset stops closes wipes and records a fixed event`() {
         val handle = FakeHandle()
         val events = mutableListOf<String>()
-        val box = AesGcmSecretBox(keyProvider())
+        val store = InMemoryStore()
         LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { LinkStateStore(directory, box) }
+        LinkRuntimeTestHooks.storeFactory = { store }
         LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> events += "$kind/$code" }
-        val store = LinkStateStore(directory, box)
-        store.write(byteArrayOf(1))
         LinkRuntime.handle(context)
 
         LinkRuntime.resetLocalState(context)
 
         assertTrue(handle.closed)
-        assertFalse(File(directory, "google-messages-link-state.bin").exists())
+        assertTrue(store.wiped)
         assertEquals(listOf("link/reset_local"), events)
     }
 
@@ -99,16 +90,21 @@ class LinkRuntimeTest {
         assertEquals(NotificationManager.IMPORTANCE_LOW, manager.getNotificationChannel(GoogleMessagesLinkService.CHANNEL_ID).importance)
     }
 
-    private fun store(): LinkStateStore = LinkStateStore(directory, AesGcmSecretBox(keyProvider()))
-
     private fun availableEngine(handle: LinkHandle) = object : LinkEngine {
         override val available = true
         override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
     }
 
-    private fun keyProvider(): (Boolean) -> SecretKey? {
-        var key: SecretKey? = null
-        return { create -> key ?: if (create) KeyGenerator.getInstance("AES").apply { init(256) }.generateKey().also { key = it } else null }
+    private class InMemoryStore(private val unreadable: Boolean = false) : LinkStateStorage {
+        var wiped = false
+
+        override fun read(): ByteArray {
+            if (unreadable) throw IllegalStateException("link_state_unreadable")
+            return ByteArray(0)
+        }
+
+        override fun write(state: ByteArray) = Unit
+        override fun wipe() { wiped = true }
     }
 
     private class FakeHandle : LinkHandle {

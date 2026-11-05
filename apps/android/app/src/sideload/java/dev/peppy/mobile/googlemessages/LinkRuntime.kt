@@ -54,11 +54,11 @@ object LinkRuntime {
         pairingInProgress.set(false)
     }
 
-    private fun store(context: Context): LinkStateStore =
+    private fun store(context: Context): LinkStateStorage =
         LinkRuntimeTestHooks.storeFactory?.invoke(context.applicationContext)
-            ?: LinkStateStore(context.applicationContext.noBackupFilesDir)
+            ?: LinkStateStoreAdapter(LinkStateStore(context.applicationContext.noBackupFilesDir))
 
-    private fun host(store: LinkStateStore) = object : LinkHost {
+    private fun host(store: LinkStateStorage) = object : LinkHost {
         override fun persistState(state: ByteArray) = store.write(state)
 
         override fun event(kind: String, code: String, value: Long) {
@@ -87,6 +87,18 @@ object LinkRuntime {
     }
 }
 
+internal interface LinkStateStorage {
+    fun read(): ByteArray
+    fun write(state: ByteArray)
+    fun wipe()
+}
+
+private class LinkStateStoreAdapter(private val store: LinkStateStore) : LinkStateStorage {
+    override fun read(): ByteArray = store.read()
+    override fun write(state: ByteArray) = store.write(state)
+    override fun wipe() = store.wipe()
+}
+
 internal fun filterReasonCode(code: String?): String =
     code?.takeIf { REASON_CODE.matches(it) } ?: "unknown"
 
@@ -94,6 +106,6 @@ private val REASON_CODE = Regex("[a-z][a-z0-9_]{0,39}")
 
 internal object LinkRuntimeTestHooks {
     @Volatile var engine: LinkEngine? = null
-    @Volatile var storeFactory: ((Context) -> LinkStateStore)? = null
+    @Volatile var storeFactory: ((Context) -> LinkStateStorage)? = null
     @Volatile var eventRecorder: ((String, String, Long) -> Unit)? = null
 }
