@@ -1,6 +1,7 @@
 use crate::{ConversationId, Error};
 use phonenumber::{Mode, parse};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const RCS_MAPPING_PROOF_VERSION: u32 = 1;
@@ -59,6 +60,8 @@ pub struct RcsMappingObservation {
     pub observed_at_ms: i64,
     pub link_generation: u64,
     pub session_generation: u64,
+    /// Monotonic gateway-wide context revision (region, SIM, own identity, canonicalizer, link).
+    pub context_revision: u64,
     pub canonicalizer_revision: u32,
     pub mapping_revision: u64,
     pub link_state: RcsLinkState,
@@ -78,6 +81,8 @@ pub enum RcsMappingRefusal {
     MappingConflict,
     NonMonotonicRevision,
     RetiredContext,
+    ContextMismatch,
+    PeppyConversationUncertain,
 }
 
 impl RcsMappingRefusal {
@@ -95,6 +100,8 @@ impl RcsMappingRefusal {
             Self::MappingConflict => "mapping_conflict",
             Self::NonMonotonicRevision => "nonmonotonic_revision",
             Self::RetiredContext => "retired_context",
+            Self::ContextMismatch => "context_mismatch",
+            Self::PeppyConversationUncertain => "peppy_conversation_uncertain",
         }
     }
 }
@@ -129,6 +136,11 @@ pub(crate) fn verify_and_store(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<RcsMappingOutcome, Error> {
+    if now_ms.saturating_sub(observation.observed_at_ms).abs() > RCS_MAPPING_FRESHNESS_MS {
+        return Ok(RcsMappingOutcome::Refused(
+            RcsMappingRefusal::StaleObservation,
+        ));
+    }
     match update_context(conn, observation)? {
         ContextUpdate::Retired => {
             return Ok(RcsMappingOutcome::Refused(
@@ -136,7 +148,7 @@ pub(crate) fn verify_and_store(
             ));
         }
         ContextUpdate::Changed => invalidate_all_mappings(conn, "context_changed")?,
-        ContextUpdate::Unchanged => {}
+        ContextUpdate::Unchanged | ContextUpdate::Advanced => {}
     }
     let outcome = verify(conn, observation, now_ms)?;
     let RcsMappingOutcome::Mapped(mapping) = &outcome else {
@@ -199,9 +211,24 @@ fn verify(
     let visible = observation
         .participants
         .iter()
-        .filter(|participant| {
-            participant.is_visible && canonical_identity(&participant.identity).is_some()
-        })
+        .filter(|participant| participant.is_visible)
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        return Ok(RcsMappingOutcome::Refused(
+            RcsMappingRefusal::ParticipantAmbiguous,
+        ));
+    }
+    if visible.iter().any(|participant| {
+        !participant.identity.trim().is_empty()
+            && canonical_identity(&participant.identity).is_none()
+    }) {
+        return Ok(RcsMappingOutcome::Refused(
+            RcsMappingRefusal::InvalidIdentity,
+        ));
+    }
+    let visible = visible
+        .into_iter()
+        .filter(|participant| !participant.identity.trim().is_empty())
         .collect::<Vec<_>>();
     if visible.is_empty() {
         return Ok(RcsMappingOutcome::Refused(
@@ -243,7 +270,12 @@ fn verify(
         ));
     };
 
-    let conversations = peppy_conversations_for_identity(conn, &participant)?;
+    let (conversations, uncertain) = peppy_conversations_for_identity(conn, &participant)?;
+    if uncertain {
+        return Ok(RcsMappingOutcome::Refused(
+            RcsMappingRefusal::PeppyConversationUncertain,
+        ));
+    }
     let [conversation_id] = conversations.as_slice() else {
         return Ok(RcsMappingOutcome::Refused(if conversations.is_empty() {
             RcsMappingRefusal::PeppyConversationMissing
@@ -308,12 +340,13 @@ fn canonical_identity(identity: &str) -> Option<String> {
 fn peppy_conversations_for_identity(
     conn: &Connection,
     identity: &str,
-) -> Result<Vec<ConversationId>, Error> {
+) -> Result<(Vec<ConversationId>, bool), Error> {
     let mut statement = conn.prepare("SELECT conversation_id,payload FROM messages")?;
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
     let mut conversations = std::collections::BTreeSet::new();
+    let mut uncertain = false;
     for row in rows {
         let (conversation_id, payload) = row?;
         let payload: crate::MessagePayload = crate::decode(payload.as_bytes())?;
@@ -321,14 +354,16 @@ fn peppy_conversations_for_identity(
             .sender_address
             .iter()
             .chain(payload.recipients.iter());
-        if identities
+        let identities = identities
             .filter_map(|address| canonical_identity(address))
-            .any(|address| address == identity)
-        {
+            .collect::<std::collections::BTreeSet<_>>();
+        if identities.contains(identity) && payload.mms_context.is_some() {
+            uncertain = true;
+        } else if identities.len() == 1 && identities.contains(identity) {
             conversations.insert(crate::parse(&conversation_id).map_err(|_| Error::Database)?);
         }
     }
-    Ok(conversations.into_iter().collect())
+    Ok((conversations.into_iter().collect(), uncertain))
 }
 
 fn highest_revision(
@@ -422,6 +457,7 @@ pub(crate) enum ContextUpdate {
     Unchanged,
     Changed,
     Retired,
+    Advanced,
 }
 
 const RCS_CONTEXT_KEY: &str = "rcs_mapping_context_v1";
@@ -430,6 +466,9 @@ pub(crate) fn update_context(
     conn: &Connection,
     observation: &RcsMappingObservation,
 ) -> Result<ContextUpdate, Error> {
+    if observation.context_revision == 0 {
+        return Ok(ContextUpdate::Retired);
+    }
     let context = context_value(observation);
     let current = conn
         .query_row(
@@ -439,16 +478,40 @@ pub(crate) fn update_context(
         )
         .optional()?;
     if let Some(current) = current {
-        let Some((link_generation, session_generation)) = context_generations(&current) else {
-            return Err(Error::Database);
-        };
-        if (observation.link_generation, observation.session_generation)
-            < (link_generation, session_generation)
+        let current: RcsContext = serde_json::from_str(&current).map_err(|_| Error::Database)?;
+        if (
+            observation.link_generation,
+            observation.session_generation,
+            observation.context_revision,
+        ) < (
+            current.link_generation,
+            current.session_generation,
+            current.context_revision,
+        ) {
+            return Ok(ContextUpdate::Retired);
+        }
+        let incoming: RcsContext = serde_json::from_str(&context).map_err(|_| Error::Database)?;
+        if (
+            observation.link_generation,
+            observation.session_generation,
+            observation.context_revision,
+        ) == (
+            current.link_generation,
+            current.session_generation,
+            current.context_revision,
+        ) && incoming != current
         {
             return Ok(ContextUpdate::Retired);
         }
-        if current == context {
+        if incoming == current {
             return Ok(ContextUpdate::Unchanged);
+        }
+        if incoming.same_content(&current) {
+            conn.execute(
+                "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                params![RCS_CONTEXT_KEY, context],
+            )?;
+            return Ok(ContextUpdate::Advanced);
         }
     }
     conn.execute(
@@ -478,7 +541,14 @@ pub(crate) fn mapping_matches_observation(
     else {
         return Ok(false);
     };
-    if context != context_value(observation)
+    if observation.google_candidate_count != 1
+        || observation.google_conversation_id != mapping.google_conversation_id
+        || observation.conversation_type != RcsConversationType::Rcs
+        || observation.status != "eligible"
+        || observation.send_mode != RcsSendMode::Automatic
+        || observation.read_only
+        || !observation.default_outgoing
+        || context != context_value(observation)
         || observation.link_state != RcsLinkState::Linked
         || mapping.mapping_revision != observation.mapping_revision
         || mapping.verified_at_ms != observation.observed_at_ms
@@ -489,27 +559,49 @@ pub(crate) fn mapping_matches_observation(
         Some(identity) => identity,
         None => return Ok(false),
     };
-    Ok(mapping.proof.digest == proof_digest(observation, mapping.class, &own_identity))
+    if mapping.proof.digest != proof_digest(observation, mapping.class, &own_identity) {
+        return Ok(false);
+    }
+    let (conversations, uncertain) =
+        peppy_conversations_for_identity(conn, &mapping.proof.canonical_participant)?;
+    Ok(!uncertain && conversations.as_slice() == [mapping.conversation_id])
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct RcsContext {
+    link_generation: u64,
+    session_generation: u64,
+    context_revision: u64,
+    identity_region: String,
+    own_identity: String,
+    sim_id: String,
+    canonicalizer_revision: u32,
+    link_state: u8,
+}
+
+impl RcsContext {
+    fn same_content(&self, other: &Self) -> bool {
+        self.identity_region == other.identity_region
+            && self.own_identity == other.own_identity
+            && self.sim_id == other.sim_id
+            && self.canonicalizer_revision == other.canonicalizer_revision
+            && self.link_state == other.link_state
+    }
 }
 
 fn context_value(observation: &RcsMappingObservation) -> String {
-    format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}:{}",
-        observation.link_generation,
-        observation.session_generation,
-        observation.identity_region,
-        canonical_identity(&observation.selected_sim_own_identity).unwrap_or_default(),
-        observation.selected_sim_id,
-        observation.canonicalizer_revision,
-        observation.link_state as u8,
-        observation.conversation_type as u8,
-        observation.send_mode as u8,
-    )
-}
-
-fn context_generations(context: &str) -> Option<(u64, u64)> {
-    let mut values = context.splitn(3, ':');
-    Some((values.next()?.parse().ok()?, values.next()?.parse().ok()?))
+    serde_json::to_string(&RcsContext {
+        link_generation: observation.link_generation,
+        session_generation: observation.session_generation,
+        context_revision: observation.context_revision,
+        identity_region: observation.identity_region.clone(),
+        own_identity: canonical_identity(&observation.selected_sim_own_identity)
+            .unwrap_or_default(),
+        sim_id: observation.selected_sim_id.clone(),
+        canonicalizer_revision: observation.canonicalizer_revision,
+        link_state: observation.link_state as u8,
+    })
+    .expect("RCS context is serializable")
 }
 
 fn invalidate_for_refusal(
@@ -526,7 +618,7 @@ fn invalidate_for_refusal(
             .filter_map(|participant| canonical_identity(&participant.identity))
             .find(|identity| own_identity.as_deref() != Some(identity.as_str()));
         if let Some(participant) = participant {
-            for conversation_id in peppy_conversations_for_identity(conn, &participant)? {
+            for conversation_id in peppy_conversations_for_identity(conn, &participant)?.0 {
                 conn.execute(
                     "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE peppy_conversation_id=? AND invalidated_at_ms IS NULL",
                     params![code, conversation_id.to_string()],

@@ -20,6 +20,7 @@ fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
         observed_at_ms: 1_000,
         link_generation: 4,
         session_generation: 7,
+        context_revision: 1,
         canonicalizer_revision: 1,
         mapping_revision: revision,
         link_state: RcsLinkState::Linked,
@@ -248,6 +249,7 @@ fn context_and_conflict_invalidate_all_affected_mappings() {
 
     let mut delayed = mapping_b.clone();
     delayed.mapping_revision = 2;
+    delayed.context_revision = 1;
     assert_eq!(
         client.verify_rcs_mapping(&delayed, 1_000).unwrap(),
         RcsMappingOutcome::Refused(RcsMappingRefusal::RetiredContext)
