@@ -199,7 +199,7 @@ class LinkSignInActivity : AppCompatActivity() {
             if (::webView.isInitialized) webView.destroy()
             releaseLease()
             if (cleared && !isFinishing && !isDestroyed) after() else if (!cleared) {
-                LinkSignInRuntime.blockSignIn()
+                GoogleMessagesLink.blockSignInAfterCleanupFailure()
                 finishWith(OUTCOME_BLOCKED)
             }
         }
