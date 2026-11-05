@@ -35,6 +35,7 @@ type Link struct {
 	host Host
 
 	mu          sync.Mutex
+	rpcMu       sync.Mutex
 	persistMu   sync.Mutex
 	state       string
 	pairingFrom string
@@ -54,6 +55,9 @@ type Link struct {
 
 	changes            chan any
 	conversationEvents []conversationEvent
+	conversationIndex  map[string]conversationSummary
+	settings           *gmproto.Settings
+	settingsAt         time.Time
 
 	// m2VerificationPassed is supplied by the Android host only after the owner-gated
 	// on-device procedures recorded in g0-libgm-verification.md have passed. It is
@@ -84,7 +88,7 @@ func Open(state []byte, host Host) (*Link, error) {
 		return nil, err
 	}
 	zerolog.SetGlobalLevel(zerolog.Disabled)
-	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, seq: decoded.Seq, changes: make(chan any, 64)}
+	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, seq: decoded.Seq, changes: make(chan any, 64), conversationIndex: make(map[string]conversationSummary)}
 	if len(decoded.Auth) > 0 && string(decoded.Auth) != "null" {
 		link.auth = libgm.NewAuthData()
 		if err := json.Unmarshal(decoded.Auth, link.auth); err != nil {
@@ -390,7 +394,32 @@ func (link *Link) RefreshConversationIndex() error {
 	if !link.hasM2Verification() {
 		return errors.New("m2_verification_required")
 	}
-	return errors.New("conversation_lookup_unavailable")
+	client := link.activeClient()
+	if client == nil {
+		return errors.New("link_unavailable")
+	}
+	link.rpcMu.Lock()
+	defer link.rpcMu.Unlock()
+	for _, folder := range []gmproto.ListConversationsRequest_Folder{gmproto.ListConversationsRequest_INBOX, gmproto.ListConversationsRequest_ARCHIVE, gmproto.ListConversationsRequest_SPAM_BLOCKED} {
+		var cursor *gmproto.Cursor
+		for page := 0; page < conversationPageLimit; page++ {
+			ctx, cancel := context.WithTimeout(context.Background(), conversationTimeout)
+			response, err := client.ListConversations(ctx, &gmproto.ListConversationsRequest{Count: conversationPageSize, Folder: folder, Cursor: cursor})
+			cancel()
+			if err != nil || response == nil {
+				return errors.New("conversation_lookup_failed")
+			}
+			link.indexConversations(response.GetConversations())
+			cursor = response.GetCursor()
+			if cursor == nil {
+				break
+			}
+			if page == conversationPageLimit-1 {
+				return errors.New("conversation_lookup_incomplete")
+			}
+		}
+	}
+	return nil
 }
 
 // GetConversation returns only fixed-code local lookup status. It never exposes
@@ -402,7 +431,18 @@ func (link *Link) GetConversation(googleConversationID string) string {
 	if !link.hasM2Verification() {
 		return conversationJSON("m2_verification_required")
 	}
-	return conversationJSON("conversation_lookup_unavailable")
+	client := link.activeClient()
+	if client == nil {
+		return conversationJSON("link_unavailable")
+	}
+	link.rpcMu.Lock()
+	defer link.rpcMu.Unlock()
+	conversation, code := link.getConversation(client, googleConversationID)
+	if code != "" {
+		return conversationJSON(code)
+	}
+	link.indexConversations([]*gmproto.Conversation{conversation})
+	return conversationJSON("conversation_found")
 }
 
 // ResolveExistingConversation refuses implicit creation. A target is accepted
@@ -413,6 +453,12 @@ func (link *Link) ResolveExistingConversation(target string) string {
 	}
 	if !link.hasM2Verification() {
 		return conversationJSON("m2_verification_required")
+	}
+	link.mu.Lock()
+	summary, found := link.conversationIndex[target]
+	link.mu.Unlock()
+	if found {
+		return resolvedConversationJSON(summary.id)
 	}
 	return conversationJSON("implicit_creation_refused")
 }
@@ -431,6 +477,15 @@ func (link *Link) hasM2Verification() bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
 	return !link.closed && link.m2VerificationPassed
+}
+
+func (link *Link) activeClient() *libgm.Client {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if link.closed || link.state != stateLinked || link.client == nil {
+		return nil
+	}
+	return link.client
 }
 
 // Unlink cancels any in-flight pair or relink and waits, bounded, for it to unwind. Then
@@ -592,7 +647,7 @@ func relevantEvent(event any) bool {
 	case *events.AuthTokenRefreshed, *events.GaiaLoggedOut, *events.ListenFatalError, *events.AccountChange,
 		*events.ListenTemporaryError, *events.ListenRecovered, *events.PhoneNotResponding,
 		*events.PhoneRespondingAgain, *events.NoDataReceived, *events.ActiveSessionSet, *gmproto.UserAlertEvent,
-		*gmproto.Conversation:
+		*gmproto.Conversation, *gmproto.Settings:
 		return true
 	}
 	return false
@@ -648,6 +703,8 @@ func (link *Link) projectEvent(event any) {
 		}
 	case *gmproto.Conversation:
 		link.recordConversationEvent(value)
+	case *gmproto.Settings:
+		link.recordSettings(value)
 	}
 }
 
@@ -672,6 +729,7 @@ func (link *Link) transition(state, code string) {
 		return
 	}
 	link.state, link.stopCode, link.healthy, link.responding = state, "", false, false
+	link.conversationIndex, link.conversationEvents, link.settings, link.settingsAt = make(map[string]conversationSummary), nil, nil, time.Time{}
 	link.mu.Unlock()
 	if err := link.persist(); err != nil {
 		link.stopFatal("persist_failed", false)
@@ -703,6 +761,7 @@ func (link *Link) signOutIf(code string, allowed func(state string) bool) {
 	}
 	link.state, link.pairingFrom, link.stopCode, link.auth = stateSignedOut, "", code, libgm.NewAuthData()
 	link.healthy, link.responding, link.lastOKMS = false, false, 0
+	link.conversationIndex, link.conversationEvents, link.settings, link.settingsAt = make(map[string]conversationSummary), nil, nil, time.Time{}
 	link.mu.Unlock()
 	if err := link.persist(); err != nil {
 		link.stopFatal("persist_failed", false)

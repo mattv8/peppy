@@ -1,10 +1,15 @@
 package gmlink
 
 import (
+	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
+
+const sendTimeout = 30 * time.Second
 
 type rcsSendRequest struct {
 	CommandID            string `json:"command_id"`
@@ -23,17 +28,12 @@ type rcsSendResult struct {
 	AckAtMS              int64  `json:"ack_at_ms,omitempty"`
 }
 
-// SendRcs accepts only an already-permitted command. M2 verification is
-// deliberately fail-closed: until the host records both owner-gated procedures,
-// this method does not contact libgm. The current pinned API has no reviewed
-// settings read RPC, so even a recorded gate cannot submit until that surface is
-// independently verified and wired with its own deadline.
+// SendRcs invokes SendMessage once only after re-fetching the exact conversation
+// and joining its outgoing id to a fresh settings event. An acknowledgement is
+// transport metadata, not delivery evidence.
 func (link *Link) SendRcs(requestJSON string) string {
 	var request rcsSendRequest
-	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil {
-		return sendJSON(rcsSendResult{Code: "invalid_request"})
-	}
-	if !validRcsRequest(request) {
+	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil || !validRcsRequest(request) {
 		return sendJSON(rcsSendResult{Code: "invalid_request"})
 	}
 	if request.M2VerificationPassed {
@@ -46,7 +46,37 @@ func (link *Link) SendRcs(requestJSON string) string {
 	if !link.hasM2Verification() {
 		return sendJSON(rcsSendResult{Code: "m2_verification_required"})
 	}
-	return sendJSON(rcsSendResult{Code: "settings_unavailable", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
+	client := link.activeClient()
+	if client == nil {
+		return sendJSON(rcsSendResult{Code: "link_unavailable"})
+	}
+	link.rpcMu.Lock()
+	defer link.rpcMu.Unlock()
+	conversation, code := link.getConversation(client, request.GoogleConversationID)
+	if code != "" {
+		return sendJSON(rcsSendResult{Code: code, TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
+	}
+	settings, code := link.currentSettings()
+	if code != "" {
+		return sendJSON(rcsSendResult{Code: code, TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
+	}
+	payload, code := validatedPayload(conversation, settings, request)
+	if code != "" {
+		return sendJSON(rcsSendResult{Code: code, TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+	response, err := client.SendMessage(ctx, payload)
+	cancel()
+	if err != nil || response == nil {
+		return sendJSON(rcsSendResult{Code: "outcome_unknown", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
+	}
+	if response.GetGoogleAccountSwitch() != nil {
+		return sendJSON(rcsSendResult{Code: "account_changed", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
+	}
+	if response.GetStatus() != gmproto.SendMessageResponse_SUCCESS {
+		return sendJSON(rcsSendResult{Code: "send_rejected", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
+	}
+	return sendJSON(rcsSendResult{Code: "submitted", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID, AckAtMS: time.Now().UnixMilli()})
 }
 
 func validRcsRequest(request rcsSendRequest) bool {
@@ -55,6 +85,49 @@ func validRcsRequest(request rcsSendRequest) bool {
 	}
 	parsed, err := uuid.Parse(request.TmpID)
 	return err == nil && parsed.Version() == 4
+}
+
+func (link *Link) currentSettings() (*gmproto.Settings, string) {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if link.settings == nil || link.settingsAt.IsZero() || time.Since(link.settingsAt) > settingsMaxAge {
+		return nil, "settings_unavailable"
+	}
+	return link.settings, ""
+}
+
+func validatedPayload(conversation *gmproto.Conversation, settings *gmproto.Settings, request rcsSendRequest) (*gmproto.SendMessageRequest, string) {
+	if conversation.GetConversationID() != request.GoogleConversationID || conversation.GetType() != gmproto.ConversationType_RCS || conversation.GetStatus() != gmproto.ConversationStatus_ACTIVE {
+		return nil, "conversation_changed"
+	}
+	if conversation.GetReadOnly() || conversation.GetSendMode() != gmproto.ConversationSendMode_SEND_MODE_AUTO {
+		return nil, "conversation_not_writable"
+	}
+	others := visibleOtherParticipants(conversation)
+	if len(others) != 1 {
+		return nil, "conversation_not_one_to_one"
+	}
+	outgoingID := conversation.GetDefaultOutgoingID()
+	if outgoingID == "" {
+		return nil, "sim_unavailable"
+	}
+	var simPayload *gmproto.SIMPayload
+	for _, card := range settings.GetSIMCards() {
+		if card.GetSIMParticipant().GetID() == outgoingID && card.GetRCSChats().GetEnabled() {
+			if simPayload != nil || card.GetSIMData().GetSIMPayload() == nil {
+				return nil, "sim_unavailable"
+			}
+			simPayload = card.GetSIMData().GetSIMPayload()
+		}
+	}
+	if simPayload == nil {
+		return nil, "sim_unavailable"
+	}
+	return &gmproto.SendMessageRequest{
+		ConversationID: conversation.GetConversationID(), SIMPayload: simPayload, TmpID: request.TmpID, ForceRCS: false,
+		MessagePayload: &gmproto.MessagePayload{TmpID: request.TmpID, TmpID2: request.TmpID, ConversationID: conversation.GetConversationID(), ParticipantID: outgoingID,
+			MessageInfo: []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: request.Content}}}}},
+	}, ""
 }
 
 func sendJSON(result rcsSendResult) string {

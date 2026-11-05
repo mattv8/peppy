@@ -73,15 +73,17 @@ type phoneFixture struct {
 	gate      chan struct{}
 	gateOnce  sync.Once
 
-	mu         sync.Mutex
-	knobs      fixtureKnobs
-	actions    []string
-	signIns    int
-	configs    int
-	polls      int
-	refreshes  int
-	listCalls  []*gmproto.ListConversationsRequest
-	unexpected []string
+	mu            sync.Mutex
+	knobs         fixtureKnobs
+	actions       []string
+	signIns       int
+	configs       int
+	polls         int
+	refreshes     int
+	listCalls     []*gmproto.ListConversationsRequest
+	conversations []*gmproto.Conversation
+	sendRequests  []*gmproto.SendMessageRequest
+	unexpected    []string
 }
 
 // newPhoneFixture serves on localhost and routes the production dialer to it.
@@ -289,6 +291,10 @@ func (fixture *phoneFixture) handleSend(writer http.ResponseWriter, request *htt
 	switch action {
 	case gmproto.ActionType_LIST_CONVERSATIONS:
 		fixture.answerListConversations(&data)
+	case gmproto.ActionType_GET_CONVERSATION:
+		fixture.answerGetConversation(&data)
+	case gmproto.ActionType_SEND_MESSAGE:
+		fixture.answerSendMessage(&data)
 	case gmproto.ActionType_CREATE_GAIA_PAIRING_CLIENT_INIT:
 		if knobs.gaiaInit {
 			fixture.deliverGaiaInit(data.GetRequestID())
@@ -313,11 +319,58 @@ func (fixture *phoneFixture) answerListConversations(data *gmproto.OutgoingRPCDa
 	fixture.mu.Lock()
 	fixture.listCalls = append(fixture.listCalls, &request)
 	fixture.mu.Unlock()
-	encrypted, err := fixture.auth.RequestCrypto.Encrypt(mustMarshal(&gmproto.ListConversationsResponse{}))
+	fixture.mu.Lock()
+	conversations := append([]*gmproto.Conversation(nil), fixture.conversations...)
+	fixture.mu.Unlock()
+	encrypted, err := fixture.auth.RequestCrypto.Encrypt(mustMarshal(&gmproto.ListConversationsResponse{Conversations: conversations}))
 	if err != nil {
 		panic(err)
 	}
 	fixture.queue(&gmproto.RPCMessageData{Action: gmproto.ActionType_LIST_CONVERSATIONS, SessionID: data.GetRequestID(), EncryptedData: encrypted})
+}
+
+func (fixture *phoneFixture) answerGetConversation(data *gmproto.OutgoingRPCData) {
+	plain, err := fixture.auth.RequestCrypto.Decrypt(data.GetEncryptedProtoData())
+	if err != nil {
+		panic(err)
+	}
+	var request gmproto.GetConversationRequest
+	if err := proto.Unmarshal(plain, &request); err != nil {
+		panic(err)
+	}
+	fixture.mu.Lock()
+	var conversation *gmproto.Conversation
+	for _, candidate := range fixture.conversations {
+		if candidate.GetConversationID() == request.GetConversationID() {
+			conversation = candidate
+			break
+		}
+	}
+	fixture.mu.Unlock()
+	encrypted, err := fixture.auth.RequestCrypto.Encrypt(mustMarshal(&gmproto.GetConversationResponse{Conversation: conversation}))
+	if err != nil {
+		panic(err)
+	}
+	fixture.queue(&gmproto.RPCMessageData{Action: gmproto.ActionType_GET_CONVERSATION, SessionID: data.GetRequestID(), EncryptedData: encrypted})
+}
+
+func (fixture *phoneFixture) answerSendMessage(data *gmproto.OutgoingRPCData) {
+	plain, err := fixture.auth.RequestCrypto.Decrypt(data.GetEncryptedProtoData())
+	if err != nil {
+		panic(err)
+	}
+	var request gmproto.SendMessageRequest
+	if err := proto.Unmarshal(plain, &request); err != nil {
+		panic(err)
+	}
+	fixture.mu.Lock()
+	fixture.sendRequests = append(fixture.sendRequests, &request)
+	fixture.mu.Unlock()
+	encrypted, err := fixture.auth.RequestCrypto.Encrypt(mustMarshal(&gmproto.SendMessageResponse{Status: gmproto.SendMessageResponse_SUCCESS}))
+	if err != nil {
+		panic(err)
+	}
+	fixture.queue(&gmproto.RPCMessageData{Action: gmproto.ActionType_SEND_MESSAGE, SessionID: data.GetRequestID(), EncryptedData: encrypted})
 }
 
 // deliverGaiaInit answers CREATE_GAIA_PAIRING_CLIENT_INIT with a valid P-256
