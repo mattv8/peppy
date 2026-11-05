@@ -8,25 +8,35 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanel
+import dev.peppy.mobile.R
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanelHost
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import dev.peppy.mobile.ui.theme.PeppyTheme
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.test.core.app.ApplicationProvider
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -35,9 +45,12 @@ import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -128,11 +141,13 @@ class GoogleMessagesLinkPanelTest {
     @Test fun `older load and reset completion cannot replace newer status`() {
         val firstEntered = CountDownLatch(1)
         val releaseFirst = CountDownLatch(1)
+        val firstCompleted = CountDownLatch(1)
         val resetLoadEntered = CountDownLatch(1)
         val releaseResetLoad = CountDownLatch(1)
+        val resetLoadCompleted = CountDownLatch(1)
         val mode = AtomicInteger(0)
-        val staleFirst = blockingHandle("needs_relink", firstEntered, releaseFirst)
-        val staleReset = blockingHandle("needs_relink", resetLoadEntered, releaseResetLoad)
+        val staleFirst = blockingHandle("needs_relink", firstEntered, releaseFirst, firstCompleted)
+        val staleReset = blockingHandle("needs_relink", resetLoadEntered, releaseResetLoad, resetLoadCompleted)
         val current = FakeHandle("linked")
         val host = FakePanelHost(
             handle = current,
@@ -152,7 +167,7 @@ class GoogleMessagesLinkPanelTest {
         host.signalChange()
         compose.waitUntil(5_000) { compose.onAllNodesWithTag("google-messages-link-linked").fetchSemanticsNodes().isNotEmpty() }
         releaseFirst.countDown()
-        compose.waitForIdle()
+        compose.waitUntil(5_000) { firstCompleted.count == 0L }
         compose.onNodeWithTag("google-messages-link-linked").fetchSemanticsNode()
 
         mode.set(1)
@@ -166,36 +181,179 @@ class GoogleMessagesLinkPanelTest {
         compose.waitUntil(5_000) { compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
 
         releaseResetLoad.countDown()
-        compose.waitForIdle()
+        compose.waitUntil(5_000) { resetLoadCompleted.count == 0L }
         compose.onNodeWithTag("google-messages-link-start").fetchSemanticsNode()
         check(compose.onAllNodesWithTag("google-messages-link-relink").fetchSemanticsNodes().isEmpty())
         check(host.resetCalls == 1)
     }
 
-    @Test fun `permission continuations never cross from notification or relink into sign in`() {
-        val host = FakePanelHost(FakeHandle("needs_relink"), notificationsGranted = false)
-        showPanel(host)
-        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-relink").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("google-messages-link-relink").performClick()
-        compose.onNodeWithTag("google-messages-link-relink-sheet-confirm").performSemanticsAction(SemanticsActions.OnClick)
-        compose.waitUntil(5_000) { host.permissionRequests == 1 }
-        check(host.serviceStarts == 0)
+    @Test fun `pending link permission survives recreation and continues exactly once`() {
+        val host = FakePanelHost(FakeHandle("unlinked"), notificationsGranted = false)
+        val restoration = StateRestorationTester(compose)
+        GoogleMessagesLinkTestHooks.available = true
+        restoration.setContent { PeppyTheme { GoogleMessagesLinkPanel(host) {} } }
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-start").performClick()
+        compose.onNodeWithTag("google-messages-link-consent-sheet-confirm")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil { host.permissionRequests == 1 }
 
+        restoration.emulateSavedInstanceStateRestore()
         host.completePermissionRequest(granted = false)
+        compose.waitUntil { host.signInLaunches == 1 }
         host.completePermissionRequest(granted = true)
-        compose.waitUntil { host.relinkCalls == 1 }
-        check(host.signInLaunches == 0)
-        check(host.serviceStarts == 1)
+        compose.waitForIdle()
+        check(host.signInLaunches == 1)
+        check(host.serviceStarts == 0)
+    }
 
-        host.handle.state = "pairing"
-        host.notificationsGranted = false
-        host.signalChange()
-        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notifications-allow").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("google-messages-link-notifications-allow").performClick()
+    @Test fun `stopping while permission is pending cancels the confirmed action`() {
+        val host = FakePanelHost(FakeHandle("unlinked"), notificationsGranted = false)
+        val owner = object : LifecycleOwner {
+            override val lifecycle = LifecycleRegistry(this).apply { currentState = Lifecycle.State.RESUMED }
+        }
+        GoogleMessagesLinkTestHooks.available = true
+        compose.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                PeppyTheme { GoogleMessagesLinkPanel(host) {} }
+            }
+        }
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-start").performClick()
+        compose.onNodeWithTag("google-messages-link-consent-sheet-confirm")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil { host.permissionRequests == 1 }
+
+        compose.runOnIdle { (owner.lifecycle as LifecycleRegistry).handleLifecycleEvent(Lifecycle.Event.ON_STOP) }
         host.completePermissionRequest(granted = true)
         compose.waitForIdle()
         check(host.signInLaunches == 0)
+    }
+
+    @Test fun `relink completion carries its pairing token and cannot end a newer attempt`() {
+        val relinkEntered = CountDownLatch(1)
+        val releaseRelink = CountDownLatch(1)
+        val relinkCompleted = CountDownLatch(1)
+        val handle = FakeHandle("needs_relink").apply {
+            relinkAction = {
+                relinkEntered.countDown()
+                awaitIgnoringInterrupts(releaseRelink)
+                relinkCompleted.countDown()
+            }
+        }
+        val host = FakePanelHost(handle, notificationsGranted = false)
+        showPanel(host)
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-relink").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-relink").performClick()
+        compose.onNodeWithTag("google-messages-link-relink-sheet-confirm")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil { host.permissionRequests == 1 }
+        host.completePermissionRequest(granted = false)
+        compose.waitUntil(5_000) { relinkEntered.count == 0L && host.pairingTokens.isNotEmpty() }
+        host.completePermissionRequest(granted = true)
+        compose.waitForIdle()
+        check(host.relinkCalls == 1)
         check(host.serviceStarts == 1)
+        check(host.signInLaunches == 0)
+
+        val first = host.pairingTokens.single()
+        assertTrue(LinkRuntime.endPairing(first))
+        val second = checkNotNull(LinkRuntime.tryBeginPairing())
+        releaseRelink.countDown()
+        compose.waitUntil(5_000) { relinkCompleted.count == 0L && host.endedTokens.contains(first) }
+
+        assertTrue(LinkRuntime.pairingInProgress.get())
+        assertTrue(LinkRuntime.endPairing(second))
+    }
+
+    @Test fun `notification permission action never launches sign in`() {
+        val host = FakePanelHost(FakeHandle("pairing"), notificationsGranted = false)
+        showPanel(host)
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notifications-allow").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-notifications-allow").performClick()
+        host.completePermissionRequest(granted = false)
+        host.completePermissionRequest(granted = true)
+        compose.waitForIdle()
+        check(host.signInLaunches == 0)
+        check(host.serviceStarts == 0)
+    }
+
+    @Test fun `successful confirmed unlink shows polite success notice`() {
+        val handle = FakeHandle("linked").apply { unlinkAction = { state = "unlinked" } }
+        val host = FakePanelHost(handle)
+        showPanel(host)
+        confirm("google-messages-link-unlink")
+        compose.waitUntil { handle.unlinkCalls == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithTag("google-messages-link-notice")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_unlinked_done)).fetchSemanticsNode()
+    }
+
+    @Test fun `persist failure hides reconnect and keeps unlink and remove recovery`() {
+        val handle = FakeHandle("linked").apply {
+            running = false
+            stopCode = "persist_failed"
+        }
+        showPanel(FakePanelHost(handle))
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-unlink").fetchSemanticsNodes().isNotEmpty() }
+
+        check(compose.onAllNodesWithTag("google-messages-link-reconnect").fetchSemanticsNodes().isEmpty())
+        compose.onNodeWithTag("google-messages-link-unlink").fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-remove-local").fetchSemanticsNode()
+    }
+
+    @Test fun `confirmed remove runs once and returns to unlinked`() {
+        val handle = FakeHandle("needs_relink")
+        val host = FakePanelHost(handle)
+        showPanel(host)
+        confirm("google-messages-link-remove-local", "google-messages-link-remove-sheet-confirm")
+        compose.waitUntil { host.resetCalls == 1 && compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
+        check(host.resetCalls == 1)
+    }
+
+    @Test fun `throwing confirmed unlink releases busy and exposes recovery`() {
+        val handle = FakeHandle("linked").apply { unlinkAction = { throw IllegalStateException("test") } }
+        val host = FakePanelHost(handle)
+        showPanel(host)
+        confirm("google-messages-link-unlink")
+        compose.waitUntil { handle.unlinkCalls == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-unlink").assertIsEnabled()
+    }
+
+    @Test fun `notification actions are disabled during held check and unlink`() {
+        val checkEntered = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        val unlinkEntered = CountDownLatch(1)
+        val releaseUnlink = CountDownLatch(1)
+        val handle = FakeHandle("linked").apply {
+            checkAction = { checkEntered.countDown(); awaitIgnoringInterrupts(releaseCheck); 1L }
+            unlinkAction = { unlinkEntered.countDown(); awaitIgnoringInterrupts(releaseUnlink) }
+        }
+        val host = FakePanelHost(handle, notificationsGranted = false)
+        showPanel(host)
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-check-now").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-notifications-allow").performClick()
+        host.completePermissionRequest(granted = false)
+        compose.waitUntil { host.permissionRequests == 1 }
+        val application = ApplicationProvider.getApplicationContext<android.app.Application>()
+        check(shadowOf(application).nextStartedActivity == null)
+        compose.onNodeWithTag("google-messages-link-check-now").performClick()
+        compose.waitUntil(5_000) { checkEntered.count == 0L }
+        compose.onNodeWithTag("google-messages-link-notifications-allow").assertIsNotEnabled()
+        check(host.permissionRequests == 1)
+        check(shadowOf(application).nextStartedActivity == null)
+        releaseCheck.countDown()
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-check-result").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-unlink").assertIsEnabled()
+
+        confirm("google-messages-link-unlink")
+        compose.waitUntil(5_000) { unlinkEntered.count == 0L }
+        compose.onNodeWithTag("google-messages-link-notifications-allow").assertIsNotEnabled()
+        check(host.permissionRequests == 1)
+        check(shadowOf(application).nextStartedActivity == null)
+        releaseUnlink.countDown()
     }
 
     @Test
@@ -231,6 +389,13 @@ class GoogleMessagesLinkPanelTest {
         check(compose.onAllNodesWithTag("google-messages-link-emoji", useUnmergedTree = false).fetchSemanticsNodes().isEmpty())
     }
 
+    private fun confirm(actionTag: String, confirmTag: String = "$actionTag-sheet-confirm") {
+        compose.waitUntil { compose.onAllNodesWithTag(actionTag).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag(actionTag).performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil { compose.onAllNodesWithTag(confirmTag).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag(confirmTag).performSemanticsAction(SemanticsActions.OnClick)
+    }
+
     private fun panel(state: String, assertion: () -> Unit) {
         GoogleMessagesLinkTestHooks.available = true
         LinkRuntimeTestHooks.engine = object : LinkEngine {
@@ -259,15 +424,21 @@ class GoogleMessagesLinkPanelTest {
     }
 
     private open class FakeHandle(var state: String) : LinkHandle {
+        var running = true
+        var stopCode = ""
         var relinkCalls = 0
+        var unlinkCalls = 0
+        var relinkAction: () -> Unit = {}
+        var unlinkAction: () -> Unit = {}
+        var checkAction: () -> Long = { 1L }
         override fun pair(cookiesJson: ByteArray) = Unit
-        override fun relink() { relinkCalls++ }
+        override fun relink() { relinkCalls++; relinkAction() }
         override fun run() = Unit
-        override fun checkHealth() = 1L
-        override fun unlink() = Unit
+        override fun checkHealth() = checkAction()
+        override fun unlink() { unlinkCalls++; unlinkAction() }
         override fun stop() = Unit
         override fun close() = Unit
-        override fun status() = statusJson(state)
+        override fun status() = statusJson(state, running, stopCode)
     }
 
     private class FakePanelHost(
@@ -280,28 +451,28 @@ class GoogleMessagesLinkPanelTest {
         override val changes: StateFlow<Long> = changesFlow
         val emojiFlow = MutableStateFlow<String?>(null)
         override val emoji: StateFlow<String?> = emojiFlow
-        private var permissionContinuation: (() -> Unit)? = null
+        private val permissionResultFlow = MutableStateFlow(0L)
+        override val permissionResults: StateFlow<Long> = permissionResultFlow
         var permissionRequests = 0
         var signInLaunches = 0
         var serviceStarts = 0
         var resetCalls = 0
+        val pairingTokens = mutableListOf<Long>()
+        val endedTokens = mutableListOf<Long>()
         val relinkCalls get() = handle.relinkCalls
 
         override fun open(): LinkOpenResult = openResult()
         override fun resetLocalState() { resetCalls++; onReset() }
         override fun pairingInProgress(): Boolean = LinkRuntime.pairingInProgress.get()
-        override fun beginPairing(): Boolean = LinkRuntime.beginPairing()
-        override fun endPairing() { LinkRuntime.endPairing() }
-        override fun requestNotificationPermission(afterResult: () -> Unit) {
-            permissionRequests++
-            permissionContinuation = afterResult
-        }
+        override fun tryBeginPairing(): Long? = LinkRuntime.tryBeginPairing()?.also(pairingTokens::add)
+        override fun endPairing(token: Long) { endedTokens += token; LinkRuntime.endPairing(token) }
+        override fun requestNotificationPermission() { permissionRequests++ }
         override fun launchSignIn(onResult: (String?) -> Unit) { signInLaunches++ }
         override fun startService() { serviceStarts++ }
 
         fun completePermissionRequest(granted: Boolean = notificationsGranted) {
             notificationsGranted = granted
-            permissionContinuation?.also { permissionContinuation = null }?.invoke()
+            permissionResultFlow.value++
         }
         fun signalChange() { changesFlow.value++ }
     }
@@ -310,12 +481,15 @@ class GoogleMessagesLinkPanelTest {
         state: String,
         entered: CountDownLatch,
         release: CountDownLatch,
+        completed: CountDownLatch,
     ) = object : FakeHandle(state) {
         override fun status(): String {
             entered.countDown()
             while (true) {
                 try {
-                    if (release.await(20, TimeUnit.MILLISECONDS)) return super.status()
+                    if (release.await(20, TimeUnit.MILLISECONDS)) {
+                        return super.status().also { completed.countDown() }
+                    }
                 } catch (_: InterruptedException) {
                     // Simulates a native call that does not cooperate with coroutine cancellation.
                 }
@@ -323,8 +497,19 @@ class GoogleMessagesLinkPanelTest {
         }
     }
 
+    private fun awaitIgnoringInterrupts(release: CountDownLatch) {
+        while (true) {
+            try {
+                if (release.await(20, TimeUnit.MILLISECONDS)) return
+            } catch (_: InterruptedException) {
+                // Models cancellation-insensitive native work.
+            }
+        }
+    }
+
     private companion object {
-        fun statusJson(state: String) = """{"seq":1,"state":"$state","running":true,"healthy":true,"phone_responding":true,"last_ok_ms":0,"stop_code":""}"""
+        fun statusJson(state: String, running: Boolean = true, stopCode: String = "") =
+            """{"seq":1,"state":"$state","running":$running,"healthy":true,"phone_responding":true,"last_ok_ms":0,"stop_code":"$stopCode"}"""
     }
 
     private class InMemoryStore : LinkStateStorage {
