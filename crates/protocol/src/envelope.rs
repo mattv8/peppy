@@ -98,12 +98,10 @@ impl<'de> Deserialize<'de> for GatewayRoute {
                 gateway_device_id: route.gateway_device_id,
                 subscription_id: route.subscription_id,
             }),
-            Route::RcsLink(route) => {
-                let _ = route.kind;
-                Ok(Self::RcsLink {
-                    gateway_device_id: route.gateway_device_id,
-                })
-            }
+            Route::RcsLink(RcsLinkRoute {
+                kind: RcsLinkKind::RcsLink,
+                gateway_device_id,
+            }) => Ok(Self::RcsLink { gateway_device_id }),
         }
     }
 }
@@ -356,7 +354,8 @@ impl Envelope {
                 write_string(&mut output, subscription_id);
             }
             Some(GatewayRoute::RcsLink { gateway_device_id }) => {
-                output.push(1);
+                // Route-presence is its discriminant: 0 = none, 1 = carrier, 2 = RCS link.
+                // Carrier remains byte-for-byte compatible with the legacy route encoding.
                 output.push(2);
                 output.extend_from_slice(gateway_device_id.0.as_bytes());
             }
