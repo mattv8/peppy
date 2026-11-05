@@ -2280,6 +2280,25 @@ describe("conversation pinning", () => {
     expect(document.querySelector("[data-header-title]")).toHaveTextContent("Aurora");
   });
 
+  it("uses the leading unpin action for a remotely pinned conversation without changing the selection", async () => {
+    host.conversations[1] = { ...host.conversations[1], pinned: true } as ConversationView;
+    const setPinned = vi.spyOn(bridge, "set_conversation_pinned").mockResolvedValue();
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    const riverRow = document.querySelector<HTMLElement>("[data-conversation-row='river']")!;
+    const unpin = riverRow.querySelector<HTMLButtonElement>("[data-pin-conversation-id='river']")!;
+    expect(unpin).toHaveAccessibleName("Unpin conversation");
+    expect(unpin.closest("[data-conversation-actions]")).toBeNull();
+    expect(unpin.closest(".conversation-select")).toBeNull();
+    expect(riverRow.querySelectorAll("[data-pin-conversation-id='river']")).toHaveLength(1);
+
+    fireEvent.click(unpin);
+
+    await waitFor(() => expect(setPinned).toHaveBeenCalledWith("river", false));
+    expect(document.querySelector("[data-header-title]")).toHaveTextContent("Aurora");
+  });
+
   it("waits for durable pinning before refreshing and prevents duplicate requests", async () => {
     const pending = deferred<void>();
     const setPinned = vi.spyOn(bridge, "set_conversation_pinned").mockReturnValue(pending.promise);
@@ -2299,8 +2318,41 @@ describe("conversation pinning", () => {
 
     host.conversations[0] = { ...host.conversations[0], pinned: true } as ConversationView;
     await act(async () => pending.resolve());
-    await waitFor(() => expect(screen.getByRole("button", { name: "Unpin conversation" })).toHaveFocus());
+    const unpin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='aurora']")!;
+    await waitFor(() => expect(unpin).toHaveFocus());
+    expect(unpin).toHaveAccessibleName("Unpin conversation");
+    expect(unpin.closest("[data-conversation-actions]")).toBeNull();
     document.body.removeAttribute("tabindex");
+  });
+
+  it("prevents duplicate unpin requests and restores focus to the trailing pin after reordering", async () => {
+    host.conversations[1] = { ...host.conversations[1], pinned: true } as ConversationView;
+    const pending = deferred<void>();
+    const setPinned = vi.spyOn(bridge, "set_conversation_pinned").mockReturnValue(pending.promise);
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    const unpin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='river']")!;
+    unpin.focus();
+    fireEvent.click(unpin);
+    fireEvent.click(unpin);
+
+    expect(setPinned).toHaveBeenCalledOnce();
+    expect(setPinned).toHaveBeenCalledWith("river", false);
+    expect(unpin).toBeDisabled();
+    expect([...document.querySelectorAll("[data-conversation-row]")].map((row) => row.getAttribute("data-conversation-row"))).toEqual(["river", "aurora"]);
+
+    host.conversations[1] = { ...host.conversations[1], pinned: false } as ConversationView;
+    await act(async () => pending.resolve());
+
+    const pin = await waitFor(() => {
+      const control = document.querySelector<HTMLButtonElement>("[data-conversation-row='river'] [data-conversation-actions] [data-pin-conversation-id='river']");
+      expect(control).toBeInTheDocument();
+      return control!;
+    });
+    expect([...document.querySelectorAll("[data-conversation-row]")].map((row) => row.getAttribute("data-conversation-row"))).toEqual(["aurora", "river"]);
+    expect(pin).toHaveAccessibleName("Pin conversation");
+    await waitFor(() => expect(pin).toHaveFocus());
   });
 
   it("reports a rejected pin mutation without reordering and re-enables the action", async () => {
@@ -2313,6 +2365,22 @@ describe("conversation pinning", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Conversation pin not changed: denied");
     expect([...document.querySelectorAll("[data-conversation-row]")].map((row) => row.getAttribute("data-conversation-row"))).toEqual(["aurora", "river"]);
     expect(document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='aurora']")).toBeEnabled();
+  });
+
+  it("retains and re-enables the leading unpin action after a rejected unpin mutation", async () => {
+    host.conversations[1] = { ...host.conversations[1], pinned: true } as ConversationView;
+    vi.spyOn(bridge, "set_conversation_pinned").mockRejectedValue(new Error("denied"));
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    const unpin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='river']")!;
+    fireEvent.click(unpin);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("denied");
+    expect(unpin).toBeEnabled();
+    expect(unpin).toHaveAccessibleName("Unpin conversation");
+    expect(unpin.closest("[data-conversation-actions]")).toBeNull();
+    expect([...document.querySelectorAll("[data-conversation-row]")].map((row) => row.getAttribute("data-conversation-row"))).toEqual(["river", "aurora"]);
   });
 
   it("reports a saved pin when the post-save refresh fails", async () => {

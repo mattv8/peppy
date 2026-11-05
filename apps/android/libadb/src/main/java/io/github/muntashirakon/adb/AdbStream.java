@@ -5,9 +5,8 @@ package io.github.muntashirakon.adb;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * This class abstracts the underlying ADB streams
@@ -33,7 +32,7 @@ public class AdbStream implements Closeable {
     /**
      * Indicates whether WRTE is currently allowed
      */
-    private final AtomicBoolean mWriteReady;
+    private boolean mWriteReady;
 
     /**
      * A queue of data from the target's WRTE packets
@@ -48,12 +47,16 @@ public class AdbStream implements Closeable {
     /**
      * Indicates whether the connection is closed already
      */
-    private volatile boolean mIsClosed;
+    private boolean mIsClosed;
 
     /**
      * Whether the remote peer has closed but we still have unread data in the queue
      */
-    private volatile boolean mPendingClose;
+    private boolean mPeerClosed;
+
+    private boolean mOpenAcknowledged;
+
+    private IOException mFailure;
 
     /**
      * Creates a new AdbStream object on the specified AdbConnection
@@ -66,9 +69,9 @@ public class AdbStream implements Closeable {
             throws IOException, InterruptedException, AdbPairingRequiredException {
         this.mAdbConnection = adbConnection;
         this.mLocalId = localId;
-        this.mReadQueue = new ConcurrentLinkedQueue<>();
+        this.mReadQueue = new ArrayDeque<>();
         this.mReadBuffer = (ByteBuffer) ByteBuffer.allocate(adbConnection.getMaxData()).flip();
-        this.mWriteReady = new AtomicBoolean(false);
+        this.mWriteReady = false;
         this.mIsClosed = false;
     }
 
@@ -85,10 +88,10 @@ public class AdbStream implements Closeable {
      *
      * @param payload Data inside the WRTE message
      */
-    void addPayload(byte[] payload) {
-        synchronized (mReadQueue) {
+    synchronized void addPayload(byte[] payload) {
+        if (!mIsClosed) {
             mReadQueue.add(payload);
-            mReadQueue.notifyAll();
+            notifyAll();
         }
     }
 
@@ -108,35 +111,40 @@ public class AdbStream implements Closeable {
      *
      * @param remoteId New remote ID
      */
-    void updateRemoteId(int remoteId) {
+    synchronized boolean acknowledgeOpen(int remoteId) {
+        if (mIsClosed || mPeerClosed || mFailure != null) {
+            return false;
+        }
         this.mRemoteId = remoteId;
-    }
-
-    /**
-     * Called by the connection thread to indicate the stream is okay to send data.
-     */
-    void readyForWrite() {
-        mWriteReady.set(true);
+        mOpenAcknowledged = true;
+        mWriteReady = true;
+        notifyAll();
+        return true;
     }
 
     /**
      * Called by the connection thread to notify that the stream was closed by the peer.
      */
-    void notifyClose(boolean closedByPeer) {
+    synchronized void notifyClose(boolean closedByPeer) {
         // We don't call close() because it sends another CLSE
-        if (closedByPeer && !mReadQueue.isEmpty()) {
-            // The remote peer closed the stream, but we haven't finished reading the remaining data
-            mPendingClose = true;
+        if (closedByPeer) {
+            if (mFailure == null && !mIsClosed) {
+                mPeerClosed = true;
+            }
         } else {
-            mIsClosed = true;
+            if (mFailure == null && !mPeerClosed) {
+                mFailure = new IOException("Stream closed.");
+                mIsClosed = true;
+            }
         }
+        notifyAll();
+    }
 
-        // Notify readers and writers
-        synchronized (this) {
+    synchronized void notifyFailure(IOException failure) {
+        if (!mPeerClosed && mFailure == null) {
+            mFailure = failure;
+            mIsClosed = true;
             notifyAll();
-        }
-        synchronized (mReadQueue) {
-            mReadQueue.notifyAll();
         }
     }
 
@@ -146,43 +154,33 @@ public class AdbStream implements Closeable {
      * @return the next byte of data, or {@code -1} if the end of the stream is reached.
      * @throws IOException If the stream fails while waiting
      */
-    public int read(byte[] bytes, int offset, int length) throws IOException {
+    public synchronized int read(byte[] bytes, int offset, int length) throws IOException {
+        if (offset < 0 || length < 0 || offset > bytes.length - length) {
+            throw new IndexOutOfBoundsException();
+        }
+        if (length == 0) return 0;
         if (mReadBuffer.hasRemaining()) {
             return readBuffer(bytes, offset, length);
         }
-        // Buffer has no data, grab from the queue
-        synchronized (mReadQueue) {
-            byte[] data;
-            // Wait for the connection to close or data to be received
-            while ((data = mReadQueue.poll()) == null && !mIsClosed) {
-                try {
-                    mReadQueue.wait();
-                } catch (InterruptedException e) {
-                    //noinspection UnnecessaryInitCause
-                    throw (IOException) new IOException().initCause(e);
+        byte[] data;
+        while ((data = mReadQueue.poll()) == null) {
+            if (mFailure != null) throw mFailure;
+            if (mPeerClosed) return -1;
+            try {
+                wait();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                IOException failure = new IOException(e);
+                notifyFailure(failure);
+                if (mFailure == failure) {
+                    throw failure;
                 }
-            }
-            // Add data to the buffer
-            if (data != null) {
-                mReadBuffer.clear();
-                mReadBuffer.put(data);
-                mReadBuffer.flip();
-                if (mReadBuffer.hasRemaining()) {
-                    return readBuffer(bytes, offset, length);
-                }
-            }
-
-            if (mIsClosed) {
-                throw new IOException("Stream closed.");
-            }
-
-            if (mPendingClose && mReadQueue.isEmpty()) {
-                // The peer closed the stream, and we've finished reading the stream data, so this stream is finished
-                mIsClosed = true;
             }
         }
-
-        return -1;
+        mReadBuffer.clear();
+        mReadBuffer.put(data);
+        mReadBuffer.flip();
+        return mReadBuffer.hasRemaining() ? readBuffer(bytes, offset, length) : read(bytes, offset, length);
     }
 
     private int readBuffer(byte[] bytes, int offset, int length) {
@@ -205,18 +203,24 @@ public class AdbStream implements Closeable {
     public void write(byte[] bytes, int offset, int length) throws IOException {
         synchronized (this) {
             // Make sure we're ready for a WRTE
-            while (!mIsClosed && !mWriteReady.compareAndSet(true, false)) {
+            while (!mIsClosed && !mPeerClosed && !mWriteReady) {
                 try {
                     wait();
                 } catch (InterruptedException e) {
-                    //noinspection UnnecessaryInitCause
-                    throw (IOException) new IOException().initCause(e);
+                    Thread.currentThread().interrupt();
+                    IOException failure = new IOException(e);
+                    notifyFailure(failure);
+                    if (mFailure == failure) {
+                        throw failure;
+                    }
                 }
             }
 
-            if (mIsClosed) {
+            if (mIsClosed || mPeerClosed) {
+                if (mFailure != null) throw mFailure;
                 throw new IOException("Stream closed");
             }
+            mWriteReady = false;
         }
         // Split and send data as WRTE packet
         // TODO: A WRITE message may not be sent until a READY message is received.
@@ -245,8 +249,11 @@ public class AdbStream implements Closeable {
     }
 
     public void flush() throws IOException {
-        if (mIsClosed) {
-            throw new IOException("Stream closed");
+        synchronized (this) {
+            if (mFailure != null) throw mFailure;
+            if (mIsClosed || mPeerClosed) {
+                throw new IOException("Stream closed");
+            }
         }
         mAdbConnection.flushPacket();
     }
@@ -259,11 +266,7 @@ public class AdbStream implements Closeable {
     @Override
     public void close() throws IOException {
         synchronized (this) {
-            // This may already be closed by the remote host
-            if (mIsClosed)
-                return;
-
-            // Notify readers/writers that we've closed
+            if (mIsClosed || mPeerClosed) return;
             notifyClose(false);
         }
 
@@ -275,8 +278,20 @@ public class AdbStream implements Closeable {
      *
      * @return True if the stream is close, false if not
      */
-    public boolean isClosed() {
-        return mIsClosed;
+    public synchronized boolean isClosed() {
+        return mIsClosed || mPeerClosed;
+    }
+
+    synchronized boolean isOpenAcknowledged() {
+        return mOpenAcknowledged;
+    }
+
+    synchronized IOException getFailure() {
+        return mFailure;
+    }
+
+    synchronized int getRemoteId() {
+        return mRemoteId;
     }
 
     /**
@@ -285,16 +300,12 @@ public class AdbStream implements Closeable {
      * @return an estimate of the number of bytes that can be read from this stream without blocking.
      * @throws IOException if the stream is close.
      */
-    public int available() throws IOException {
-        synchronized (this) {
-            if (mIsClosed) {
-                throw new IOException("Stream closed.");
-            }
+    public synchronized int available() throws IOException {
+            if (mFailure != null) throw mFailure;
             if (mReadBuffer.hasRemaining()) {
                 return mReadBuffer.remaining();
             }
             byte[] data = mReadQueue.peek();
             return data == null ? 0 : data.length;
-        }
     }
 }

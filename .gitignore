@@ -1,5 +1,6 @@
 .opencode/
 .openchamber/
+.codegraph/
 .playwright-mcp/
 .DS_Store
 .pytest_cache/
