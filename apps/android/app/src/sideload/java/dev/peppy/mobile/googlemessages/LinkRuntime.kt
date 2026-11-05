@@ -11,6 +11,8 @@ object LinkRuntime {
     private val callbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val changeCounter = MutableStateFlow(0L)
     private var cachedHandle: LinkHandle? = null
+    private var handleGeneration = 0L
+    private var pairingGeneration = 0L
 
     val emoji = MutableStateFlow<String?>(null)
     val changes: StateFlow<Long> = changeCounter
@@ -27,7 +29,10 @@ object LinkRuntime {
             return LinkOpenResult.Unreadable(filterReasonCode(error.message))
         }
         return try {
-            engine.open(state, host(store)).also { cachedHandle = it }.let(LinkOpenResult::Open)
+            engine.open(state, host(store, handleGeneration + 1)).also {
+                handleGeneration += 1
+                cachedHandle = it
+            }.let(LinkOpenResult::Open)
         } catch (error: Exception) {
             if (error.message == "link_unavailable") LinkOpenResult.Unavailable
             else LinkOpenResult.Unreadable(filterReasonCode(error.message))
@@ -39,6 +44,7 @@ object LinkRuntime {
         synchronized(this) {
             cachedHandle?.close()
             cachedHandle = null
+            handleGeneration += 1
             store(context).wipe()
             emoji.value = null
             pairingInProgress.set(false)
@@ -51,10 +57,26 @@ object LinkRuntime {
         cachedHandle?.stop()
     }
 
+    /** Begins one owner-requested Pair or Relink attempt and fences the prior emoji. */
+    fun beginPairing() = synchronized(this) {
+        pairingGeneration += 1
+        emoji.value = null
+        pairingInProgress.set(true)
+        signalChange()
+    }
+
+    /** Completes an owner-requested attempt; callers must invoke this in `finally`. */
+    fun endPairing() = synchronized(this) {
+        pairingInProgress.set(false)
+        emoji.value = null
+        signalChange()
+    }
+
     internal fun resetForTest() = synchronized(this) {
         GoogleMessagesLinkService.stopActiveWorker()
         cachedHandle?.close()
         cachedHandle = null
+        handleGeneration += 1
         emoji.value = null
         changeCounter.value = 0
         pairingInProgress.set(false)
@@ -64,20 +86,23 @@ object LinkRuntime {
         LinkRuntimeTestHooks.storeFactory?.invoke(context.applicationContext)
             ?: LinkStateStoreAdapter(LinkStateStore(context.applicationContext.noBackupFilesDir))
 
-    private fun host(store: LinkStateStorage) = object : LinkHost {
+    private fun host(store: LinkStateStorage, generation: Long) = object : LinkHost {
         override fun persistState(state: ByteArray) = store.write(state)
 
         override fun event(kind: String, code: String, value: Long) {
             val safeCode = filterReasonCode(code)
             callbackExecutor.execute {
+                if (!acceptsCallback(generation)) return@execute
                 recordEvent(kind, safeCode, value)
                 GoogleMessagesLinkService.onLinkEvent(kind, safeCode)
+                if (kind == "link" && safeCode in PAIRING_TERMINAL_CODES) endPairing()
                 signalChange()
             }
         }
 
         override fun showEmoji(value: String) {
             callbackExecutor.execute {
+                if (!acceptsCallback(generation) || !pairingInProgress.get()) return@execute
                 emoji.value = value
                 signalChange()
             }
@@ -91,6 +116,8 @@ object LinkRuntime {
     private fun signalChange() {
         changeCounter.value += 1
     }
+
+    private fun acceptsCallback(generation: Long): Boolean = synchronized(this) { generation == handleGeneration && cachedHandle != null }
 }
 
 internal interface LinkStateStorage {
@@ -109,6 +136,7 @@ internal fun filterReasonCode(code: String?): String =
     code?.takeIf { REASON_CODE.matches(it) } ?: "unknown"
 
 private val REASON_CODE = Regex("[a-z][a-z0-9_]{0,39}")
+private val PAIRING_TERMINAL_CODES = setOf("pair_ok", "pair_failed", "pair_no_phone", "pair_multiple_phones", "pair_wrong_emoji", "pair_cancelled", "pair_timeout", "account_mismatch", "relink_ok", "relink_failed", "signed_out", "unlinked")
 
 internal object LinkRuntimeTestHooks {
     @Volatile var engine: LinkEngine? = null

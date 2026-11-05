@@ -8,6 +8,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -102,6 +104,32 @@ class LinkRuntimeTest {
 
         val manager = context.getSystemService(NotificationManager::class.java)
         assertEquals(NotificationManager.IMPORTANCE_LOW, manager.getNotificationChannel(GoogleMessagesLinkService.CHANNEL_ID).importance)
+    }
+
+    @Test
+    fun `new pairing fences and clears a previous emoji`() {
+        lateinit var host: LinkHost
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, callback: LinkHost): LinkHandle = FakeHandle().also { host = callback }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntime.handle(context)
+        val first = CountDownLatch(1)
+        LinkRuntimeTestHooks.eventRecorder = { _, _, _ -> first.countDown() }
+
+        LinkRuntime.beginPairing()
+        host.showEmoji("first")
+        host.event("link", "pair_ok", 0)
+        assertTrue(first.await(1, TimeUnit.SECONDS))
+
+        LinkRuntime.beginPairing()
+
+        assertEquals(null, LinkRuntime.emoji.value)
+        assertTrue(LinkRuntime.pairingInProgress.get())
+        LinkRuntime.endPairing()
+        assertEquals(null, LinkRuntime.emoji.value)
+        assertFalse(LinkRuntime.pairingInProgress.get())
     }
 
     private fun availableEngine(handle: LinkHandle) = object : LinkEngine {
