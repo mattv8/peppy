@@ -1160,7 +1160,12 @@ impl Client {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let outcome = rcs_mapping::verify_and_store(&transaction, observation, now_ms)?;
-        if outcome != RcsMappingOutcome::Refused(RcsMappingRefusal::LinkUnavailable) {
+        if !matches!(
+            outcome,
+            RcsMappingOutcome::Refused(
+                RcsMappingRefusal::LinkUnavailable | RcsMappingRefusal::GoogleConversationAmbiguous
+            )
+        ) {
             return Err(Error::InvalidRequest("unlink context is not current"));
         }
         if !rcs_mapping::context_is_current(
