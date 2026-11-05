@@ -702,6 +702,35 @@ pub(crate) fn update_context(
     Ok(ContextUpdate::Changed)
 }
 
+pub(crate) fn admission_observation_targets_mapping(
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> bool {
+    is_fresh(now_ms, mapping.verified_at_ms)
+        && is_fresh(now_ms, observation.observed_at_ms)
+        && observation.google_conversation_id == mapping.google_conversation_id
+}
+
+pub(crate) fn admission_context_is_v2(conn: &Connection) -> Result<bool, Error> {
+    let Some(value) = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    if serde_json::from_str::<RcsContext>(&value).is_ok() {
+        return Ok(true);
+    }
+    serde_json::from_str::<LegacyRcsContext>(&value)
+        .map(|_| false)
+        .map_err(|_| Error::Database)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MappingObservationStatus {
     Exact,

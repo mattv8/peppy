@@ -1670,3 +1670,101 @@ fn stale_foreign_and_database_error_refusals_do_not_revoke_current_mapping() {
     assert!(reopened.rcs_mapping(conversation_id).unwrap().is_some());
     assert_eq!(attempt_count(&config, command_id), 0);
 }
+
+#[test]
+fn stale_future_and_foreign_routing_refusals_preserve_current_authority() {
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let mut stale = current.clone();
+    stale.observed_at_ms = 1_000 - RCS_MAPPING_FRESHNESS_MS - 1;
+    stale.outgoing.sim_payload.two += 1;
+    assert!(
+        gateway
+            .begin_rcs_send_attempt(command_id, &stale, 1_000)
+            .is_err()
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+    assert_eq!(rcs_ledger_count(&config, command_id), 0);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    let permit = reopened
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    assert!(uuid::Uuid::parse_str(permit.tmp_id()).is_ok());
+
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let mut future = current.clone();
+    future.observed_at_ms = 1_001;
+    future.outgoing.sim_payload.two += 1;
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&future), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+    assert_eq!(rcs_ledger_count(&config, command_id), 0);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(matches!(
+        reopened
+            .begin_automatic_send_attempt(command_id, Some(&current), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Rcs(_)
+    ));
+
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let first = gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    let tmp_id = first.tmp_id().to_owned();
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    let mut foreign = current.clone();
+    foreign.google_conversation_id = "foreign-google-conversation".into();
+    foreign.outgoing.sim_payload.two += 1;
+    assert!(
+        gateway
+            .retry_rcs_failed_before_submission(command_id, &foreign, 1_000)
+            .is_err()
+    );
+    assert_eq!(attempt_count(&config, command_id), 1);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    let retry = reopened
+        .retry_rcs_failed_before_submission(command_id, &current, 1_000)
+        .unwrap();
+    assert_eq!(retry.tmp_id(), tmp_id);
+    assert_eq!(attempt_count(&config, command_id), 1);
+}
+
+#[test]
+fn admission_does_not_recover_or_replace_legacy_context() {
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let conversation_id = command_conversation(&gateway);
+    drop(gateway);
+    let connection = encrypted_connection(&config);
+    connection
+        .execute(
+            "UPDATE metadata SET v=? WHERE k='rcs_mapping_context_v1'",
+            [r#"{"link_generation":1,"session_generation":1,"context_revision":1}"#],
+        )
+        .unwrap();
+    drop(connection);
+
+    let reopened = unlocked(&config, &vault);
+    assert!(
+        reopened
+            .begin_rcs_send_attempt(command_id, &current, 1_000)
+            .is_err()
+    );
+    assert!(reopened.rcs_mapping(conversation_id).unwrap().is_some());
+    assert_eq!(attempt_count(&config, command_id), 0);
+    assert_eq!(rcs_ledger_count(&config, command_id), 0);
+
+    let fresh = fresh_reobservation(current);
+    assert!(matches!(
+        reopened.verify_rcs_mapping(&fresh, 1_001).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+}

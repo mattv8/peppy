@@ -9739,12 +9739,17 @@ fn exact_rcs_mapping(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<Option<RcsMapping>, Error> {
-    if rcs_mapping::update_context(conn, observation)? != rcs_mapping::ContextUpdate::Unchanged {
-        return Ok(None);
-    }
     let Some(mapping) = rcs_mapping::get(conn, conversation_id)? else {
         return Ok(None);
     };
+    if !rcs_mapping::admission_observation_targets_mapping(&mapping, observation, now_ms)
+        || !rcs_mapping::admission_context_is_v2(conn)?
+    {
+        return Ok(None);
+    }
+    if rcs_mapping::update_context(conn, observation)? != rcs_mapping::ContextUpdate::Unchanged {
+        return Ok(None);
+    }
     match rcs_mapping::mapping_observation_status(conn, &mapping, observation, now_ms)? {
         rcs_mapping::MappingObservationStatus::Exact => Ok(Some(mapping)),
         rcs_mapping::MappingObservationStatus::CurrentWithdrawal => {
