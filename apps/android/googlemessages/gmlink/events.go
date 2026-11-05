@@ -13,6 +13,7 @@ var eventCodes = []eventCode{
 	{"browser", "active"}, {"browser", "inactive"},
 	{"session", "active_session_set"},
 	{"health", "ok"}, {"health", "failed"},
+	{"conversation", "updated"},
 }
 
 type eventCode struct{ kind, code string }

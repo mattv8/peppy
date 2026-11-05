@@ -52,7 +52,13 @@ type Link struct {
 	pairCancel  context.CancelFunc
 	pairDone    chan struct{}
 
-	changes chan any
+	changes            chan any
+	conversationEvents []conversationEvent
+
+	// m2VerificationPassed is supplied by the Android host only after the owner-gated
+	// on-device procedures recorded in g0-libgm-verification.md have passed. It is
+	// deliberately runtime-only: a reconnect or relink must re-establish the proof.
+	m2VerificationPassed bool
 }
 
 var openLink atomic.Pointer[Link]
@@ -377,6 +383,56 @@ func (link *Link) CheckHealth() int64 {
 	return latency
 }
 
+// RefreshConversationIndex refreshes the bounded local conversation index.
+// The pinned libgm facts have not been verified offline, so indexing remains
+// unavailable until the host records the required owner-gated evidence.
+func (link *Link) RefreshConversationIndex() error {
+	if !link.hasM2Verification() {
+		return errors.New("m2_verification_required")
+	}
+	return errors.New("conversation_lookup_unavailable")
+}
+
+// GetConversation returns only fixed-code local lookup status. It never exposes
+// Google participant data through the gomobile boundary.
+func (link *Link) GetConversation(googleConversationID string) string {
+	if googleConversationID == "" {
+		return conversationJSON("invalid_request")
+	}
+	if !link.hasM2Verification() {
+		return conversationJSON("m2_verification_required")
+	}
+	return conversationJSON("conversation_lookup_unavailable")
+}
+
+// ResolveExistingConversation refuses implicit creation. A target is accepted
+// only by a future verified local index; it is never sent to a create-capable RPC.
+func (link *Link) ResolveExistingConversation(target string) string {
+	if target == "" {
+		return conversationJSON("invalid_request")
+	}
+	if !link.hasM2Verification() {
+		return conversationJSON("m2_verification_required")
+	}
+	return conversationJSON("implicit_creation_refused")
+}
+
+// DrainConversationEvents returns local, content-free event correlations.
+func (link *Link) DrainConversationEvents() string {
+	link.mu.Lock()
+	events := append([]conversationEvent(nil), link.conversationEvents...)
+	link.conversationEvents = nil
+	link.mu.Unlock()
+	encoded, _ := json.Marshal(events)
+	return string(encoded)
+}
+
+func (link *Link) hasM2Verification() bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	return !link.closed && link.m2VerificationPassed
+}
+
 // Unlink cancels any in-flight pair or relink and waits, bounded, for it to unwind. Then
 // it unpairs the pairing the link ends up with, once, and wipes the local link. A pair
 // that commits first is unpaired; one that loses commits nothing.
@@ -535,7 +591,8 @@ func relevantEvent(event any) bool {
 	switch event.(type) {
 	case *events.AuthTokenRefreshed, *events.GaiaLoggedOut, *events.ListenFatalError, *events.AccountChange,
 		*events.ListenTemporaryError, *events.ListenRecovered, *events.PhoneNotResponding,
-		*events.PhoneRespondingAgain, *events.NoDataReceived, *events.ActiveSessionSet, *gmproto.UserAlertEvent:
+		*events.PhoneRespondingAgain, *events.NoDataReceived, *events.ActiveSessionSet, *gmproto.UserAlertEvent,
+		*gmproto.Conversation:
 		return true
 	}
 	return false
@@ -589,6 +646,8 @@ func (link *Link) projectEvent(event any) {
 		} else if value.GetAlertType() == gmproto.AlertType_BROWSER_INACTIVE {
 			link.emit("browser", "inactive", 0)
 		}
+	case *gmproto.Conversation:
+		link.recordConversationEvent(value)
 	}
 }
 

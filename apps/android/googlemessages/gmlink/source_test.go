@@ -17,12 +17,13 @@ var fixedCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
 // allowedLibgmCalls are the only libgm client methods the link may call.
 var allowedLibgmCalls = map[string]bool{
 	"FetchConfig": true, "SetEventHandler": true, "SetPingInterval": true, "StartGaiaPairing": true,
-	"FinishGaiaPairing": true, "Connect": true, "Disconnect": true, "ListConversations": true, "UnpairGaia": true,
+	"FinishGaiaPairing": true, "Connect": true, "Disconnect": true, "ListConversations": true, "GetConversation": true,
+	"GetOrCreateConversation": true, "SendMessage": true, "UnpairGaia": true,
 }
 
 // forbiddenRPCNames are the read, send, open, typing, delete and Bugle-revoke methods.
 var forbiddenRPCNames = []string{
-	"GetConversation", "SendMessage", "MarkRead", "SetTyping", "SendReaction", "DeleteMessage",
+	"MarkRead", "SetTyping", "SendReaction", "DeleteMessage",
 	"UpdateConversation", "UpdateSettings", "UnpairBugle", "Unpair", "RevokeRelayPairing",
 }
 
