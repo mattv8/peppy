@@ -10707,11 +10707,14 @@ mod tests {
     use std::time::Instant;
     use uuid::Uuid;
 
-    fn drop_v46_objects(conn: &Connection) {
+    fn drop_post_v45_objects(conn: &Connection) {
         conn.execute_batch(
             "DROP TABLE rcs_mapping_proofs;
               DROP TABLE rcs_conversation_mappings;
               DROP TABLE rcs_send_ledger;
+              DROP TABLE rcs_link_status_projection;
+              DROP TABLE rcs_link_eligibility_projection;
+              DROP TABLE rcs_capability_published;
               ALTER TABLE attempts DROP COLUMN finalized_transport;",
         )
         .unwrap();
@@ -10741,7 +10744,7 @@ mod tests {
                 "INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) VALUES(?,?,?,?, 'pending',0,1)",
                 params![request_id.to_string(), ConversationId::new().to_string(), DeviceId::new().to_string(), "[\"+15555550100\"]"],
             ).unwrap();
-            drop_v46_objects(&store.conn);
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute("UPDATE schema_meta SET version=44", [])
@@ -10793,7 +10796,10 @@ mod tests {
             store
                 .conn
                 .execute_batch(
-                    "ALTER TABLE attempts DROP COLUMN finalized_transport;
+                    "DROP TABLE rcs_link_status_projection;
+                 DROP TABLE rcs_link_eligibility_projection;
+                 DROP TABLE rcs_capability_published;
+                 ALTER TABLE attempts DROP COLUMN finalized_transport;
                  UPDATE schema_meta SET version=46;",
                 )
                 .unwrap();
@@ -11090,7 +11096,7 @@ mod tests {
                 "INSERT INTO projection_notifications(generation,source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![8_i64, source, "staged", uuid::Uuid::new_v4().to_string(), "instance", "com.example.mail", "Mail", "old-icon", "Staged title", "Staged text", "mail", 43_i64, 1_i64, 0_i64, 8_i64],
             ).unwrap();
-            drop_v46_objects(&store.conn);
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -11526,7 +11532,7 @@ mod tests {
             .unwrap();
         {
             let store = client.lock().unwrap();
-            drop_v46_objects(&store.conn);
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -12054,7 +12060,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(actual, definition);
             }
-            drop_v46_objects(&store.conn);
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -12520,7 +12526,7 @@ mod tests {
             let client = Client::open(config.clone(), key()).unwrap();
             let mut store = client.lock().unwrap();
             // Recreate the baseline-35 shape: no priority column and no history seed column.
-            drop_v46_objects(&store.conn);
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -12720,7 +12726,7 @@ mod tests {
                 .unwrap();
             // This mirrors the existing version-33 fixture: the schema is current except for
             // artifacts introduced by the simulated upgrade.
-            drop_v46_objects(&store.conn);
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
