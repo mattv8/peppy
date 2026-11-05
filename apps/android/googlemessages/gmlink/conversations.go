@@ -37,8 +37,8 @@ func resolvedConversationJSON(id string) string {
 	return string(encoded)
 }
 
-func (link *Link) getConversation(client *libgm.Client, id string) (*gmproto.Conversation, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), conversationTimeout)
+func (link *Link) getConversation(ctx context.Context, client *libgm.Client, id string) (*gmproto.Conversation, string) {
+	ctx, cancel := context.WithTimeout(ctx, conversationTimeout)
 	conversation, err := client.GetConversation(ctx, id)
 	cancel()
 	if err != nil {
@@ -86,7 +86,7 @@ func (link *Link) recordConversationEvent(conversation *gmproto.Conversation) {
 	link.indexConversations([]*gmproto.Conversation{conversation})
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if link.closed || !link.m2VerificationPassed {
+	if link.closed || !link.hasOwnerVerificationLocked() {
 		return
 	}
 	link.conversationEvents = append(link.conversationEvents, conversationEvent{Code: "conversation_updated", GoogleConversationID: conversation.GetConversationID()})

@@ -16,7 +16,7 @@ func TestSendRcsRequiresVerificationBeforeSubmission(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if got := decoded["code"]; got != "m2_verification_required" {
+	if got := decoded["code"]; got != "pending_prepare" {
 		t.Fatalf("code = %v", got)
 	}
 	if _, exists := decoded["ack_at_ms"]; exists {
@@ -24,7 +24,7 @@ func TestSendRcsRequiresVerificationBeforeSubmission(t *testing.T) {
 	}
 }
 
-func TestSendRcsRechecksConversationAndSubmitsOneBridgePayload(t *testing.T) {
+func TestLegacySendRcsDoesNotSubmitWithoutPrepareCommit(t *testing.T) {
 	auth := linkedSafetyAuth()
 	fixture := newPhoneFixture(t, auth)
 	fixture.configure(func(knobs *fixtureKnobs) { knobs.configEmail = fixtureSourceID })
@@ -38,21 +38,19 @@ func TestSendRcsRechecksConversationAndSubmitsOneBridgePayload(t *testing.T) {
 	link, _ := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
 	done := startSafetyRun(t, link)
-	link.mu.Lock()
-	link.m2VerificationPassed = true
-	link.mu.Unlock()
+	setTestOwnerVerification(link)
 	link.projectEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
 	if err := link.RefreshConversationIndex(); err != nil {
 		t.Fatal(err)
 	}
 	result := link.SendRcs(`{"command_id":"synthetic-command","tmp_id":"00000000-0000-4000-8000-000000000000","google_conversation_id":"synthetic-conversation","mapping_revision":1,"proof_digest":"synthetic-proof","content":"synthetic-content"}`)
-	if got := decodeSendCode(t, result); got != "submitted" {
+	if got := decodeSendCode(t, result); got != "pending_prepare" {
 		t.Fatalf("code = %s result=%s", got, result)
 	}
 	fixture.mu.Lock()
 	requests := append([]*gmproto.SendMessageRequest(nil), fixture.sendRequests...)
 	fixture.mu.Unlock()
-	if len(requests) != 1 || requests[0].GetForceRCS() || requests[0].GetTmpID() != "00000000-0000-4000-8000-000000000000" || requests[0].GetMessagePayload().GetTmpID2() != requests[0].GetTmpID() || requests[0].GetMessagePayload().GetParticipantID() != "synthetic-outgoing" {
+	if len(requests) != 0 {
 		t.Fatalf("request = %+v", requests)
 	}
 	link.Stop()
@@ -77,9 +75,7 @@ func TestOldSettingsCannotReplaceCurrentSendAuthority(t *testing.T) {
 	link, _ := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
 	done := startSafetyRun(t, link)
-	link.mu.Lock()
-	link.m2VerificationPassed = true
-	link.mu.Unlock()
+	setTestOwnerVerification(link)
 	current := &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{
 		SIMParticipant: &gmproto.SIMParticipant{ID: "current-outgoing"},
 		SIMData:        &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}},
@@ -103,7 +99,7 @@ func TestOldSettingsCannotReplaceCurrentSendAuthority(t *testing.T) {
 	})
 
 	result := link.SendRcs(`{"command_id":"synthetic-command","tmp_id":"00000000-0000-4000-8000-000000000000","google_conversation_id":"synthetic-conversation","mapping_revision":1,"proof_digest":"synthetic-proof","content":"synthetic-content"}`)
-	if got := decodeSendCode(t, result); got != "settings_unavailable" {
+	if got := decodeSendCode(t, result); got != "pending_prepare" {
 		t.Fatalf("code = %s result=%s", got, result)
 	}
 	if got := fixture.countAction(gmproto.ActionType_SEND_MESSAGE.String()); got != 0 {
@@ -129,9 +125,7 @@ func TestBareSettingsCannotEnableSendAuthority(t *testing.T) {
 	link, _ := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
 	done := startSafetyRun(t, link)
-	link.mu.Lock()
-	link.m2VerificationPassed = true
-	link.mu.Unlock()
+	setTestOwnerVerification(link)
 	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{
 		SIMParticipant: &gmproto.SIMParticipant{ID: "current-outgoing"},
 		SIMData:        &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}},
@@ -148,7 +142,7 @@ func TestBareSettingsCannotEnableSendAuthority(t *testing.T) {
 	})
 
 	result := link.SendRcs(`{"command_id":"synthetic-command","tmp_id":"00000000-0000-4000-8000-000000000000","google_conversation_id":"synthetic-conversation","mapping_revision":1,"proof_digest":"synthetic-proof","content":"synthetic-content"}`)
-	if got := decodeSendCode(t, result); got != "settings_unavailable" {
+	if got := decodeSendCode(t, result); got != "pending_prepare" {
 		t.Fatalf("code = %s result=%s", got, result)
 	}
 	if got := fixture.countAction(gmproto.ActionType_SEND_MESSAGE.String()); got != 0 {

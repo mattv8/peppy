@@ -1,7 +1,6 @@
 package gmlink
 
 import (
-	"context"
 	"encoding/json"
 	"time"
 
@@ -18,7 +17,6 @@ type rcsSendRequest struct {
 	MappingRevision      uint64 `json:"mapping_revision"`
 	ProofDigest          string `json:"proof_digest"`
 	Content              string `json:"content"`
-	M2VerificationPassed bool   `json:"m2_verification_passed"`
 }
 
 type rcsSendResult struct {
@@ -36,47 +34,9 @@ func (link *Link) SendRcs(requestJSON string) string {
 	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil || !validRcsRequest(request) {
 		return sendJSON(rcsSendResult{Code: "invalid_request"})
 	}
-	if request.M2VerificationPassed {
-		link.mu.Lock()
-		if !link.closed {
-			link.m2VerificationPassed = true
-		}
-		link.mu.Unlock()
-	}
-	if !link.hasM2Verification() {
-		return sendJSON(rcsSendResult{Code: "m2_verification_required"})
-	}
-	client := link.activeClient()
-	if client == nil {
-		return sendJSON(rcsSendResult{Code: "link_unavailable"})
-	}
-	link.rpcMu.Lock()
-	defer link.rpcMu.Unlock()
-	conversation, code := link.getConversation(client, request.GoogleConversationID)
-	if code != "" {
-		return sendJSON(rcsSendResult{Code: code, TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
-	}
-	settings, code := link.currentSettings()
-	if code != "" {
-		return sendJSON(rcsSendResult{Code: code, TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
-	}
-	payload, code := validatedPayload(conversation, settings, request)
-	if code != "" {
-		return sendJSON(rcsSendResult{Code: code, TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
-	response, err := client.SendMessage(ctx, payload)
-	cancel()
-	if err != nil || response == nil {
-		return sendJSON(rcsSendResult{Code: "outcome_unknown", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
-	}
-	if response.GetGoogleAccountSwitch() != nil {
-		return sendJSON(rcsSendResult{Code: "account_changed", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
-	}
-	if response.GetStatus() != gmproto.SendMessageResponse_SUCCESS {
-		return sendJSON(rcsSendResult{Code: "send_rejected", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
-	}
-	return sendJSON(rcsSendResult{Code: "submitted", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID, AckAtMS: time.Now().UnixMilli()})
+	// Stage 1 intentionally leaves the legacy request inert. It lacks the
+	// one-use core permit and exact prepared target required for effect admission.
+	return sendJSON(rcsSendResult{Code: "pending_prepare", TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID})
 }
 
 func validRcsRequest(request rcsSendRequest) bool {

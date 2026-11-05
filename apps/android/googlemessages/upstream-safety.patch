@@ -27,12 +27,16 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
 diff -ruN a/pkg/libgm/events/ready.go b/pkg/libgm/events/ready.go
 --- pkg/libgm/events/ready.go
 +++ pkg/libgm/events/ready.go
-@@ -15,6 +15,9 @@
+@@ -15,6 +15,13 @@
  
  type AuthTokenRefreshed struct{}
  
 +// ActiveSessionSet marks an active-session claim without carrying content.
 +type ActiveSessionSet struct{}
++
++// StreamGap marks a long-poll teardown before a reconnect. It carries no
++// claim that a later connection has caught up.
++type StreamGap struct{}
 +
  type GaiaLoggedOut struct{}
  
@@ -84,6 +88,17 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  			cancel()
  			log.Debug().Msg("Long polling stopped while opening stream, closing it")
  			_ = resp.Body.Close()
+@@ -600,6 +599,10 @@
+ 		cleanClose := c.readLongPoll(&log, resp.Body, background, cancel)
+ 		cancel()
+ 		c.longPollingConn.Store(nil)
++		if loggedIn && c.listenID.Load() == listenID {
++			// A clean EOF/reopen can lose events too. Later recovery is not proof.
++			c.triggerEvent(&events.StreamGap{})
++		}
+ 		if background {
+ 			return cleanClose
+ 		}
 @@ -613,7 +612,7 @@
  
  func (c *Client) readLongPoll(log *zerolog.Logger, rc io.ReadCloser, background bool, cancel context.CancelFunc) bool {

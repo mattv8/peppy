@@ -42,6 +42,12 @@ const (
 	canaryNumber  = "canary-number-0001"
 )
 
+func setTestOwnerVerification(link *Link) {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	link.ownerVerification = &ownerVerification{generation: link.generation}
+}
+
 // fixtureKnobs select how the fake Google server answers. Tests change them
 // through phoneFixture.configure, which holds the fixture lock.
 type fixtureKnobs struct {

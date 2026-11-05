@@ -22,9 +22,7 @@ func TestConversationFacadeRequiresVerification(t *testing.T) {
 
 func TestDrainConversationEventsExcludesParticipantIdentity(t *testing.T) {
 	link, _ := openSafetyLink(t, nil)
-	link.mu.Lock()
-	link.m2VerificationPassed = true
-	link.mu.Unlock()
+	setTestOwnerVerification(link)
 	link.projectEvent(&gmproto.Conversation{
 		ConversationID: "synthetic-conversation",
 		Participants:   []*gmproto.Participant{{ID: &gmproto.SmallInfo{Number: "synthetic-target"}}},

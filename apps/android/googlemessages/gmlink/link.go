@@ -27,32 +27,37 @@ type Host interface {
 }
 
 var (
-	errPersistFailed = errors.New("persist_failed")
-	errLinkClosed    = errors.New("link_closed")
+	errPersistFailed                = errors.New("persist_failed")
+	errLinkClosed                   = errors.New("link_closed")
+	errOwnerVerificationInvalid     = errors.New("owner_verification_invalid")
+	errOwnerVerificationUnavailable = errors.New("owner_verification_unavailable")
 )
 
 // Link owns one Google Messages link for the process.
 type Link struct {
 	host Host
 
-	mu          sync.Mutex
-	rpcMu       sync.Mutex
-	persistMu   sync.Mutex
-	state       string
-	pairingFrom string
-	stopCode    string
-	auth        *libgm.AuthData
-	seq         uint64
-	client      *libgm.Client
-	running     bool
-	healthy     bool
-	responding  bool
-	lastOKMS    int64
-	closed      bool
-	unlinking   bool
-	stopRun     context.CancelFunc
-	pairCancel  context.CancelFunc
-	pairDone    chan struct{}
+	mu            sync.Mutex
+	rpcMu         sync.Mutex
+	persistMu     sync.Mutex
+	state         string
+	pairingFrom   string
+	stopCode      string
+	auth          *libgm.AuthData
+	seq           uint64
+	client        *libgm.Client
+	running       bool
+	healthy       bool
+	responding    bool
+	lastOKMS      int64
+	closed        bool
+	unlinking     bool
+	stopRun       context.CancelFunc
+	runCtx        context.Context
+	generation    uint64
+	runGeneration uint64
+	pairCancel    context.CancelFunc
+	pairDone      chan struct{}
 
 	changes            chan any
 	conversationEvents []conversationEvent
@@ -61,10 +66,14 @@ type Link struct {
 	settingsAt         time.Time
 	settingsVersion    uint64
 
-	// m2VerificationPassed is supplied by the Android host only after the owner-gated
-	// on-device procedures recorded in g0-libgm-verification.md have passed. It is
-	// deliberately runtime-only: a reconnect or relink must re-establish the proof.
-	m2VerificationPassed bool
+	ownerVerification *ownerVerification
+}
+
+// queuedEvent is fenced twice: before it enters the queue and immediately before
+// it mutates Link state. A callback from a retired libgm client is never current.
+type queuedEvent struct {
+	generation uint64
+	event      any
 }
 
 var openLink atomic.Pointer[Link]
@@ -122,6 +131,7 @@ func (link *Link) Close() {
 	link.mu.Lock()
 	if !link.closed {
 		link.closed = true
+		link.revokeLocked()
 		close(link.changes)
 	}
 	if link.pairCancel != nil {
@@ -162,6 +172,7 @@ func (link *Link) Relink() error {
 		link.mu.Unlock()
 		return errors.New("relink_refused")
 	}
+	link.revokeLocked()
 	auth := link.auth.CopyForRepair()
 	storedSource := link.auth.Mobile.GetSourceID()
 	link.mu.Unlock()
@@ -172,6 +183,7 @@ func (link *Link) Relink() error {
 // before any pairing request is sent.
 func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (err error) {
 	link.mu.Lock()
+	link.revokeLocked()
 	previous := link.state
 	if link.closed {
 		link.mu.Unlock()
@@ -309,17 +321,21 @@ func (link *Link) Run() error {
 		return errors.New("run_refused")
 	}
 	auth := link.auth
-	client := link.newClient(auth, link.persist)
-	link.client, link.running, link.stopRun = client, true, cancelRun
+	link.generation++
+	generation := link.generation
+	client := link.newClient(auth, link.persist, generation)
+	link.client, link.running, link.stopRun, link.runCtx, link.runGeneration = client, true, cancelRun, runCtx, generation
 	link.mu.Unlock()
 	defer func() {
 		link.mu.Lock()
-		if link.client == client {
+		if link.client == client && link.runGeneration == generation {
 			link.client = nil
+			link.runCtx = nil
+			link.runGeneration = 0
+			link.stopRun = nil
+			link.healthy = false
+			link.running = false
 		}
-		link.running = false
-		link.healthy = false
-		link.stopRun = nil
 		link.mu.Unlock()
 		client.Disconnect()
 	}()
@@ -369,14 +385,14 @@ func (link *Link) Run() error {
 
 // CheckHealth checks one inbox conversation and returns its latency in milliseconds, or -1.
 func (link *Link) CheckHealth() int64 {
-	link.mu.Lock()
-	client := link.client
-	link.mu.Unlock()
-	if client == nil {
+	link.rpcMu.Lock()
+	defer link.rpcMu.Unlock()
+	client, runCtx, ok := link.activeRuntime()
+	if !ok {
 		link.recordHealth(false, 0)
 		return -1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), healthTimeout)
+	ctx, cancel := context.WithTimeout(runCtx, healthTimeout)
 	defer cancel()
 	started := time.Now()
 	_, err := client.ListConversations(ctx, &gmproto.ListConversationsRequest{Count: 1, Folder: gmproto.ListConversationsRequest_INBOX})
@@ -396,16 +412,19 @@ func (link *Link) RefreshConversationIndex() error {
 	if !link.hasM2Verification() {
 		return errors.New("m2_verification_required")
 	}
-	client := link.activeClient()
-	if client == nil {
-		return errors.New("link_unavailable")
-	}
 	link.rpcMu.Lock()
 	defer link.rpcMu.Unlock()
+	client, runCtx, ok := link.activeRuntime()
+	if !ok {
+		return errors.New("link_unavailable")
+	}
+	if !link.hasM2Verification() {
+		return errors.New("m2_verification_required")
+	}
 	for _, folder := range []gmproto.ListConversationsRequest_Folder{gmproto.ListConversationsRequest_INBOX, gmproto.ListConversationsRequest_ARCHIVE, gmproto.ListConversationsRequest_SPAM_BLOCKED} {
 		var cursor *gmproto.Cursor
 		for page := 0; page < conversationPageLimit; page++ {
-			ctx, cancel := context.WithTimeout(context.Background(), conversationTimeout)
+			ctx, cancel := context.WithTimeout(runCtx, conversationTimeout)
 			response, err := client.ListConversations(ctx, &gmproto.ListConversationsRequest{Count: conversationPageSize, Folder: folder, Cursor: cursor})
 			cancel()
 			if err != nil || response == nil {
@@ -433,13 +452,16 @@ func (link *Link) GetConversation(googleConversationID string) string {
 	if !link.hasM2Verification() {
 		return conversationJSON("m2_verification_required")
 	}
-	client := link.activeClient()
-	if client == nil {
-		return conversationJSON("link_unavailable")
-	}
 	link.rpcMu.Lock()
 	defer link.rpcMu.Unlock()
-	conversation, code := link.getConversation(client, googleConversationID)
+	client, runCtx, ok := link.activeRuntime()
+	if !ok {
+		return conversationJSON("link_unavailable")
+	}
+	if !link.hasM2Verification() {
+		return conversationJSON("m2_verification_required")
+	}
+	conversation, code := link.getConversation(runCtx, client, googleConversationID)
 	if code != "" {
 		return conversationJSON(code)
 	}
@@ -478,16 +500,18 @@ func (link *Link) DrainConversationEvents() string {
 func (link *Link) hasM2Verification() bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	return !link.closed && link.m2VerificationPassed
+	return link.hasOwnerVerificationLocked()
 }
 
-func (link *Link) activeClient() *libgm.Client {
+// activeRuntime is called only after rpcMu is acquired. It selects the client
+// and its cancellable generation-owned context atomically with revalidation.
+func (link *Link) activeRuntime() (*libgm.Client, context.Context, bool) {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if link.closed || link.state != stateLinked || link.client == nil {
-		return nil
+	if link.closed || link.state != stateLinked || !link.running || link.client == nil || link.runCtx == nil || link.runGeneration != link.generation {
+		return nil, nil, false
 	}
-	return link.client
+	return link.client, link.runCtx, true
 }
 
 // Unlink cancels any in-flight pair or relink and waits, bounded, for it to unwind. Then
@@ -505,6 +529,7 @@ func (link *Link) Unlink() error {
 	}
 	// From here until the final block, Pair, Relink and Run are refused.
 	link.unlinking = true
+	link.revokeLocked()
 	var pairDone chan struct{}
 	if link.pairCancel != nil {
 		link.pairCancel()
@@ -568,12 +593,27 @@ func (link *Link) Unlink() error {
 // Stop ends Run without changing link state.
 func (link *Link) Stop() {
 	link.mu.Lock()
-	link.stopRunLocked()
+	link.revokeLocked()
 	link.mu.Unlock()
 }
 
 // stopRunLocked cancels the current Run, if any. Callers hold link.mu.
 func (link *Link) stopRunLocked() {
+	if link.stopRun != nil {
+		link.stopRun()
+	}
+}
+
+// revokeLocked is the single admission linearization point for a runtime
+// lifetime. It cancels all run-derived RPC contexts before any retired callback
+// can observe settings or readiness. It cannot recall bytes already admitted to
+// libgm's writer; callers must treat an admitted request as outcome-unknown.
+func (link *Link) revokeLocked() {
+	link.generation++
+	link.ownerVerification = nil
+	link.conversationIndex = make(map[string]conversationSummary)
+	link.conversationEvents = nil
+	link.invalidateSettingsLocked()
 	if link.stopRun != nil {
 		link.stopRun()
 	}
@@ -597,9 +637,17 @@ func (link *Link) Status() string {
 }
 
 // newClient builds a libgm client whose transport persists through persist.
-func (link *Link) newClient(auth *libgm.AuthData, persist func() error) *libgm.Client {
+func (link *Link) newClient(auth *libgm.AuthData, persist func() error, generations ...uint64) *libgm.Client {
 	client := libgm.NewClient(auth, nil, zerolog.Nop(), newGuardedSettings(auth, persist, link.transportStop))
-	client.SetEventHandler(link.queueEvent)
+	var generation uint64
+	if len(generations) == 1 {
+		generation = generations[0]
+	} else {
+		link.mu.Lock()
+		generation = link.generation
+		link.mu.Unlock()
+	}
+	client.SetEventHandler(func(event any) { link.queueEventFor(generation, event) })
 	return client
 }
 
@@ -626,17 +674,31 @@ func (link *Link) persistRotated(candidate *libgm.AuthData, owner chan struct{})
 // queueEvent hands one event to the consumer. Only events the consumer handles are
 // queued, and a full queue stops the link with its own code.
 func (link *Link) queueEvent(event any) {
+	link.mu.Lock()
+	generation := link.generation
+	link.mu.Unlock()
+	link.queueEventFor(generation, event)
+}
+
+func (link *Link) queueEventFor(generation uint64, event any) {
 	if !relevantEvent(event) {
 		return
 	}
 	event = cloneQueuedEvent(event)
 	link.mu.Lock()
-	if link.closed {
+	if link.closed || generation != link.generation {
 		link.mu.Unlock()
 		return
 	}
+	if invalidatesAtIngress(event) {
+		link.invalidateSettingsLocked()
+		link.conversationIndex = make(map[string]conversationSummary)
+	}
+	if invalidatesOwnerEvidence(event) {
+		link.ownerVerification = nil
+	}
 	select {
-	case link.changes <- event:
+	case link.changes <- queuedEvent{generation: generation, event: event}:
 		link.mu.Unlock()
 	default:
 		link.mu.Unlock()
@@ -670,7 +732,7 @@ func relevantEvent(event any) bool {
 	case *events.AuthTokenRefreshed, *events.GaiaLoggedOut, *events.ListenFatalError, *events.AccountChange,
 		*events.ListenTemporaryError, *events.ListenRecovered, *events.PhoneNotResponding,
 		*events.PhoneRespondingAgain, *events.NoDataReceived, *events.ActiveSessionSet, *gmproto.UserAlertEvent,
-		*gmproto.Conversation, *libgm.WrappedSettings, *gmproto.Settings:
+		*gmproto.Conversation, *libgm.WrappedSettings, *gmproto.Settings, *events.StreamGap:
 		return true
 	}
 	return false
@@ -678,7 +740,41 @@ func relevantEvent(event any) bool {
 
 func (link *Link) consumeEvents() {
 	for event := range link.changes {
-		link.projectEvent(event)
+		link.consumeQueuedEvent(event)
+	}
+}
+
+func (link *Link) consumeQueuedEvent(queued any) {
+	event, ok := queued.(queuedEvent)
+	if !ok {
+		return
+	}
+	link.mu.Lock()
+	current := !link.closed && event.generation == link.generation
+	link.mu.Unlock()
+	if current {
+		link.projectEvent(event.event)
+	}
+}
+
+func invalidatesAtIngress(event any) bool {
+	switch event.(type) {
+	case *events.ListenTemporaryError, *events.NoDataReceived, *events.ActiveSessionSet,
+		*events.StreamGap, *gmproto.Settings:
+		return true
+	case *libgm.WrappedSettings:
+		return true
+	default:
+		return false
+	}
+}
+
+func invalidatesOwnerEvidence(event any) bool {
+	switch event.(type) {
+	case *events.ListenTemporaryError, *events.NoDataReceived, *events.ActiveSessionSet, *events.StreamGap:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -702,6 +798,8 @@ func (link *Link) projectEvent(event any) {
 		}
 	case *events.ListenTemporaryError:
 		link.emit("conn", "temporary_error", 0)
+	case *events.StreamGap:
+		link.emit("conn", "temporary_error", 0)
 	case *events.ListenRecovered:
 		link.emit("conn", "recovered", 0)
 	case *events.PhoneNotResponding:
@@ -717,6 +815,9 @@ func (link *Link) projectEvent(event any) {
 	case *events.NoDataReceived:
 		link.emit("conn", "no_data", 0)
 	case *events.ActiveSessionSet:
+		link.mu.Lock()
+		link.revokeLocked()
+		link.mu.Unlock()
 		link.emit("session", "active_session_set", 0)
 	case *gmproto.UserAlertEvent:
 		if value.GetAlertType() == gmproto.AlertType_BROWSER_ACTIVE {
@@ -756,7 +857,7 @@ func (link *Link) transition(state, code string) {
 		return
 	}
 	link.state, link.stopCode, link.healthy, link.responding = state, "", false, false
-	link.conversationIndex, link.conversationEvents, link.settings, link.settingsAt = make(map[string]conversationSummary), nil, nil, time.Time{}
+	link.revokeLocked()
 	link.mu.Unlock()
 	if err := link.persist(); err != nil {
 		link.stopFatal("persist_failed", false)
@@ -788,7 +889,7 @@ func (link *Link) signOutIf(code string, allowed func(state string) bool) {
 	}
 	link.state, link.pairingFrom, link.stopCode, link.auth = stateSignedOut, "", code, libgm.NewAuthData()
 	link.healthy, link.responding, link.lastOKMS = false, false, 0
-	link.conversationIndex, link.conversationEvents, link.settings, link.settingsAt = make(map[string]conversationSummary), nil, nil, time.Time{}
+	link.revokeLocked()
 	link.mu.Unlock()
 	if err := link.persist(); err != nil {
 		link.stopFatal("persist_failed", false)
@@ -804,7 +905,7 @@ func (link *Link) stopFatal(code string, wipe bool) {
 	if wipe {
 		link.state, link.pairingFrom, link.auth = stateSignedOut, "", libgm.NewAuthData()
 	}
-	link.stopRunLocked()
+	link.revokeLocked()
 	link.mu.Unlock()
 	link.emit("link", code, 0)
 }
