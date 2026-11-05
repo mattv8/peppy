@@ -1,5 +1,6 @@
 package dev.peppy.mobile.googlemessages
 
+import org.json.JSONException
 import org.json.JSONObject
 
 interface LinkHost {
@@ -25,6 +26,7 @@ interface LinkEngine {
 }
 
 data class LinkStatus(
+    val seq: Long,
     val state: String,
     val running: Boolean,
     val healthy: Boolean,
@@ -37,19 +39,25 @@ data class LinkStatus(
         private val codePattern = Regex("[a-z][a-z0-9_]{0,39}")
 
         fun parse(json: String): LinkStatus {
-            val value = JSONObject(json)
-            val parsedState = value.optString("state")
-            // Unknown states fail closed as unknown; the panel treats this as a load failure.
-            val state = parsedState.takeIf(states::contains) ?: "unknown"
-            val stopCode = value.optString("stop_code").takeIf(codePattern::matches) ?: "unknown"
-            return LinkStatus(
-                state = state,
-                running = value.optBoolean("running"),
-                healthy = value.optBoolean("healthy"),
-                phoneResponding = value.optBoolean("phone_responding"),
-                lastOkMs = value.optLong("last_ok_ms"),
-                stopCode = stopCode,
-            )
+            return try {
+                val value = JSONObject(json)
+                val parsedState = value.optString("state")
+                // Unknown states and malformed JSON fail closed as unknown; the panel treats this as a load failure.
+                val state = parsedState.takeIf(states::contains) ?: "unknown"
+                val rawStopCode = value.optString("stop_code")
+                val stopCode = if (rawStopCode.isEmpty() || codePattern.matches(rawStopCode)) rawStopCode else "unknown"
+                LinkStatus(
+                    seq = value.optLong("seq"),
+                    state = state,
+                    running = value.optBoolean("running"),
+                    healthy = value.optBoolean("healthy"),
+                    phoneResponding = value.optBoolean("phone_responding"),
+                    lastOkMs = value.optLong("last_ok_ms"),
+                    stopCode = stopCode,
+                )
+            } catch (_: JSONException) {
+                LinkStatus(0, "unknown", false, false, false, 0, "unknown")
+            }
         }
     }
 }

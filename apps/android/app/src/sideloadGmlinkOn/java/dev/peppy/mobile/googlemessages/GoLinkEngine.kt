@@ -18,11 +18,33 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
 private object GoLinkEngine : LinkEngine {
     override val available = true
 
-    override fun open(state: ByteArray, host: LinkHost): LinkHandle = GoLinkHandle(
-        Gmlink.open(state, object : Host {
-            override fun persistState(state: ByteArray) = host.persistState(state)
-            override fun event(kind: String, code: String, value: Long) = host.event(kind, code, value)
-            override fun showEmoji(emoji: String) = host.showEmoji(emoji)
+    override fun open(restoredState: ByteArray, linkHost: LinkHost): LinkHandle = GoLinkHandle(
+        Gmlink.open(restoredState, object : Host {
+            // Gomobile invokes these from Go goroutine threads. Never call Link synchronously from a callback.
+            override fun persistState(persistedState: ByteArray) {
+                try {
+                    linkHost.persistState(persistedState)
+                } catch (_: Throwable) {
+                    // Gomobile turns this checked exception into the Go Host error result.
+                    throw Exception("persist_failed")
+                }
+            }
+
+            override fun event(kind: String, code: String, value: Long) {
+                try {
+                    linkHost.event(kind, code, value)
+                } catch (_: Throwable) {
+                    // Host event delivery must not unwind through JNI.
+                }
+            }
+
+            override fun showEmoji(emoji: String) {
+                try {
+                    linkHost.showEmoji(emoji)
+                } catch (_: Throwable) {
+                    // Host display updates must not unwind through JNI.
+                }
+            }
         }),
     )
 }

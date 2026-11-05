@@ -40,7 +40,7 @@ fun strictBooleanProperty(name: String): Boolean = providers.gradleProperty(name
 
 val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
 val peppySideloadDebugSigning = strictBooleanProperty("peppySideloadDebugSigning")
-val peppyGoogleMessagesLink = providers.gradleProperty("peppyGoogleMessagesLink").map { it.toBooleanStrict() }.getOrElse(false)
+val peppyGoogleMessagesLink = strictBooleanProperty("peppyGoogleMessagesLink")
 val googleMessagesAar = rootProject.layout.projectDirectory.file("googlemessages/build/gmlink.aar")
 val releaseTaskRequested = gradle.startParameter.taskNames.any { taskName ->
     taskName.contains("release", ignoreCase = true) || taskName.contains("sideload", ignoreCase = true)
@@ -675,6 +675,25 @@ fun verifyGoogleMessagesLinkExclusion(archives: List<File>, variant: String, not
     }
 }
 
+fun verifySideloadGoogleMessagesLinkArtifacts(artifacts: Set<String>, enabled: Boolean) {
+    val required = setOf(googleMessagesNativeLibrary, "dev/peppy/gmlink/", googleMessagesNotice)
+    if (enabled) {
+        check(artifacts == required) { "Sideload APK must contain all Google Messages link artifacts: missing ${required - artifacts}" }
+    } else {
+        check(artifacts.isEmpty()) { "Sideload APK must not contain Google Messages link artifacts: $artifacts" }
+    }
+}
+
+fun writeArchiveFixture(archiveFile: File, entries: Map<String, ByteArray>) {
+    ZipOutputStream(archiveFile.outputStream()).use { archive ->
+        entries.forEach { (name, bytes) ->
+            archive.putNextEntry(ZipEntry(name))
+            archive.write(bytes)
+            archive.closeEntry()
+        }
+    }
+}
+
 fun verifyRestrictedSetupManifest(mergedManifest: File, variant: String) {
     check(mergedManifest.isFile) { "Expected merged $variant manifest at $mergedManifest" }
     val parserFactory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
@@ -855,12 +874,7 @@ val verifySideloadGoogleMessagesLink = tasks.register("verifySideloadGoogleMessa
     doLast {
         val metadata = layout.buildDirectory.file("outputs/apk/sideload/output-metadata.json").get().asFile
         val artifacts = googleMessagesLinkArtifacts(apksFromMetadata(metadata, "sideload"))
-        val required = setOf(googleMessagesNativeLibrary, "dev/peppy/gmlink/", googleMessagesNotice)
-        if (peppyGoogleMessagesLink) {
-            check(artifacts == required) { "Sideload APK must contain all Google Messages link artifacts: missing ${required - artifacts}" }
-        } else {
-            check(artifacts.isEmpty()) { "Sideload APK must not contain Google Messages link artifacts: $artifacts" }
-        }
+        verifySideloadGoogleMessagesLinkArtifacts(artifacts, peppyGoogleMessagesLink)
     }
 }
 
@@ -903,17 +917,35 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
             "Synthetic sideload notice must fail the release APK exclusion guard"
         }
 
-        ZipOutputStream(fixtureApk.outputStream()).use { archive ->
-            archive.putNextEntry(ZipEntry("classes.dex"))
-            archive.write("${googleMessagesDexPrefix}Gmlink;".toByteArray())
-            archive.closeEntry()
-            archive.putNextEntry(ZipEntry("lib/arm64-v8a/$googleMessagesNativeLibrary"))
-            archive.closeEntry()
-            archive.putNextEntry(ZipEntry(googleMessagesNotice))
-            archive.closeEntry()
+        val googleMessagesArtifacts = mapOf(
+            googleMessagesNativeLibrary to mapOf("lib/arm64-v8a/$googleMessagesNativeLibrary" to ByteArray(0)),
+            "dev/peppy/gmlink/" to mapOf("classes.dex" to "${googleMessagesDexPrefix}Gmlink;".toByteArray()),
+            googleMessagesNotice to mapOf(googleMessagesNotice to ByteArray(0)),
+        )
+        writeArchiveFixture(fixtureApk, mapOf("classes.dex" to ByteArray(0)))
+        check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isSuccess) {
+            "Clean APK must pass the Google Messages link exclusion guard"
         }
-        check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isFailure) {
-            "Synthetic Google Messages link APK artifacts must fail the release exclusion guard"
+        googleMessagesArtifacts.forEach { (artifact, entries) ->
+            writeArchiveFixture(fixtureApk, entries)
+            check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isFailure) {
+                "Synthetic $artifact APK artifact must fail the release exclusion guard"
+            }
+        }
+        writeArchiveFixture(fixtureApk, mapOf("classes.dex" to "Ldev/peppy/mobile/googlemessages/GoogleMessagesLink;".toByteArray()))
+        check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isSuccess) {
+            "Google Messages link stub seam must not fail the release exclusion guard"
+        }
+        val requiredGoogleMessagesArtifacts = googleMessagesArtifacts.keys
+        requiredGoogleMessagesArtifacts.forEach { artifact ->
+            check(runCatching {
+                verifySideloadGoogleMessagesLinkArtifacts(requiredGoogleMessagesArtifacts - artifact, true)
+            }.isFailure) { "Flag-on guard must reject a missing $artifact" }
+        }
+        requiredGoogleMessagesArtifacts.forEach { artifact ->
+            check(runCatching {
+                verifySideloadGoogleMessagesLinkArtifacts(setOf(artifact), false)
+            }.isFailure) { "Flag-off guard must reject $artifact" }
         }
 
         val fixtureAab = fixtureDirectory.resolve("app-release.aab")
@@ -936,17 +968,17 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
             "Synthetic sideload notice must fail the release AAB exclusion guard"
         }
 
-        ZipOutputStream(fixtureAab.outputStream()).use { archive ->
-            archive.putNextEntry(ZipEntry("base/dex/classes.dex"))
-            archive.write("${googleMessagesDexPrefix}Gmlink;".toByteArray())
-            archive.closeEntry()
-            archive.putNextEntry(ZipEntry("base/lib/arm64-v8a/$googleMessagesNativeLibrary"))
-            archive.closeEntry()
-            archive.putNextEntry(ZipEntry("base/$googleMessagesNotice"))
-            archive.closeEntry()
+        googleMessagesArtifacts.forEach { (artifact, entries) ->
+            writeArchiveFixture(fixtureAab, entries.mapKeys { (name, _) -> if (name == "classes.dex") "base/dex/classes.dex" else "base/$name" })
+            check(runCatching { verifyGoogleMessagesLinkExclusion(listOf(fixtureAab), "Release AAB", "base/$googleMessagesNotice") }.isFailure) {
+                "Synthetic $artifact AAB artifact must fail the release exclusion guard"
+            }
         }
-        check(runCatching { verifyGoogleMessagesLinkExclusion(listOf(fixtureAab), "Release AAB", "base/$googleMessagesNotice") }.isFailure) {
-            "Synthetic Google Messages link AAB artifacts must fail the release exclusion guard"
+
+        val debugFixture = fixtureDirectory.resolve("app-debug.apk")
+        writeArchiveFixture(debugFixture, googleMessagesArtifacts.getValue(googleMessagesNativeLibrary))
+        check(runCatching { verifyGoogleMessagesLinkExclusion(listOf(debugFixture), "Debug APK") }.isFailure) {
+            "Synthetic Google Messages link artifact must fail the debug exclusion guard"
         }
 
         ZipOutputStream(fixtureApk.outputStream()).use { archive ->
