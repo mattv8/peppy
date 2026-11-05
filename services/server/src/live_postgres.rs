@@ -337,11 +337,13 @@ mod tests {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required for PostgreSQL live relay tests");
         let (proxy_url, disposed) = stalled_listen_proxy(&database_url).await;
+        let options = sqlx::postgres::PgConnectOptions::from_str(&proxy_url)
+            .unwrap()
+            .ssl_mode(sqlx::postgres::PgSslMode::Disable);
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .min_connections(0)
-            .connect_lazy(&proxy_url)
-            .unwrap();
+            .connect_lazy_with(options);
 
         assert!(matches!(
             setup_listener(&pool, Duration::from_millis(100)).await,
