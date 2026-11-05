@@ -30,6 +30,7 @@ struct Notify {
 
 struct Inner {
     pool: PgPool,
+    listener_pool: PgPool,
     instance_id: Uuid,
     hub: LiveHub,
     ready: AtomicBool,
@@ -51,8 +52,14 @@ impl PgLiveBackend {
 
     fn new_with_setup_timeout(pool: PgPool, hub: LiveHub, listen_setup_timeout: Duration) -> Self {
         let (readiness, _) = tokio::sync::watch::channel(false);
+        let listener_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .min_connections(0)
+            .acquire_timeout(LISTEN_SETUP_TIMEOUT)
+            .connect_lazy_with((*pool.connect_options()).clone());
         let inner = Arc::new(Inner {
             pool,
+            listener_pool,
             instance_id: Uuid::new_v4(),
             hub,
             ready: AtomicBool::new(false),
@@ -141,7 +148,7 @@ async fn listener_loop(inner: Weak<Inner>) {
 }
 
 async fn listen_once(state: &Inner) -> Result<(), sqlx::Error> {
-    let mut listener = setup_listener(&state.pool, state.listen_setup_timeout).await?;
+    let mut listener = setup_listener(&state.listener_pool, state.listen_setup_timeout).await?;
     set_ready(state, true);
     loop {
         let Some(notification) = listener.try_recv().await? else {
@@ -388,6 +395,12 @@ mod tests {
         let backend = PgLiveBackend::new(pool.clone(), LiveHub::new());
         wait_ready(&backend).await;
         let mut readiness = backend.subscribe_readiness();
+        assert_eq!(backend.inner.listener_pool.size(), 1);
+        let app_pool_available: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(app_pool_available, 1);
 
         let admin = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -412,6 +425,12 @@ mod tests {
         .await
         .expect("terminated listener marks backend unavailable before reconnect");
         assert!(!backend.is_ready());
+        assert!(backend.inner.listener_pool.size() <= 1);
+        let app_pool_available: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(app_pool_available, 1);
 
         tokio::time::timeout(Duration::from_secs(2), pool.close())
             .await
