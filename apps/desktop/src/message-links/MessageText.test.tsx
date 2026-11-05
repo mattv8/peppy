@@ -165,7 +165,7 @@ describe("MessageText", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("shows an inline destination on keyboard focus", () => {
+  it("preserves canonical destination disclosure for internationalized URLs", () => {
     render(<MessageText text="https://例え.テスト/path" />);
     const link = screen.getByRole("link");
 
