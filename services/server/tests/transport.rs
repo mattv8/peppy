@@ -1217,7 +1217,7 @@ async fn cross_vault_foreign_gateway_and_non_target_receipts_are_denied() {
         .unwrap();
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 
-    let foreign_route = set_fingerprint(
+    for foreign_route in [
         command(
             first.vault,
             first.owner_device,
@@ -1226,15 +1226,23 @@ async fn cross_vault_foreign_gateway_and_non_target_receipts_are_denied() {
             Uuid::new_v4(),
             foreign.id,
         ),
-        &first.fingerprint,
-    );
-    let denied = first
-        .auth(client.post(format!("{}/v1/commands", first.base_url)))
-        .json(&foreign_route)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        rcs_link_command(
+            first.vault,
+            first.owner_device,
+            1,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            foreign.id,
+        ),
+    ] {
+        let denied = first
+            .auth(client.post(format!("{}/v1/commands", first.base_url)))
+            .json(&set_fingerprint(foreign_route, &first.fingerprint))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    }
 
     let command_id = Uuid::new_v4();
     let valid = set_fingerprint(
@@ -1435,7 +1443,7 @@ async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
         .post(&foreign_owner.device_token, "/v1/capabilities", &capability)
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{foreign_capability}");
-    let foreign_target = set_fingerprint(
+    for foreign_target in [
         command(
             server.vault,
             server.owner_device,
@@ -1444,13 +1452,25 @@ async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
             Uuid::new_v4(),
             foreign_owner.device_id,
         ),
-        &server.fingerprint,
-    );
-    let (status, foreign_target_rejected) = server
-        .post(&server.owner_token, "/v1/commands", &foreign_target)
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(foreign_target_rejected["code"], "gateway_not_authorized");
+        rcs_link_command(
+            server.vault,
+            server.owner_device,
+            4,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            foreign_owner.device_id,
+        ),
+    ] {
+        let (status, foreign_target_rejected) = server
+            .post(
+                &server.owner_token,
+                "/v1/commands",
+                &set_fingerprint(foreign_target, &server.fingerprint),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(foreign_target_rejected["code"], "gateway_not_authorized");
+    }
 
     let revoked_owner = server.provision_device("gateway").await;
     sqlx::query("UPDATE devices SET role='owner' WHERE vault_id=$1 AND device_id=$2")
@@ -1471,7 +1491,7 @@ async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{revoked}");
-    let revoked_target = set_fingerprint(
+    for revoked_target in [
         command(
             server.vault,
             server.owner_device,
@@ -1480,13 +1500,25 @@ async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
             Uuid::new_v4(),
             revoked_owner.id,
         ),
-        &server.fingerprint,
-    );
-    let (status, revoked_target_rejected) = server
-        .post(&server.owner_token, "/v1/commands", &revoked_target)
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(revoked_target_rejected["code"], "gateway_not_authorized");
+        rcs_link_command(
+            server.vault,
+            server.owner_device,
+            5,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            revoked_owner.id,
+        ),
+    ] {
+        let (status, revoked_target_rejected) = server
+            .post(
+                &server.owner_token,
+                "/v1/commands",
+                &set_fingerprint(revoked_target, &server.fingerprint),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(revoked_target_rejected["code"], "gateway_not_authorized");
+    }
 
     sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
         .bind(server.vault)
