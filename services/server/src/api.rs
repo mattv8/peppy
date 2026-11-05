@@ -524,24 +524,30 @@ pub(crate) fn build_router(
 ) -> Result<(Router, Maintenance), &'static str> {
     build_router_with_live_backend(
         db,
-        config,
-        initialized_storage,
-        options,
-        explicit_relay_url,
-        push_advertisement,
+        RouterBuildOptions {
+            config,
+            initialized_storage,
+            transport: options,
+            explicit_relay_url,
+            push_advertisement,
+        },
         authorization,
         #[cfg(test)]
         None,
     )
 }
 
-fn build_router_with_live_backend(
-    db: PgPool,
+struct RouterBuildOptions {
     config: Option<Config>,
     initialized_storage: Option<Storage>,
-    options: TransportOptions,
+    transport: TransportOptions,
     explicit_relay_url: Option<url::Url>,
     push_advertisement: PushConfigAdvertisement,
+}
+
+fn build_router_with_live_backend(
+    db: PgPool,
+    build: RouterBuildOptions,
     authorization: RouterAuthorization,
     #[cfg(test)] live_override: Option<(
         Arc<dyn crate::live::LiveBackend>,
@@ -549,6 +555,13 @@ fn build_router_with_live_backend(
         Duration,
     )>,
 ) -> Result<(Router, Maintenance), &'static str> {
+    let RouterBuildOptions {
+        config,
+        initialized_storage,
+        transport: options,
+        explicit_relay_url,
+        push_advertisement,
+    } = build;
     let RouterAuthorization {
         policy,
         enrollment: enrollment_authorization,

@@ -2,8 +2,8 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -29,11 +29,14 @@ use tokio_tungstenite::{
 
 use super::*;
 
+const TRACE_COLLECTOR_SENTINEL: &str = "live_test_backend_publish_observed";
+
 #[derive(Clone)]
 struct FakeLiveBackend {
     started: Arc<AtomicUsize>,
     completed: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
+    fail: Arc<AtomicBool>,
     release: Arc<Notify>,
     stall: bool,
 }
@@ -44,6 +47,7 @@ impl FakeLiveBackend {
             started: Arc::new(AtomicUsize::new(0)),
             completed: Arc::new(AtomicUsize::new(0)),
             dropped: Arc::new(AtomicUsize::new(0)),
+            fail: Arc::new(AtomicBool::new(false)),
             release: Arc::new(Notify::new()),
             stall: false,
         }
@@ -69,11 +73,18 @@ impl crate::live::LiveBackend for FakeLiveBackend {
                 completed: false,
             };
             self.started.fetch_add(1, Ordering::SeqCst);
+            tracing::info!(
+                safe_marker = TRACE_COLLECTOR_SENTINEL,
+                "live_test_backend_publish"
+            );
             if self.stall {
                 self.release.notified().await;
             }
-            self.completed.fetch_add(1, Ordering::SeqCst);
             drop_acknowledgement.completed = true;
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(crate::live::LiveBackendError);
+            }
+            self.completed.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
     }
@@ -96,19 +107,31 @@ struct LiveTestServer {
     pool: PgPool,
     admin: PgPool,
     schema: String,
+    base_url: String,
     ws_url: String,
     task: JoinHandle<()>,
     _readiness_sender: watch::Sender<bool>,
     owner_token: String,
     owner_device: Uuid,
+    vault: Uuid,
+    peer_token: String,
+    peer_device: Uuid,
 }
 
 impl LiveTestServer {
     async fn start(backend: FakeLiveBackend, ready: bool) -> Self {
-        Self::start_with_publish_timeout(backend, ready, LIVE_PUBLISH_TIMEOUT).await
+        Self::start_with_configuration(backend, ready, LIVE_PUBLISH_TIMEOUT).await
     }
 
     async fn start_with_publish_timeout(
+        backend: FakeLiveBackend,
+        ready: bool,
+        publish_timeout: Duration,
+    ) -> Self {
+        Self::start_with_configuration(backend, ready, publish_timeout).await
+    }
+
+    async fn start_with_configuration(
         backend: FakeLiveBackend,
         ready: bool,
         publish_timeout: Duration,
@@ -146,13 +169,29 @@ impl LiveTestServer {
         digest.update((0_u8..16).collect::<Vec<_>>());
         digest.update(vault.as_bytes());
         digest.update(1_u32.to_be_bytes());
-        let owner = create_owner(
-            &pool,
-            profile,
-            vec![7, 8, 9],
-            hex::encode(digest.finalize()),
-            1,
+        let fingerprint = hex::encode(digest.finalize());
+        let owner = create_owner(&pool, profile, vec![7, 8, 9], fingerprint.clone(), 1)
+            .await
+            .unwrap();
+        let peer_device = Uuid::new_v4();
+        let peer_token = (0..3)
+            .map(|_| Uuid::new_v4().simple().to_string())
+            .collect::<String>();
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device',$3,$4,1)")
+            .bind(vault)
+            .bind(peer_device)
+            .bind(serde_json::json!({"fixture": true}))
+            .bind(&fingerprint)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)",
         )
+        .bind(Sha256::digest(peer_token.as_bytes()).as_slice())
+        .bind(vault)
+        .bind(peer_device)
+        .execute(&pool)
         .await
         .unwrap();
 
@@ -166,11 +205,13 @@ impl LiveTestServer {
         };
         let (router, _maintenance) = build_router_with_live_backend(
             pool.clone(),
-            None,
-            None,
-            TransportOptions::default(),
-            None,
-            PushConfigAdvertisement::default(),
+            RouterBuildOptions {
+                config: None,
+                initialized_storage: None,
+                transport: TransportOptions::default(),
+                explicit_relay_url: None,
+                push_advertisement: PushConfigAdvertisement::default(),
+            },
             authorization,
             Some((Arc::new(backend), readiness, publish_timeout)),
         )
@@ -182,11 +223,15 @@ impl LiveTestServer {
             pool,
             admin,
             schema,
+            base_url: format!("http://{address}"),
             ws_url: format!("ws://{address}/v1/live"),
             task,
             _readiness_sender: readiness_sender,
             owner_token: owner.device_token,
             owner_device: owner.device_id,
+            vault,
+            peer_token,
+            peer_device,
         }
     }
 
@@ -194,12 +239,40 @@ impl LiveTestServer {
         &self,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
+        self.connect_with_token(&self.owner_token).await
+    }
+
+    async fn connect_peer(
+        &self,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        self.connect_with_token(&self.peer_token).await
+    }
+
+    async fn connect_with_token(
+        &self,
+        token: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         let mut request = self.ws_url.clone().into_client_request().unwrap();
-        request.headers_mut().insert(
-            "authorization",
-            format!("Bearer {}", self.owner_token).parse().unwrap(),
-        );
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
         connect_async(request).await.unwrap().0
+    }
+
+    async fn snapshot(&self) -> serde_json::Value {
+        reqwest::Client::new()
+            .get(format!("{}/v1/snapshot", self.base_url))
+            .bearer_auth(&self.owner_token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
     }
 
     async fn shutdown(self) {
@@ -215,6 +288,10 @@ impl LiveTestServer {
 }
 
 fn signal(sender: Uuid) -> String {
+    signal_with_ciphertext(sender, "AQ==")
+}
+
+fn signal_with_ciphertext(sender: Uuid, ciphertext_b64: &str) -> String {
     let now = live_now_ms();
     serde_json::json!({
         "protocol_version": 1,
@@ -224,7 +301,7 @@ fn signal(sender: Uuid) -> String {
         "sent_at_ms": now.to_string(),
         "expires_at_ms": (now + 15_000).to_string(),
         "sequence": "1",
-        "ciphertext_b64": "AQ=="
+        "ciphertext_b64": ciphertext_b64
     })
     .to_string()
 }
@@ -289,6 +366,58 @@ async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
     })
     .await
     .expect("counter did not reach expected value");
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogWriter(self.0.clone())
+    }
+}
+
+impl std::io::Write for CapturedLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+async fn next_text(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> String {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("socket did not receive live frame")
+            .expect("socket ended before live frame")
+            .expect("websocket read failed")
+        {
+            tungstenite::Message::Text(text) => return text.to_string(),
+            tungstenite::Message::Ping(payload) => socket
+                .send(tungstenite::Message::Pong(payload))
+                .await
+                .unwrap(),
+            message => panic!("unexpected websocket frame: {message:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -449,6 +578,109 @@ async fn native_message_limit_rejects_oversized_valid_json_before_publication() 
     assert_eq!(close.reason, "invalid_live_frame");
     assert_eq!(backend.started.load(Ordering::SeqCst), 1);
     assert_eq!(backend.completed.load(Ordering::SeqCst), 1);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn delivered_live_signal_does_not_change_authenticated_snapshot() {
+    let backend = FakeLiveBackend::immediate();
+    let server = LiveTestServer::start(backend.clone(), true).await;
+    let before = server.snapshot().await;
+    assert_eq!(before["snapshot_version"], 1);
+    assert_eq!(before["vault_id"], serde_json::json!(server.vault));
+    assert_eq!(before["record_count"], "0");
+    assert_eq!(before["high_water_cursor"], "0");
+
+    let mut sender = server.connect().await;
+    expect_strict_hello(&mut sender).await;
+    let mut peer = server.connect_peer().await;
+    expect_strict_hello(&mut peer).await;
+    let frame = signal(server.owner_device);
+    sender
+        .send(tungstenite::Message::Text(frame.clone().into()))
+        .await
+        .unwrap();
+    let received = next_text(&mut peer).await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&received).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&frame).unwrap()
+    );
+    wait_for_count(&backend.completed, 1).await;
+
+    let after = server.snapshot().await;
+    // Snapshot start has no clock, connection, or request fields; every field is
+    // durable vault state or a protocol capability, so exact equality is stable.
+    assert_eq!(after, before);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_publish_receive_invalid_and_error_paths_do_not_log_sensitive_data() {
+    const CIPHERTEXT_CANARY: &str = "U0lHTkFMX0NBTkFSWV9OT19MT0c=";
+    const PLAINTEXT_CANARY: &str = "SIGNAL_CANARY_NO_LOG";
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("live tracing test must install the process collector");
+
+    let backend = FakeLiveBackend::immediate();
+    let server = LiveTestServer::start(backend.clone(), true).await;
+    let mut sender = server.connect().await;
+    expect_strict_hello(&mut sender).await;
+    let mut peer = server.connect_peer().await;
+    expect_strict_hello(&mut peer).await;
+
+    let canary_frame = signal_with_ciphertext(server.owner_device, CIPHERTEXT_CANARY);
+    sender
+        .send(tungstenite::Message::Text(canary_frame.clone().into()))
+        .await
+        .unwrap();
+    let received = next_text(&mut peer).await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&received).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&canary_frame).unwrap()
+    );
+
+    sender
+        .send(tungstenite::Message::Text(signal(Uuid::new_v4()).into()))
+        .await
+        .unwrap();
+    let invalid_close = next_close(&mut sender).await;
+    assert_eq!(invalid_close.reason, "invalid_live_frame");
+
+    backend.fail.store(true, Ordering::SeqCst);
+    peer.send(tungstenite::Message::Text(
+        signal(server.peer_device).into(),
+    ))
+    .await
+    .unwrap();
+    let error_close = next_close(&mut peer).await;
+    assert_eq!(error_close.reason, "live_unavailable");
+
+    let captured = logs.text();
+    assert!(captured.contains(TRACE_COLLECTOR_SENTINEL));
+    let vault_id = server.vault.to_string();
+    let owner_device_id = server.owner_device.to_string();
+    let peer_device_id = server.peer_device.to_string();
+    for secret in [
+        CIPHERTEXT_CANARY,
+        PLAINTEXT_CANARY,
+        canary_frame.as_str(),
+        vault_id.as_str(),
+        owner_device_id.as_str(),
+        peer_device_id.as_str(),
+    ] {
+        assert!(
+            !captured.contains(secret),
+            "sensitive live data reached tracing output"
+        );
+    }
     server.shutdown().await;
 }
 
