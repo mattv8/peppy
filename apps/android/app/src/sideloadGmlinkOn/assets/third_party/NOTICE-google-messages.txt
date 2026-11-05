@@ -22,28 +22,31 @@ with your own key and install it on your device. Android requires the signature
 to match the installed app, so uninstall this APK first; that removes Peppy's
 local data on the device.
 
-Go modules linked into gmlink
------------------------------
-The following is the linked module set from `go list -deps` for `./gmlink`
-after prepare-libgm.sh. The MIT and BSD-3-Clause license texts are reproduced
-in the sideload's MIT.txt and BSD-3-Clause.txt. MPL-2.0.txt and AGPL-3.0.txt
-are included with this link-enabled sideload asset set.
+Go modules and generated binding runtime linked into gmlink
+-----------------------------------------------------------
+The Go input-package module set was enumerated with `GOFLAGS=-mod=readonly go
+list -deps -f '{{with .Module}}{{.Path}} {{.Version}}{{end}}' ./gmlink` after
+prepare-libgm.sh. That command does not enumerate code introduced by gomobile.
+The generated gmlink-sources.jar contains go/Seq.java, go/Universe.java and
+go/error.java; those generated bindings and libgojni include the pinned
+golang.org/x/mobile runtime packages bind/seq, bind/java and internal/mobileinit.
+They are listed separately below.
 
 github.com/google/uuid v1.6.0
-Copyright (c) 2009, 2014 Google Inc. All rights reserved.
-License: BSD-3-Clause.
+Copyright (c) 2009,2014 Google Inc. All rights reserved.
+License: BSD-3-Clause; see the original BSD-3-Clause-google-uuid.txt.
 
 github.com/mattn/go-colorable v0.1.14
 Copyright (c) 2016 Yasuhiro Matsumoto.
-License: MIT.
+License: MIT; see the original MIT-go-colorable.txt.
 
 github.com/mattn/go-isatty v0.0.20
 Copyright (c) Yasuhiro MATSUMOTO.
-License: MIT.
+License: MIT; see the original MIT-go-isatty.txt.
 
 github.com/rs/zerolog v1.35.1
 Copyright (c) 2017 Olivier Poitrey.
-License: MIT.
+License: MIT; see the original MIT-zerolog.txt.
 
 go.mau.fi/util v0.11.0
 Copyright (c) 2025 Tulir Asokan.
@@ -55,9 +58,14 @@ golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e
 golang.org/x/net v0.61.0
 golang.org/x/sys v0.49.0
 golang.org/x/text v0.43.0
-Copyright 2009 The Go Authors. All rights reserved.
-License: BSD-3-Clause.
+Copyright 2009 The Go Authors.
+License: BSD-3-Clause; see the original BSD-3-Clause-go-x-and-mobile.txt.
+
+golang.org/x/mobile v0.0.0-20261011034528-197770444867
+Generated binding runtime packages: bind/seq, bind/java and internal/mobileinit.
+Copyright 2009 The Go Authors.
+License: BSD-3-Clause; see the original BSD-3-Clause-go-x-and-mobile.txt.
 
 google.golang.org/protobuf v1.36.12
 Copyright (c) 2018 The Go Authors. All rights reserved.
-License: BSD-3-Clause.
+License: BSD-3-Clause; see the original BSD-3-Clause-google-protobuf.txt.
