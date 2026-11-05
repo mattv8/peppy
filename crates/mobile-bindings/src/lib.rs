@@ -583,6 +583,10 @@ pub enum NativePermitState {
     MediaUnavailable,
     Historical,
     RestoreGuarded,
+    RouteUnavailable,
+    UnknownRoute,
+    MappingUnproven,
+    CarrierOnlyProofUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -850,7 +854,8 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::StaleDraft { .. } | CoreError::DraftMoved { .. } => Self::StaleDraft,
             CoreError::DraftNotDiscardable
             | CoreError::RecipientlessDraftExists
-            | CoreError::DraftMergeOverflow => Self::Conflict,
+            | CoreError::DraftMergeOverflow
+            | CoreError::AlreadyAttempted(_) => Self::Conflict,
             CoreError::InvalidKeyCache => Self::InvalidKeyCache,
             CoreError::KeysUnavailable => Self::KeysUnavailable,
             CoreError::InvalidMedia => Self::InvalidMedia,
@@ -1255,6 +1260,12 @@ fn permit_view(decision: PermitDecision) -> NativePermit {
                 PermitBlock::MediaUnavailable => NativePermitState::MediaUnavailable,
                 PermitBlock::Historical => NativePermitState::Historical,
                 PermitBlock::RestoreGuarded => NativePermitState::RestoreGuarded,
+                PermitBlock::RouteUnavailable => NativePermitState::RouteUnavailable,
+                PermitBlock::UnknownRoute => NativePermitState::UnknownRoute,
+                PermitBlock::MappingUnproven => NativePermitState::MappingUnproven,
+                PermitBlock::CarrierOnlyProofUnavailable => {
+                    NativePermitState::CarrierOnlyProofUnavailable
+                }
             },
             command: None,
             existing_send_state: None,
@@ -3759,6 +3770,39 @@ impl NativePlaintextHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permit_view_keeps_new_blocks_non_authorising() {
+        let blocked_states = [
+            (PermitBlock::RouteUnavailable, NativePermitState::RouteUnavailable),
+            (PermitBlock::UnknownRoute, NativePermitState::UnknownRoute),
+            (PermitBlock::MappingUnproven, NativePermitState::MappingUnproven),
+            (
+                PermitBlock::CarrierOnlyProofUnavailable,
+                NativePermitState::CarrierOnlyProofUnavailable,
+            ),
+        ];
+
+        for (block, expected_state) in blocked_states {
+            let permit = permit_view(PermitDecision::Blocked(block));
+            assert_eq!(permit.state, expected_state);
+            assert_eq!(permit.command, None);
+            assert_eq!(permit.existing_send_state, None);
+        }
+    }
+
+    #[test]
+    fn already_attempted_core_error_is_a_conflict_without_authority() {
+        assert!(matches!(
+            MobileBindingsError::from(CoreError::AlreadyAttempted(SendState::AttemptRecorded)),
+            MobileBindingsError::Conflict,
+        ));
+
+        let permit = permit_view(PermitDecision::AlreadyAttempted(SendState::AttemptRecorded));
+        assert_eq!(permit.state, NativePermitState::AlreadyAttempted);
+        assert_eq!(permit.command, None);
+        assert_eq!(permit.existing_send_state.as_deref(), Some("AttemptRecorded"));
+    }
 
     /// Removes a temporary database, its SQLite sidecars and its `.media` root when the test ends,
     /// including after a failed assertion. Declare it before any client that opens the database.

@@ -11926,6 +11926,10 @@ public enum NativePermitState: Equatable, Hashable {
     case mediaUnavailable
     case historical
     case restoreGuarded
+    case routeUnavailable
+    case unknownRoute
+    case mappingUnproven
+    case carrierOnlyProofUnavailable
 
 
 
@@ -11962,6 +11966,14 @@ public struct FfiConverterTypeNativePermitState: FfiConverterRustBuffer {
         case 7: return .historical
         
         case 8: return .restoreGuarded
+        
+        case 9: return .routeUnavailable
+        
+        case 10: return .unknownRoute
+        
+        case 11: return .mappingUnproven
+        
+        case 12: return .carrierOnlyProofUnavailable
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -12001,6 +12013,22 @@ public struct FfiConverterTypeNativePermitState: FfiConverterRustBuffer {
         
         case .restoreGuarded:
             writeInt(&buf, Int32(8))
+        
+        
+        case .routeUnavailable:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .unknownRoute:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .mappingUnproven:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .carrierOnlyProofUnavailable:
+            writeInt(&buf, Int32(12))
         
         }
     }
