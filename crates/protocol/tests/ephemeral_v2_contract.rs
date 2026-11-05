@@ -6,7 +6,7 @@ use peppy_domain::{DeviceId, VaultId};
 use peppy_protocol::{
     ChallengePlaintextV2, Envelope, EphemeralSignalV1, EphemeralSignalV2, EphemeralSignalV2Kind,
     LiveHelloV2, MAX_EPHEMERAL_V2_CONTROL_CIPHERTEXT_BYTES,
-    MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES,
+    MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES, SessionAckPlaintextV2, TypingPlaintextV2,
 };
 
 fn signal(kind: EphemeralSignalV2Kind) -> EphemeralSignalV2 {
@@ -152,6 +152,47 @@ fn v2_plaintexts_reject_wrong_gateway_nonce_and_unknown_fields() {
         invalid[field] = value;
         assert!(serde_json::from_value::<ChallengePlaintextV2>(invalid).is_err());
     }
+}
+
+#[test]
+fn v2_plaintext_gateway_condition_and_control_lengths_are_exact() {
+    let session = URL_SAFE_NO_PAD.encode([7_u8; 16]);
+    let nonce = STANDARD.encode([8_u8; 16]);
+    let typing = serde_json::json!({
+        "version":2,"origin":"vault_device","conversation_id":"00000000-0000-0000-0000-000000000003",
+        "state":"started","gateway_device_id":"00000000-0000-0000-0000-000000000004"
+    });
+    assert!(serde_json::from_value::<TypingPlaintextV2>(typing.clone()).is_ok());
+    let mut missing_gateway = typing;
+    missing_gateway
+        .as_object_mut()
+        .unwrap()
+        .remove("gateway_device_id");
+    assert!(serde_json::from_value::<TypingPlaintextV2>(missing_gateway).is_err());
+
+    let challenge = serde_json::json!({
+        "version":2,"challenger_device_id":"00000000-0000-0000-0000-000000000001",
+        "challenger_session_id":session,"responder_device_id":"00000000-0000-0000-0000-000000000002","nonce_b64":nonce,
+    });
+    let ack = serde_json::json!({
+        "version":2,"responder_device_id":"00000000-0000-0000-0000-000000000001","responder_session_id":session,
+        "challenger_device_id":"00000000-0000-0000-0000-000000000002","challenger_session_id":session,
+        "echoed_nonce_b64":nonce,"sequence_floor":"18446744073709551615",
+    });
+    assert_eq!(
+        serde_json::to_vec(&serde_json::from_value::<ChallengePlaintextV2>(challenge).unwrap())
+            .unwrap()
+            .len(),
+        224
+    );
+    assert_eq!(
+        serde_json::to_vec(&serde_json::from_value::<SessionAckPlaintextV2>(ack).unwrap())
+            .unwrap()
+            .len(),
+        319
+    );
+    assert_eq!(224 + 24 + 16, 264);
+    assert_eq!(319 + 24 + 16, 359);
 }
 
 #[test]
