@@ -683,8 +683,14 @@ mod tests {
         drop(client);
         let conn = Connection::open(&config.database_path).unwrap();
         apply_database_key(&conn, &key()).unwrap();
-        conn.execute_batch("DROP TABLE conversation_folders; UPDATE schema_meta SET version=42;")
-            .unwrap();
+        conn.execute_batch(
+            "DROP TABLE conversation_folders;
+             DROP TABLE rcs_mapping_proofs;
+             DROP TABLE rcs_conversation_mappings;
+             DROP TABLE rcs_send_ledger;
+             UPDATE schema_meta SET version=42;",
+        )
+        .unwrap();
         drop(conn);
 
         let upgraded = Client::open(config.clone(), key()).unwrap();
