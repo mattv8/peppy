@@ -1017,6 +1017,12 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_sender_blocklist(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_rcs_eligibility_projection(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_rcs_gateway_supported(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_rcs_link_status(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_receive_cursor(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_reconcile_contact_apply(
@@ -1511,6 +1517,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_sender_blocklist(`ptr`: Long,`numbers`: RustBuffer.ByValue,`canUnblock`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_eligibility_projection(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`gatewayDeviceId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_gateway_supported(`ptr`: Long,`gatewayDeviceId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_link_status(`ptr`: Long,`gatewayDeviceId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_receive_cursor(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_reconcile_contact_apply(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2457,6 +2469,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_sender_blocklist() and 0xFFFF) != 19267) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_rcs_eligibility_projection() and 0xFFFF) != 28430) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_rcs_gateway_supported() and 0xFFFF) != 2404) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_rcs_link_status() and 0xFFFF) != 61314) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_receive_cursor() and 0xFFFF) != 34175) {
@@ -3595,6 +3616,26 @@ public interface NativeClientInterface {
     fun `publishMessageHistoryCaptureSource`(`facts`: NativeMessageHistorySourceFacts): kotlin.String
     
     fun `publishSenderBlocklist`(`numbers`: List<kotlin.String>?, `canUnblock`: kotlin.Boolean): kotlin.Boolean
+    
+    /**
+     * Returns sanitized per-conversation capability state. Core maps stale,
+     * future, unavailable, and unlinked evidence to `Unknown`; this method is
+     * never a permit or send authority.
+     */
+    fun `rcsEligibilityProjection`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsEligibilityProjection?
+    
+    /**
+     * Returns whether this gateway's current RCS link satisfies the core's
+     * capability gate. This is a display capability, not a permit or transport
+     * authority.
+     */
+    fun `rcsGatewaySupported`(`gatewayDeviceId`: kotlin.String, `nowMs`: kotlin.Long): kotlin.Boolean
+    
+    /**
+     * Returns sanitized link state for native display. `current` means fresh
+     * evidence only; it does not authorize a transport effect.
+     */
+    fun `rcsLinkStatus`(`gatewayDeviceId`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsLinkStatus?
     
     fun `receiveCursor`(): kotlin.String
     
@@ -5883,6 +5924,69 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         
         FfiConverterOptionalSequenceString.lower(`numbers`),
         FfiConverterBoolean.lower(`canUnblock`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Returns sanitized per-conversation capability state. Core maps stale,
+     * future, unavailable, and unlinked evidence to `Unknown`; this method is
+     * never a permit or send authority.
+     */
+    @Throws(MobileBindingsException::class)override fun `rcsEligibilityProjection`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsEligibilityProjection? {
+            return FfiConverterOptionalTypeNativeRcsEligibilityProjection.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_eligibility_projection(
+        it,
+        
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterString.lower(`gatewayDeviceId`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Returns whether this gateway's current RCS link satisfies the core's
+     * capability gate. This is a display capability, not a permit or transport
+     * authority.
+     */
+    @Throws(MobileBindingsException::class)override fun `rcsGatewaySupported`(`gatewayDeviceId`: kotlin.String, `nowMs`: kotlin.Long): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_gateway_supported(
+        it,
+        
+        FfiConverterString.lower(`gatewayDeviceId`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Returns sanitized link state for native display. `current` means fresh
+     * evidence only; it does not authorize a transport effect.
+     */
+    @Throws(MobileBindingsException::class)override fun `rcsLinkStatus`(`gatewayDeviceId`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsLinkStatus? {
+            return FfiConverterOptionalTypeNativeRcsLinkStatus.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_link_status(
+        it,
+        
+        FfiConverterString.lower(`gatewayDeviceId`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     }
     )
@@ -12438,6 +12542,140 @@ public object FfiConverterTypeNativeRawSnapshotRecord: FfiConverterRustBuffer<Na
 
 
 
+data class NativeRcsEligibilityProjection (
+    var `conversationId`: kotlin.String
+    , 
+    var `gatewayDeviceId`: kotlin.String
+    , 
+    /**
+     * Stale, future, unavailable, or unlinked evidence is represented as
+     * `Unknown`; it is not send authority.
+     */
+    var `eligibility`: NativeRcsEligibility
+    , 
+    var `featureBits`: kotlin.UInt
+    , 
+    var `mappingRevision`: kotlin.ULong
+    , 
+    var `observedAtMs`: kotlin.Long
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsEligibilityProjection: FfiConverterRustBuffer<NativeRcsEligibilityProjection> {
+    override fun read(buf: ByteBuffer): NativeRcsEligibilityProjection {
+        return NativeRcsEligibilityProjection(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeNativeRcsEligibility.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsEligibilityProjection) = (
+            FfiConverterString.allocationSize(value.`conversationId`) +
+            FfiConverterString.allocationSize(value.`gatewayDeviceId`) +
+            FfiConverterTypeNativeRcsEligibility.allocationSize(value.`eligibility`) +
+            FfiConverterUInt.allocationSize(value.`featureBits`) +
+            FfiConverterULong.allocationSize(value.`mappingRevision`) +
+            FfiConverterLong.allocationSize(value.`observedAtMs`)
+    )
+
+    override fun write(value: NativeRcsEligibilityProjection, buf: ByteBuffer) {
+            FfiConverterString.write(value.`conversationId`, buf)
+            FfiConverterString.write(value.`gatewayDeviceId`, buf)
+            FfiConverterTypeNativeRcsEligibility.write(value.`eligibility`, buf)
+            FfiConverterUInt.write(value.`featureBits`, buf)
+            FfiConverterULong.write(value.`mappingRevision`, buf)
+            FfiConverterLong.write(value.`observedAtMs`, buf)
+    }
+}
+
+
+
+data class NativeRcsLinkStatus (
+    var `state`: NativeRcsLinkState
+    , 
+    /**
+     * Whether the content-free capability evidence is fresh. This is display
+     * state only and never authorizes a transport effect.
+     */
+    var `current`: kotlin.Boolean
+    , 
+    var `availability`: kotlin.Boolean
+    , 
+    var `health`: kotlin.Boolean
+    , 
+    var `phoneResponsive`: kotlin.Boolean
+    , 
+    var `observedAtMs`: kotlin.Long
+    , 
+    var `capabilityRevision`: kotlin.ULong
+    , 
+    var `featureBits`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer<NativeRcsLinkStatus> {
+    override fun read(buf: ByteBuffer): NativeRcsLinkStatus {
+        return NativeRcsLinkStatus(
+            FfiConverterTypeNativeRcsLinkState.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsLinkStatus) = (
+            FfiConverterTypeNativeRcsLinkState.allocationSize(value.`state`) +
+            FfiConverterBoolean.allocationSize(value.`current`) +
+            FfiConverterBoolean.allocationSize(value.`availability`) +
+            FfiConverterBoolean.allocationSize(value.`health`) +
+            FfiConverterBoolean.allocationSize(value.`phoneResponsive`) +
+            FfiConverterLong.allocationSize(value.`observedAtMs`) +
+            FfiConverterULong.allocationSize(value.`capabilityRevision`) +
+            FfiConverterUInt.allocationSize(value.`featureBits`)
+    )
+
+    override fun write(value: NativeRcsLinkStatus, buf: ByteBuffer) {
+            FfiConverterTypeNativeRcsLinkState.write(value.`state`, buf)
+            FfiConverterBoolean.write(value.`current`, buf)
+            FfiConverterBoolean.write(value.`availability`, buf)
+            FfiConverterBoolean.write(value.`health`, buf)
+            FfiConverterBoolean.write(value.`phoneResponsive`, buf)
+            FfiConverterLong.write(value.`observedAtMs`, buf)
+            FfiConverterULong.write(value.`capabilityRevision`, buf)
+            FfiConverterUInt.write(value.`featureBits`, buf)
+    }
+}
+
+
+
 data class NativeSenderUnblockWork (
     var `requestId`: kotlin.String
     , 
@@ -14828,6 +15066,78 @@ public object FfiConverterTypeNativePlayLinkOutcome: FfiConverterRustBuffer<Nati
 
 
 
+enum class NativeRcsEligibility {
+    
+    ELIGIBLE,
+    NOT_ELIGIBLE,
+    UNKNOWN;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsEligibility: FfiConverterRustBuffer<NativeRcsEligibility> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeRcsEligibility.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeRcsEligibility) = 4UL
+
+    override fun write(value: NativeRcsEligibility, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeRcsLinkState {
+    
+    LINKED,
+    UNLINKED,
+    NEEDS_RELINK,
+    SIGNED_OUT,
+    UNAVAILABLE;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsLinkState: FfiConverterRustBuffer<NativeRcsLinkState> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeRcsLinkState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeRcsLinkState) = 4UL
+
+    override fun write(value: NativeRcsLinkState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class NativeRemoteAttachmentState {
     
     AVAILABLE,
@@ -15405,6 +15715,70 @@ public object FfiConverterOptionalTypeNativePendingVaultRequest: FfiConverterRus
         } else {
             buf.put(1)
             FfiConverterTypeNativePendingVaultRequest.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeRcsEligibilityProjection: FfiConverterRustBuffer<NativeRcsEligibilityProjection?> {
+    override fun read(buf: ByteBuffer): NativeRcsEligibilityProjection? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeRcsEligibilityProjection.read(buf)
+    }
+
+    override fun allocationSize(value: NativeRcsEligibilityProjection?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeRcsEligibilityProjection.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeRcsEligibilityProjection?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeRcsEligibilityProjection.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeRcsLinkStatus: FfiConverterRustBuffer<NativeRcsLinkStatus?> {
+    override fun read(buf: ByteBuffer): NativeRcsLinkStatus? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeRcsLinkStatus.read(buf)
+    }
+
+    override fun allocationSize(value: NativeRcsLinkStatus?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeRcsLinkStatus.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeRcsLinkStatus?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeRcsLinkStatus.write(value, buf)
         }
     }
 }

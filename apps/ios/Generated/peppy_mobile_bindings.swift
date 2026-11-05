@@ -991,6 +991,26 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func publishSenderBlocklist(numbers: [String]?, canUnblock: Bool) throws  -> Bool
     
+    /**
+     * Returns sanitized per-conversation capability state. Core maps stale,
+     * future, unavailable, and unlinked evidence to `Unknown`; this method is
+     * never a permit or send authority.
+     */
+    func rcsEligibilityProjection(conversationId: String, gatewayDeviceId: String, nowMs: Int64) throws  -> NativeRcsEligibilityProjection?
+    
+    /**
+     * Returns whether this gateway's current RCS link satisfies the core's
+     * capability gate. This is a display capability, not a permit or transport
+     * authority.
+     */
+    func rcsGatewaySupported(gatewayDeviceId: String, nowMs: Int64) throws  -> Bool
+    
+    /**
+     * Returns sanitized link state for native display. `current` means fresh
+     * evidence only; it does not authorize a transport effect.
+     */
+    func rcsLinkStatus(gatewayDeviceId: String, nowMs: Int64) throws  -> NativeRcsLinkStatus?
+    
     func receiveCursor() throws  -> String
     
     func reconcileContactApply(inputJson: String) throws  -> String
@@ -2581,6 +2601,54 @@ open func publishSenderBlocklist(numbers: [String]?, canUnblock: Bool)throws  ->
             self.uniffiCloneHandle(),
         FfiConverterOptionSequenceString.lower(numbers),
         FfiConverterBool.lower(canUnblock),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Returns sanitized per-conversation capability state. Core maps stale,
+     * future, unavailable, and unlinked evidence to `Unknown`; this method is
+     * never a permit or send authority.
+     */
+open func rcsEligibilityProjection(conversationId: String, gatewayDeviceId: String, nowMs: Int64)throws  -> NativeRcsEligibilityProjection?  {
+    return try  FfiConverterOptionTypeNativeRcsEligibilityProjection.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_eligibility_projection(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterString.lower(gatewayDeviceId),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Returns whether this gateway's current RCS link satisfies the core's
+     * capability gate. This is a display capability, not a permit or transport
+     * authority.
+     */
+open func rcsGatewaySupported(gatewayDeviceId: String, nowMs: Int64)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_gateway_supported(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(gatewayDeviceId),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Returns sanitized link state for native display. `current` means fresh
+     * evidence only; it does not authorize a transport effect.
+     */
+open func rcsLinkStatus(gatewayDeviceId: String, nowMs: Int64)throws  -> NativeRcsLinkStatus?  {
+    return try  FfiConverterOptionTypeNativeRcsLinkStatus.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_link_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(gatewayDeviceId),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 })
 }
@@ -8678,6 +8746,170 @@ public func FfiConverterTypeNativeRawSnapshotRecord_lower(_ value: NativeRawSnap
 }
 
 
+public struct NativeRcsEligibilityProjection: Equatable, Hashable {
+    public var conversationId: String
+    public var gatewayDeviceId: String
+    /**
+     * Stale, future, unavailable, or unlinked evidence is represented as
+     * `Unknown`; it is not send authority.
+     */
+    public var eligibility: NativeRcsEligibility
+    public var featureBits: UInt32
+    public var mappingRevision: UInt64
+    public var observedAtMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(conversationId: String, gatewayDeviceId: String, 
+        /**
+         * Stale, future, unavailable, or unlinked evidence is represented as
+         * `Unknown`; it is not send authority.
+         */eligibility: NativeRcsEligibility, featureBits: UInt32, mappingRevision: UInt64, observedAtMs: Int64) {
+        self.conversationId = conversationId
+        self.gatewayDeviceId = gatewayDeviceId
+        self.eligibility = eligibility
+        self.featureBits = featureBits
+        self.mappingRevision = mappingRevision
+        self.observedAtMs = observedAtMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeRcsEligibilityProjection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsEligibilityProjection: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsEligibilityProjection {
+        return
+            try NativeRcsEligibilityProjection(
+                conversationId: FfiConverterString.read(from: &buf), 
+                gatewayDeviceId: FfiConverterString.read(from: &buf), 
+                eligibility: FfiConverterTypeNativeRcsEligibility.read(from: &buf), 
+                featureBits: FfiConverterUInt32.read(from: &buf), 
+                mappingRevision: FfiConverterUInt64.read(from: &buf), 
+                observedAtMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeRcsEligibilityProjection, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.gatewayDeviceId, into: &buf)
+        FfiConverterTypeNativeRcsEligibility.write(value.eligibility, into: &buf)
+        FfiConverterUInt32.write(value.featureBits, into: &buf)
+        FfiConverterUInt64.write(value.mappingRevision, into: &buf)
+        FfiConverterInt64.write(value.observedAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsEligibilityProjection_lift(_ buf: RustBuffer) throws -> NativeRcsEligibilityProjection {
+    return try FfiConverterTypeNativeRcsEligibilityProjection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsEligibilityProjection_lower(_ value: NativeRcsEligibilityProjection) -> RustBuffer {
+    return FfiConverterTypeNativeRcsEligibilityProjection.lower(value)
+}
+
+
+public struct NativeRcsLinkStatus: Equatable, Hashable {
+    public var state: NativeRcsLinkState
+    /**
+     * Whether the content-free capability evidence is fresh. This is display
+     * state only and never authorizes a transport effect.
+     */
+    public var current: Bool
+    public var availability: Bool
+    public var health: Bool
+    public var phoneResponsive: Bool
+    public var observedAtMs: Int64
+    public var capabilityRevision: UInt64
+    public var featureBits: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(state: NativeRcsLinkState, 
+        /**
+         * Whether the content-free capability evidence is fresh. This is display
+         * state only and never authorizes a transport effect.
+         */current: Bool, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, capabilityRevision: UInt64, featureBits: UInt32) {
+        self.state = state
+        self.current = current
+        self.availability = availability
+        self.health = health
+        self.phoneResponsive = phoneResponsive
+        self.observedAtMs = observedAtMs
+        self.capabilityRevision = capabilityRevision
+        self.featureBits = featureBits
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeRcsLinkStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsLinkStatus {
+        return
+            try NativeRcsLinkStatus(
+                state: FfiConverterTypeNativeRcsLinkState.read(from: &buf), 
+                current: FfiConverterBool.read(from: &buf), 
+                availability: FfiConverterBool.read(from: &buf), 
+                health: FfiConverterBool.read(from: &buf), 
+                phoneResponsive: FfiConverterBool.read(from: &buf), 
+                observedAtMs: FfiConverterInt64.read(from: &buf), 
+                capabilityRevision: FfiConverterUInt64.read(from: &buf), 
+                featureBits: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeRcsLinkStatus, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeRcsLinkState.write(value.state, into: &buf)
+        FfiConverterBool.write(value.current, into: &buf)
+        FfiConverterBool.write(value.availability, into: &buf)
+        FfiConverterBool.write(value.health, into: &buf)
+        FfiConverterBool.write(value.phoneResponsive, into: &buf)
+        FfiConverterInt64.write(value.observedAtMs, into: &buf)
+        FfiConverterUInt64.write(value.capabilityRevision, into: &buf)
+        FfiConverterUInt32.write(value.featureBits, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsLinkStatus_lift(_ buf: RustBuffer) throws -> NativeRcsLinkStatus {
+    return try FfiConverterTypeNativeRcsLinkStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsLinkStatus_lower(_ value: NativeRcsLinkStatus) -> RustBuffer {
+    return FfiConverterTypeNativeRcsLinkStatus.lower(value)
+}
+
+
 public struct NativeSenderUnblockWork: Equatable, Hashable {
     public var requestId: String
     public var numbers: [String]
@@ -12208,6 +12440,166 @@ public func FfiConverterTypeNativePlayLinkOutcome_lower(_ value: NativePlayLinkO
 
 
 
+public enum NativeRcsEligibility: Equatable, Hashable {
+    
+    case eligible
+    case notEligible
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeRcsEligibility: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsEligibility: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRcsEligibility
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsEligibility {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .eligible
+        
+        case 2: return .notEligible
+        
+        case 3: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeRcsEligibility, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .eligible:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .notEligible:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsEligibility_lift(_ buf: RustBuffer) throws -> NativeRcsEligibility {
+    return try FfiConverterTypeNativeRcsEligibility.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsEligibility_lower(_ value: NativeRcsEligibility) -> RustBuffer {
+    return FfiConverterTypeNativeRcsEligibility.lower(value)
+}
+
+
+
+
+public enum NativeRcsLinkState: Equatable, Hashable {
+    
+    case linked
+    case unlinked
+    case needsRelink
+    case signedOut
+    case unavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeRcsLinkState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsLinkState: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRcsLinkState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsLinkState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .linked
+        
+        case 2: return .unlinked
+        
+        case 3: return .needsRelink
+        
+        case 4: return .signedOut
+        
+        case 5: return .unavailable
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeRcsLinkState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .linked:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .unlinked:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .needsRelink:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .signedOut:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .unavailable:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsLinkState_lift(_ buf: RustBuffer) throws -> NativeRcsLinkState {
+    return try FfiConverterTypeNativeRcsLinkState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsLinkState_lower(_ value: NativeRcsLinkState) -> RustBuffer {
+    return FfiConverterTypeNativeRcsLinkState.lower(value)
+}
+
+
+
+
 public enum NativeRemoteAttachmentState: Equatable, Hashable {
     
     case available
@@ -13105,6 +13497,54 @@ fileprivate struct FfiConverterOptionTypeNativePendingVaultRequest: FfiConverter
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeNativePendingVaultRequest.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeNativeRcsEligibilityProjection: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRcsEligibilityProjection?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeRcsEligibilityProjection.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeRcsEligibilityProjection.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeNativeRcsLinkStatus: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRcsLinkStatus?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeRcsLinkStatus.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeRcsLinkStatus.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -14747,6 +15187,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_sender_blocklist() != 19267) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_rcs_eligibility_projection() != 28430) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_rcs_gateway_supported() != 2404) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_rcs_link_status() != 61314) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_receive_cursor() != 34175) {

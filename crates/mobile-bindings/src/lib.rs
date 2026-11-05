@@ -28,6 +28,11 @@ mod account_access;
 mod attachment_retention;
 mod hosted;
 pub mod newenrollment;
+mod rcs_status;
+
+pub use rcs_status::{
+    NativeRcsEligibility, NativeRcsEligibilityProjection, NativeRcsLinkState, NativeRcsLinkStatus,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum CapabilityState {
@@ -1959,6 +1964,51 @@ impl NativeClient {
         })
     }
 
+    /// Returns whether this gateway's current RCS link satisfies the core's
+    /// capability gate. This is a display capability, not a permit or transport
+    /// authority.
+    pub fn rcs_gateway_supported(
+        &self,
+        gateway_device_id: String,
+        now_ms: i64,
+    ) -> Result<bool, MobileBindingsError> {
+        let gateway_device_id = parse_id(&gateway_device_id)?;
+        with_client(&self.client, |client| {
+            client.rcs_gateway_supported(gateway_device_id, now_ms)
+        })
+    }
+
+    /// Returns sanitized link state for native display. `current` means fresh
+    /// evidence only; it does not authorize a transport effect.
+    pub fn rcs_link_status(
+        &self,
+        gateway_device_id: String,
+        now_ms: i64,
+    ) -> Result<Option<NativeRcsLinkStatus>, MobileBindingsError> {
+        let gateway_device_id = parse_id(&gateway_device_id)?;
+        with_client(&self.client, |client| {
+            client.rcs_link_status(gateway_device_id, now_ms)
+        })
+        .map(|status| status.map(rcs_status::link_status_view))
+    }
+
+    /// Returns sanitized per-conversation capability state. Core maps stale,
+    /// future, unavailable, and unlinked evidence to `Unknown`; this method is
+    /// never a permit or send authority.
+    pub fn rcs_eligibility_projection(
+        &self,
+        conversation_id: String,
+        gateway_device_id: String,
+        now_ms: i64,
+    ) -> Result<Option<NativeRcsEligibilityProjection>, MobileBindingsError> {
+        let conversation_id = parse_id(&conversation_id)?;
+        let gateway_device_id = parse_id(&gateway_device_id)?;
+        with_client(&self.client, |client| {
+            client.rcs_eligibility_projection(conversation_id, gateway_device_id, now_ms)
+        })
+        .map(|projection| projection.map(rcs_status::eligibility_view))
+    }
+
     /// Android-only local admission: provider UUIDs stay local while core maps
     /// them to the protocol's decimal control generation.
     pub fn publish_message_history_capture_source(
@@ -3774,9 +3824,15 @@ mod tests {
     #[test]
     fn permit_view_keeps_new_blocks_non_authorising() {
         let blocked_states = [
-            (PermitBlock::RouteUnavailable, NativePermitState::RouteUnavailable),
+            (
+                PermitBlock::RouteUnavailable,
+                NativePermitState::RouteUnavailable,
+            ),
             (PermitBlock::UnknownRoute, NativePermitState::UnknownRoute),
-            (PermitBlock::MappingUnproven, NativePermitState::MappingUnproven),
+            (
+                PermitBlock::MappingUnproven,
+                NativePermitState::MappingUnproven,
+            ),
             (
                 PermitBlock::CarrierOnlyProofUnavailable,
                 NativePermitState::CarrierOnlyProofUnavailable,
@@ -3801,7 +3857,10 @@ mod tests {
         let permit = permit_view(PermitDecision::AlreadyAttempted(SendState::AttemptRecorded));
         assert_eq!(permit.state, NativePermitState::AlreadyAttempted);
         assert_eq!(permit.command, None);
-        assert_eq!(permit.existing_send_state.as_deref(), Some("AttemptRecorded"));
+        assert_eq!(
+            permit.existing_send_state.as_deref(),
+            Some("AttemptRecorded")
+        );
     }
 
     /// Removes a temporary database, its SQLite sidecars and its `.media` root when the test ends,
@@ -3991,6 +4050,275 @@ mod tests {
         assert_eq!(status.state, NativeSnapshotProjectionState::Promoted);
         assert_eq!(status.reason, None);
         assert!(!client.contact_repair_required().unwrap());
+    }
+
+    fn rcs_client() -> (TempDatabase, Arc<NativeClient>, String) {
+        let path = TempDatabase::new(format!("peppy-mobile-rcs-{}.db", uuid::Uuid::new_v4()));
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let gateway_device_id = uuid::Uuid::new_v4().to_string();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let client = open_native_client(NativeOpenConfig {
+            database_path: path.to_string_lossy().into_owned(),
+            vault_id,
+            device_id: gateway_device_id.clone(),
+            database_key: vec![10; 32],
+        })
+        .unwrap();
+        client
+            .unlock(
+                material.profile_json,
+                material.header_json,
+                "test passphrase".into(),
+            )
+            .unwrap();
+        (path, client, gateway_device_id)
+    }
+
+    fn rcs_status(
+        gateway_device_id: peppy_client_core::DeviceId,
+        state: peppy_client_core::RcsCapabilityState,
+        revision: u64,
+        observed_at_ms: i64,
+    ) -> peppy_client_core::RcsLinkStatusEvent {
+        peppy_client_core::RcsLinkStatusEvent {
+            gateway_device_id,
+            state,
+            availability: state == peppy_client_core::RcsCapabilityState::Linked,
+            health: state == peppy_client_core::RcsCapabilityState::Linked,
+            phone_responsive: state == peppy_client_core::RcsCapabilityState::Linked,
+            observed_at_ms,
+            capability_revision: revision,
+            feature_bits: 7,
+        }
+    }
+
+    fn rcs_eligibility(
+        gateway_device_id: peppy_client_core::DeviceId,
+        conversation_id: peppy_client_core::ConversationId,
+        revision: u64,
+        observed_at_ms: i64,
+    ) -> peppy_client_core::RcsEligibilityProjection {
+        peppy_client_core::RcsEligibilityProjection {
+            conversation_id,
+            eligibility: peppy_client_core::RcsEligibility::Eligible,
+            feature_bits: 3,
+            mapping_revision: revision,
+            observed_at_ms,
+            gateway_device_id,
+        }
+    }
+
+    fn publish_rcs(
+        client: &NativeClient,
+        status: &peppy_client_core::RcsLinkStatusEvent,
+        eligibility: &[peppy_client_core::RcsEligibilityProjection],
+        now_ms: i64,
+    ) {
+        client
+            .client
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .publish_rcs_capability(status, eligibility, now_ms)
+            .unwrap();
+    }
+
+    #[test]
+    fn rcs_read_methods_report_missing_invalid_and_closed_without_authority() {
+        let (_path, client, gateway_device_id) = rcs_client();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+
+        assert_eq!(
+            client
+                .rcs_link_status(gateway_device_id.clone(), 1_000)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            client
+                .rcs_eligibility_projection(conversation_id, gateway_device_id.clone(), 1_000)
+                .unwrap(),
+            None
+        );
+        assert!(
+            !client
+                .rcs_gateway_supported(gateway_device_id.clone(), 1_000)
+                .unwrap()
+        );
+        assert!(matches!(
+            client.rcs_link_status("not-a-uuid".into(), 1_000),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+
+        client.dispose().unwrap();
+        assert!(matches!(
+            client.rcs_gateway_supported(gateway_device_id, 1_000),
+            Err(MobileBindingsError::Closed)
+        ));
+    }
+
+    #[test]
+    fn rcs_read_methods_preserve_fresh_status_and_suppress_unavailable_or_unlinked_eligibility() {
+        let (_path, client, gateway_device_id) = rcs_client();
+        let gateway = parse_id::<peppy_client_core::DeviceId>(&gateway_device_id).unwrap();
+        let conversation = peppy_client_core::ConversationId::new();
+        let linked = rcs_status(
+            gateway,
+            peppy_client_core::RcsCapabilityState::Linked,
+            1,
+            1_000,
+        );
+        let eligibility = rcs_eligibility(gateway, conversation, 1, 1_000);
+        publish_rcs(&client, &linked, std::slice::from_ref(&eligibility), 1_000);
+
+        let status = client
+            .rcs_link_status(gateway_device_id.clone(), 1_001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.state, NativeRcsLinkState::Linked);
+        assert!(status.current);
+        assert!(status.availability);
+        assert!(status.health);
+        assert!(status.phone_responsive);
+        assert_eq!(status.observed_at_ms, 1_000);
+        assert_eq!(status.capability_revision, 1);
+        assert_eq!(status.feature_bits, 7);
+        assert!(
+            client
+                .rcs_gateway_supported(gateway_device_id.clone(), 1_001)
+                .unwrap()
+        );
+        assert_eq!(
+            client
+                .rcs_eligibility_projection(
+                    conversation.to_string(),
+                    gateway_device_id.clone(),
+                    1_001,
+                )
+                .unwrap()
+                .unwrap()
+                .eligibility,
+            NativeRcsEligibility::Eligible
+        );
+
+        let unavailable = rcs_status(
+            gateway,
+            peppy_client_core::RcsCapabilityState::Unavailable,
+            2,
+            1_002,
+        );
+        publish_rcs(&client, &unavailable, &[], 1_002);
+        let status = client
+            .rcs_link_status(gateway_device_id.clone(), 1_002)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.state, NativeRcsLinkState::Unavailable);
+        assert!(status.current);
+        assert!(
+            !client
+                .rcs_gateway_supported(gateway_device_id.clone(), 1_002)
+                .unwrap()
+        );
+        assert_eq!(
+            client
+                .rcs_eligibility_projection(
+                    conversation.to_string(),
+                    gateway_device_id.clone(),
+                    1_002,
+                )
+                .unwrap()
+                .unwrap()
+                .eligibility,
+            NativeRcsEligibility::Unknown
+        );
+
+        let unlinked = rcs_status(
+            gateway,
+            peppy_client_core::RcsCapabilityState::Unlinked,
+            3,
+            1_003,
+        );
+        publish_rcs(&client, &unlinked, &[], 1_003);
+        let status = client
+            .rcs_link_status(gateway_device_id.clone(), 1_003)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.state, NativeRcsLinkState::Unlinked);
+        assert!(status.current);
+        assert_eq!(
+            client
+                .rcs_eligibility_projection(conversation.to_string(), gateway_device_id, 1_003)
+                .unwrap()
+                .unwrap()
+                .eligibility,
+            NativeRcsEligibility::Unknown
+        );
+    }
+
+    #[test]
+    fn rcs_read_methods_mark_stale_and_future_evidence_not_current() {
+        let (_path, client, gateway_device_id) = rcs_client();
+        let gateway = parse_id::<peppy_client_core::DeviceId>(&gateway_device_id).unwrap();
+        let conversation = peppy_client_core::ConversationId::new();
+        let linked = rcs_status(
+            gateway,
+            peppy_client_core::RcsCapabilityState::Linked,
+            1,
+            1_000,
+        );
+        let eligibility = rcs_eligibility(gateway, conversation, 1, 1_000);
+        publish_rcs(&client, &linked, std::slice::from_ref(&eligibility), 1_000);
+
+        let stale_now = 1_000 + peppy_client_core::RCS_CAPABILITY_STALE_MS + 1;
+        assert!(
+            !client
+                .rcs_link_status(gateway_device_id.clone(), stale_now)
+                .unwrap()
+                .unwrap()
+                .current
+        );
+        assert_eq!(
+            client
+                .rcs_eligibility_projection(
+                    conversation.to_string(),
+                    gateway_device_id.clone(),
+                    stale_now,
+                )
+                .unwrap()
+                .unwrap()
+                .eligibility,
+            NativeRcsEligibility::Unknown
+        );
+
+        let future = rcs_status(
+            gateway,
+            peppy_client_core::RcsCapabilityState::Linked,
+            2,
+            2_000,
+        );
+        let future_eligibility = rcs_eligibility(gateway, conversation, 2, 2_000);
+        publish_rcs(
+            &client,
+            &future,
+            std::slice::from_ref(&future_eligibility),
+            2_000,
+        );
+        assert!(
+            !client
+                .rcs_link_status(gateway_device_id.clone(), 1_999)
+                .unwrap()
+                .unwrap()
+                .current
+        );
+        assert_eq!(
+            client
+                .rcs_eligibility_projection(conversation.to_string(), gateway_device_id, 1_999)
+                .unwrap()
+                .unwrap()
+                .eligibility,
+            NativeRcsEligibility::Unknown
+        );
     }
 
     #[test]
