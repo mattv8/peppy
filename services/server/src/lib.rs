@@ -4,6 +4,7 @@ pub mod config;
 pub mod enrollment;
 pub mod health;
 pub mod instance;
+pub(crate) mod live;
 pub mod presence;
 pub mod rls;
 pub mod scope;
