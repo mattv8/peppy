@@ -12,8 +12,7 @@
 }
 .message-bubble[data-peppy-tone] .message-text-link { color: inherit; text-decoration-color: currentColor; }
 
-[data-message-text-link-label],
-[data-message-text-link]::after {
+[data-message-text-link-label] {
   display: -webkit-inline-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
@@ -27,17 +26,6 @@
 [data-message-text-link]:hover > [data-message-text-link-label],
 [data-message-text-link]:focus-visible > [data-message-text-link-label] {
   -webkit-line-clamp: 3;
-}
-
-[data-message-text-link]::after {
-  content: "→ " attr(data-message-text-destination);
-  display: none;
-  -webkit-line-clamp: 3;
-  margin-inline-start: 0.5em;
-}
-
-[data-message-text-link]:focus-visible::after {
-  display: -webkit-inline-box;
 }
 
 [data-message-text-link]:focus-visible {
