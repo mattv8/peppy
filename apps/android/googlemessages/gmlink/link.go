@@ -28,20 +28,21 @@ type Host interface {
 type Link struct {
 	host Host
 
-	mu         sync.Mutex
-	persistMu  sync.Mutex
-	state      string
-	stopCode   string
-	auth       *libgm.AuthData
-	seq        uint64
-	client     *libgm.Client
-	running    bool
-	healthy    bool
-	responding bool
-	lastOKMS   int64
-	stop       chan struct{}
-	stopOnce   sync.Once
-	pairCancel context.CancelFunc
+	mu          sync.Mutex
+	persistMu   sync.Mutex
+	state       string
+	pairingFrom string
+	stopCode    string
+	auth        *libgm.AuthData
+	seq         uint64
+	client      *libgm.Client
+	running     bool
+	healthy     bool
+	responding  bool
+	lastOKMS    int64
+	stop        chan struct{}
+	stopOnce    sync.Once
+	pairCancel  context.CancelFunc
 
 	changes chan any
 }
@@ -133,7 +134,7 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool) (err error) {
 		link.mu.Unlock()
 		return errors.New("pair_refused")
 	}
-	link.state, link.stopCode = statePairing, ""
+	link.state, link.pairingFrom, link.stopCode = statePairing, previous, ""
 	ctx, cancel := context.WithCancel(context.Background())
 	link.pairCancel = cancel
 	link.mu.Unlock()
@@ -185,7 +186,7 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool) (err error) {
 		return errors.New("account_mismatch")
 	}
 	link.mu.Lock()
-	link.auth, link.state, link.stopCode = auth, stateLinked, ""
+	link.auth, link.state, link.pairingFrom, link.stopCode = auth, stateLinked, "", ""
 	link.mu.Unlock()
 	if err = link.persist(); err != nil {
 		link.stopFatal("persist_failed", false)
@@ -204,7 +205,7 @@ func (link *Link) restorePair(previous, code string) bool {
 	link.mu.Lock()
 	restored := false
 	if link.state == statePairing {
-		link.state, link.stopCode = previous, code
+		link.state, link.pairingFrom, link.stopCode = previous, "", code
 		restored = true
 	}
 	link.mu.Unlock()
@@ -311,7 +312,7 @@ func (link *Link) Unlink() error {
 		client.Disconnect()
 	}
 	link.mu.Lock()
-	link.state, link.auth = stateUnlinked, libgm.NewAuthData()
+	link.state, link.pairingFrom, link.auth = stateUnlinked, "", libgm.NewAuthData()
 	link.healthy, link.responding, link.lastOKMS = false, false, 0
 	if err != nil {
 		link.stopCode = "unlink_remote_failed"
@@ -444,7 +445,7 @@ func (link *Link) transition(state, code, kind string) {
 
 func (link *Link) signOut(code string) {
 	link.mu.Lock()
-	link.state, link.stopCode, link.auth = stateSignedOut, code, libgm.NewAuthData()
+	link.state, link.pairingFrom, link.stopCode, link.auth = stateSignedOut, "", code, libgm.NewAuthData()
 	link.mu.Unlock()
 	if err := link.persist(); err != nil {
 		link.stopFatal("persist_failed", false)
@@ -458,7 +459,7 @@ func (link *Link) stopFatal(code string, wipe bool) {
 	link.mu.Lock()
 	link.stopCode = code
 	if wipe {
-		link.state, link.auth = stateSignedOut, libgm.NewAuthData()
+		link.state, link.pairingFrom, link.auth = stateSignedOut, "", libgm.NewAuthData()
 	}
 	link.stopOnce.Do(func() { close(link.stop) })
 	link.mu.Unlock()
@@ -485,7 +486,7 @@ func (link *Link) persist() error {
 	link.mu.Lock()
 	link.seq++
 	auth, err := json.Marshal(link.auth)
-	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, StopCode: link.stopCode, Auth: auth}
+	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, Auth: auth}
 	encoded, marshalErr := json.Marshal(state)
 	link.mu.Unlock()
 	if err != nil || marshalErr != nil {

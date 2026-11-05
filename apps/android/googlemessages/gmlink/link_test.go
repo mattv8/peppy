@@ -8,8 +8,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
 
 type testHost struct {
@@ -47,6 +50,24 @@ func TestOpenEmptyIsUnlinked(t *testing.T) {
 func TestOpenCorruptFailsClosed(t *testing.T) {
 	if _, err := Open([]byte("garbage"), &testHost{}); err == nil {
 		t.Fatal("corrupt state opened")
+	}
+}
+
+func TestOpenPairingReopensAsPrevious(t *testing.T) {
+	host := &testHost{}
+	state := []byte(`{"version":1,"seq":4,"state":"pairing","pairing_from":"needs_relink","stop_code":"","auth":{}}`)
+	link, err := Open(state, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	if !strings.Contains(link.Status(), `"state":"needs_relink"`) {
+		t.Fatalf("status=%s", link.Status())
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if len(host.states) != 1 || strings.Contains(string(host.states[0]), `"state":"pairing"`) {
+		t.Fatalf("reopened state=%q", host.states)
 	}
 }
 
@@ -100,6 +121,150 @@ func TestPairAcceptsOptionalPSIDTSAndRejectsUnknownCookie(t *testing.T) {
 	parsed["unexpected"] = "synthetic"
 	if validCookies(parsed) {
 		t.Fatal("unknown cookie accepted")
+	}
+}
+
+func TestConcurrentPairSecondRefused(t *testing.T) {
+	link, err := Open(nil, &testHost{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	link.mu.Lock()
+	link.state = statePairing
+	link.mu.Unlock()
+	if err := link.Pair([]byte(`{"OSID":"synthetic","SID":"synthetic","HSID":"synthetic","SSID":"synthetic","APISID":"synthetic","SAPISID":"synthetic"}`)); err == nil || err.Error() != "pair_refused" {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestGaiaLoggedOutNeedsRelink(t *testing.T) {
+	link, err := Open(nil, &testHost{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	link.mu.Lock()
+	link.state = stateLinked
+	link.mu.Unlock()
+	link.projectEvent(&events.GaiaLoggedOut{})
+	if !strings.Contains(link.Status(), `"state":"needs_relink"`) {
+		t.Fatalf("status=%s", link.Status())
+	}
+}
+
+func TestListenFatalAuthErrorSignsOut(t *testing.T) {
+	link, err := Open(nil, &testHost{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	link.mu.Lock()
+	link.state = stateLinked
+	link.mu.Unlock()
+	link.projectEvent(&events.ListenFatalError{Error: events.ErrInvalidCredentials})
+	if !strings.Contains(link.Status(), `"state":"signed_out"`) {
+		t.Fatalf("status=%s", link.Status())
+	}
+}
+
+func TestFakeAccountChangeIgnored(t *testing.T) {
+	link, err := Open(nil, &testHost{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	link.mu.Lock()
+	link.state = stateLinked
+	link.mu.Unlock()
+	link.projectEvent(&events.AccountChange{IsFake: true})
+	if !strings.Contains(link.Status(), `"state":"linked"`) {
+		t.Fatalf("status=%s", link.Status())
+	}
+}
+
+func TestRealAccountChangeSignsOut(t *testing.T) {
+	link, err := Open(nil, &testHost{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	link.mu.Lock()
+	link.state = stateLinked
+	link.mu.Unlock()
+	link.projectEvent(&events.AccountChange{})
+	if !strings.Contains(link.Status(), `"state":"signed_out"`) {
+		t.Fatalf("status=%s", link.Status())
+	}
+}
+
+func TestRelinkOnlyFromNeedsRelinkAndUsesExistingCookies(t *testing.T) {
+	link, err := Open(nil, &testHost{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	if err := link.Relink(); err == nil || err.Error() != "relink_refused" {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestRunRefusesSecondConcurrentRun(t *testing.T) {
+	link, err := Open(nil, &testHost{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	link.mu.Lock()
+	link.state, link.running, link.auth.Browser = stateLinked, true, &gmproto.Device{}
+	link.mu.Unlock()
+	if err := link.Run(); err == nil || err.Error() != "run_refused" {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestRunTransientErrorKeepsState(t *testing.T) {
+	link, err := Open(nil, &testHost{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	link.mu.Lock()
+	link.state = stateLinked
+	link.mu.Unlock()
+	link.emit("conn", "temporary_error", 0)
+	if !strings.Contains(link.Status(), `"state":"linked"`) {
+		t.Fatalf("status=%s", link.Status())
+	}
+}
+
+func TestEventHandlerNeverBlocks(t *testing.T) {
+	link, err := Open(nil, &testHost{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(link.Close)
+	done := make(chan struct{})
+	go func() {
+		link.queueEvent(&events.PhoneNotResponding{})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("event handler blocked")
+	}
+}
+
+func TestNoReadOrSendRPCs(t *testing.T) {
+	contents, err := os.ReadFile("link.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"GetConversation", "SendMessage", "MarkRead", "SetTyping", "SendReaction", "DeleteMessage", "UpdateConversation", "UpdateSettings", "UnpairBugle"} {
+		if strings.Contains(string(contents), forbidden) {
+			t.Fatalf("forbidden RPC reference %q", forbidden)
+		}
 	}
 }
 

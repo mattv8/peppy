@@ -16,11 +16,12 @@ const (
 )
 
 type persistedState struct {
-	Version  int             `json:"version"`
-	Seq      uint64          `json:"seq"`
-	State    string          `json:"state"`
-	StopCode string          `json:"stop_code"`
-	Auth     json.RawMessage `json:"auth,omitempty"`
+	Version     int             `json:"version"`
+	Seq         uint64          `json:"seq"`
+	State       string          `json:"state"`
+	PairingFrom string          `json:"pairing_from,omitempty"`
+	StopCode    string          `json:"stop_code"`
+	Auth        json.RawMessage `json:"auth,omitempty"`
 }
 
 func decodeState(data []byte) (persistedState, error) {
@@ -32,9 +33,26 @@ func decodeState(data []byte) (persistedState, error) {
 		return persistedState{}, errors.New("invalid_state")
 	}
 	if state.State == statePairing {
-		state.State = stateUnlinked
+		if state.PairingFrom == "" {
+			// Pairing envelopes written before pairing_from existed can only
+			// conservatively reopen as unlinked.
+			state.PairingFrom = stateUnlinked
+		}
+		if !validPairingOrigin(state.PairingFrom) {
+			return persistedState{}, errors.New("invalid_state")
+		}
+		state.State, state.PairingFrom = state.PairingFrom, ""
 	}
 	return state, nil
+}
+
+func validPairingOrigin(state string) bool {
+	switch state {
+	case stateUnlinked, stateNeedsRelink, stateSignedOut:
+		return true
+	default:
+		return false
+	}
 }
 
 func validState(state string) bool {

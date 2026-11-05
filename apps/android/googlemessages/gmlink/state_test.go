@@ -11,9 +11,9 @@ func TestDecodeStateRejectsCorruption(t *testing.T) {
 	}
 }
 
-func TestDecodeStateReopensPairingAsUnlinked(t *testing.T) {
-	state, err := decodeState([]byte(`{"version":1,"seq":4,"state":"pairing","stop_code":"","auth":{}}`))
-	if err != nil || state.State != stateUnlinked || state.Seq != 4 {
+func TestDecodeStateReopensPairingAsPrevious(t *testing.T) {
+	state, err := decodeState([]byte(`{"version":1,"seq":4,"state":"pairing","pairing_from":"needs_relink","stop_code":"","auth":{"cookie":"synthetic"}}`))
+	if err != nil || state.State != stateNeedsRelink || len(state.Auth) == 0 || state.Seq != 4 {
 		t.Fatalf("state=%+v err=%v", state, err)
 	}
 }
