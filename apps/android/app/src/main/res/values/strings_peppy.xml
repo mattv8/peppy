@@ -68,6 +68,15 @@
     <string name="peppy_about_license_bouncy_castle">Bouncy Castle license</string>
     <string name="peppy_about_license_conscrypt">Conscrypt notice</string>
     <string name="peppy_about_license_boringssl">BoringSSL, OpenSSL and ISC licenses</string>
+    <string name="peppy_about_license_agpl_3_0">GNU Affero General Public License v3.0</string>
+    <string name="peppy_about_license_mpl_2_0">Mozilla Public License 2.0</string>
+    <string name="peppy_about_license_google_messages">Google Messages link notices</string>
+    <string name="peppy_about_license_google_uuid">google/uuid — BSD 3-Clause License</string>
+    <string name="peppy_about_license_go_x_and_mobile">Go x/mobile and x modules — BSD 3-Clause License</string>
+    <string name="peppy_about_license_google_protobuf">Google Protocol Buffers — BSD 3-Clause License</string>
+    <string name="peppy_about_license_go_colorable">go-colorable — MIT License</string>
+    <string name="peppy_about_license_go_isatty">go-isatty — MIT License</string>
+    <string name="peppy_about_license_zerolog">zerolog — MIT License</string>
     <string name="peppy_about_loading">Loading…</string>
     <string name="peppy_about_license_load_failed">This text couldn’t be loaded. Try again.</string>
     <string name="peppy_toggle_android_account_devices">Devices</string>

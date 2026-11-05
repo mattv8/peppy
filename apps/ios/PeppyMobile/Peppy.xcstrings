@@ -671,6 +671,96 @@
         }
       }
     },
+    "peppy.about_license_agpl_3_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GNU Affero General Public License v3.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_mpl_2_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mozilla Public License 2.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_google_messages": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages link notices"
+          }
+        }
+      }
+    },
+    "peppy.about_license_google_uuid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "google/uuid — BSD 3-Clause License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_go_x_and_mobile": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Go x/mobile and x modules — BSD 3-Clause License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_google_protobuf": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Protocol Buffers — BSD 3-Clause License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_go_colorable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "go-colorable — MIT License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_go_isatty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "go-isatty — MIT License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_zerolog": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "zerolog — MIT License"
+          }
+        }
+      }
+    },
     "peppy.about_loading": {
       "localizations": {
         "en": {
