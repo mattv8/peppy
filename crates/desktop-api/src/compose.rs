@@ -98,7 +98,7 @@ pub fn normalize_recipient(value: &str) -> Result<String, ComposeError> {
     }
 }
 fn parse_route(gateway: &str, sim: &str) -> Result<GatewayRoute, ComposeError> {
-    Ok(GatewayRoute {
+    Ok(GatewayRoute::Carrier {
         gateway_device_id: DeviceId::from_str(gateway)
             .map_err(|_| ui("invalid-route", "The phone ID is invalid."))?,
         subscription_id: sim.to_owned(),

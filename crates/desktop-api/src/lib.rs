@@ -2,9 +2,9 @@
 //! serialized: no credentials, tokens, keys, file keys, raw paths or core records.
 use peppy_client_core::{
     AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft,
-    ConversationFolder, ConversationFolderReason, DeferredMediaStatus, Direction, Error, MediaPage,
-    MediaPageAround, Message, MessageId, MirroredNotification, SendState, SenderUnblockStatus,
-    Transport,
+    ConversationFolder, ConversationFolderReason, DeferredMediaStatus, Direction, Error, GatewayRoute,
+    MediaPage, MediaPageAround, Message, MessageId, MirroredNotification, SendState,
+    SenderUnblockStatus, Transport,
 };
 pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Preview};
 use serde::{Deserialize, Serialize};
@@ -688,14 +688,18 @@ pub fn draft_view(draft: &ComposeDraft) -> DraftView {
             .iter()
             .map(ToString::to_string)
             .collect(),
-        gateway_id: draft
-            .route
-            .as_ref()
-            .map(|route| route.gateway_device_id.to_string()),
-        sim_id: draft
-            .route
-            .as_ref()
-            .map(|route| route.subscription_id.clone()),
+        gateway_id: draft.route.as_ref().map(|route| match route {
+            GatewayRoute::Carrier {
+                gateway_device_id, ..
+            }
+            | GatewayRoute::RcsLink { gateway_device_id } => gateway_device_id.to_string(),
+        }),
+        sim_id: draft.route.as_ref().and_then(|route| match route {
+            GatewayRoute::Carrier {
+                subscription_id, ..
+            } => Some(subscription_id.clone()),
+            GatewayRoute::RcsLink { .. } => None,
+        }),
         revision: draft.revision.to_string(),
     }
 }
