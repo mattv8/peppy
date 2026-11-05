@@ -3551,9 +3551,25 @@ impl Client {
         }
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
         if !media_ready {
+            invalidate_automatic_carrier_proof_if_contradicted(
+                &tx,
+                &subscription_id,
+                &message,
+                observation,
+                now_ms,
+            )?;
+            tx.commit()?;
             return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
         if send_retention_blocked(&tx, command_id)? {
+            invalidate_automatic_carrier_proof_if_contradicted(
+                &tx,
+                &subscription_id,
+                &message,
+                observation,
+                now_ms,
+            )?;
+            tx.commit()?;
             return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
         if subscription_id.is_empty() {
@@ -9414,6 +9430,29 @@ fn send_retention_blocked(conn: &Connection, command_id: CommandId) -> Result<bo
         |row| row.get(0),
     )
     .map_err(Into::into)
+}
+
+fn invalidate_automatic_carrier_proof_if_contradicted(
+    tx: &Connection,
+    subscription_id: &str,
+    message: &MessagePayload,
+    observation: Option<&RcsMappingObservation>,
+    now_ms: i64,
+) -> Result<(), Error> {
+    let Some(observation) = observation else {
+        return Ok(());
+    };
+    if subscription_id.is_empty() {
+        return Ok(());
+    }
+    let mapping_is_exact = subscription_id == observation.selected_sim_id
+        && exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)
+            .and_then(|mapping| require_exact_rcs_recipient(message, &mapping))
+            .is_ok();
+    if !mapping_is_exact {
+        rcs_send::invalidate_carrier_only_proof(tx, message.record.conversation_id)?;
+    }
+    Ok(())
 }
 
 fn automatic_rcs_permit(
