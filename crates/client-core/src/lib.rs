@@ -37,6 +37,12 @@ mod conversation_tones;
 mod deferred_media;
 mod device_succession;
 mod ephemeral;
+/// Temporary private staging boundary; C3 consumes this policy module and removes the allowance.
+#[allow(dead_code)]
+mod ephemeral_v2_policy;
+/// Temporary private staging boundary; C3 consumes this session module and removes the allowance.
+#[allow(dead_code)]
+mod ephemeral_v2_session;
 mod gateway_settings;
 mod history_import;
 mod initial_replay;
