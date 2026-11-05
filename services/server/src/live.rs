@@ -1,8 +1,8 @@
 use peppy_domain::{DeviceId, VaultId};
 use peppy_protocol::EphemeralSignalV1;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -83,10 +83,13 @@ impl LiveRateLimiter {
             self.address.clear();
         }
         Self::reserve(&mut self.device, device, now)
-            && address.map_or(true, |address| Self::reserve(&mut self.address, address, now))
+            && address.is_none_or(|address| Self::reserve(&mut self.address, address, now))
     }
 
-    fn prune<K: std::cmp::Eq + std::hash::Hash>(buckets: &mut HashMap<K, LiveRateBucket>, now: std::time::Instant) {
+    fn prune<K: std::cmp::Eq + std::hash::Hash>(
+        buckets: &mut HashMap<K, LiveRateBucket>,
+        now: std::time::Instant,
+    ) {
         buckets.retain(|_, bucket| now.duration_since(bucket.started) < LIVE_RATE_WINDOW);
     }
 
@@ -95,7 +98,10 @@ impl LiveRateLimiter {
         key: K,
         now: std::time::Instant,
     ) -> bool {
-        let bucket = buckets.entry(key).or_insert(LiveRateBucket { started: now, count: 0 });
+        let bucket = buckets.entry(key).or_insert(LiveRateBucket {
+            started: now,
+            count: 0,
+        });
         if bucket.count >= LIVE_RATE_LIMIT {
             return false;
         }

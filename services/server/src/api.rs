@@ -231,6 +231,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use ipnet::IpNet;
+use peppy_domain::{DeviceId, VaultId};
 use peppy_hosted_api::{DeviceRosterDevice, DeviceRosterResponse};
 use peppy_hosted_api::{
     PushConfig, PushConfigAdvertisement,
@@ -240,7 +241,6 @@ use peppy_hosted_api::{
         InstanceSession, VaultMaterial,
     },
 };
-use peppy_domain::{DeviceId, VaultId};
 use peppy_protocol::{Envelope, EnvelopePurpose, LiveFrameV1, LiveHelloV1};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -667,7 +667,9 @@ pub(crate) fn build_router(
         // No backend is configured in this stage. Keep the public route disabled
         // rather than exposing an in-process-only relay across replicas.
         live_backend: None,
-        live_rate_limiter: Arc::new(std::sync::Mutex::new(crate::live::LiveRateLimiter::default())),
+        live_rate_limiter: Arc::new(std::sync::Mutex::new(
+            crate::live::LiveRateLimiter::default(),
+        )),
     });
     let manual_state = invitation_origin
         .as_ref()
@@ -2682,7 +2684,10 @@ async fn live_websocket(
     // credentials never receive an upgrade or register a hub sink.
     let principal = authenticated(&state, &headers, Operation::Sync).await?;
     let Some(backend) = state.live_backend.clone() else {
-        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "live_unavailable"));
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live_unavailable",
+        ));
     };
     Ok(upgrade
         .max_message_size(8_192)
@@ -2702,7 +2707,15 @@ async fn live_session(
         .live_hub
         .register(VaultId(principal.vault), DeviceId(principal.device));
     let generation = registration.generation;
-    live_session_inner(socket, &state, &principal, peer, backend, registration.receiver).await;
+    live_session_inner(
+        socket,
+        &state,
+        &principal,
+        peer,
+        backend,
+        registration.receiver,
+    )
+    .await;
     state.live_hub.unregister(
         VaultId(principal.vault),
         DeviceId(principal.device),
@@ -2771,7 +2784,11 @@ async fn live_session_inner(
                             return live_close(&mut socket, 1008, "invalid_live_frame").await;
                         }
                     }
-                    if backend.publish(VaultId(principal.vault), frame).await.is_err() {
+                    if backend
+                        .publish(VaultId(principal.vault), frame.clone())
+                        .await
+                        .is_err()
+                    {
                         return live_close(&mut socket, 1011, "live_unavailable").await;
                     }
                     // The backend was available when this frame was accepted;
