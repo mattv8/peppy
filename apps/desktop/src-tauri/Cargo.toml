@@ -101,6 +101,7 @@ block = "=0.1.6"
 block = { path = "../../../vendor/block" }
 libsodium-sys-stable = { path = "../../../vendor/libsodium-sys-stable" }
 tauri-plugin-single-instance = { path = "../../../vendor/tauri-plugin-single-instance" }
+sqlx-postgres = { path = "../../../vendor/sqlx-postgres" }
 
 # This standalone manifest needs the same disk-conscious defaults as the root.
 # The test profile inherits these settings; release builds are unchanged.
