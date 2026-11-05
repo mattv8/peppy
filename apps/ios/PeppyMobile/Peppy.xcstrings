@@ -4091,6 +4091,36 @@
         }
       }
     },
+    "peppy.google_messages_link_remote_help_attention": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Peppy on that phone, find Google Messages link, and follow the steps there."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_remote_help_unresponsive": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make sure that phone is online and Google Messages is not stopped."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_remote_help_unconfirmed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy has not had a recent answer from the link on that phone. Some chats may wait to send until it does."
+          }
+        }
+      }
+    },
     "peppy.google_messages_link_help_phone_not_responding": {
       "localizations": {
         "en": {

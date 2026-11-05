@@ -38,6 +38,7 @@ final class AppModel {
     private(set) var attachmentStorageRefreshing = false
     private(set) var attachmentStorageIsStale = false
     private(set) var devices: [DeviceRosterItem] = []
+    private(set) var googleMessagesLinkStatuses: [String: GoogleMessagesLinkStatus] = [:]
     private(set) var devicesLoaded = false
     private(set) var relay: RelayWakeClient?
     var relayOrigin = UserDefaults.standard.string(forKey: "peppy.relay-origin") ?? ""
@@ -142,6 +143,7 @@ final class AppModel {
 
     func refresh() async {
         await run(.refreshing) { try await $0.refreshEnrollment() }
+        await refreshDevices()
     }
 
     /// Invoked only from the visible Account settings surface or its explicit refresh control.
@@ -419,8 +421,22 @@ final class AppModel {
 
     func refreshDevices() async {
         defer { devicesLoaded = true }
-        do { devices = try await session.devices() }
+        do {
+            devices = try await session.devices()
+            await refreshGoogleMessagesLinkStatuses()
+        }
         catch { lastError = (error as? ClientError)?.userMessage ?? "Could not load devices." }
+    }
+
+    func googleMessagesLinkStatus(for device: DeviceRosterItem) -> GoogleMessagesLinkStatus? {
+        googleMessagesLinkStatuses[device.id]
+    }
+
+    private func refreshGoogleMessagesLinkStatuses() async {
+        googleMessagesLinkStatuses = await session.googleMessagesLinkStatuses(
+            for: devices,
+            currentDeviceID: status.identity?.deviceId
+        )
     }
 
     func revokeDevice(_ id: String) async {
@@ -457,6 +473,7 @@ final class AppModel {
         lastSync = nil
         lastSyncDate = nil
         devices = []
+        googleMessagesLinkStatuses = [:]
         serverReachability = .unknown
         clearAttachmentStorage()
     }
@@ -719,6 +736,7 @@ final class AppModel {
             lastError = (error as? ClientError)?.userMessage ?? "Sync failed."
         }
         if let opened = try? await session.open() { setStatus(opened) }
+        await refreshGoogleMessagesLinkStatuses()
         await publishServerReachability()
         await runContactsPass(.foreground)
     }

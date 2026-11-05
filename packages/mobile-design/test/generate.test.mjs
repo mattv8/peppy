@@ -327,6 +327,22 @@ test("Google Messages link copy avoids protocol and maturity claims", () => {
   }
 });
 
+test("Google Messages link device status help is generated for the Peppy table", () => {
+  const copy = {
+    google_messages_link_remote_help_attention: "Open Peppy on that phone, find Google Messages link, and follow the steps there.",
+    google_messages_link_remote_help_unresponsive: "Make sure that phone is online and Google Messages is not stopped.",
+    google_messages_link_remote_help_unconfirmed: "Peppy has not had a recent answer from the link on that phone. Some chats may wait to send until it does.",
+  };
+  const ios = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
+
+  for (const [key, value] of Object.entries(copy)) {
+    assert.equal(catalog[key], value);
+    assert.equal(nativeCatalog[key], value);
+    assert.equal(ios.strings[`peppy.${key}`].localizations.en.stringUnit.value, value);
+    assert.doesNotMatch(value, /\bRCS\b/i);
+  }
+});
+
 test("store, account, startup, and re-enrol copy is desktop-only and generated", () => {
   const desktopOnlyPattern = /^(store_|attachment_storage_addon_|billing_elsewhere_|account_billing_intro_|account_portal_cta$|account_delete_|account_deleted_|startup_|reenrol_|updates_app_store_delivered$|hosted_sign_in_(group_label|waiting)$|hosted_session_recovery_body$)/;
   const keys = Object.keys(desktopOverrides).filter(key => desktopOnlyPattern.test(key));

@@ -475,6 +475,25 @@ struct DeviceView: View {
                 VStack(alignment: .leading) {
                     Text(device.id + (device.id == model.status.identity?.deviceId ? " (this device)" : ""))
                     Text(device.revoked ? "Revoked" : device.role).font(.footnote).foregroundStyle(.secondary)
+                    if let linkStatus = model.googleMessagesLinkStatus(for: device) {
+                        LabeledContent {
+                            Text(LocalizedStringKey("peppy.\(linkStatus.valueKey)"), tableName: "Peppy")
+                                .foregroundStyle(linkStatus.needsAttention ? colors.WarningText : colors.TextPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } label: {
+                            Text("peppy.google_messages_link_title", tableName: "Peppy")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("device-link-status-\(device.id)")
+                        if let helpKey = linkStatus.helpKey {
+                            Text(LocalizedStringKey("peppy.\(helpKey)"), tableName: "Peppy")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("device-link-help-\(device.id)")
+                        }
+                    }
                     if device.id == model.status.identity?.deviceId {
                         Button("Sign out", role: .destructive) { confirmingDisconnect = true }
                     } else if model.status.role == "owner" && !device.revoked {

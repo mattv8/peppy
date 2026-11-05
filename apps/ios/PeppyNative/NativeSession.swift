@@ -24,6 +24,50 @@ public struct DeviceRosterItem: Identifiable, Equatable, Sendable {
     public let keyEpoch: UInt32
 }
 
+public enum GoogleMessagesLinkStatus: Equatable, Sendable {
+    case connected
+    case phoneNotResponding
+    case unconfirmed
+    case needsRelink
+    case signedOut
+
+    public var valueKey: String {
+        switch self {
+        case .connected: "google_messages_link_connection_connected"
+        case .phoneNotResponding: "google_messages_link_connection_phone_not_responding"
+        case .unconfirmed: "google_messages_link_connection_unconfirmed"
+        case .needsRelink: "google_messages_link_status_needs_relink"
+        case .signedOut: "google_messages_link_status_signed_out"
+        }
+    }
+
+    public var helpKey: String? {
+        switch self {
+        case .connected: nil
+        case .phoneNotResponding: "google_messages_link_remote_help_unresponsive"
+        case .unconfirmed: "google_messages_link_remote_help_unconfirmed"
+        case .needsRelink, .signedOut: "google_messages_link_remote_help_attention"
+        }
+    }
+
+    public var needsAttention: Bool { helpKey != nil }
+
+    static func presentation(for status: NativeRcsLinkStatus?) -> Self? {
+        guard let status else { return nil }
+        guard status.current else { return .unconfirmed }
+
+        switch status.state {
+        case .linked:
+            return status.availability && status.health && status.phoneResponsive
+                ? .connected
+                : .phoneNotResponding
+        case .needsRelink: return .needsRelink
+        case .signedOut: return .signedOut
+        case .unlinked, .unavailable: return nil
+        }
+    }
+}
+
 public struct PhoneEnrollmentStatus: Equatable, Sendable {
     public let verificationCode: String?
     public let awaitingOwner: Bool
@@ -829,6 +873,24 @@ public actor NativeSession {
                   let epoch = UInt32(exactly: try item.integer("key_epoch")) else { throw ClientError.invalidResponse("device roster") }
             return DeviceRosterItem(id: id, role: try item.string("role"), revoked: item["revoked"] as? Bool ?? false, keyEpoch: epoch)
         }
+    }
+
+    /// Reads Rust's display-only capability projection through this actor. It never creates a
+    /// carrier permit or starts a send attempt.
+    public func googleMessagesLinkStatuses(
+        for devices: [DeviceRosterItem],
+        currentDeviceID: String?
+    ) -> [String: GoogleMessagesLinkStatus] {
+        guard let client else { return [:] }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
+
+        return Dictionary(uniqueKeysWithValues: devices.compactMap { device in
+            guard device.role == "gateway", !device.revoked, device.id != currentDeviceID,
+                  let status = try? client.rcsLinkStatus(gatewayDeviceId: device.id, nowMs: nowMs),
+                  let presentation = GoogleMessagesLinkStatus.presentation(for: status)
+            else { return nil }
+            return (device.id, presentation)
+        })
     }
 
     public func revokeDevice(_ deviceId: String) async throws -> SessionStatus {
