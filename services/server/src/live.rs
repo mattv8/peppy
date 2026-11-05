@@ -1,5 +1,7 @@
 use peppy_domain::{DeviceId, VaultId};
 use peppy_protocol::EphemeralSignalV1;
+use std::future::Future;
+use std::pin::Pin;
 use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
@@ -9,6 +11,19 @@ use tokio::sync::mpsc;
 
 const LIVE_CHANNEL_CAPACITY: usize = 32;
 const FUTURE_TOLERANCE_MS: u64 = 30_000;
+
+/// A relay is required before the live route accepts upgrades. An in-process
+/// hub alone cannot provide the cross-replica delivery promise.
+pub(crate) trait LiveBackend: Send + Sync {
+    fn publish(
+        &self,
+        vault_id: VaultId,
+        frame: EphemeralSignalV1,
+    ) -> Pin<Box<dyn Future<Output = Result<(), LiveBackendError>> + Send + '_>>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LiveBackendError;
 
 #[derive(Clone, Default)]
 pub(crate) struct LiveHub {
@@ -37,6 +52,56 @@ pub(crate) enum LiveReject {
     SenderMismatch,
     Expired,
     FutureTimestamp,
+}
+
+/// Per-device and per-resolved-IP limits bound relay work. Entries are pruned
+/// after one minute and the cache is capped to prevent unbounded key growth.
+pub(crate) const LIVE_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const LIVE_RATE_LIMIT: usize = 120;
+const LIVE_RATE_BUCKET_CAPACITY: usize = 4_096;
+
+#[derive(Default)]
+pub(crate) struct LiveRateLimiter {
+    device: HashMap<DeviceId, LiveRateBucket>,
+    address: HashMap<std::net::IpAddr, LiveRateBucket>,
+}
+
+struct LiveRateBucket {
+    started: std::time::Instant,
+    count: usize,
+}
+
+impl LiveRateLimiter {
+    pub(crate) fn allow(&mut self, device: DeviceId, address: Option<std::net::IpAddr>) -> bool {
+        let now = std::time::Instant::now();
+        Self::prune(&mut self.device, now);
+        Self::prune(&mut self.address, now);
+        if self.device.len() >= LIVE_RATE_BUCKET_CAPACITY {
+            self.device.clear();
+        }
+        if self.address.len() >= LIVE_RATE_BUCKET_CAPACITY {
+            self.address.clear();
+        }
+        Self::reserve(&mut self.device, device, now)
+            && address.map_or(true, |address| Self::reserve(&mut self.address, address, now))
+    }
+
+    fn prune<K: std::cmp::Eq + std::hash::Hash>(buckets: &mut HashMap<K, LiveRateBucket>, now: std::time::Instant) {
+        buckets.retain(|_, bucket| now.duration_since(bucket.started) < LIVE_RATE_WINDOW);
+    }
+
+    fn reserve<K: std::cmp::Eq + std::hash::Hash + Copy>(
+        buckets: &mut HashMap<K, LiveRateBucket>,
+        key: K,
+        now: std::time::Instant,
+    ) -> bool {
+        let bucket = buckets.entry(key).or_insert(LiveRateBucket { started: now, count: 0 });
+        if bucket.count >= LIVE_RATE_LIMIT {
+            return false;
+        }
+        bucket.count += 1;
+        true
+    }
 }
 
 impl LiveHub {
@@ -81,6 +146,25 @@ impl LiveHub {
         frame: EphemeralSignalV1,
         now_ms: u64,
     ) -> Result<usize, LiveReject> {
+        Self::validate_frame(authenticated_device_id, &frame, now_ms)?;
+        let sinks = self.inner.sinks.lock().expect("live hub lock poisoned");
+        let mut accepted = 0;
+        for (&(sink_vault, sink_device), sink) in sinks.iter() {
+            if sink_vault == vault_id
+                && sink_device != authenticated_device_id
+                && sink.sender.try_send(frame.clone()).is_ok()
+            {
+                accepted += 1;
+            }
+        }
+        Ok(accepted)
+    }
+
+    pub(crate) fn validate_frame(
+        authenticated_device_id: DeviceId,
+        frame: &EphemeralSignalV1,
+        now_ms: u64,
+    ) -> Result<(), LiveReject> {
         if frame.sender_device_id != authenticated_device_id {
             return Err(LiveReject::SenderMismatch);
         }
@@ -99,17 +183,7 @@ impl LiveHub {
         if sent_at_ms > now_ms.saturating_add(FUTURE_TOLERANCE_MS) {
             return Err(LiveReject::FutureTimestamp);
         }
-        let sinks = self.inner.sinks.lock().expect("live hub lock poisoned");
-        let mut accepted = 0;
-        for (&(sink_vault, sink_device), sink) in sinks.iter() {
-            if sink_vault == vault_id
-                && sink_device != authenticated_device_id
-                && sink.sender.try_send(frame.clone()).is_ok()
-            {
-                accepted += 1;
-            }
-        }
-        Ok(accepted)
+        Ok(())
     }
 }
 
@@ -271,5 +345,17 @@ mod tests {
             Ok(1)
         );
         assert_eq!(peer.receiver.try_recv(), Ok(frame()));
+    }
+
+    #[test]
+    fn rate_limiter_enforces_device_and_ip_buckets() {
+        let mut limiter = LiveRateLimiter::default();
+        let address = "127.0.0.1".parse().unwrap();
+        for _ in 0..LIVE_RATE_LIMIT {
+            assert!(limiter.allow(device(1), Some(address)));
+        }
+        assert!(!limiter.allow(device(1), Some(address)));
+        assert!(!limiter.allow(device(2), Some(address)));
+        assert!(limiter.allow(device(3), Some("127.0.0.2".parse().unwrap())));
     }
 }

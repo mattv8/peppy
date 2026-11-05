@@ -240,7 +240,8 @@ use peppy_hosted_api::{
         InstanceSession, VaultMaterial,
     },
 };
-use peppy_protocol::{Envelope, EnvelopePurpose};
+use peppy_domain::{DeviceId, VaultId};
+use peppy_protocol::{Envelope, EnvelopePurpose, LiveFrameV1, LiveHelloV1};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -285,6 +286,9 @@ pub(super) struct ApiState {
     claim_policy: crate::instance::ClaimPolicy,
     setup_window_started: std::time::Instant,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
+    live_hub: crate::live::LiveHub,
+    live_backend: Option<Arc<dyn crate::live::LiveBackend>>,
+    live_rate_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
 }
 struct PeerAddress(Option<IpAddr>);
 
@@ -626,7 +630,8 @@ pub(crate) fn build_router(
             "/file/mms-usercontent/{token}/{safe_name}",
             get(attachments::download_public_copy),
         )
-        .route("/v1/ws", get(websocket));
+        .route("/v1/ws", get(websocket))
+        .route("/v1/live", get(live_websocket));
     let router = if row_security {
         router
     } else {
@@ -658,6 +663,11 @@ pub(crate) fn build_router(
         claim_policy,
         setup_window_started: std::time::Instant::now(),
         trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs.clone()),
+        live_hub: crate::live::LiveHub::new(),
+        // No backend is configured in this stage. Keep the public route disabled
+        // rather than exposing an in-process-only relay across replicas.
+        live_backend: None,
+        live_rate_limiter: Arc::new(std::sync::Mutex::new(crate::live::LiveRateLimiter::default())),
     });
     let manual_state = invitation_origin
         .as_ref()
@@ -2660,6 +2670,151 @@ async fn receipt(
         .await
         .map_err(|error| database_unavailable(&error, "receipt_commit"))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn live_websocket(
+    State(state): State<ApiState>,
+    PeerAddress(peer): PeerAddress,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> ApiResult<Response> {
+    // Authenticate before deciding whether the relay is available, so failed
+    // credentials never receive an upgrade or register a hub sink.
+    let principal = authenticated(&state, &headers, Operation::Sync).await?;
+    let Some(backend) = state.live_backend.clone() else {
+        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "live_unavailable"));
+    };
+    Ok(upgrade
+        .max_message_size(8_192)
+        .max_frame_size(8_192)
+        .on_upgrade(move |socket| live_session(socket, state, principal, peer, backend))
+        .into_response())
+}
+
+async fn live_session(
+    socket: WebSocket,
+    state: ApiState,
+    principal: Principal,
+    peer: Option<IpAddr>,
+    backend: Arc<dyn crate::live::LiveBackend>,
+) {
+    let registration = state
+        .live_hub
+        .register(VaultId(principal.vault), DeviceId(principal.device));
+    let generation = registration.generation;
+    live_session_inner(socket, &state, &principal, peer, backend, registration.receiver).await;
+    state.live_hub.unregister(
+        VaultId(principal.vault),
+        DeviceId(principal.device),
+        generation,
+    );
+}
+
+async fn live_session_inner(
+    mut socket: WebSocket,
+    state: &ApiState,
+    principal: &Principal,
+    peer: Option<IpAddr>,
+    backend: Arc<dyn crate::live::LiveBackend>,
+    mut outgoing: tokio::sync::mpsc::Receiver<LiveFrameV1>,
+) {
+    let hello = match serde_json::to_string(&LiveHelloV1::new()) {
+        Ok(hello) => hello,
+        Err(_) => return live_close(&mut socket, 1011, "live_unavailable").await,
+    };
+    if socket.send(Message::Text(hello.into())).await.is_err() {
+        return;
+    }
+    let mut recheck = tokio::time::interval(Duration::from_secs(20));
+    let mut challenge: Option<Vec<u8>> = None;
+    loop {
+        tokio::select! {
+            _ = recheck.tick() => match still_active(state, principal).await {
+                Ok(true) if authorize(state, principal, Operation::Sync).await.is_ok() => {
+                    if challenge.is_some() {
+                        return;
+                    }
+                    let token = Uuid::new_v4().as_bytes().to_vec();
+                    if socket.send(Message::Ping(token.clone().into())).await.is_err() {
+                        return;
+                    }
+                    challenge = Some(token);
+                }
+                Ok(true) | Ok(false) => return live_close(&mut socket, 1008, "live_unauthorized").await,
+                Err(_) => return live_close(&mut socket, 1011, "live_unavailable").await,
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                Some(Ok(Message::Ping(payload))) => {
+                    if socket.send(Message::Pong(payload)).await.is_err() { return; }
+                }
+                Some(Ok(Message::Pong(payload))) => {
+                    if challenge.as_ref().is_some_and(|token| token.as_slice() == payload.as_ref()) {
+                        challenge = None;
+                    }
+                }
+                Some(Ok(Message::Binary(_))) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
+                Some(Ok(Message::Text(text))) => {
+                    let Ok(frame) = serde_json::from_str::<LiveFrameV1>(&text) else {
+                        return live_close(&mut socket, 1008, "invalid_live_frame").await;
+                    };
+                    let allowed = state.live_rate_limiter.lock().expect("live rate limiter lock poisoned")
+                        .allow(DeviceId(principal.device), peer);
+                    if !allowed {
+                        return live_close(&mut socket, 1008, "live_rate_limited").await;
+                    }
+                    let now_ms = live_now_ms();
+                    match crate::live::LiveHub::validate_frame(DeviceId(principal.device), &frame, now_ms) {
+                        Ok(()) => {}
+                        Err(crate::live::LiveReject::Expired | crate::live::LiveReject::FutureTimestamp) => continue,
+                        Err(crate::live::LiveReject::InvalidFrame | crate::live::LiveReject::SenderMismatch) => {
+                            return live_close(&mut socket, 1008, "invalid_live_frame").await;
+                        }
+                    }
+                    if backend.publish(VaultId(principal.vault), frame).await.is_err() {
+                        return live_close(&mut socket, 1011, "live_unavailable").await;
+                    }
+                    // The backend was available when this frame was accepted;
+                    // local fan-out is only a latency optimization.
+                    let _ = state.live_hub.forward(
+                        VaultId(principal.vault),
+                        DeviceId(principal.device),
+                        frame,
+                        live_now_ms(),
+                    );
+                }
+            },
+            frame = outgoing.recv() => match frame {
+                Some(frame) if live_frame_is_current(&frame, live_now_ms()) => {
+                    let Ok(frame) = serde_json::to_string(&frame) else { continue; };
+                    if socket.send(Message::Text(frame.into())).await.is_err() { return; }
+                }
+                Some(_) => continue,
+                None => return,
+            },
+        }
+    }
+}
+
+fn live_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn live_frame_is_current(frame: &LiveFrameV1, now_ms: u64) -> bool {
+    frame.validate().is_ok()
+        && frame
+            .expires_at_ms
+            .parse::<u64>()
+            .is_ok_and(|expires_at_ms| expires_at_ms > now_ms)
+}
+
+async fn live_close(socket: &mut WebSocket, code: u16, reason: &'static str) {
+    ws_close(socket, code, reason).await;
 }
 
 /// WebSocket close codes. Clients reconnect and resume on 4429, take a
