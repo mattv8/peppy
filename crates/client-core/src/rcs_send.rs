@@ -1,6 +1,7 @@
 use crate::{
     CommandId, ConversationId, Error, MessagePayload,
-    rcs_mapping::{self, RCS_MAPPING_FRESHNESS_MS},
+    rcs_mapping::{self, RCS_MAPPING_FRESHNESS_MS, RcsConversationType, RcsMapping,
+        RcsMappingClass, RcsMappingObservation, RcsSendMode},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use std::collections::BTreeSet;
 
 const CARRIER_ONLY_PROOF_PREFIX: &str = "rcs_carrier_only_proof_v1/";
 const INTENTIONAL_UNLINK_KEY: &str = "rcs_intentional_unlink_context_v1";
+const RCS_TARGET_IDENTITY_PREFIX: &str = "rcs_target_identity_v1/";
 
 /// A completed, target-scoped local lookup which found no eligible RCS target.
 /// This is intentionally a typed host result: unknown, partial, and failed lookups have no
@@ -232,4 +234,83 @@ pub struct RcsPermit {
     pub proof_digest: [u8; 32],
     pub google_conversation_id: String,
     pub message: MessagePayload,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct StoredRcsTargetIdentity {
+    google_conversation_id: String,
+    canonical_participant: String,
+    own_identity: String,
+    identity_region: String,
+    selected_sim_id: String,
+    link_generation: u64,
+    session_generation: u64,
+    canonicalizer_revision: u32,
+    self_chat: bool,
+}
+
+pub(crate) fn record_rcs_target_identity(
+    conn: &Connection,
+    command_id: CommandId,
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+) -> Result<(), Error> {
+    let identity = target_identity(mapping, observation)?;
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO NOTHING",
+        params![
+            target_identity_key(command_id),
+            serde_json::to_string(&identity).map_err(|_| Error::Database)?
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn has_same_rcs_target_identity(
+    conn: &Connection,
+    command_id: CommandId,
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+) -> Result<bool, Error> {
+    let Some(value) = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [target_identity_key(command_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let stored: StoredRcsTargetIdentity =
+        serde_json::from_str(&value).map_err(|_| Error::Database)?;
+    Ok(stored == target_identity(mapping, observation)?)
+}
+
+fn target_identity(
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+) -> Result<StoredRcsTargetIdentity, Error> {
+    if observation.google_conversation_id != mapping.google_conversation_id
+        || observation.conversation_type != RcsConversationType::Rcs
+        || observation.send_mode != RcsSendMode::Automatic
+        || !observation.default_outgoing
+    {
+        return Err(Error::InvalidRequest("RCS target identity is not current"));
+    }
+    Ok(StoredRcsTargetIdentity {
+        google_conversation_id: mapping.google_conversation_id.clone(),
+        canonical_participant: mapping.proof.canonical_participant.clone(),
+        own_identity: mapping.proof.own_identity.clone(),
+        identity_region: mapping.proof.identity_region.clone(),
+        selected_sim_id: observation.selected_sim_id.clone(),
+        link_generation: observation.link_generation,
+        session_generation: observation.session_generation,
+        canonicalizer_revision: observation.canonicalizer_revision,
+        self_chat: mapping.class == RcsMappingClass::SelfChat,
+    })
+}
+
+fn target_identity_key(command_id: CommandId) -> String {
+    format!("{RCS_TARGET_IDENTITY_PREFIX}{command_id}")
 }

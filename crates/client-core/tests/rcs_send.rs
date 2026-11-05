@@ -438,6 +438,93 @@ fn rcs_retry_rechecks_the_command_recipient_against_the_mapping_participant() {
 }
 
 #[test]
+fn rcs_retry_accepts_a_fresh_same_target_proof_after_the_old_proof_expires() {
+    let (_directory, _vault, _config, gateway, command_id, current) = rcs_command("peer-local");
+    let first = gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    let mut refreshed = current;
+    refreshed.mapping_revision = 2;
+    refreshed.context_revision = 2;
+    refreshed.observed_at_ms = 31_001;
+    gateway.verify_rcs_mapping(&refreshed, 31_001).unwrap();
+
+    let retry = gateway
+        .retry_rcs_failed_before_submission(command_id, &refreshed, 31_001)
+        .unwrap();
+    assert_eq!(retry.command_id, first.command_id);
+    assert_eq!(retry.tmp_id, first.tmp_id);
+    assert_eq!(retry.mapping_revision, 2);
+}
+
+#[test]
+fn rcs_retry_refuses_changed_sim_or_link_session() {
+    for changed_session in [false, true] {
+        let (_directory, _vault, _config, gateway, command_id, current) = rcs_command("peer-local");
+        gateway
+            .begin_rcs_send_attempt(command_id, &current, 1_000)
+            .unwrap();
+        gateway
+            .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+            .unwrap();
+        let mut changed = current;
+        changed.mapping_revision = 2;
+        changed.context_revision = 2;
+        changed.observed_at_ms = 1_001;
+        if changed_session {
+            changed.session_generation = 2;
+        } else {
+            changed.selected_sim_id = "other-sim-local".into();
+        }
+        assert!(matches!(
+            gateway.verify_rcs_mapping(&changed, 1_001),
+            Ok(RcsMappingOutcome::Mapped(_))
+        ));
+        assert!(gateway
+            .retry_rcs_failed_before_submission(command_id, &changed, 1_001)
+            .is_err());
+    }
+}
+
+#[test]
+fn explicit_unknown_resend_creates_new_command_with_local_lineage_and_no_permit() {
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let original = gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    drop(gateway);
+    let gateway = unlocked(&config, &vault);
+    let queued = gateway.resend_rcs_outcome_unknown(command_id).unwrap();
+    assert_ne!(queued.command_id, command_id);
+    assert_eq!(
+        gateway
+            .reconcile_rcs_tmp_id(&original.tmp_id, &original.google_conversation_id, None)
+            .unwrap(),
+        Some(SendState::OutcomeUnknown)
+    );
+    assert_eq!(
+        gateway
+            .begin_rcs_send_attempt(queued.command_id, &current, 1_000)
+            .unwrap_err(),
+        Error::NotFound
+    );
+
+    let connection = encrypted_connection(&config);
+    let (tmp_id, retry_of): (String, String) = connection
+        .query_row(
+            "SELECT tmp_id,retry_of_command_id FROM rcs_send_ledger WHERE command_id=?",
+            [queued.command_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_ne!(tmp_id, original.tmp_id);
+    assert_eq!(retry_of, command_id.to_string());
+}
+
+#[test]
 fn carrier_proof_rejects_future_extreme_overflow_and_expired_times() {
     let (_directory, _vault, _config, gateway, _command_id) = carrier_command();
     let mut unknown = observation("peer-local", 1);

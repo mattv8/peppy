@@ -3431,7 +3431,17 @@ impl Client {
         }
         let mapping = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?;
         require_exact_rcs_recipient(&message, &mapping)?;
-        let tmp_id = uuid::Uuid::new_v4().to_string();
+        let existing_tmp_id: Option<String> = tx
+            .query_row(
+                "SELECT tmp_id FROM rcs_send_ledger WHERE command_id=?",
+                [command_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let tmp_id = existing_tmp_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        rcs_send::record_rcs_target_identity(&tx, command_id, &mapping, observation)?;
         tx.execute(
             "INSERT INTO attempts(command_id,state,attempted_at_ms) VALUES(?,?,?)",
             params![
@@ -3440,10 +3450,17 @@ impl Client {
                 now_ms
             ],
         )?;
-        tx.execute(
-            "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,?,?,?,?)",
-            params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
-        )?;
+        if existing_tmp_id.is_some() {
+            tx.execute(
+                "UPDATE rcs_send_ledger SET mapping_revision=?,proof_digest=?,google_conversation_id=?,attempted_at_ms=? WHERE command_id=?",
+                params![mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms, command_id.to_string()],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,?,?,?,?)",
+                params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
+            )?;
+        }
         let permit = RcsPermit {
             command_id,
             conversation_id: message.record.conversation_id,
@@ -3468,6 +3485,9 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if attempt_state(&tx, command_id)?.is_none() {
+            return Err(Error::NoAttempt);
+        }
         if tx.execute(
             "UPDATE rcs_send_ledger SET transport_ack_at_ms=?,transport_ack_code=? WHERE command_id=?",
             params![ack_at_ms, code, command_id.to_string()],
@@ -3482,6 +3502,52 @@ impl Client {
     pub fn record_rcs_submitted(&self, command_id: CommandId) -> Result<SendState, Error> {
         self.require_rcs_attempt(command_id)?;
         self.record_send_result(command_id, SendResult::Submitted)
+    }
+
+    /// Creates a new local RCS command after the original attempt is explicitly known unknown.
+    /// The new command has no permit until it is received through the normal command ledger.
+    pub fn resend_rcs_outcome_unknown(&self, command_id: CommandId) -> Result<QueuedSend, Error> {
+        let mut guard = self.lock()?;
+        let gateway_device_id = guard.config.device_id;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if attempt_state(&tx, command_id)? != Some(SendState::OutcomeUnknown) {
+            return Err(Error::AlreadyAttempted(
+                attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?,
+            ));
+        }
+        let (payload, revision, digest, google_conversation_id): (String, u64, Vec<u8>, String) =
+            tx.query_row(
+                "SELECT l.payload,r.mapping_revision,r.proof_digest,r.google_conversation_id FROM command_ledger l JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND l.subscription_id=''",
+                [command_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
+        if !media_ready || message.transport != Transport::Sms || !message.record.attachments.is_empty() {
+            return Err(Error::InvalidRequest("RCS text required"));
+        }
+        let route = GatewayRoute::RcsLink { gateway_device_id };
+        let resend = OutgoingSms {
+            conversation_id: message.record.conversation_id,
+            recipients: message.recipients,
+            body: message.body,
+        };
+        validate_outgoing(&resend, &route)?;
+        let queued = queue_sms(&tx, &ctx, resend, &route, &[])?;
+        tx.execute(
+            "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms,retry_of_command_id) VALUES(?,?,?,?,?,?,?)",
+            params![
+                queued.command_id.to_string(),
+                uuid::Uuid::new_v4().to_string(),
+                revision,
+                digest,
+                google_conversation_id,
+                notifications::now_ms(),
+                command_id.to_string()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(queued)
     }
 
     /// Reopens only an RCS attempt proven not to have reached the transport, with the same route.
@@ -3501,16 +3567,8 @@ impl Client {
                 attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?,
             ));
         }
-        let (epoch, historical, payload, revision, digest, google_id, tmp_id): (
-            u32,
-            bool,
-            String,
-            u64,
-            Vec<u8>,
-            String,
-            String,
-        ) = tx.query_row(
-            "SELECT l.key_epoch,l.historical,l.payload,r.mapping_revision,r.proof_digest,r.google_conversation_id,r.tmp_id FROM command_ledger l JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND l.subscription_id=''",
+        let (epoch, historical, payload, tmp_id): (u32, bool, String, String) = tx.query_row(
+            "SELECT l.key_epoch,l.historical,l.payload,r.tmp_id FROM command_ledger l JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND l.subscription_id=''",
             [command_id.to_string()],
             |row| {
                 Ok((
@@ -3518,9 +3576,6 @@ impl Client {
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
                 ))
             },
         )?;
@@ -3534,10 +3589,7 @@ impl Client {
         }
         let mapping = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?;
         require_exact_rcs_recipient(&message, &mapping)?;
-        if mapping.mapping_revision != revision
-            || mapping.proof.digest.as_slice() != digest.as_slice()
-            || mapping.google_conversation_id != google_id
-        {
+        if !rcs_send::has_same_rcs_target_identity(&tx, command_id, &mapping, observation)? {
             return Err(Error::InvalidRequest("mapping changed"));
         }
         tx.execute(
@@ -3548,14 +3600,23 @@ impl Client {
                 command_id.to_string()
             ],
         )?;
+        tx.execute(
+            "UPDATE rcs_send_ledger SET mapping_revision=?,proof_digest=?,google_conversation_id=? WHERE command_id=?",
+            params![
+                mapping.mapping_revision,
+                mapping.proof.digest.as_slice(),
+                mapping.google_conversation_id,
+                command_id.to_string()
+            ],
+        )?;
         tx.commit()?;
         Ok(RcsPermit {
             command_id,
             conversation_id: message.record.conversation_id,
             tmp_id,
-            mapping_revision: revision,
+            mapping_revision: mapping.mapping_revision,
             proof_digest: mapping.proof.digest,
-            google_conversation_id: google_id,
+            google_conversation_id: mapping.google_conversation_id,
             message,
         })
     }
