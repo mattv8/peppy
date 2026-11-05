@@ -2,7 +2,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use semver::Version;
 
-use super::types::UpdateChannel;
+use crate::distribution::Distribution;
+
+use super::super::types::UpdateChannel;
 
 pub const STARTUP_DELAY_SECS: u64 = 30;
 pub const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
@@ -63,6 +65,10 @@ pub fn parse_channel(value: Option<&str>) -> UpdateChannel {
     }
 }
 
+pub fn should_start_update_loops(distribution: Distribution) -> bool {
+    distribution == Distribution::Direct
+}
+
 pub fn strictly_newer(current: &str, candidate: &str, channel: UpdateChannel) -> bool {
     let Ok(current) = Version::parse(current) else {
         return false;
@@ -106,6 +112,12 @@ mod tests {
             UpdateChannel::Staging
         ));
         assert!(!strictly_newer("1.0.0", "2.0.0", UpdateChannel::Disabled));
+    }
+
+    #[test]
+    fn app_store_distribution_never_starts_self_update_loops() {
+        assert!(should_start_update_loops(Distribution::Direct));
+        assert!(!should_start_update_loops(Distribution::AppStore));
     }
 
     #[test]

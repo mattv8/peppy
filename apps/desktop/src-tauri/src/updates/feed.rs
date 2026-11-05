@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 use url::Url;
 use uuid::Uuid;
 
-use super::{cache::MAX_PAYLOAD_BYTES, types::UpdateChannel};
+use super::{super::types::UpdateChannel, cache::MAX_PAYLOAD_BYTES};
 use crate::error::{BridgeError, BridgeResult};
 
 const MAX_MANIFEST: usize = 1024 * 1024;

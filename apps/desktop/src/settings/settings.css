@@ -144,3 +144,30 @@
 #attachment-storage-usage > div { display: flex; justify-content: space-between; gap: 1rem; }
 #attachment-storage-usage dd { margin: 0; font-weight: 600; }
 #attachment-storage-policy-state { display: grid; gap: 0.4rem; margin: 0.65rem 0 0; font-weight: 600; }
+
+#hosted-account-delete,
+#account-delete-body,
+#hosted-account-sign-in-options {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.provider-button {
+  min-height: 2rem;
+}
+
+@media (pointer: coarse) {
+  .provider-button,
+  #hosted-account-delete-open,
+  #account-delete-cancel,
+  #account-delete-submit {
+    min-height: 44px;
+  }
+}
+
+@media (forced-colors: active) {
+  #hosted-account-delete-status,
+  #account-delete-apple-notice {
+    border: 1px solid CanvasText;
+  }
+}

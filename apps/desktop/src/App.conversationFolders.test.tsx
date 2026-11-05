@@ -159,7 +159,7 @@ describe("App conversation folders", () => {
   });
 
   it("hides folder actions while the app lock is engaged", async () => {
-    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: true, locked: true, storageAvailable: true });
+    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: true, locked: true, storageAvailable: true, pending: false });
     const values = new Map([["peppy.setup.mode", "self-hosted"]]);
     vi.stubGlobal("localStorage", { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) });
     render(<App hostKind="native" />);

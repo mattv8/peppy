@@ -76,9 +76,42 @@ describe("UpdatesSettings", () => {
   it("does not present a network failure as up to date", () => {
     vi.mocked(useUpdateStatus).mockReturnValue(result({ ...UPDATE_STATUS_SERDE_FIXTURE, phase: "error", message: "Network unavailable" }));
     render(<UpdatesSettings />);
+    expect(screen.getByRole("alert")).toHaveClass("settings-error");
     expect(screen.getByRole("alert")).toHaveTextContent("Network unavailable");
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(screen.queryByText("Your update check is complete.")).not.toBeInTheDocument();
+  });
+
+  it("shows only the version and App Store delivery copy for App Store installs", () => {
+    vi.mocked(useUpdateStatus).mockReturnValue(result({
+      ...UPDATE_STATUS_SERDE_FIXTURE,
+      distribution: "app_store",
+      phase: "disabled",
+      channel: "disabled",
+      automatic: false,
+      lastCheckedAt: "2026-10-16T12:00:00Z",
+      message: "Updates are delivered by the App Store.",
+    }));
+    const { container } = render(<UpdatesSettings />);
+
+    expect(screen.getByRole("heading", { name: "Updates" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Updates are delivered by the App Store.");
+    expect(screen.getByText(`Peppy ${UPDATE_STATUS_SERDE_FIXTURE.currentVersion}`)).toBeInTheDocument();
+    expect(container.querySelector("#settings-updates")).toHaveAttribute("data-distribution", "app_store");
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Last checked:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/channel|stable|disabled/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps a direct install's update status and controls", () => {
+    render(<UpdatesSettings />);
+
+    expect(document.querySelector("#settings-updates")).not.toHaveAttribute("data-distribution");
+    expect(screen.getByRole("button", { name: "Check now" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Automatically download updates")).toBeInTheDocument();
+    expect(screen.getByText(/Last checked:/)).toBeInTheDocument();
   });
 
   it("hides update controls for disabled builds and keeps a persistent status region", () => {

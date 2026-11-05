@@ -19,19 +19,18 @@ labels, options, and notifications use prose or commas.
 | `packages/desktop-ui/src/index.tsx` | `AppTitlebar`, `Panel`, `StatusPopover`, `ConnectionDot`, composer, recipient panel |
 | `packages/desktop-ui/src/phone.ts` | Shared phone validation and formatting |
 | `apps/desktop/src/App.tsx`, `status.ts` | Shells, views, drafts, persistence, status details and severity |
-| `apps/desktop/src/app.css`, `settings.css`, `vibrancy.css` | Desktop chrome, settings cards, native-material CSS |
-| `apps/desktop/src-tauri/src/window_chrome.rs`, `material_state.rs`, `tray.rs` | Native effect lifecycle, success inspection, deferred show, `data-vibrancy` |
-| `apps/desktop/src-tauri/tauri.conf.json`, `tauri.macos.conf.json` | Base config keeps the main window opaque; the macOS overlay makes it transparent |
+| `apps/desktop/src/app.css`, `settings.css` | Desktop chrome and settings cards |
+| `apps/desktop/src-tauri/src/window_chrome.rs`, `material_state.rs`, `tray.rs` | Native window geometry, deferred show, and composer lifecycle |
+| `apps/desktop/src-tauri/tauri.conf.json`, `tauri.macos.conf.json` | Opaque main-window configuration |
 | `peppy-platform/web/src/web.css` (private) | Account website styles; consumes `--peppy-*` tokens, adds no token values. |
 
 ## Surfaces and themes
 
-- **Tier 1, desk:** window background. Solid or subtle tonal fill; translucent
-  only under native macOS material.
+- **Tier 1, desk:** opaque window background with a solid or subtle tonal fill.
 - **Tier 2, docked:** rail, titlebar, thread list, conversation, contacts, and
   settings. Structural borders, full legibility, no blur. Settings cards are opaque.
-- **Tier 3, floating:** composer, recipient rail, popovers, pickers, dialogs.
-  CSS glass, on small areas only. Never blur a full scrolling list.
+- **Tier 3, floating:** opaque composer, recipient rail, popovers, pickers, and
+  dialogs. Never blur a full scrolling list.
 
 Preserve the composer's opaque gutters and fade, read-visibility geometry,
 recipient-rail boundaries, pane resizing, and saved layouts when restyling.
@@ -40,14 +39,11 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
   values from `peppy-tokens.css`; this guide does not copy them.
 - Shells carry `theme-system`, `theme-light`, or `theme-dark`. Light values
   appear in both `.theme-light` and the system-light media rule; keep them in sync.
-- Glass falls back to opaque with zero blur on native Linux, under
-  `prefers-reduced-transparency`, without `backdrop-filter`, and on native
-  vibrancy failure or inactive state. Forced colors use system colors and no
-  shadows. Reduced motion disables animation.
+- Floating surfaces use opaque theme tokens. Forced colors use system colors and
+  no shadows. Reduced motion disables animation.
 - Theme overrides target the shell element carrying the theme class, not a
   descendant of it or an assumed theme on the document root.
-- A fallback must stay readable. A native fallback must never leave a transparent,
-  blank shell.
+- A fallback must stay readable and never leave a transparent, blank shell.
 - Bundle fonts and assets locally. The CSP stays `default-src 'self'`; add no
   remote sources. Treat display timestamps as opaque strings.
 
@@ -258,47 +254,17 @@ notification previews and floating heads.
 - Display names and photos never rewrite conversation IDs, draft recipients, or
   notification contents.
 
-## Native vibrancy
+## Opaque native windows
 
-The macOS contract spans `window_chrome.rs`, `material_state.rs`, `tray.rs`,
-`lib.rs`, and the CSS half in `vibrancy.css`. Every native visual state stays
-unverified until the runtime checks in [Native and fixture limits](#native-and-fixture-limits) pass.
-
-- Uses Tauri 2 `set_effects`; no window-vibrancy crate. Requested on macOS only,
-  for the main window and non-panel composers. Head windows are untouched.
-- `set_effects` reports only dispatch, so success is inspected. macOS is active
-  only when the content view contains an `NSVisualEffectView` child. Windows
-  material is disabled: every window reports opaque, and the WebView background
-  is not mutated. A DWM backdrop attribute is not evidence, and Acrylic is not
-  used. Linux and other platforms are never active.
-- `material_state.rs` caches results per window label. Apply or clear only on
-  explicit transitions: first configuration and effective panel-mode change.
-  Resize and page-load hooks republish the cached result without reinstalling.
-- Reserve a transition in the cache before native calls. Do not borrow the cache
-  during AppKit or DWM work. Record a result only if the window is still in the
-  reserved mode.
-- A failed effect stays opaque and is not retried on refresh. Closing a window
-  calls `forget_material`, so a recreated label retries.
-- Main and composer windows start hidden and show after `PageLoadEvent::Finished`, so first paint
-  follows the material result. Background starts never show explicitly; a second
-  explicit show (tray "Open Peppy") during a pending load does.
-- `window_chrome::sync_webview` sets `html[data-vibrancy]` to `active` or `opaque`.
-  No attribute means opaque, and browser and fixture hosts never receive it.
-  `DesktopSnapshot` is unchanged.
-- Transparency: `macos-private-api` belongs on the common `tauri` dependency in
-  `Cargo.toml`, since cfg-only dependencies are ignored by manifest validation.
-  The base config keeps the main window opaque; the macOS overlay makes it
-  transparent. `apply_macos_window` clears the native background on every sync,
-  so the opaque CSS fallback is the only guard against a blank shell.
-- `macOSPrivateApi` blocks Mac App Store distribution; keep that recorded for any
-  store path. Windows material needs validation on Windows 11 and the Windows 10
-  fallback before the opaque fallback may be removed.
-- CSS (`vibrancy.css`, only under `html[data-vibrancy="active"]`): desk surfaces
-  go transparent; the titlebar and rail use `--peppy-surface-native-chrome`;
-  `#conversation-stage` stays `--peppy-surface-editor` so text and visibility
-  geometry remain opaque. The content list is never blurred. Native material
-  applies only to `.theme-system`; the OS supplies its appearance, and the app
-  theme only tints CSS.
+- macOS and Windows windows are opaque. Do not enable Tauri private macOS APIs,
+  native materials, vibrancy, transparent window flags, or transparent shell
+  backgrounds.
+- Main, composer, floating-chat-panel, and media-viewer roots use opaque
+  `--peppy-surface-*` tokens for every theme. Browser and fixture hosts use the
+  same surfaces.
+- Main and composer windows start hidden and show after `PageLoadEvent::Finished`.
+  Background starts never show explicitly; a second explicit show (tray "Open
+  Peppy") during a pending load does.
 
 ## Native and fixture limits
 
@@ -307,6 +273,6 @@ unverified until the runtime checks in [Native and fixture limits](#native-and-f
   preview preferences stay distinct from encrypted-sync state.
 - Floating-head behavior needs native input-region and focus integration. Keep
   the main-window and composer fallbacks; do not infer native behavior from browser CSS.
-- Browser inspection and builds cover CSS and layout only. Native material needs
-  macOS runtime evidence (cold start, bright and dark backgrounds, resizing,
-  fullscreen, reduced transparency). Report missing evidence as unverified.
+- Browser inspection and builds cover CSS and layout only. Native window behavior
+  needs macOS runtime evidence (cold start, bright and dark themes, resizing,
+  and fullscreen). Report missing evidence as unverified.

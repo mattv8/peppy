@@ -1,0 +1,13 @@
+# This is a maintained lock file for vendored crate upstream audit coverage.
+# It contains a single registry entry for the upstream tauri-plugin-single-instance
+# package to ensure cargo-audit covers the vendored local path dependency that
+# cargo-deny skips. This is NOT the crate's own lockfile; it is a CI input.
+# See vendor/tauri-plugin-single-instance/PEPPY.md for audit coverage rationale.
+
+version = 3
+
+[[package]]
+name = "tauri-plugin-single-instance"
+version = "2.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee2c8fe2d6b75caed0153f91eda30ea1dea3bfb6710d5adb80456d2c035a569d"

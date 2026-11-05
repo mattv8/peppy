@@ -608,7 +608,7 @@ describe("setup landing routing", () => {
     const origin = "https://example.test";
     localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
     await landingSnapshot({ connection: { state: "connected", origin }, gateways: [], deviceRole: "owner" });
-    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: true, locked: true, storageAvailable: true });
+    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: true, locked: true, storageAvailable: true, pending: false });
     render(<App />);
     const action = await screen.findByRole("button", { name: "Connect a phone" });
     await waitFor(() => expect(action).toBeDisabled());
@@ -4870,12 +4870,15 @@ describe("host state display", () => {
 
   it("preserves browser account links and native hosted account actions in settings order", async () => {
     const configure = vi.spyOn(bridge, "configure_server");
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
     render(<App hostKind="browser" fixedOrigin="https://app.example.com" accountUrl="https://account.example.com/account" />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     const section = document.querySelector('[data-settings-section="account-billing"]');
-    const link = screen.getByRole("link", { name: /manage storage on the website/i });
+    const link = await screen.findByRole("link", { name: /manage storage on the website/i });
     expect(section).toBeInTheDocument();
     expect(link).toHaveAttribute("href", "https://account.example.com/account");
     expect(link).toHaveAttribute("target", "_blank");
@@ -4888,19 +4891,20 @@ describe("host state display", () => {
     render(<App accountUrl="https://account.example.com/account" />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("button", { name: /manage storage on the website/i })).toBeInTheDocument();
+    await screen.findByRole("button", { name: /manage storage on the website/i });
   });
 
   it("uses the selected native mode to expose only its connection controls", async () => {
-    const openBilling = vi.spyOn(bridge, "hosted_open_billing").mockResolvedValue();
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(document.getElementById("settings-connection-summary")).toHaveTextContent("Peppy Hosted · https://example.test");
 
     expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /manage storage on the website/i }));
-    await waitFor(() => expect(openBilling).toHaveBeenCalledOnce());
+    await screen.findByRole("button", { name: /manage storage on the website/i });
 
     cleanup();
     localStorage.setItem("peppy.setup.mode", "self-hosted");
@@ -5251,6 +5255,88 @@ describe("host state display", () => {
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     await waitFor(() => expect(startup).toBeEnabled());
     expect(startup).not.toBeChecked();
+  });
+
+  it.each([
+    ["on", true, false],
+    ["off", false, false],
+    ["approval_needed", true, true],
+    ["unavailable", false, false],
+  ] as const)("renders the %s startup state", async (state, checked, background) => {
+    vi.spyOn(bridge, "startup_status").mockResolvedValue({ state, background });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const card = document.getElementById("settings-startup")!;
+    await waitFor(() => expect(card).toHaveAttribute("data-startup-state", state));
+    expect(screen.getByRole("checkbox", { name: "Start at login" })).toHaveProperty("checked", checked);
+    const backgroundToggle = screen.getByRole("checkbox", { name: "Open in the background" });
+    expect(backgroundToggle).toHaveProperty("checked", background);
+    if (state === "unavailable") expect(backgroundToggle).toBeDisabled();
+  });
+
+  it("disables opening in the background until start at login is enabled", async () => {
+    vi.spyOn(bridge, "startup_status").mockResolvedValue({ state: "off", background: false });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByRole("checkbox", { name: "Open in the background" })).toBeDisabled();
+    expect(document.getElementById("startup-open-background-hint")).toHaveTextContent("Turn on Start at login to use this.");
+  });
+
+  it("uses neutral feedback when changing the background startup option fails", async () => {
+    vi.spyOn(bridge, "startup_status").mockResolvedValue({ state: "on", background: false });
+    vi.spyOn(bridge, "set_open_in_background").mockRejectedValue(new Error("Permission denied."));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Open in the background" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Permission denied.");
+    expect(screen.queryByText(/Start at login was not changed/)).not.toBeInTheDocument();
+  });
+
+  it("offers re-enrolment when the protected database key is unavailable", async () => {
+    vi.mocked(bridge.load_state).mockRejectedValue({ code: "database-key-unavailable" });
+    const connectComputer = vi.spyOn(bridge, "enrollment_connect_computer");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Reconnect this computer" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show connection code" }));
+    await waitFor(() => expect(document.getElementById("reenrol-enrollment")).toBeInTheDocument());
+    await waitFor(() => expect(connectComputer).toHaveBeenCalledWith());
+    await waitFor(() => expect(document.getElementById("enrollment-computer_waiting")).toBeInTheDocument());
+  });
+
+  it.each([
+    ["deleted", "stripe", "Account deleted"],
+    ["deleted", "apple", "Account deleted"],
+    ["pending", "none", "Deletion in progress"],
+  ] as const)("shows the %s account-deletion result for %s", async (outcome, provider, title) => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider, manageableIn: provider === "apple" ? "app_store" : "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.spyOn(bridge, "hosted_delete_account").mockResolvedValue(outcome);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete account" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "I understand this is permanent" }));
+    fireEvent.click(document.getElementById("account-delete-submit")!);
+
+    expect(await screen.findByRole("heading", { name: title })).toBeInTheDocument();
+    expect(document.getElementById("account-deletion-result-dialog")).toBeInTheDocument();
+    if (provider === "apple") expect(screen.getByRole("button", { name: "Manage App Store subscriptions" })).toBeInTheDocument();
+  });
+
+  it("reports when the protected key remains unavailable after retrying", async () => {
+    vi.mocked(bridge.load_state).mockRejectedValue({ code: "database-key-unavailable" });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("The protected key is still unavailable.")).toHaveAttribute("role", "status");
   });
 
   it("shows the public URL returned by publish_attachment and reports cancellation", async () => {
@@ -6495,8 +6581,8 @@ describe("desktop app lock", () => {
   it("enables the requirement only through the native prompt and reflects the fresh status", async () => {
     const setLock = vi.spyOn(bridge, "set_app_lock").mockResolvedValue(true);
     vi.spyOn(bridge, "get_app_lock_status")
-      .mockResolvedValueOnce({ enabled: false, locked: false, storageAvailable: true })
-      .mockResolvedValueOnce({ enabled: true, locked: false, storageAvailable: true });
+      .mockResolvedValueOnce({ enabled: false, locked: false, storageAvailable: true, pending: false })
+      .mockResolvedValueOnce({ enabled: true, locked: false, storageAvailable: true, pending: false });
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -6520,7 +6606,7 @@ describe("desktop app lock", () => {
   });
 
   it("disables the control and explains storage failure when secure storage is unavailable", async () => {
-    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: false, locked: false, storageAvailable: false });
+    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: false, locked: false, storageAvailable: false, pending: false });
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -6547,7 +6633,7 @@ describe("desktop app lock", () => {
     const unlock = vi.spyOn(bridge, "unlock_app").mockResolvedValue(false);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Unlock" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Peppy is still locked.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Peppy could not unlock.");
     expect(unlock).toHaveBeenCalledOnce();
     expect(bridge.load_state).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("heading", { name: "Peppy is locked" })).toBeInTheDocument();
@@ -6562,6 +6648,83 @@ describe("desktop app lock", () => {
     expect(screen.queryByText(/wrong password|incorrect password|server/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Hello from Aurora")).not.toBeInTheDocument();
     expect(unlock).not.toHaveBeenCalled();
+  });
+
+  it("shows the checking lock screen, then refreshes status and focuses Unlock when it resolves", async () => {
+    const initialStatus = deferred<{ enabled: boolean; locked: boolean; storageAvailable: boolean; pending: boolean }>();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    vi.spyOn(bridge, "get_app_lock_status")
+      .mockReturnValueOnce(initialStatus.promise)
+      .mockResolvedValueOnce({ enabled: true, locked: true, storageAvailable: true, pending: false });
+    vi.mocked(bridge.load_state)
+      .mockResolvedValueOnce(lockedSnapshot("app-lock-checking"))
+      .mockResolvedValueOnce(lockedSnapshot("app-locked"))
+      .mockResolvedValue(host.load());
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Checking Peppy's lock" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unlock" })).toBeDisabled();
+
+    await act(async () => { hint?.(); });
+    const unlock = await screen.findByRole("button", { name: "Unlock" });
+    expect(unlock).toHaveFocus();
+    await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
+
+    initialStatus.resolve({ enabled: false, locked: false, storageAvailable: true, pending: false });
+    await act(async () => undefined);
+    expect(unlock).toBeEnabled();
+
+    await act(async () => { hint?.(); });
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeChecked();
+  });
+
+  it("starts a fresh app lock check when storage retry is selected", async () => {
+    vi.mocked(bridge.load_state)
+      .mockResolvedValueOnce(lockedSnapshot("secure-store-unavailable"))
+      .mockResolvedValue(lockedSnapshot("app-lock-checking"));
+    const retry = vi.spyOn(bridge, "retry_app_lock_check").mockResolvedValue({ enabled: false, locked: true, storageAvailable: true, pending: true });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(retry).toHaveBeenCalledOnce());
+    expect(await screen.findByRole("heading", { name: "Checking Peppy's lock" })).toBeInTheDocument();
+  });
+
+  it("refreshes pending startup status after the first healthy snapshot", async () => {
+    vi.spyOn(bridge, "get_app_lock_status")
+      .mockResolvedValueOnce({ enabled: false, locked: true, storageAvailable: true, pending: true })
+      .mockResolvedValueOnce({ enabled: true, locked: false, storageAvailable: true, pending: false });
+
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+
+    await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const checkbox = screen.getByRole("checkbox", { name: "Require a password when Peppy starts" });
+    expect(checkbox).toBeChecked();
+    expect(checkbox).toBeEnabled();
+  });
+
+  it("refreshes pending retry status after an immediate unlocked snapshot", async () => {
+    vi.mocked(bridge.load_state)
+      .mockResolvedValueOnce(lockedSnapshot("secure-store-unavailable"))
+      .mockResolvedValue(host.load());
+    vi.spyOn(bridge, "get_app_lock_status")
+      .mockResolvedValueOnce({ enabled: false, locked: true, storageAvailable: false, pending: false })
+      .mockResolvedValueOnce({ enabled: true, locked: false, storageAvailable: true, pending: false });
+    vi.spyOn(bridge, "retry_app_lock_check").mockResolvedValue({ enabled: false, locked: true, storageAvailable: true, pending: true });
+
+    render(<App />);
+    await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
+    const checkbox = screen.getByRole("checkbox", { name: "Require a password when Peppy starts" });
+    expect(checkbox).toBeChecked();
+    expect(checkbox).toBeEnabled();
   });
 
   it("never applies the local app lock in the browser host", async () => {
@@ -6609,7 +6772,7 @@ describe("theme persistence and window sync (M26)", () => {
     window.dispatchEvent(new StorageEvent("storage", { key: LAYOUT_KEY, newValue }));
   });
 
-  it("keeps a chosen Light theme, its body portal class, and sibling layout keys across remount", async () => {
+  it("keeps a chosen Light theme on the document and body, and sibling layout keys across remount", async () => {
     localStorage.setItem(LAYOUT_KEY, JSON.stringify({ composerHeight: 128 }));
     const first = render(<App />);
     await screen.findByText("Hello from Aurora");
@@ -6617,14 +6780,17 @@ describe("theme persistence and window sync (M26)", () => {
     chooseTheme("light");
 
     expect(shell()).toHaveClass("theme-light");
+    expect(document.documentElement).toHaveClass("theme-light");
     expect(document.body).toHaveClass("theme-light");
     expect(storedLayout()).toMatchObject({ theme: "light", composerHeight: 128 });
     first.unmount();
+    expect(document.documentElement).not.toHaveClass("theme-light");
     expect(document.body).not.toHaveClass("theme-light");
 
     render(<App />);
     await screen.findByText("Hello from Aurora");
     expect(shell()).toHaveClass("theme-light");
+    expect(document.documentElement).toHaveClass("theme-light");
     expect(document.body).toHaveClass("theme-light");
   });
 
@@ -6636,6 +6802,7 @@ describe("theme persistence and window sync (M26)", () => {
     otherWindowWrites(JSON.stringify({ theme: "dark", composerHeight: 140 }));
 
     expect(shell()).toHaveClass("theme-dark");
+    expect(document.documentElement).toHaveClass("theme-dark");
     expect(document.body).toHaveClass("theme-dark");
     expect(setItem.mock.calls.filter(([key]) => key === LAYOUT_KEY)).toEqual([]);
   });
@@ -6650,6 +6817,7 @@ describe("theme persistence and window sync (M26)", () => {
     await screen.findByText("Hello from Aurora");
 
     expect(shell()).toHaveClass("theme-system");
+    expect(document.documentElement).toHaveClass("theme-system");
     expect(document.body).toHaveClass("theme-system");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.getByLabelText("Theme")).toHaveValue("system");

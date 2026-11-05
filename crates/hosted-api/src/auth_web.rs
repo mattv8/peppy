@@ -51,6 +51,7 @@ pub mod routes {
     pub const SESSION: &str = "/hosted/v1/web/session";
     pub const SESSION_RENEW: &str = "/hosted/v1/web/session/renew";
     pub const APP_SESSION_RENEW: &str = "/hosted/v1/web/app-session/renew";
+    pub const APP_AUTHORIZE: &str = "/hosted/v1/web/app-authorize";
     pub const AUTH_START: &str = "/hosted/v1/web/auth/{provider}/start";
     pub const GOOGLE_CALLBACK: &str = "/hosted/v1/web/auth/google/callback";
     pub const APPLE_CALLBACK: &str = "/hosted/v1/web/auth/apple/callback";
@@ -120,6 +121,7 @@ mod tests {
     #[test]
     fn renewal_routes_use_the_web_and_app_session_audiences() {
         assert_eq!(routes::SESSION_RENEW, "/hosted/v1/web/session/renew");
+        assert_eq!(routes::APP_AUTHORIZE, "/hosted/v1/web/app-authorize");
         assert_eq!(
             routes::APP_SESSION_RENEW,
             "/hosted/v1/web/app-session/renew"

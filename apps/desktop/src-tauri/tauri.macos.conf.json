@@ -5,10 +5,11 @@
       "minWidth": 760, "minHeight": 560, "decorations": true,
       "titleBarStyle": "Overlay", "hiddenTitle": true,
       "trafficLightPosition": { "x": 16, "y": 22 },
-      "transparent": true, "resizable": true, "visible": false
+       "transparent": false, "resizable": true, "visible": false
     }]
   },
   "bundle": {
+    "category": "SocialNetworking",
     "macOS": {
       "dmg": {
         "background": "../../../packaging/macos/dmg/background.tiff",

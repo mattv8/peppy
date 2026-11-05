@@ -1,0 +1,6 @@
+{
+  "direct": { "appStore": false, "website": true },
+  "appStoreUnitedStates": { "appStore": true, "website": true },
+  "appStoreOtherStorefront": { "appStore": true, "website": false },
+  "appStoreUnknownStorefront": { "appStore": true, "website": false }
+}

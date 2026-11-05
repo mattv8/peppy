@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AppLockStatus } from "../bridge/bridge";
 
 /**
@@ -8,10 +8,10 @@ import type { AppLockStatus } from "../bridge/bridge";
 
 const FAILED_CHANGE = "Peppy could not change the password requirement.";
 
-const messageOf = (error: unknown): string =>
+const messageOf = (error: unknown, fallback = FAILED_CHANGE): string =>
   typeof error === "object" && error !== null && "message" in error && typeof error.message === "string" && error.message
     ? error.message
-    : FAILED_CHANGE;
+    : fallback;
 
 export function AppLockSettings({
   status,
@@ -45,7 +45,7 @@ export function AppLockSettings({
           id="app-lock-enabled"
           type="checkbox"
           checked={status?.enabled ?? false}
-          disabled={pending || !status || !storageAvailable}
+          disabled={pending || !status || !storageAvailable || status.pending}
           aria-busy={pending || undefined}
           onChange={(event) => void change(event.target.checked)}
         />
@@ -65,39 +65,72 @@ export function AppLockSettings({
 }
 
 export function AppLockScreen({
-  storageUnavailable,
+  state,
   onUnlock,
   onRetry,
 }: {
-  storageUnavailable: boolean;
+  state: "checking" | "storage-unavailable" | "locked";
   onUnlock(): Promise<boolean>;
   onRetry(): Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
+  const previousState = useRef(state);
+  const retryButton = useRef<HTMLButtonElement>(null);
+  const restoreRetryFocusRef = useRef(false);
 
-  const run = async (action: () => Promise<void>) => {
+  useEffect(() => {
+    const wasChecking = previousState.current === "checking";
+    previousState.current = state;
+    if (!wasChecking || state === "checking" || !document.hasFocus()) return;
+    const activeElement = document.activeElement;
+    if (activeElement !== document.body && !activeElement?.closest("#app-lock-card")) return;
+    document.getElementById(state === "locked" ? "app-lock-unlock" : "app-lock-retry")?.focus();
+  }, [state]);
+
+  useEffect(() => {
+    if (!restoreRetryFocusRef.current || pending || state !== "storage-unavailable" || !document.hasFocus()) return;
+    restoreRetryFocusRef.current = false;
+    retryButton.current?.focus();
+  }, [pending, state]);
+
+  const run = async (action: () => Promise<void>, fallback: string, restoreRetryFocus = false) => {
     setPending(true);
     setMessage("");
     try {
       await action();
     } catch (error) {
-      setMessage(messageOf(error));
+      setMessage(messageOf(error, fallback));
+      restoreRetryFocusRef.current = restoreRetryFocus;
     } finally {
       setPending(false);
     }
   };
 
-  if (storageUnavailable) {
+  if (state === "checking") {
+    return (
+      <main id="app-lock-screen" className="app-lock-screen" data-app-lock-state="checking" aria-busy="true">
+        <section id="app-lock-card" className="app-lock-card" aria-labelledby="app-lock-heading" aria-describedby="app-lock-status">
+          <h1 id="app-lock-heading">Checking Peppy&apos;s lock</h1>
+          <p id="app-lock-status" role="status">
+            Peppy is checking its password setting in secure storage. Your conversations stay hidden until this finishes. If your system asks for keychain access, allow it to continue.
+          </p>
+          <button id="app-lock-unlock" className="primary-button" disabled aria-describedby="app-lock-status">Unlock</button>
+        </section>
+      </main>
+    );
+  }
+
+  if (state === "storage-unavailable") {
     return (
       <main id="app-lock-screen" className="app-lock-screen" data-app-lock-state="storage-unavailable" aria-busy={pending || undefined}>
-        <section className="app-lock-card" aria-labelledby="app-lock-heading">
+        <section id="app-lock-card" className="app-lock-card" aria-labelledby="app-lock-heading">
           <h1 id="app-lock-heading">Peppy cannot check its lock</h1>
           <p>
             Secure storage on this computer is unavailable, so Peppy cannot open until it can read its password setting.
-            Make sure your system keychain is available, then try again.
+            Make sure your system keychain is available, then try again. If you declined keychain access, choose Try again and allow it.
           </p>
-          <button className="secondary-button" disabled={pending} aria-busy={pending || undefined} onClick={() => void run(onRetry)}>
+          <button ref={retryButton} id="app-lock-retry" className="secondary-button" disabled={pending} aria-busy={pending || undefined} onClick={() => void run(onRetry, "Peppy still cannot reach secure storage.", true)}>
             Try again
           </button>
           {message && <p role="alert" className="settings-error">{message}</p>}
@@ -108,16 +141,17 @@ export function AppLockScreen({
 
   return (
     <main id="app-lock-screen" className="app-lock-screen" data-app-lock-state="locked" aria-busy={pending || undefined}>
-      <section className="app-lock-card" aria-labelledby="app-lock-heading">
+      <section id="app-lock-card" className="app-lock-card" aria-labelledby="app-lock-heading">
         <h1 id="app-lock-heading">Peppy is locked</h1>
         <p>Unlock Peppy with your password to see your conversations.</p>
         <button
+          id="app-lock-unlock"
           className="primary-button"
           disabled={pending}
           aria-busy={pending || undefined}
           onClick={() => void run(async () => {
-            if (!(await onUnlock())) setMessage("Peppy is still locked.");
-          })}
+            if (!(await onUnlock())) setMessage("Peppy could not unlock.");
+          }, FAILED_CHANGE)}
         >
           Unlock
         </button>

@@ -37,13 +37,16 @@ import {
 } from "./phone";
 import { conversationAvatar, seedKey, type AvatarIdentity } from "./avatar";
 import { ContactAvatar } from "./ContactAvatar";
+export { BusyIndicator } from "./BusyIndicator";
 import type { ConversationFolder } from "./bridge-contracts";
 export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
 export { ToneOverridesProvider, incomingToneSeed, toneIndex, toneStyle, useToneOverrides, useToneStyle, type ToneOverrides } from "./tone";
 export { OmniSearch, type OmniSearchProps } from "./OmniSearch";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
 export { SyncProgress, type SyncProgressProps } from "./SyncProgress";
-export { AttachmentStorageSettings, attachmentStorageRemovalText, type AttachmentStorageCopy, type AttachmentStorageSettingsProps } from "./AttachmentStorageSettings";
+export { AttachmentStorageSettings, attachmentStorageRemovalText, type AttachmentStorageCopy, type AttachmentStorageSettingsProps, type StoragePurchaseProps, type StoragePurchaseState } from "./AttachmentStorageSettings";
+export { BillingElsewhereNotice, type BillingElsewhereCopy, type BillingElsewhereNoticeProps, type BillingElsewhereVariant } from "./BillingElsewhereNotice";
+export { StorePlanOptions, type StorePlanOptionsCopy, type StorePlanOptionsProps, type StorePlanState } from "./StorePlanOptions";
 export { Modal, type ModalProps } from "./Modal";
 export { installOverlayScrollbars, OVERLAY_SCROLL_HIDE_DELAY } from "./overlayScroll";
 export {
@@ -262,14 +265,6 @@ export function StatusPopover({ tone, summary, children }: { tone: StatusTone; s
 export function ConnectionDot({ state, label, serverUnreachable = false }: { state: string; label: string; serverUnreachable?: boolean }): ReactElement {
   return <span role="status" aria-label={label} title={label} data-connection-state={state} data-server-unreachable={serverUnreachable || undefined}>
     <span className="connection-dot" aria-hidden />
-  </span>;
-}
-
-/** Visible pending status: the label is the live-region text; the spinner is decorative. */
-export function BusyIndicator({ id, label }: { id: string; label: string }): ReactElement {
-  return <span id={id} className="busy-indicator" role="status" aria-live="polite" aria-atomic="true">
-    <LoaderCircle className="busy-indicator-icon" size={14} strokeWidth={1.75} aria-hidden />
-    <span className="busy-indicator-label">{label}</span>
   </span>;
 }
 

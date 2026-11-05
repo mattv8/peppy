@@ -787,6 +787,21 @@ describe("BrowserBridge", () => {
     await expect(result).rejects.toMatchObject({ code: "invalid-request", message: "Denied" });
     await expect(bridge.open_composer()).rejects.toMatchObject({ code: "unsupported" });
     await expect(bridge.get_app_lock_status()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.retry_app_lock_check()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.startup_status()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.hosted_sign_in("apple")).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.hosted_delete_account()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.store_products()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.store_purchase("product-id")).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.store_restore()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.open_store_subscriptions()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.purchase_options()).resolves.toEqual({ appStore: false, website: true });
+  });
+
+  it("reports a website-only default billing summary", async () => {
+    const bridge = new BrowserBridge(new TestPort() as unknown as MessagePort);
+    await expect(bridge.billing_summary()).resolves.toEqual({ provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    bridge.dispose();
   });
 
   it("round-trips discard requests and moved-draft details", async () => {

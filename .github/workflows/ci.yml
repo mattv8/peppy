@@ -335,6 +335,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/production' }}
           cache-on-failure: true
       - run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo check --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: 'cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib updates::'
       - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
       - name: Diagnose Windows loader failure
         if: failure() && runner.os == 'Windows'
@@ -551,7 +553,12 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET: ${{ secrets.PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET }}
+      APPLE_MAS_CERTIFICATE_P12: ${{ secrets.APPLE_MAS_CERTIFICATE_P12 }}
+      APPLE_MAS_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_MAS_CERTIFICATE_PASSWORD }}
+      APPLE_MAS_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_MAS_INSTALLER_CERTIFICATE }}
+      APPLE_MAS_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_MAS_PROVISIONING_PROFILE_BASE64 }}
+      APPLE_MAS_SIGNING_IDENTITY: ${{ secrets.APPLE_MAS_SIGNING_IDENTITY }}
+      APPLE_MAS_INSTALLER_IDENTITY: ${{ secrets.APPLE_MAS_INSTALLER_IDENTITY }}
       PEPPY_ANDROID_KEYSTORE_BASE64: ${{ secrets.PEPPY_ANDROID_KEYSTORE_BASE64 }}
       PEPPY_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEYSTORE_PASSWORD }}
       PEPPY_ANDROID_KEY_ALIAS: ${{ secrets.PEPPY_ANDROID_KEY_ALIAS }}

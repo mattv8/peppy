@@ -256,6 +256,16 @@ pub struct SessionResponse {
 
 // Intentionally no Debug for SessionResponse (sensitive)
 
+/// Exchanges a single-use browser authorization code for a native account session.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionExchangeRequest {
+    pub code: String,
+    pub verifier: String,
+}
+
+// Intentionally no Debug for NativeSessionExchangeRequest (sensitive)
+
 /// Response confirming that an authenticated session remains active.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -363,6 +373,7 @@ pub mod routes {
     pub const AUTH_CONFIG: &str = "/hosted/v1/auth/config";
     pub const AUTH_ATTEMPTS: &str = "/hosted/v1/auth/attempts";
     pub const AUTH_SESSION: &str = "/hosted/v1/auth/session";
+    pub const AUTH_NATIVE_SESSION: &str = "/hosted/v1/auth/native-session";
     pub const AUTH_SESSION_RENEW: &str = "/hosted/v1/auth/session/renew";
     pub const ACCOUNT: &str = "/hosted/v1/account";
     pub const BILLING_CHECKOUT: &str = "/hosted/v1/billing/checkout";
@@ -934,6 +945,10 @@ mod tests {
     fn test_route_constants() {
         assert_eq!(routes::AUTH_ATTEMPTS, "/hosted/v1/auth/attempts");
         assert_eq!(routes::AUTH_SESSION, "/hosted/v1/auth/session");
+        assert_eq!(
+            routes::AUTH_NATIVE_SESSION,
+            "/hosted/v1/auth/native-session"
+        );
         assert_eq!(routes::AUTH_SESSION_RENEW, "/hosted/v1/auth/session/renew");
         assert_eq!(routes::ACCOUNT, "/hosted/v1/account");
         assert_eq!(routes::BILLING_CHECKOUT, "/hosted/v1/billing/checkout");
@@ -974,6 +989,7 @@ mod tests {
 pub mod account_access;
 pub mod attachments;
 pub mod auth_web;
+pub mod billing_apple;
 pub mod billing_play;
 pub mod billing_web;
 pub mod computer_enrollment;

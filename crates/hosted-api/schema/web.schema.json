@@ -87,6 +87,15 @@
       ],
       "type": "object"
     },
+    "BillingManageableIn": {
+      "description": "Where the account's current billing can be managed.",
+      "enum": [
+        "none",
+        "website",
+        "app_store"
+      ],
+      "type": "string"
+    },
     "BillingOperationRequest": {
       "additionalProperties": false,
       "properties": {
@@ -119,6 +128,15 @@
       ],
       "type": "object"
     },
+    "BillingProvider": {
+      "description": "Provider currently responsible for an account's billing.",
+      "enum": [
+        "none",
+        "stripe",
+        "apple"
+      ],
+      "type": "string"
+    },
     "BillingSummary": {
       "additionalProperties": false,
       "properties": {
@@ -134,6 +152,10 @@
           },
           "type": "array"
         },
+        "manageable_in": {
+          "$ref": "#/$defs/BillingManageableIn",
+          "default": "none"
+        },
         "paid_through": {
           "format": "int64",
           "type": "integer"
@@ -143,6 +165,10 @@
         },
         "price_id": {
           "type": "string"
+        },
+        "provider": {
+          "$ref": "#/$defs/BillingProvider",
+          "default": "none"
         },
         "storage": {
           "$ref": "#/$defs/StorageSummary"

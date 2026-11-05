@@ -43,6 +43,11 @@ import type {
   ResolvedContact,
   ContactResolutionMap,
   BridgeError,
+  BridgeErrorCode,
+  BillingSummaryView,
+  BillingProvider,
+  BillingManageableIn,
+  HostedSignInProvider,
   HostedAccountView,
   EnrollmentView as SharedEnrollmentView,
   ComputerClaimantView,
@@ -66,6 +71,9 @@ import type {
   MessageWindowRequest,
   MessageWindow,
   AttachmentRetentionStatusResult,
+  PurchaseOptions,
+  StartupStatus,
+  StoreProduct,
   DesktopBridge as SharedDesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
@@ -109,6 +117,11 @@ export {
   type ResolvedContact,
   type ContactResolutionMap,
   type BridgeError,
+  type BridgeErrorCode,
+  type BillingSummaryView,
+  type BillingProvider,
+  type BillingManageableIn,
+  type HostedSignInProvider,
   type HostedAccountView,
   type ComputerClaimantView,
   type HostedPreviewView,
@@ -131,6 +144,9 @@ export {
   type MessageWindowRequest,
   type MessageWindow,
   type AttachmentRetentionStatusResult,
+  type PurchaseOptions,
+  type StartupStatus,
+  type StoreProduct,
 } from "@peppy/desktop-ui/bridge-contracts";
 
 export type EnrollmentView = SharedEnrollmentView & { computerClaimant?: ComputerClaimantView };
@@ -226,7 +242,7 @@ const fixtureMovedError = (target: Draft) => ({
   currentRevision: target.revision,
   details: { conversationId: target.conversationId, draftId: target.id, currentRevision: target.revision },
 });
-const fixtureAccount = (): HostedAccountView => ({ available: true, signedIn: false, accountLabel: null, classification: null, entitlement: null, access: null, hasVault: false, resumable: false });
+const fixtureAccount = (): HostedAccountView => ({ available: true, signedIn: false, accountLabel: null, classification: null, entitlement: null, access: null, hasVault: false, resumable: false, providers: ["apple", "google"] });
 /** Display-only fixture views deliberately have no reducer or event transition logic. */
 const cannedHostedView = (screen = "welcome", scenario = "new"): HostedPreviewView => ({
   scenario, screen, accountState: screen === "welcome" ? "anonymous" : "signed_in", entitlementState: screen === "lapsed" ? "expired" : "active", approvalState: screen === "approval" ? "pending" : "none", unlocked: screen === "settings", rejected: false,
@@ -324,7 +340,8 @@ export const fixtureBridge: DesktopBridge = {
   },
   configure_server: async () => undefined,
   unlock_sync: async () => undefined,
-  get_app_lock_status: async () => ({ enabled: false, locked: false, storageAvailable: true }),
+  get_app_lock_status: async () => ({ enabled: false, locked: false, storageAvailable: true, pending: false }),
+  retry_app_lock_check: async () => ({ enabled: false, locked: false, storageAvailable: true, pending: false }),
   set_app_lock: async () => true,
   unlock_app: async () => true,
   save_draft: async input => fixtureSave(input),
@@ -405,6 +422,9 @@ export const fixtureBridge: DesktopBridge = {
   publish_attachment: async () => null,
   open_composer: async () => undefined,
   set_start_at_login: async enabled => { fixtureSnapshot.desktop = { trayAvailable: true, startAtLogin: enabled, startupSupported: true, background: false }; },
+  startup_status: async () => ({ state: fixtureSnapshot.desktop?.startAtLogin ? "on" : "off", background: fixtureSnapshot.desktop?.background ?? false }),
+  set_open_in_background: async enabled => { fixtureSnapshot.desktop = { trayAvailable: true, startAtLogin: fixtureSnapshot.desktop?.startAtLogin ?? false, startupSupported: true, background: enabled }; },
+  open_login_items: async () => undefined,
   get_notification_sound: async () => fixtureNotificationSound,
   set_notification_sound: async enabled => { fixtureNotificationSound = enabled; },
   popout_conversation: async conversationId => {
@@ -480,8 +500,18 @@ export const fixtureBridge: DesktopBridge = {
   hosted_origin_url: async () => "https://peppy.pro",
   hosted_sign_in: async () => ({ ...fixtureAccount(), signedIn: true, accountLabel: "Fixture account", classification: "new" }),
   hosted_sign_out: async () => undefined,
+  hosted_delete_account: async () => "deleted",
   hosted_open_billing: async () => undefined,
   hosted_provision: async () => undefined,
+  billing_summary: async () => ({ provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }),
+  purchase_options: async () => ({ appStore: false, website: true }),
+  store_products: async () => [
+    { id: "org.peppy.desktop.plan.monthly", kind: "plan", displayName: "Peppy Hosted Monthly", displayPrice: "$4.99", period: "month" },
+    { id: "org.peppy.desktop.storage.packs.1", kind: "storage", displayName: "Extra storage", displayPrice: "$0.99", period: "month", storageBytes: 5 * 1024 * 1024 * 1024 },
+  ],
+  store_purchase: async () => "purchased",
+  store_restore: async () => undefined,
+  open_store_subscriptions: async () => undefined,
   enrollment_discover: async origin => ({ mode: "community", stage: "server", origin }),
   enrollment_start_over: async () => ({ mode: "community", stage: "setup" }),
   enrollment_create_owner: async () => ({ mode: "community", stage: "ready", owner: true }),
@@ -553,6 +583,15 @@ export const renewHostedSession = () => "__TAURI_INTERNALS__" in window
   : Promise.resolve();
 export const tauriBridge: DesktopBridge = {
   get_notification_sound: () => invoke("get_notification_sound"),
+  startup_status: () => invoke("startup_status"),
+  set_open_in_background: enabled => invoke("set_open_in_background", { enabled }),
+  open_login_items: () => invoke("open_login_items"),
+  hosted_delete_account: () => invoke("hosted_delete_account"),
+  purchase_options: () => invoke("purchase_options"),
+  store_products: () => invoke("store_products"),
+  store_purchase: productId => invoke("store_purchase", { productId }),
+  store_restore: () => invoke("store_restore"),
+  open_store_subscriptions: () => invoke("open_store_subscriptions"),
   set_notification_sound: enabled => invoke("set_notification_sound", { enabled }),
   media_sync_request: attachmentIds => invoke("media_sync_request", { attachmentIds }),
   open_media_viewer: (conversationId, attachmentId, messageId) => invoke("open_media_viewer", { conversationId, attachmentId, messageId }),
@@ -563,8 +602,8 @@ export const tauriBridge: DesktopBridge = {
   attachment_retention_status: () => invoke("attachment_retention_status"),
   account_access: () => invoke("account_access"),
   attachment_retention_state: attachmentId => invoke("attachment_retention_state", { attachmentId }),
-  load_state: (conversationId, historyFromMessageId, options) => invoke("load_state", { conversationId, historyFromMessageId, metadataOnly: options?.metadataOnly }), search_local: input => invoke("search_local", { input }), advance_search_index: input => invoke("advance_search_index", { input }), get_history_search: () => invoke("get_history_search"), start_history_search: ({ operationId }) => invoke("start_history_search", { input: { operationId } }), cancel_history_search: ({ attemptId }) => invoke("cancel_history_search", { input: { attemptId } }), load_message_window: input => invoke("load_message_window", { input }), open_external_url: url => invoke("open_external_url", { url }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), mark_all_read: () => invoke("mark_all_read"), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), open_notification_settings: () => invoke("open_notification_settings"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), set_maximize_button_region: region => invoke("set_maximize_button_region", { region }), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_maximize_button_hover: listener => subscribeWindowEvent("peppy://maximize-button-hover", payload => { if (typeof payload === "boolean") listener(payload); }), subscribe_drafts: listener => subscribeWindowEvent("peppy://draft", payload => { if (isDraft(payload)) listener(payload); }), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
-   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
+  load_state: (conversationId, historyFromMessageId, options) => invoke("load_state", { conversationId, historyFromMessageId, metadataOnly: options?.metadataOnly }), search_local: input => invoke("search_local", { input }), advance_search_index: input => invoke("advance_search_index", { input }), get_history_search: () => invoke("get_history_search"), start_history_search: ({ operationId }) => invoke("start_history_search", { input: { operationId } }), cancel_history_search: ({ attemptId }) => invoke("cancel_history_search", { input: { attemptId } }), load_message_window: input => invoke("load_message_window", { input }), open_external_url: url => invoke("open_external_url", { url }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), retry_app_lock_check: () => invoke("retry_app_lock_check"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), mark_all_read: () => invoke("mark_all_read"), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), open_notification_settings: () => invoke("open_notification_settings"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), set_maximize_button_region: region => invoke("set_maximize_button_region", { region }), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_maximize_button_hover: listener => subscribeWindowEvent("peppy://maximize-button-hover", payload => { if (typeof payload === "boolean") listener(payload); }), subscribe_drafts: listener => subscribeWindowEvent("peppy://draft", payload => { if (isDraft(payload)) listener(payload); }), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
+   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), billing_summary: () => invoke("billing_summary"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
   enrollment_connect_computer: beginComputerClaimant,
   enrollment_computer_status: computerClaimantStatus,
   enrollment_confirm_computer: confirmComputerClaimant,

@@ -12,11 +12,12 @@ use crate::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use peppy_hosted_api::{
-    routes, IdentityProvider, NativeAuthConfigResponse, SESSION_LIFETIME_SECONDS,
+    auth_web::routes as web_routes, routes, NativeAuthConfigResponse, NativeSessionExchangeRequest,
+    SESSION_LIFETIME_SECONDS,
 };
 use peppy_hosted_client::{
-    hosted_login_request, hosted_session_request, parse_hosted_account, parse_hosted_login_attempt,
-    parse_hosted_session, parse_hosted_session_renewal, prepare, restore, HostedProvisioning,
+    parse_hosted_account, parse_hosted_session, parse_hosted_session_renewal, prepare, restore,
+    HostedProvisioning,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -33,6 +34,7 @@ use tokio::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 mod callback_page;
 
 const PRODUCTION_ORIGIN: &str = "https://peppy.pro";
@@ -150,6 +152,8 @@ impl HostedState {
 #[serde(rename_all = "camelCase")]
 pub struct HostedAccountView {
     pub available: bool,
+    pub providers: Vec<String>,
+    pub deletion_pending: bool,
     pub signed_in: bool,
     pub account_label: Option<String>,
     pub classification: Option<String>,
@@ -160,21 +164,11 @@ pub struct HostedAccountView {
 }
 
 impl HostedAccountView {
-    fn unavailable() -> Self {
+    fn signed_out(providers: Vec<String>) -> Self {
         Self {
-            available: false,
-            signed_in: false,
-            account_label: None,
-            classification: None,
-            entitlement: None,
-            access: None,
-            has_vault: false,
-            resumable: false,
-        }
-    }
-    fn signed_out() -> Self {
-        Self {
-            available: true,
+            available: !providers.is_empty(),
+            providers,
+            deletion_pending: false,
             signed_in: false,
             account_label: None,
             classification: None,
@@ -245,9 +239,6 @@ fn resolve_hosted_origin(override_origin: Option<&str>) -> BridgeResult<String> 
     #[cfg(not(debug_assertions))]
     let _ = override_origin;
     Ok(PRODUCTION_ORIGIN.into())
-}
-fn client_id() -> Option<&'static str> {
-    option_env!("PEPPY_DESKTOP_GOOGLE_CLIENT_ID").filter(|value| !value.is_empty())
 }
 fn session_key(origin: &str) -> String {
     format!("{SESSION_PREFIX}{origin}")
@@ -364,7 +355,7 @@ fn read_recovery_index(
 fn hosted_error() -> BridgeError {
     BridgeError::new(
         "hosted-unavailable",
-        "Google sign-in is currently unavailable.",
+        "Hosted sign-in is currently unavailable.",
     )
 }
 fn invalid_response() -> BridgeError {
@@ -409,14 +400,7 @@ async fn read_response(response: reqwest::Response) -> Result<Vec<u8>, NetError>
     }
     read_bounded(response, MAX_BODY).await
 }
-async fn sign_in_available(
-    hosted: &HostedState,
-    origin: &str,
-    configured_client_id: Option<&str>,
-) -> BridgeResult<bool> {
-    if configured_client_id.is_none() {
-        return Ok(false);
-    }
+async fn sign_in_providers(hosted: &HostedState, origin: &str) -> BridgeResult<Vec<String>> {
     let base = hosted.auth_config_base(origin);
     let client = http(&base)?;
     let response = client
@@ -429,16 +413,18 @@ async fn sign_in_available(
         serde_json::from_slice(&response).map_err(|_| NetError::Invalid)?;
     Ok(config
         .available_providers
-        .contains(&IdentityProvider::Google))
+        .into_iter()
+        .map(|provider| provider.to_string())
+        .collect())
 }
 
-async fn begin_sign_in(
-    hosted: &HostedState,
-    origin: &str,
-    configured_client_id: Option<&str>,
-) -> BridgeResult<u64> {
+async fn begin_sign_in(hosted: &HostedState, origin: &str, provider: &str) -> BridgeResult<u64> {
     let generation = hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    if !sign_in_available(hosted, origin, configured_client_id).await? {
+    if !sign_in_providers(hosted, origin)
+        .await?
+        .iter()
+        .any(|available| available == provider)
+    {
         return Err(hosted_error());
     }
     ensure_sign_in_current(hosted, generation)?;
@@ -455,16 +441,10 @@ fn ensure_sign_in_current(hosted: &HostedState, generation: u64) -> BridgeResult
     Ok(())
 }
 
-async fn signed_out_view(
-    hosted: &HostedState,
-    origin: &str,
-    configured_client_id: Option<&str>,
-) -> BridgeResult<HostedAccountView> {
-    if sign_in_available(hosted, origin, configured_client_id).await? {
-        Ok(HostedAccountView::signed_out())
-    } else {
-        Ok(HostedAccountView::unavailable())
-    }
+async fn signed_out_view(hosted: &HostedState, origin: &str) -> BridgeResult<HostedAccountView> {
+    Ok(HostedAccountView::signed_out(
+        sign_in_providers(hosted, origin).await?,
+    ))
 }
 async fn authenticated(
     client: &reqwest::Client,
@@ -591,7 +571,7 @@ pub async fn hosted_account(
 ) -> BridgeResult<HostedAccountView> {
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
-    account_view(&*state.store, &hosted, &hosted_origin()?, client_id()).await
+    account_view(&*state.store, &hosted, &hosted_origin()?).await
 }
 
 #[tauri::command]
@@ -624,6 +604,51 @@ pub async fn hosted_sign_out(
 }
 
 #[tauri::command]
+pub(crate) async fn hosted_delete_account(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    hosted: tauri::State<'_, HostedState>,
+) -> BridgeResult<String> {
+    let _operation = crate::admit_update_operation(&state)?;
+    crate::require_main(window.label())?;
+    delete_account_core(&*state.store, &hosted, &hosted_origin()?).await
+}
+
+/// Deletes the current Hosted account and discards only the observed account session on success.
+pub(crate) async fn delete_account_core(
+    store: &dyn SecretStore,
+    hosted: &HostedState,
+    origin: &str,
+) -> BridgeResult<String> {
+    let Some(session) = load_session_from_store(store, hosted, origin).await? else {
+        return Err(BridgeError::new(
+            "hosted-session-required",
+            "Sign in again to Peppy Hosted before deleting your account.",
+        ));
+    };
+    let generation = hosted.sign_in_generation.load(Ordering::SeqCst);
+    let base = hosted.api_base(origin);
+    let response = http(&base)?
+        .delete(format!("{base}{}", routes::ACCOUNT))
+        .bearer_auth(&*session.bearer)
+        .send()
+        .await
+        .map_err(|_| BridgeError::new("offline", "Could not reach Peppy Hosted."))?;
+
+    match response.status() {
+        reqwest::StatusCode::NO_CONTENT => {
+            tombstone_observed_session(store, hosted, origin, &session.bearer, generation).await?;
+            Ok("deleted".into())
+        }
+        reqwest::StatusCode::ACCEPTED => Ok("pending".into()),
+        _ => Err(BridgeError::new(
+            "account-deletion-failed",
+            "Peppy Hosted could not delete your account. Please try again.",
+        )),
+    }
+}
+
+#[tauri::command]
 pub fn hosted_open_billing(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -640,96 +665,47 @@ pub fn hosted_open_billing(
 #[tauri::command]
 pub async fn hosted_sign_in(
     window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
+    #[cfg_attr(target_os = "macos", allow(unused_variables))] app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     hosted: tauri::State<'_, HostedState>,
     provider: String,
 ) -> BridgeResult<HostedAccountView> {
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
-    let Some(client_id) = client_id() else {
-        return Err(hosted_error());
-    };
-    if provider != "google" {
-        return Err(hosted_error());
-    }
     let origin = hosted_origin()?;
-    let generation = begin_sign_in(&hosted, &origin, Some(client_id)).await?;
-    let client = http(&origin)?;
-    let request = hosted_login_request("google".into()).map_err(client_error)?;
-    let attempt_body = read_response(
-        client
-            .post(format!("{origin}{}", routes::AUTH_ATTEMPTS))
-            .header("content-type", "application/json")
-            .body(request)
-            .send()
-            .await
-            .map_err(|_| BridgeError::new("offline", "Could not reach Peppy Hosted."))?,
-    )
-    .await
-    .map_err(BridgeError::from)?;
-    let attempt = parse_hosted_login_attempt(
-        String::from_utf8(attempt_body).map_err(|_| invalid_response())?,
-    )
-    .map_err(client_error)?;
-    let redirect = Loopback::bind().await?;
+    let generation = begin_sign_in(&hosted, &origin, &provider).await?;
     ensure_sign_in_current(&hosted, generation)?;
-    let redirect_uri = redirect.uri.clone();
     let mut verifier = Zeroizing::new(random_b64url(32)?);
     let state_token = Zeroizing::new(random_b64url(32)?);
     let challenge = pkce_challenge(&verifier);
-    let auth = google_url(
-        client_id,
-        &redirect_uri,
-        &challenge,
-        &state_token,
-        &attempt.nonce(),
-    );
-    app.opener()
-        .open_url(auth, None::<String>)
-        .map_err(|_| BridgeError::new("open-url", "Could not open Google sign-in."))?;
-    let code = redirect.receive(&state_token).await?;
+    #[cfg(target_os = "macos")]
+    let (return_to, _loopback): (String, Option<Loopback>) =
+        ("org.peppy.desktop:/auth/callback".to_owned(), None);
+    #[cfg(not(target_os = "macos"))]
+    let (return_to, loopback) = {
+        let loopback = Loopback::bind().await?;
+        (format!("{}/callback", loopback.uri), Some(loopback))
+    };
+    let auth = app_authorize_url(&origin, &challenge, &state_token, &provider, &return_to)?;
+    #[cfg(target_os = "macos")]
+    let code = authenticate_with_system_browser(&window, auth, &state_token).await?;
+    #[cfg(not(target_os = "macos"))]
+    let code = {
+        app.opener()
+            .open_url(auth, None::<String>)
+            .map_err(|_| BridgeError::new("open-url", "Could not open Hosted sign-in."))?;
+        loopback
+            .expect("loopback exists off macOS")
+            .receive(&state_token)
+            .await?
+    };
     ensure_sign_in_current(&hosted, generation)?;
-    let mut form = vec![
-        ("code", code.to_string()),
-        ("client_id", client_id.to_owned()),
-        ("redirect_uri", redirect_uri),
-        ("grant_type", "authorization_code".into()),
-        ("code_verifier", verifier.to_string()),
-    ];
-    if let Some(secret) =
-        option_env!("PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET").filter(|value| !value.is_empty())
-    {
-        form.push(("client_secret", secret.into()));
-    }
-    let encoded_form = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(form.iter().map(|(key, value)| (*key, value.as_str())))
-        .finish();
-    let token_body = read_response(
-        http("https://oauth2.googleapis.com")?
-            .post("https://oauth2.googleapis.com/token")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(encoded_form)
-            .send()
-            .await
-            .map_err(|_| BridgeError::new("offline", "Could not reach Google sign-in."))?,
-    )
-    .await
-    .map_err(BridgeError::from)?;
+    let session_request = native_session_request(&code, &verifier)?;
     verifier.zeroize();
-    let mut id_token = Zeroizing::new(
-        serde_json::from_slice::<serde_json::Value>(&token_body)
-            .ok()
-            .and_then(|v| v.get("id_token")?.as_str().map(str::to_owned))
-            .filter(|value| !value.is_empty() && value.len() <= 16 * 1024)
-            .ok_or_else(invalid_response)?,
-    );
-    let session_request =
-        hosted_session_request(attempt.attempt_id(), id_token.to_string()).map_err(client_error)?;
-    id_token.zeroize();
+    let client = http(&origin)?;
     let session_body = read_response(
         client
-            .post(format!("{origin}{}", routes::AUTH_SESSION))
+            .post(format!("{origin}{}", routes::AUTH_NATIVE_SESSION))
             .header("content-type", "application/json")
             .body(session_request)
             .send()
@@ -747,7 +723,7 @@ pub async fn hosted_sign_in(
         expires_at_unix: now_unix().saturating_add(parsed.expires_in_seconds() as u64),
     };
     commit_sign_in_session(&*state.store, &hosted, &origin, generation, record).await?;
-    account_view(&*state.store, &hosted, &origin, Some(client_id)).await
+    account_view(&*state.store, &hosted, &origin).await
 }
 
 #[tauri::command]
@@ -838,10 +814,9 @@ pub(crate) async fn account_view(
     store: &dyn SecretStore,
     hosted: &HostedState,
     origin: &str,
-    configured_client_id: Option<&str>,
 ) -> BridgeResult<HostedAccountView> {
     let Some(session) = load_session_from_store(store, hosted, origin).await? else {
-        return signed_out_view(hosted, origin, configured_client_id).await;
+        return signed_out_view(hosted, origin).await;
     };
     let base = hosted.api_base(origin);
     let client = http(&base)?;
@@ -850,7 +825,7 @@ pub(crate) async fn account_view(
         Ok(bytes) => bytes,
         Err(NetError::Revoked) => {
             tombstone_observed_session(store, hosted, origin, &session.bearer, generation).await?;
-            return signed_out_view(hosted, origin, configured_client_id).await;
+            return signed_out_view(hosted, origin).await;
         }
         Err(error) => return Err(error.into()),
     };
@@ -862,10 +837,12 @@ pub(crate) async fn account_view(
     let resumable = store
         .get(&checkpoint_key(origin, &session.account_id))?
         .is_some_and(|value| !value.is_empty());
+    let providers = sign_in_providers(hosted, origin).await.unwrap_or_default();
     Ok(HostedAccountView {
-        available: sign_in_available(hosted, origin, configured_client_id)
-            .await
-            .unwrap_or(false),
+        available: !providers.is_empty(),
+        providers,
+        // The current native account DTO does not expose deletion state yet.
+        deletion_pending: false,
         signed_in: true,
         account_label: None,
         classification: Some(account.classification),
@@ -1395,10 +1372,12 @@ async fn replace_observed_session_expiry(
     Ok(true)
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 struct Loopback {
     listener: TcpListener,
     uri: String,
 }
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 impl Loopback {
     async fn bind() -> BridgeResult<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|_| {
@@ -1431,7 +1410,7 @@ impl Loopback {
             let Ok(accepted) = tokio::time::timeout(remaining, self.listener.accept()).await else {
                 return Err(BridgeError::new(
                     "hosted-sign-in-timeout",
-                    "Google sign-in timed out.",
+                    "Hosted sign-in timed out.",
                 ));
             };
             let Ok((mut stream, _)) = accepted else {
@@ -1457,17 +1436,14 @@ impl Loopback {
                 CallbackRequest::Unrelated => continue,
                 CallbackRequest::Cancelled => (
                     callback_page::CallbackOutcome::Cancelled,
-                    Err(BridgeError::new(
-                        "hosted-sign-in-cancelled",
-                        "Google sign-in was cancelled.",
-                    )),
+                    Err(cancelled_error()),
                 ),
                 CallbackRequest::Code(code) => (callback_page::CallbackOutcome::Received, Ok(code)),
                 CallbackRequest::MissingCode => (
                     callback_page::CallbackOutcome::Received,
                     Err(BridgeError::new(
                         "hosted-sign-in",
-                        "Google did not return a sign-in code.",
+                        "Hosted sign-in did not return a code.",
                     )),
                 ),
             };
@@ -1481,6 +1457,7 @@ impl Loopback {
 
 /// What one loopback request line means for the pending sign-in.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 enum CallbackRequest {
     /// Not this sign-in's callback: malformed, another path, or without the expected `state`.
     Unrelated,
@@ -1489,8 +1466,9 @@ enum CallbackRequest {
     MissingCode,
 }
 
-/// Only a request to `/` carrying this sign-in's `state` may finish it, so an unrelated local
+/// Only a request to `/callback` carrying this sign-in's `state` may finish it, so an unrelated local
 /// connection can neither cancel the sign-in nor substitute a code.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn classify_callback_request(line: &str, expected_state: &str) -> CallbackRequest {
     let Some(target) = line.split_whitespace().nth(1) else {
         return CallbackRequest::Unrelated;
@@ -1498,7 +1476,7 @@ fn classify_callback_request(line: &str, expected_state: &str) -> CallbackReques
     let Ok(url) = url::Url::parse(&format!("http://127.0.0.1{target}")) else {
         return CallbackRequest::Unrelated;
     };
-    if url.path() != "/" {
+    if url.path() != "/callback" {
         return CallbackRequest::Unrelated;
     }
     let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -1519,6 +1497,7 @@ fn classify_callback_request(line: &str, expected_state: &str) -> CallbackReques
         })
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 async fn read_callback_request_line(
     stream: &mut (impl tokio::io::AsyncRead + Unpin),
     deadline: Duration,
@@ -1572,26 +1551,264 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     }
     difference == 0
 }
-fn google_url(
-    client_id: &str,
-    redirect: &str,
+fn app_authorize_url(
+    origin: &str,
     challenge: &str,
     state: &str,
-    nonce: &str,
-) -> String {
-    let mut url =
-        url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth").expect("constant URL");
+    provider: &str,
+    return_to: &str,
+) -> BridgeResult<String> {
+    let mut url = url::Url::parse(&format!("{origin}{}", web_routes::APP_AUTHORIZE))
+        .map_err(|_| invalid_response())?;
     url.query_pairs_mut()
-        .append_pair("response_type", "code")
-        .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", redirect)
-        .append_pair("scope", "openid email")
-        .append_pair("code_challenge", challenge)
-        .append_pair("code_challenge_method", "S256")
+        .append_pair("challenge", challenge)
         .append_pair("state", state)
-        .append_pair("nonce", nonce)
-        .append_pair("prompt", "select_account");
-    url.into()
+        .append_pair("provider", provider)
+        .append_pair("return_to", return_to);
+    Ok(url.into())
+}
+
+fn native_session_request(code: &str, verifier: &str) -> BridgeResult<String> {
+    serde_json::to_string(&NativeSessionExchangeRequest {
+        code: code.to_owned(),
+        verifier: verifier.to_owned(),
+    })
+    .map_err(|_| invalid_response())
+}
+
+const SYSTEM_BROWSER_DEADLINE: Duration = Duration::from_secs(300);
+
+fn is_system_browser_cancellation(error_domain: &str, code: isize) -> bool {
+    error_domain == "ASWebAuthenticationSessionErrorDomain" && code == 1
+}
+
+async fn await_system_browser_completion<T>(
+    receiver: tokio::sync::oneshot::Receiver<BridgeResult<T>>,
+    deadline: Duration,
+    release_session: impl FnOnce(),
+) -> BridgeResult<T> {
+    match tokio::time::timeout(deadline, receiver).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(BridgeError::new(
+            "hosted-sign-in",
+            "Hosted sign-in did not complete.",
+        )),
+        Err(_) => {
+            release_session();
+            Err(BridgeError::new(
+                "hosted-sign-in-timeout",
+                "Hosted sign-in timed out.",
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated, unexpected_cfgs)]
+async fn authenticate_with_system_browser(
+    window: &tauri::WebviewWindow,
+    auth: String,
+    state: &str,
+) -> BridgeResult<Zeroizing<String>> {
+    use std::sync::OnceLock;
+
+    use cocoa::{
+        base::{id, nil},
+        foundation::NSString,
+    };
+    use objc::{
+        class,
+        declare::ClassDecl,
+        msg_send,
+        runtime::{Class, Object, Sel},
+        sel, sel_impl,
+    };
+    use objc2_authentication_services as _;
+    use objc2_foundation::{NSError, NSURL};
+
+    fn release_session_objects(
+        objects: &std::sync::Arc<std::sync::Mutex<Option<(usize, usize)>>>,
+        cancel: bool,
+    ) {
+        let Some((session, provider)) = objects.lock().unwrap().take() else {
+            return;
+        };
+        unsafe {
+            let session = session as id;
+            let provider = provider as id;
+            if cancel {
+                let _: () = msg_send![session, cancel];
+            }
+            let _: () = msg_send![session, release];
+            let _: () = msg_send![provider, release];
+        }
+    }
+
+    extern "C" fn presentation_anchor(provider: &Object, _: Sel, _: id) -> id {
+        unsafe { *provider.get_ivar("anchor") }
+    }
+
+    fn presentation_provider_class() -> *const Class {
+        static CLASS: OnceLock<usize> = OnceLock::new();
+        *CLASS.get_or_init(|| {
+            let superclass = class!(NSObject);
+            let mut declaration =
+                ClassDecl::new("PeppyAuthenticationPresentationContext", superclass)
+                    .expect("presentation provider class is registered once");
+            declaration.add_ivar::<id>("anchor");
+            unsafe {
+                declaration.add_method(
+                    sel!(presentationAnchorForWebAuthenticationSession:),
+                    presentation_anchor as extern "C" fn(&Object, Sel, id) -> id,
+                );
+            }
+            declaration.register() as *const Class as usize
+        }) as *const Class
+    }
+
+    let expected_state = state.to_owned();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let sender = std::sync::Arc::new(std::sync::Mutex::new(Some(sender)));
+    let session_objects = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let auth_for_main = auth.clone();
+    let presentation_window = window.clone();
+    let completion_sender = sender.clone();
+    let completion_objects = session_objects.clone();
+    let session_objects_for_main = session_objects.clone();
+    window
+        .run_on_main_thread(move || unsafe {
+            let session_class = class!(ASWebAuthenticationSession);
+            let Ok(anchor) = presentation_window.ns_window() else {
+                let _ = sender.lock().unwrap().take().map(|sender| {
+                    sender.send(Err(BridgeError::new(
+                        "hosted-sign-in",
+                        "Could not present the secure sign-in window.",
+                    )))
+                });
+                return;
+            };
+            let provider: id = msg_send![presentation_provider_class(), alloc];
+            let provider: id = msg_send![provider, init];
+            (*provider).set_ivar("anchor", anchor.cast::<Object>());
+            let url = NSString::alloc(nil).init_str(&auth_for_main);
+            let scheme = NSString::alloc(nil).init_str("org.peppy.desktop");
+            let url: id = msg_send![class!(NSURL), URLWithString: url];
+            let completion: block2::RcBlock<dyn Fn(*mut NSURL, *mut NSError)> =
+                block2::RcBlock::new(move |callback_url: *mut NSURL, error: *mut NSError| {
+                    let callback_url = callback_url.cast::<Object>();
+                    let error = error.cast::<Object>();
+                    let result = if callback_url != nil {
+                        let value: id = msg_send![callback_url, absoluteString];
+                        let bytes: *const std::ffi::c_char = msg_send![value, UTF8String];
+                        if bytes.is_null() {
+                            Err(BridgeError::new(
+                                "hosted-sign-in",
+                                "The sign-in callback was invalid.",
+                            ))
+                        } else {
+                            let callback = std::ffi::CStr::from_ptr(bytes).to_string_lossy();
+                            classify_native_callback(&callback, &expected_state)
+                        }
+                    } else if error != nil {
+                        let code: isize = msg_send![error, code];
+                        let domain: id = msg_send![error, domain];
+                        let domain_bytes: *const std::ffi::c_char = msg_send![domain, UTF8String];
+                        let is_cancelled = !domain_bytes.is_null()
+                            && is_system_browser_cancellation(
+                                &std::ffi::CStr::from_ptr(domain_bytes).to_string_lossy(),
+                                code,
+                            );
+                        if is_cancelled {
+                            Err(cancelled_error())
+                        } else {
+                            Err(BridgeError::new(
+                                "hosted-sign-in",
+                                "Hosted sign-in did not complete.",
+                            ))
+                        }
+                    } else {
+                        Err(BridgeError::new(
+                            "hosted-sign-in",
+                            "Hosted sign-in did not complete.",
+                        ))
+                    };
+                    release_session_objects(&completion_objects, false);
+                    let _ = completion_sender
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .map(|sender| sender.send(result));
+                });
+            let session: id = msg_send![session_class, alloc];
+            let session: id = msg_send![session,
+                initWithURL: url
+                callbackURLScheme: scheme
+                completionHandler: block2::RcBlock::as_ptr(&completion)
+            ];
+            let _: () = msg_send![session, setPresentationContextProvider: provider];
+            let _: () = msg_send![session, setPrefersEphemeralWebBrowserSession: false];
+            *session_objects_for_main.lock().unwrap() = Some((session as usize, provider as usize));
+            let started: bool = msg_send![session, start];
+            if !started {
+                release_session_objects(&session_objects_for_main, false);
+                let _ = sender.lock().unwrap().take().map(|sender| {
+                    sender.send(Err(BridgeError::new(
+                        "hosted-sign-in",
+                        "Could not present the secure sign-in window.",
+                    )))
+                });
+            }
+        })
+        .map_err(|_| {
+            BridgeError::new(
+                "hosted-sign-in",
+                "Could not present the secure sign-in window.",
+            )
+        })?;
+    let timeout_window = window.clone();
+    await_system_browser_completion(receiver, SYSTEM_BROWSER_DEADLINE, move || {
+        let session_objects = session_objects.clone();
+        let _ = timeout_window.run_on_main_thread(move || {
+            release_session_objects(&session_objects, true);
+        });
+    })
+    .await
+}
+
+fn cancelled_error() -> BridgeError {
+    BridgeError::new("cancelled", "Hosted sign-in was cancelled.")
+}
+
+fn classify_native_callback(
+    callback: &str,
+    expected_state: &str,
+) -> BridgeResult<Zeroizing<String>> {
+    let url = url::Url::parse(callback)
+        .map_err(|_| BridgeError::new("hosted-sign-in", "The sign-in callback was invalid."))?;
+    if url.scheme() != "org.peppy.desktop" || url.path() != "/auth/callback" {
+        return Err(BridgeError::new(
+            "hosted-sign-in",
+            "The sign-in callback was invalid.",
+        ));
+    }
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    if !query
+        .get("state")
+        .is_some_and(|state| constant_time_eq(state.as_bytes(), expected_state.as_bytes()))
+    {
+        return Err(BridgeError::new(
+            "hosted-sign-in",
+            "The sign-in callback was invalid.",
+        ));
+    }
+    if query.contains_key("error") {
+        return Err(cancelled_error());
+    }
+    query
+        .get("code")
+        .filter(|code| !code.is_empty() && code.len() <= 8192)
+        .map(|code| Zeroizing::new(code.to_owned()))
+        .ok_or_else(|| BridgeError::new("hosted-sign-in", "The sign-in callback was invalid."))
 }
 fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
@@ -1601,12 +1818,6 @@ fn pkce_challenge(verifier: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn absent_client_id_is_unavailable() {
-        if client_id().is_none() {
-            assert!(!HostedAccountView::unavailable().available);
-        }
-    }
     #[test]
     fn pkce_is_s256() {
         assert_eq!(
@@ -1634,10 +1845,10 @@ mod tests {
             "GET :99999/ HTTP/1.1",
             "GET /favicon.ico HTTP/1.1",
             "GET / HTTP/1.1",
-            "GET /?error=access_denied HTTP/1.1",
-            "GET /?error=access_denied&state=other HTTP/1.1",
-            "GET /?code=forged&state=other HTTP/1.1",
-            "GET /?code=forged&state=expected-stat HTTP/1.1",
+            "GET /callback?error=access_denied HTTP/1.1",
+            "GET /callback?error=access_denied&state=other HTTP/1.1",
+            "GET /callback?code=forged&state=other HTTP/1.1",
+            "GET /callback?code=forged&state=expected-stat HTTP/1.1",
             "GET /favicon.ico?code=x&state=expected-state HTTP/1.1",
         ] {
             assert_eq!(
@@ -1648,19 +1859,22 @@ mod tests {
         }
         assert_eq!(
             classify_callback_request(
-                "GET /?error=access_denied&state=expected-state HTTP/1.1",
+                "GET /callback?error=access_denied&state=expected-state HTTP/1.1",
                 CALLBACK_STATE
             ),
             CallbackRequest::Cancelled
         );
         assert_eq!(
-            classify_callback_request("GET /?state=expected-state HTTP/1.1", CALLBACK_STATE),
+            classify_callback_request(
+                "GET /callback?state=expected-state HTTP/1.1",
+                CALLBACK_STATE
+            ),
             CallbackRequest::MissingCode
         );
         assert_eq!(
             classify_callback_request(
                 &format!(
-                    "GET /?code={}&state=expected-state HTTP/1.1",
+                    "GET /callback?code={}&state=expected-state HTTP/1.1",
                     "c".repeat(8193)
                 ),
                 CALLBACK_STATE
@@ -1669,11 +1883,91 @@ mod tests {
         );
         assert_eq!(
             classify_callback_request(
-                "GET /?code=auth-code&state=expected-state HTTP/1.1",
+                "GET /callback?code=auth-code&state=expected-state HTTP/1.1",
                 CALLBACK_STATE
             ),
             CallbackRequest::Code(Zeroizing::new("auth-code".into()))
         );
+    }
+
+    #[test]
+    fn native_callback_requires_matching_state_and_maps_provider_errors_to_cancelled() {
+        assert_eq!(
+            classify_native_callback(
+                "org.peppy.desktop:/auth/callback?code=forged&state=other",
+                CALLBACK_STATE,
+            )
+            .unwrap_err()
+            .code,
+            "hosted-sign-in"
+        );
+        assert_eq!(
+            classify_native_callback(
+                "org.peppy.desktop:/auth/callback?error=access_denied&state=expected-state",
+                CALLBACK_STATE,
+            )
+            .unwrap_err()
+            .code,
+            "cancelled"
+        );
+        assert_eq!(
+            classify_native_callback(
+                "org.peppy.desktop:/other?code=forged&state=expected-state",
+                CALLBACK_STATE,
+            )
+            .unwrap_err()
+            .code,
+            "hosted-sign-in"
+        );
+    }
+
+    #[test]
+    fn system_browser_cancellation_requires_the_authentication_session_domain() {
+        assert!(is_system_browser_cancellation(
+            "ASWebAuthenticationSessionErrorDomain",
+            1
+        ));
+        assert!(!is_system_browser_cancellation("NSURLErrorDomain", 1));
+        assert!(!is_system_browser_cancellation(
+            "ASWebAuthenticationSessionErrorDomain",
+            2
+        ));
+    }
+
+    #[tokio::test]
+    async fn system_browser_timeout_releases_the_session_and_returns_timeout() {
+        let (_sender, receiver) = tokio::sync::oneshot::channel::<BridgeResult<()>>();
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_session = released.clone();
+
+        let error =
+            await_system_browser_completion(receiver, Duration::from_millis(1), move || {
+                release_session.store(true, Ordering::SeqCst)
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "hosted-sign-in-timeout");
+        assert!(released.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn native_session_exchange_uses_the_attempt_verifier() {
+        let request: serde_json::Value = serde_json::from_str(
+            &native_session_request("returned-code", "attempt-verifier").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["code"], "returned-code");
+        assert_eq!(request["verifier"], "attempt-verifier");
+    }
+
+    #[tokio::test]
+    async fn loopback_is_ipv4_only_and_releases_its_port_after_use() {
+        let loopback = Loopback::bind().await.unwrap();
+        let address = loopback.listener.local_addr().unwrap();
+        assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
+        drop(loopback);
+        TcpListener::bind(address).await.unwrap();
     }
 
     #[tokio::test]
@@ -1685,7 +1979,7 @@ mod tests {
         let (mut server, _) = listener.accept().await.unwrap();
         client
             .write_all(
-                b"GET /?code=auth-code&state=expected-state HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                b"GET /callback?code=auth-code&state=expected-state HTTP/1.1\r\nHost: localhost\r\n\r\n",
             )
             .await
             .unwrap();
@@ -1714,7 +2008,7 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream
             .write_all(
-                b"GET /?code=auth-code&state=expected-state HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                b"GET /callback?code=auth-code&state=expected-state HTTP/1.1\r\nHost: localhost\r\n\r\n",
             )
             .await
             .unwrap();
@@ -1824,9 +2118,9 @@ mod tests {
             &[b"GET / HTTP/1.1\r\n\r\n".as_slice()],
             &[b"GARBAGE\r\n\r\n".as_slice()],
             &[b"GET :99999/ HTTP/1.1\r\n\r\n".as_slice()],
-            &[b"GET /?error=access_denied HTTP/1.1\r\n\r\n".as_slice()],
-            &[b"GET /?code=forged&state=other HTTP/1.1\r\n\r\n".as_slice()],
-            &[b"GET /?code=cut-off&state=expected-state".as_slice()],
+            &[b"GET /callback?error=access_denied HTTP/1.1\r\n\r\n".as_slice()],
+            &[b"GET /callback?code=forged&state=other HTTP/1.1\r\n\r\n".as_slice()],
+            &[b"GET /callback?code=cut-off&state=expected-state".as_slice()],
             &[b"\xff\xfe\r\n\r\n".as_slice()],
             &[oversized.as_slice()],
         ] {
@@ -1839,7 +2133,7 @@ mod tests {
         let response = send_callback_connection(
             &address,
             &[
-                b"GET /?code=auth-code&st",
+                b"GET /callback?code=auth-code&st",
                 b"ate=expected-state HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
             ],
         )
@@ -1856,16 +2150,20 @@ mod tests {
         let address = loopback.uri.trim_start_matches("http://").to_owned();
         let receiver = tokio::spawn(async move { loopback.receive(CALLBACK_STATE).await });
 
-        send_callback_connection(&address, &[b"GET /?error=access_denied HTTP/1.1\r\n\r\n"]).await;
+        send_callback_connection(
+            &address,
+            &[b"GET /callback?error=access_denied HTTP/1.1\r\n\r\n"],
+        )
+        .await;
         assert!(!receiver.is_finished());
         send_callback_connection(
             &address,
-            &[b"GET /?error=access_denied&state=expected-state HTTP/1.1\r\n\r\n"],
+            &[b"GET /callback?error=access_denied&state=expected-state HTTP/1.1\r\n\r\n"],
         )
         .await;
 
         let error = receiver.await.unwrap().unwrap_err();
-        assert_eq!(error.code, "hosted-sign-in-cancelled");
+        assert_eq!(error.code, "cancelled");
     }
 }
 

@@ -45,6 +45,38 @@ pub fn close_operation(is_main: bool, tray_available: bool, is_panel: bool) -> O
     }
 }
 
+pub const CLOSE_NOTICE_TITLE: &str = "Peppy is still running";
+pub const CLOSE_NOTICE_MACOS: &str = "Closing this window doesn't quit Peppy. It keeps running in the menu bar so you still get your messages. To quit, choose Quit Peppy from the Peppy icon in the menu bar.";
+pub const CLOSE_NOTICE_OTHER: &str = "Closing this window doesn't quit Peppy. It keeps running in the notification area so you still get your messages. To quit, right-click the Peppy icon in the notification area and choose Quit Peppy. If you don't see it, click the arrow to show hidden icons.";
+
+fn should_show_close_notice(already_shown: bool, tray_available: bool, quitting: bool) -> bool {
+    !already_shown && tray_available && !quitting
+}
+
+pub(crate) fn show_close_notice_once(app: &tauri::AppHandle) {
+    let state = app.state::<crate::AppState>();
+    if !should_show_close_notice(
+        state
+            .config()
+            .map(|config| config.close_notice_shown)
+            .unwrap_or(true),
+        crate::TRAY_ACTIVE.load(std::sync::atomic::Ordering::Relaxed),
+        state
+            .quit_requested
+            .load(std::sync::atomic::Ordering::Acquire),
+    ) {
+        return;
+    }
+    let message = if cfg!(target_os = "macos") {
+        CLOSE_NOTICE_MACOS
+    } else {
+        CLOSE_NOTICE_OTHER
+    };
+    if crate::dialogs::inform(app, CLOSE_NOTICE_TITLE, message) {
+        let _ = state.update_config(|config| config.close_notice_shown = true);
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
@@ -833,6 +865,7 @@ fn apply_completion(
                 };
                 if label == crate::tray::MAIN {
                     crate::startup::background_main(app)?;
+                    show_close_notice_once(app);
                 } else {
                     match action {
                         Action::Close => window.destroy().map_err(|_| {
@@ -1165,6 +1198,17 @@ mod tests {
             close_operation(false, true, false),
             Operation::Window(Action::Close)
         );
+    }
+
+    #[test]
+    fn close_notice_copy_and_flag_are_pinned() {
+        assert_eq!(CLOSE_NOTICE_TITLE, "Peppy is still running");
+        assert!(CLOSE_NOTICE_MACOS.contains("menu bar"));
+        assert!(CLOSE_NOTICE_OTHER.contains("notification area"));
+        assert!(should_show_close_notice(false, true, false));
+        assert!(!should_show_close_notice(true, true, false));
+        assert!(!should_show_close_notice(false, false, false));
+        assert!(!should_show_close_notice(false, true, true));
     }
 
     #[tokio::test]

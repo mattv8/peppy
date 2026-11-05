@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import QRCode from "qrcode";
-import { BusyIndicator } from "@peppy/desktop-ui";
-import { bridge, discardComputerClaimant as discardNativeComputerClaimant, type ComputerClaimantView, type EnrollmentView, type HostedAccountView } from "../bridge/bridge";
+import { BillingElsewhereNotice, BusyIndicator, StorePlanOptions } from "@peppy/desktop-ui";
+import { bridge, discardComputerClaimant as discardNativeComputerClaimant, type BillingSummaryView, type ComputerClaimantView, type EnrollmentView, type HostedAccountView, type PurchaseOptions, type StoreProduct } from "../bridge/bridge";
 import { peppyCopy, type PeppyCopyKey } from "../generated/peppyCopy";
 import "./setup-landing.css";
 
@@ -12,9 +12,20 @@ type Method = "transfer" | "shared_secret";
 type Stage = EnrollmentView["stage"] | ComputerClaimantView["stage"] | "computer_claim_error";
 type InvitationAttempt = "idle" | "starting" | "active" | "stopped";
 type PendingOperation = { id: number; label: PeppyCopyKey };
+type SignInProvider = "apple" | "google";
 type EnrollmentOperation = { action: (isCurrent: () => boolean) => Promise<EnrollmentView>; retry: () => void; label: PeppyCopyKey; startOver?: boolean; reconcileCreateOwner?: boolean };
 
 const copy = (key: PeppyCopyKey) => peppyCopy[key];
+const TERMS_OF_USE_URL = "https://peppy.pro/terms";
+const PRIVACY_POLICY_URL = "https://peppy.pro/privacy";
+const openExternal = async (url: string) => {
+  try {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+  } catch {
+    // Link failures are intentionally silent; purchase controls remain usable.
+  }
+};
 const pollingStages = new Set<Stage>(["waiting_phone", "verify_phone", "phone_approved"]);
 const reconciliationStages = new Set<Stage>(["server", "setup", "signin"]);
 const pollIntervalMs = 4_000;
@@ -137,6 +148,13 @@ function Stage({ stage, setupMode, children }: { stage: Stage; setupMode?: "open
   return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage} data-setup-mode={setupMode}>{children}</div>;
 }
 
+function PaywallControls({ options, summary, products, state, subscribeLabel, onRefresh }: { options: PurchaseOptions; summary: BillingSummaryView; products: StoreProduct[]; state: "loading" | "ready" | "unavailable"; subscribeLabel?: string; onRefresh(): Promise<unknown> }) {
+  if (summary.provider === "stripe" && options.appStore) return <BillingElsewhereNotice variant={options.website ? "website" : "other"} provider="stripe" copy={peppyCopy} onManageWebsite={options.website ? bridge.hosted_open_billing : undefined} />;
+  if (summary.provider === "apple" && !options.appStore) return <BillingElsewhereNotice variant="apple" provider="apple" copy={peppyCopy} onManageAppStore={bridge.open_store_subscriptions} />;
+  if (!options.appStore) return null;
+  return <StorePlanOptions purchaseOptions={options} billingProvider={summary.provider} products={products} state={state} copy={peppyCopy} subscribeLabel={subscribeLabel} onPurchase={bridge.store_purchase} onPurchased={onRefresh} onRestore={async () => { await bridge.store_restore(); await onRefresh(); }} onRetry={() => void onRefresh()} onOpenTerms={() => void openExternal(TERMS_OF_USE_URL)} onOpenPrivacy={() => void openExternal(PRIVACY_POLICY_URL)} />;
+}
+
 function DiscardComputerClaimant({ confirming, busy, onConfirming, onDiscard }: { confirming: boolean; busy: boolean; onConfirming(value: boolean): void; onDiscard(): Promise<void> }) {
   const safeButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (confirming) safeButton.current?.focus(); }, [confirming]);
@@ -145,7 +163,7 @@ function DiscardComputerClaimant({ confirming, busy, onConfirming, onDiscard }: 
   return <button id="computer-discard-button" className="secondary-button" disabled={busy} onClick={() => onConfirming(true)}>{copy("computer_discard_cta")}</button>;
 }
 
-export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEstablished = false, addingPhone = false, connectionPending = false, onExit, onDeferPhone, onJoined, onInitialEnrollmentStart, fixedOrigin, accountUrl, newIdentity = false, hostKind = "native" }: {
+export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEstablished = false, addingPhone = false, connectionPending = false, onExit, onDeferPhone, onJoined, onInitialEnrollmentStart, fixedOrigin, accountUrl, newIdentity = false, hostKind = "native", reenrol = false }: {
   mode: Mode;
   onMode(mode: Mode): void;
   enrolledWithoutPhone: boolean;
@@ -161,6 +179,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   /** Host-provided local identity state; a locked saved identity must not start a claimant flow. */
   newIdentity?: boolean;
   hostKind?: "native" | "browser";
+  reenrol?: boolean;
 }) {
   const [account, setAccount] = useState<HostedAccountView | null>(null);
   const [accountLoading, setAccountLoading] = useState(!fixedOrigin && mode === "hosted" && !enrolledWithoutPhone);
@@ -168,7 +187,13 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const [signOutError, setSignOutError] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [signInError, setSignInError] = useState(false);
+  const [signInProvider, setSignInProvider] = useState<SignInProvider | null>(null);
+  const [purchaseOptions, setPurchaseOptions] = useState<PurchaseOptions | null>(null);
+  const [billingSummary, setBillingSummary] = useState<BillingSummaryView>({ provider: "none", manageableIn: "none", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+  const [storeProducts, setStoreProducts] = useState<StoreProduct[]>([]);
+  const [storeState, setStoreState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [recoveryPending, setRecoveryPending] = useState(false);
+  const [recoveryProvider, setRecoveryProvider] = useState<SignInProvider | null>(null);
   const [hostedPath, setHostedPath] = useState<HostedPath>("chooser");
   const [view, setView] = useState<EnrollmentView | null>(null);
   const [computerClaimant, setComputerClaimant] = useState<ComputerClaimantView | null>(null);
@@ -348,25 +373,33 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     computerFinishFailures.current = 0;
     void bridge.enrollment_cancel_computer().catch(() => undefined);
   };
-  const refreshAccount = async () => {
+  const refreshAccount = async (initial = account === null) => {
     const epoch = ++accountFetchEpoch.current;
     setAccountError(false);
-    setAccountLoading(true);
-    setHostedOperation("production_pairing_checking");
+    if (initial) { setAccountLoading(true); setHostedOperation("production_pairing_checking"); }
     try {
       const next = await bridge.hosted_account();
-      if (epoch === accountFetchEpoch.current) setAccount(next);
+      if (epoch === accountFetchEpoch.current) {
+        setAccount(next);
+        const options = await bridge.purchase_options();
+        if (epoch !== accountFetchEpoch.current) return next;
+        setPurchaseOptions(options);
+        try { setBillingSummary(await bridge.billing_summary()); } catch { setBillingSummary({ provider: "none", manageableIn: "none", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }); }
+        if (options.appStore) {
+          try { const products = await bridge.store_products(); setStoreProducts(products); setStoreState(products.length ? "ready" : "unavailable"); }
+          catch { setStoreState("unavailable"); }
+        } else setStoreState("ready");
+      }
       return next;
     } catch {
       if (epoch === accountFetchEpoch.current) {
-        setAccount(null);
+        if (initial) setAccount(null);
         setAccountError(true);
       }
       return null;
     } finally {
       if (epoch === accountFetchEpoch.current) {
-        setAccountLoading(false);
-        setHostedOperation(null);
+        if (initial) { setAccountLoading(false); setHostedOperation(null); }
       }
     }
   };
@@ -434,7 +467,11 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const applyComputerClaimant = (next: ComputerClaimantView, epoch = computerEpoch.current, fromPoll = false) => {
     if (!mounted.current || epoch !== computerEpoch.current) return;
     setComputerPollError(false);
-    setComputerClaimant(current => epoch !== computerEpoch.current || !current || current.stage === "computer_connected" ? current : fromPoll && (current.stage === "computer_approved" || current.stage === "computer_finishing") && ["computer_waiting", "computer_expired"].includes(next.stage) ? current : next);
+    setComputerClaimant(current => {
+      if (epoch !== computerEpoch.current || current?.stage === "computer_connected") return current;
+      if (current === null) return next;
+      return fromPoll && (current.stage === "computer_approved" || current.stage === "computer_finishing") && ["computer_waiting", "computer_expired"].includes(next.stage) ? current : next;
+    });
   };
   const beginComputerClaimant = async () => {
     const epoch = ++computerEpoch.current;
@@ -447,7 +484,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     const pendingId = beginPending("production_pairing_preparing");
     try {
       const next = await bridge.enrollment_connect_computer();
-      if (epoch === computerEpoch.current) setComputerClaimant(next);
+      applyComputerClaimant(next, epoch);
     } catch (error) {
       if (!mounted.current || epoch !== computerEpoch.current) return;
       const errorCode = thrownErrorCode(error);
@@ -724,14 +761,15 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     setHostedPath("chooser");
   };
 
-  const signIn = async (): Promise<HostedAccountView | null> => {
+  const signIn = async (provider: SignInProvider): Promise<HostedAccountView | null> => {
     recordModeChoice("hosted");
     const epoch = ++signInEpoch.current;
     setSignInError(false);
+    setSignInProvider(provider);
     setHostedOperation("production_pairing_connecting");
     setBusy(true);
     try {
-      const next = await bridge.hosted_sign_in("google");
+      const next = await bridge.hosted_sign_in(provider);
       if (epoch === signInEpoch.current) {
         if (next.signedIn) {
           accountFetchEpoch.current += 1;
@@ -740,11 +778,12 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
         }
         setSignInError(true);
       }
-    } catch {
-      if (epoch === signInEpoch.current) setSignInError(true);
+    } catch (error) {
+      if (epoch === signInEpoch.current && !(typeof error === "object" && error !== null && "code" in error && error.code === "cancelled")) setSignInError(true);
     } finally {
       if (epoch === signInEpoch.current) {
         setBusy(false);
+        setSignInProvider(null);
         setHostedOperation(null);
       }
     }
@@ -793,6 +832,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     };
   }, [fixedOrigin, mode, enrolledWithoutPhone]);
   useEffect(() => {
+    if (!reenrol || computerClaimant || computerClaimantError) return;
+    void beginComputerClaimant();
+  }, [reenrol]);
+  useEffect(() => {
     if (!fixedOrigin || fixedStarted.current) return;
     fixedStarted.current = true;
     void discover(fixedOrigin);
@@ -814,6 +857,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       : hostedPath === "existing" ? "enrollment" : hostedPath === "new" ? "new" : "chooser";
   const recoveryActive = !fixedOrigin && mode === "hosted"
     && (view?.errorCode === "hosted-session-required" || provisionError === "hosted-session-required");
+
+  useEffect(() => {
+    if (recoveryActive && account === null) void refreshAccount(false);
+  }, [account, recoveryActive]);
 
   useEffect(() => {
     if (addingPhone || community || route !== "enrollment" || discoverStarted.current) return;
@@ -1072,12 +1119,13 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       }
     });
   };
-  const recoverHostedSession = async () => {
+  const recoverHostedSession = async (provider: SignInProvider) => {
     if (recoveryInFlight.current) return;
     recoveryInFlight.current = true;
     const epoch = ++recoveryEpoch.current;
     setRecoveryPending(true);
-    const next = await signIn();
+    setRecoveryProvider(provider);
+    const next = await signIn(provider);
     if (!next || !mounted.current || epoch !== recoveryEpoch.current) return;
     if (provisionError === "hosted-session-required") {
       setProvisionError(null);
@@ -1091,6 +1139,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     if (!recoveryActive || !busy) {
       recoveryInFlight.current = false;
       setRecoveryPending(false);
+      setRecoveryProvider(null);
     }
   }, [busy, recoveryActive, recoveryPending]);
   const exitRecovery = () => {
@@ -1370,9 +1419,11 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const recoveryPanel = (
     <section id="hosted-session-recovery-panel">
       <Heading>Sign in again to continue</Heading>
-      <p>Your Peppy Hosted sign-in is no longer valid. Sign in again with the same Google account to continue. Your saved data and setup progress will be kept.</p>
+      <p id="hosted_session_recovery_body">{copy("hosted_session_recovery_body")}</p>
+      <div id="hosted-session-recovery-options" role="group" aria-label={copy("hosted_sign_in_group_label")}>
+        {(account?.providers ?? []).map(provider => <button key={provider} id={`hosted-session-recovery-${provider}-button`} className="secondary-button provider-button" data-provider={provider} disabled={busy || recoveryPending} aria-busy={recoveryProvider === provider || undefined} onClick={() => void recoverHostedSession(provider)}>{provider === "apple" ? copy("hosted_sign_in_apple") : copy("hosted_sign_in_google")}</button>)}
+      </div>
       <div id="hosted-session-recovery-actions" className="enrollment-actions">
-        <button id="hosted-session-recovery-button" className="primary-button" disabled={busy || recoveryPending} onClick={() => void recoverHostedSession()}>Sign in again with Google</button>
         {onExit && <button id="hosted-session-recovery-close-button" className="secondary-button" onClick={exitRecovery}>Close</button>}
       </div>
       {signInError && <p id="hosted-session-recovery-error" role="alert">{copy("production_signin_failed")}</p>}
@@ -1384,17 +1435,19 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     <>
       {route === "checking" && <section id="hosted-account-checking" aria-busy="true"><h2 tabIndex={-1}>{copy("hosted_account_checking")}</h2></section>}
       {route === "chooser" && <div id="hosted-path-chooser">{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}<div className="chooser-buttons"><button ref={choice} id="hosted-choice-existing" className="chooser-button" onClick={chooseExisting}><span className="chooser-button-label">{copy("setup_choice_existing")}</span><span className="chooser-button-hint">{copy("setup_choice_existing_hint")}</span></button><button id="hosted-choice-new" className="chooser-button" onClick={chooseNew}><span className="chooser-button-label">{copy("setup_choice_new")}</span><span className="chooser-button-hint">{copy("setup_choice_new_hint")}</span></button></div></div>}
-      {route === "new" && <section id="hosted-signin-panel" data-section="signin"><h2 tabIndex={-1}>Sign in to your Peppy account</h2><p>{copy("hosted_sign_in_body")} Signing in does not unlock your vault.</p><button id="hosted-signin-google-button" className="primary-button" disabled={!account?.available || busy} onClick={() => void signIn()}>{copy("hosted_sign_in_google")}</button>{account && !account.available && <p id="hosted-signin-unavailable" role="alert">{copy("production_hosted_unavailable")}</p>}{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}{signInError && <p id="hosted-signin-error" role="alert">{copy("production_signin_failed")} <button className="secondary-button" onClick={() => void signIn()}>{copy("try_again")}</button></p>}<button id="setup-back-button" className="secondary-button" onClick={backToChooser}>{copy("back")}</button></section>}
+      {route === "new" && <section id="hosted-signin-panel" data-section="signin"><h2 tabIndex={-1}>Sign in to your Peppy account</h2><p>{copy("hosted_sign_in_body")} Signing in does not unlock your vault.</p>{account?.available && (account.providers ?? []).length ? <div id="hosted-signin-options" role="group" aria-label={copy("hosted_sign_in_group_label")}>{(account.providers ?? []).map(provider => <button key={provider} id={`hosted-signin-${provider}-button`} className="secondary-button provider-button" data-provider={provider} disabled={busy} aria-busy={signInProvider === provider || undefined} onClick={() => void signIn(provider)}>{provider === "apple" ? copy("hosted_sign_in_apple") : copy("hosted_sign_in_google")}</button>)}<p id="hosted-signin-status" role="status">{signInProvider ? copy("hosted_sign_in_waiting") : ""}</p></div> : <p id="hosted-signin-unavailable" role="alert">Sign-in is not available.</p>}{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}{signInError && <p id="hosted-signin-error" role="alert">{copy("production_signin_failed")} <button className="secondary-button" onClick={() => { const provider = signInProvider ?? account?.providers?.[0]; if (provider) void signIn(provider); }}>{copy("try_again")}</button></p>}<button id="setup-back-button" className="secondary-button" onClick={backToChooser}>{copy("back")}</button></section>}
       {route === "enrollment" && <div id="enrollment-panel">{renderEnrollment()}</div>}
-      {route === "lapsed" && <section id="hosted-lapsed-card"><h2 tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" disabled={signingOut} onClick={() => void signOut()}>{copy("settings_server_sign_out")}</button>{signOutError && <p id="hosted-signout-error" role="alert">{copy("hosted_account_check_failed")}</p>}</section>}
-      {route === "billing" && <section id="hosted-billing-card"><h2 tabIndex={-1}>{copy("hosted_subscribe_headline")}</h2><p>{copy("production_billing_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button></section>}
+      {route === "lapsed" && <section id="hosted-lapsed-card" data-purchase-mode={purchaseOptions?.appStore ? purchaseOptions.website ? "both" : "iap" : undefined}><h2 tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p>{purchaseOptions && <PaywallControls options={purchaseOptions} summary={billingSummary} products={storeProducts} state={storeState} subscribeLabel={copy("hosted_lapsed_resubscribe")} onRefresh={refreshAccount} />}{purchaseOptions?.website && (billingSummary.provider !== "apple" && (!purchaseOptions.appStore || billingSummary.provider !== "stripe")) && <button id="hosted-website-button" className="secondary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button>}<button id="hosted-billing-check" className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" disabled={signingOut} onClick={() => void signOut()}>{copy("settings_server_sign_out")}</button>{signOutError && <p id="hosted-signout-error" role="alert">{copy("hosted_account_check_failed")}</p>}</section>}
+      {route === "billing" && <section id="hosted-billing-card" data-purchase-mode={purchaseOptions?.appStore ? purchaseOptions.website ? "both" : "iap" : undefined}><h2 tabIndex={-1}>{copy("hosted_subscribe_headline")}</h2>{purchaseOptions?.website && (billingSummary.provider !== "apple" && (!purchaseOptions.appStore || billingSummary.provider !== "stripe")) && <p>{copy("production_billing_body")}</p>}{purchaseOptions && <PaywallControls options={purchaseOptions} summary={billingSummary} products={storeProducts} state={storeState} onRefresh={refreshAccount} />}<div className="enrollment-actions">{purchaseOptions?.website && (billingSummary.provider !== "apple" && (!purchaseOptions.appStore || billingSummary.provider !== "stripe")) && <button id="hosted-website-button" className="secondary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button>}<button id="hosted-billing-check" className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button></div></section>}
       {route === "provisioning" && <section id="hosted-provisioning-card"><h2 tabIndex={-1}>{copy("provisioning_headline")}</h2><div role="progressbar" aria-label={copy("provisioning_headline")} /><p>{copy("setup_provisioning_body")}</p>{provisionError !== null && <p id="hosted-provision-error" role="alert">{copy("production_provision_retry")}</p>}{provisionError !== null && <p id="hosted-provision-error-code" className="setup-hint" data-error-code={provisionError}>Error code: {provisionError}</p>}{provisionError !== null && <button id="hosted-provision-retry-button" className="secondary-button" disabled={busy} onClick={startProvisioning}>{copy("production_provision_resume")}</button>}</section>}
       {route === "passphrase" && <section id="hosted-passphrase-card"><h2 tabIndex={-1}>{copy("hosted_create_vault_headline")}</h2><p>{copy("hosted_create_vault_body")}</p><button id="passphrase-native-cta-button" className="primary-button" disabled={busy} onClick={startProvisioning}>{copy(provisionError === null ? "production_create_vault" : "try_again")}</button>{provisionError !== null && <p id="hosted-passphrase-error" role="alert">{copy("hosted_create_vault_error")}</p>}{provisionError !== null && <p id="hosted-passphrase-error-code" className="setup-hint" data-error-code={provisionError}>Error code: {provisionError}</p>}</section>}
     </>
   );
 
   let content: ReactNode;
-  if (recoveryActive) {
+  if (reenrol) {
+    content = <section id="reenrol-setup"><div id="enrollment-panel">{renderEnrollment()}</div></section>;
+  } else if (recoveryActive) {
     content = recoveryPanel;
   } else if (community) {
     const headline = hostedBrowser ? "Connect this device" : copy("self_hosted_headline");

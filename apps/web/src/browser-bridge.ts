@@ -5,6 +5,7 @@ import type {
   HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MaximizeButtonRegion, MediaCursor, MediaOpen, MediaPage, MessageWindow,
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
+  BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
   AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
@@ -68,6 +69,9 @@ class BrowserBridgeError extends Error implements BridgeError {
     public readonly draftId?: string,
   ) { super(message); }
 }
+
+/** The browser has no hosted billing data source, so it reports a website-only, unsubscribed default. */
+const BROWSER_BILLING_SUMMARY: BillingSummaryView = { provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false };
 
 function unsupported(method: string): Promise<never> {
   return Promise.reject(new BrowserBridgeError("unsupported", `${method} is unavailable in the browser.`));
@@ -522,6 +526,7 @@ export class BrowserBridge implements DesktopBridge {
   public configure_server(origin: string): Promise<void> { return origin === location.origin ? Promise.resolve() : Promise.reject(new BrowserBridgeError("invalid-origin", "The browser uses its own secure origin.")); }
   public hosted_origin_url(): Promise<string> { return Promise.resolve(location.origin); }
   public get_app_lock_status(): Promise<AppLockStatus> { return unsupported("App lock"); }
+  public retry_app_lock_check(): Promise<AppLockStatus> { return unsupported("App lock"); }
   public set_app_lock(_enabled: boolean): Promise<boolean> { return unsupported("App lock"); }
   public unlock_app(): Promise<boolean> { return unsupported("App lock"); }
   public async request_notification_permission(): Promise<NotificationCheck> {
@@ -700,6 +705,9 @@ export class BrowserBridge implements DesktopBridge {
   }
   public open_composer(): Promise<void> { return unsupported("Additional composer windows"); }
   public set_start_at_login(): Promise<void> { return unsupported("Start at login"); }
+  public startup_status(): Promise<StartupStatus> { return unsupported("Startup status"); }
+  public set_open_in_background(): Promise<void> { return unsupported("Open in the background"); }
+  public open_login_items(): Promise<void> { return unsupported("Login Items settings"); }
   public popout_conversation(): Promise<{ headCreated: boolean; warning?: string }> { return unsupported("Floating conversations"); }
   public hide_head(): Promise<void> { return unsupported("Floating conversations"); }
   public close_composer(): Promise<void> { return unsupported("Closing a composer window"); }
@@ -707,14 +715,21 @@ export class BrowserBridge implements DesktopBridge {
   public acknowledge_lifecycle(): Promise<void> { return unsupported("Window lifecycle controls"); }
   public window(): Promise<void> { return unsupported("Window controls"); }
   public hosted_account(): Promise<never> { return unsupported("Hosted accounts"); }
-  public hosted_sign_in(): Promise<never> { return unsupported("Hosted sign-in"); }
+  public hosted_sign_in(_provider: HostedSignInProvider): Promise<never> { return unsupported("Hosted sign-in"); }
   public hosted_sign_out(): Promise<void> { return unsupported("Hosted sign-out"); }
+  public hosted_delete_account(): Promise<"deleted" | "pending"> { return unsupported("Account deletion"); }
   public hosted_open_billing(): Promise<void> {
     if (!this.accountUrl) return unsupported("Hosted billing");
     window.open(this.accountUrl, "_blank", "noopener,noreferrer");
     return Promise.resolve();
   }
   public hosted_provision(): Promise<void> { return unsupported("Hosted provisioning"); }
+  public billing_summary(): Promise<BillingSummaryView> { return Promise.resolve({ ...BROWSER_BILLING_SUMMARY }); }
+  public purchase_options(): Promise<PurchaseOptions> { return Promise.resolve({ appStore: false, website: true }); }
+  public store_products(): Promise<StoreProduct[]> { return unsupported("App Store purchases"); }
+  public store_purchase(_productId: string): Promise<"purchased" | "pending" | "cancelled"> { return unsupported("App Store purchases"); }
+  public store_restore(): Promise<void> { return unsupported("Restore purchases"); }
+  public open_store_subscriptions(): Promise<void> { return unsupported("App Store subscriptions"); }
 
   private async enrollmentSecretAction(command: string, id: string, title: string, description: string, confirm: string, fields: EnrollmentSecretField[], input: Record<string, unknown> = {}): Promise<EnrollmentView> {
     const secret = await secretDialog({ id, title, description, confirm, fields });

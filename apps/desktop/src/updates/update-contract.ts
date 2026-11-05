@@ -2,6 +2,7 @@ import updateStatusFixture from "./update-status.fixture.json";
 
 /** Canonical Rust update-status DTO mirrored for the desktop renderer boundary. */
 export type UpdateChannel = "stable" | "staging" | "disabled";
+export type Distribution = "direct" | "app_store";
 export type UpdatePhase =
   | "disabled"
   | "idle"
@@ -16,6 +17,7 @@ export type UpdatePhase =
 
 export interface UpdateStatus {
   currentVersion: string;
+  distribution: Distribution;
   channel: UpdateChannel;
   phase: UpdatePhase;
   automatic: boolean;

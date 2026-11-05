@@ -16,8 +16,10 @@ validate_mode() {
 
 macos_mode="${PEPPY_MACOS_SIGNING_MODE-developer-id}"
 windows_mode="${PEPPY_WINDOWS_SIGNING_MODE-authenticode}"
+macos_distribution="${PEPPY_MACOS_DISTRIBUTION-direct}"
 validate_mode PEPPY_MACOS_SIGNING_MODE "$macos_mode" developer-id adhoc
 validate_mode PEPPY_WINDOWS_SIGNING_MODE "$windows_mode" authenticode none
+validate_mode PEPPY_MACOS_DISTRIBUTION "$macos_distribution" direct app-store
 
 if [ "${1:-}" = --validate-modes ]; then
   exit 0
@@ -39,8 +41,11 @@ required_inputs=(
   PEPPY_ANDROID_SIGNING_CERT_SHA256
 )
 
-if [ "$macos_mode" = developer-id ]; then
+if [ "$macos_distribution" = direct ] && [ "$macos_mode" = developer-id ]; then
   required_inputs+=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID)
+fi
+if [ "$macos_distribution" = app-store ]; then
+  required_inputs+=(APPLE_MAS_CERTIFICATE_P12 APPLE_MAS_CERTIFICATE_PASSWORD APPLE_MAS_INSTALLER_CERTIFICATE APPLE_MAS_PROVISIONING_PROFILE_BASE64 APPLE_MAS_SIGNING_IDENTITY APPLE_MAS_INSTALLER_IDENTITY)
 fi
 if [ "$windows_mode" = authenticode ]; then
   required_inputs+=(WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD)

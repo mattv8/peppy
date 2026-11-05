@@ -332,9 +332,10 @@ declared_secrets = lambda do |workflow, name|
 end
 referenced_secrets = ->(text) { text.scan(/secrets\.([A-Za-z0-9_]+)/).flatten.uniq.sort }
 artifact_secret_names = %w[
-  APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_SIGNING_IDENTITY
-  APPLE_TEAM_ID PEPPY_ANDROID_KEYSTORE_BASE64 PEPPY_ANDROID_KEYSTORE_PASSWORD PEPPY_ANDROID_KEY_ALIAS PEPPY_ANDROID_KEY_PASSWORD
-  PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET PEPPY_RELEASE_RPM_GPG_KEY PEPPY_UPDATER_PRIVATE_KEY PEPPY_UPDATER_PRIVATE_KEY_PASSWORD
+  APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_MAS_CERTIFICATE_P12 APPLE_MAS_CERTIFICATE_PASSWORD APPLE_MAS_INSTALLER_CERTIFICATE
+  APPLE_MAS_INSTALLER_IDENTITY APPLE_MAS_PROVISIONING_PROFILE_BASE64 APPLE_MAS_SIGNING_IDENTITY APPLE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_TEAM_ID
+  PEPPY_ANDROID_KEYSTORE_BASE64 PEPPY_ANDROID_KEYSTORE_PASSWORD PEPPY_ANDROID_KEY_ALIAS PEPPY_ANDROID_KEY_PASSWORD
+  PEPPY_RELEASE_RPM_GPG_KEY PEPPY_UPDATER_PRIVATE_KEY PEPPY_UPDATER_PRIVATE_KEY_PASSWORD
   WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD
 ].freeze
 publish_secret_names = %w[
@@ -363,10 +364,7 @@ named_secret_map.call(ci_jobs.fetch('development-artifacts'), artifact_secret_na
 named_secret_map.call(release.fetch('jobs').fetch('publish'), publish_secret_names, 'release publish')
 named_secret_map.call(ci_jobs.fetch('publish-prerelease'), publish_secret_names, 'CI prerelease publish')
 
-assert.call(bundle_env.fetch('PEPPY_DESKTOP_GOOGLE_CLIENT_ID') == "${{ inputs.trusted_update_build && vars.PEPPY_DESKTOP_GOOGLE_CLIENT_ID || '' }}", 'desktop bundling must receive the public desktop Google client ID only for trusted builds')
-assert.call(bundle_env.fetch('PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET') == "${{ inputs.trusted_update_build && secrets.PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET || '' }}", 'desktop bundling must receive the installed-client field only for trusted builds')
-
-assert.call(build_workflow.fetch('jobs').fetch('desktop-development-artifacts').fetch('environment') == "${{ inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}", 'artifact environment selection must stay unchanged')
+assert.call(build_workflow.fetch('jobs').fetch('desktop-development-artifacts').fetch('environment') == "${{ inputs.macos_distribution == 'app-store' && 'mac-app-store' || inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}", 'App Store artifacts must use their protected environment without changing direct builds')
 assert.call(publish_workflow.fetch('jobs').fetch('publish').fetch('environment') == "${{ inputs.channel == 'stable' && 'updates-stable' || inputs.channel == 'staging' && 'updates-staging' || 'invalid-update-channel' }}", 'publish environment selection must stay unchanged')
 assert.call(ci_jobs.fetch('development-artifacts').fetch('with').fetch('trusted_update_build') == "${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' }}", 'CI artifact trust predicate must stay unchanged')
 ci_artifacts_with = ci_jobs.fetch('development-artifacts').fetch('with')

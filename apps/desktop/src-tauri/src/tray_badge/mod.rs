@@ -95,6 +95,7 @@ struct Runtime {
 struct Candidate {
     badge: TrayBadge,
     session: Option<Arc<Session>>,
+    configured: bool,
     revoked: bool,
     cancelled: bool,
     mismatch: bool,
@@ -105,6 +106,7 @@ struct Candidate {
 struct ApplyFence {
     app_locked: bool,
     session_current: bool,
+    configured_matches: bool,
     cancelled: bool,
     revoked_matches: bool,
     mismatch_matches: bool,
@@ -132,9 +134,7 @@ fn runtime(app: &AppHandle) -> tauri::State<'_, Runtime> {
 
 /// Installs the state-event listener and performs an initial refresh after the tray exists.
 pub fn install(app: &AppHandle) {
-    if !cfg!(any(target_os = "macos", target_os = "windows"))
-        || app.try_state::<Runtime>().is_some()
-    {
+    if app.try_state::<Runtime>().is_some() {
         return;
     }
     app.manage(Runtime {
@@ -143,6 +143,13 @@ pub fn install(app: &AppHandle) {
     let handle = app.clone();
     app.listen(STATE_EVENT, move |_| schedule_refresh(&handle));
     schedule_refresh(app);
+}
+
+/// Applies the fail-closed startup badge synchronously before any secure-store read.
+pub fn apply_initial_locked(app: &AppHandle) {
+    if let Some(tray) = crate::tray::icon(app) {
+        let _ = apply(&tray, &TrayBadge::Locked);
+    }
 }
 
 fn schedule_refresh(app: &AppHandle) {
@@ -205,6 +212,7 @@ async fn refresh(app: &AppHandle) -> RefreshOutcome {
         .map(|refresh| refresh.needs_apply(&candidate.badge))
         .unwrap_or(false);
     if !needs_apply {
+        crate::refresh_tray_lock_menu(app, &state, &candidate.badge);
         return RefreshOutcome::Applied;
     }
     match apply_on_main(app, candidate.clone()).await {
@@ -233,6 +241,7 @@ async fn badge_for_state(state: &AppState) -> ReadOutcome {
         return ReadOutcome::Candidate(Candidate {
             badge: TrayBadge::Locked,
             session: None,
+            configured: false,
             revoked: false,
             cancelled: false,
             mismatch: false,
@@ -244,9 +253,15 @@ async fn badge_for_state(state: &AppState) -> ReadOutcome {
         Err(()) => return ReadOutcome::Busy,
     };
     let Some(session) = session else {
+        let configured = state
+            .config()
+            .ok()
+            .and_then(|config| config.active_binding().cloned())
+            .is_some();
         return ReadOutcome::Candidate(Candidate {
-            badge: TrayBadge::Hidden,
+            badge: badge_without_session(configured),
             session: None,
+            configured,
             revoked: false,
             cancelled: false,
             mismatch: false,
@@ -261,6 +276,14 @@ async fn badge_for_state(state: &AppState) -> ReadOutcome {
     {
         Ok(candidate) => ReadOutcome::Candidate(candidate),
         Err(_) => ReadOutcome::Busy,
+    }
+}
+
+fn badge_without_session(configured: bool) -> TrayBadge {
+    if configured {
+        TrayBadge::Locked
+    } else {
+        TrayBadge::Hidden
     }
 }
 
@@ -296,6 +319,7 @@ fn candidate_for_session(session: Arc<Session>) -> BridgeResult<Candidate> {
     Ok(Candidate {
         badge,
         session: Some(session),
+        configured: true,
         revoked,
         cancelled,
         mismatch,
@@ -342,6 +366,11 @@ async fn apply_on_main(app: &AppHandle, candidate: Candidate) -> RefreshOutcome 
                 if crate::tray::icon(&main_app)
                     .is_some_and(|tray| apply(&tray, &candidate.badge).is_ok())
                 {
+                    crate::refresh_tray_lock_menu(
+                        &main_app,
+                        &main_app.state::<AppState>(),
+                        &candidate.badge,
+                    );
                     RefreshOutcome::Applied
                 } else {
                     RefreshOutcome::Failed
@@ -365,6 +394,7 @@ fn current_fence(app: &AppHandle, candidate: &Candidate) -> Result<ApplyFence, (
         return Ok(ApplyFence {
             app_locked,
             session_current: false,
+            configured_matches: true,
             cancelled: false,
             revoked_matches: true,
             mismatch_matches: true,
@@ -376,6 +406,7 @@ fn current_fence(app: &AppHandle, candidate: &Candidate) -> Result<ApplyFence, (
         return Ok(ApplyFence {
             app_locked,
             session_current: current.is_none(),
+            configured_matches: configured_without_session(app) == candidate.configured,
             cancelled: false,
             revoked_matches: true,
             mismatch_matches: true,
@@ -386,6 +417,7 @@ fn current_fence(app: &AppHandle, candidate: &Candidate) -> Result<ApplyFence, (
         return Ok(ApplyFence {
             app_locked,
             session_current: false,
+            configured_matches: false,
             cancelled: true,
             revoked_matches: false,
             mismatch_matches: false,
@@ -402,6 +434,7 @@ fn current_fence(app: &AppHandle, candidate: &Candidate) -> Result<ApplyFence, (
     Ok(ApplyFence {
         app_locked,
         session_current: true,
+        configured_matches: true,
         cancelled: session.cancel.is_cancelled(),
         revoked_matches: revoked == candidate.revoked,
         mismatch_matches: session.mismatch.load(std::sync::atomic::Ordering::Acquire)
@@ -422,11 +455,19 @@ fn same_session<T>(expected: Option<&Arc<T>>, current: Option<&Arc<T>>) -> bool 
     matches!((expected, current), (Some(expected), Some(current)) if Arc::ptr_eq(expected, current))
 }
 
+fn configured_without_session(app: &AppHandle) -> bool {
+    app.state::<AppState>()
+        .config()
+        .ok()
+        .is_some_and(|config| config.active_binding().is_some())
+}
+
 fn apply_fence_accepts(candidate: &Candidate, fence: ApplyFence) -> bool {
     apply_fence_accepts_parts(
         &candidate.badge,
         candidate.session.is_some(),
         candidate.cancelled,
+        candidate.configured,
         fence,
     )
 }
@@ -435,13 +476,17 @@ fn apply_fence_accepts_parts(
     badge: &TrayBadge,
     session_expected: bool,
     cancelled: bool,
+    configured: bool,
     fence: ApplyFence,
 ) -> bool {
     if fence.app_locked {
         return *badge == TrayBadge::Locked;
     }
     if !session_expected {
-        return fence.session_current && *badge == TrayBadge::Hidden;
+        return fence.session_current
+            && fence.configured_matches
+            && matches!(badge, TrayBadge::Hidden | TrayBadge::Locked)
+            && (*badge == TrayBadge::Locked) == configured;
     }
     fence.session_current
         && fence.cancelled == cancelled
@@ -463,7 +508,7 @@ fn apply(tray: &tauri::tray::TrayIcon<tauri::Wry>, badge: &TrayBadge) -> tauri::
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_fence_accepts_parts, classify_session_security, inbox_unread_total, observe_lock,
+        apply_fence_accepts_parts, badge_without_session, classify_session_security, inbox_unread_total, observe_lock,
         observe_slot, same_session, should_retry_busy, unread_total, ApplyFence, RefreshState,
         TrayBadge, MAX_BUSY_RETRIES,
     };
@@ -534,6 +579,7 @@ mod tests {
         let current = ApplyFence {
             app_locked: false,
             session_current: true,
+            configured_matches: true,
             cancelled: false,
             revoked_matches: true,
             mismatch_matches: true,
@@ -543,12 +589,14 @@ mod tests {
             &TrayBadge::Unread(4),
             true,
             false,
+            true,
             current,
         ));
         assert!(!apply_fence_accepts_parts(
             &TrayBadge::Unread(4),
             true,
             false,
+            true,
             ApplyFence {
                 session_current: false,
                 ..current
@@ -558,6 +606,7 @@ mod tests {
             &TrayBadge::Unread(4),
             true,
             false,
+            true,
             ApplyFence {
                 app_locked: true,
                 ..current
@@ -567,6 +616,7 @@ mod tests {
             &TrayBadge::Locked,
             true,
             false,
+            true,
             ApplyFence {
                 app_locked: true,
                 ..current
@@ -574,6 +624,7 @@ mod tests {
         ));
         assert!(apply_fence_accepts_parts(
             &TrayBadge::Hidden,
+            false,
             false,
             false,
             ApplyFence {
@@ -585,13 +636,35 @@ mod tests {
             &TrayBadge::Hidden,
             false,
             false,
+            false,
             ApplyFence {
                 session_current: false,
                 ..current
             },
         ));
+        assert!(apply_fence_accepts_parts(
+            &TrayBadge::Locked,
+            false,
+            false,
+            true,
+            ApplyFence {
+                configured_matches: true,
+                ..current
+            },
+        ));
+        assert!(!apply_fence_accepts_parts(
+            &TrayBadge::Locked,
+            false,
+            false,
+            true,
+            ApplyFence {
+                configured_matches: false,
+                ..current
+            },
+        ));
         assert!(!apply_fence_accepts_parts(
             &TrayBadge::Hidden,
+            false,
             false,
             false,
             ApplyFence {
@@ -607,9 +680,11 @@ mod tests {
             &TrayBadge::Locked,
             false,
             false,
+            true,
             ApplyFence {
                 app_locked: true,
                 session_current: false,
+                configured_matches: true,
                 cancelled: true,
                 revoked_matches: false,
                 mismatch_matches: false,
@@ -620,6 +695,8 @@ mod tests {
 
     #[test]
     fn security_classification_hides_unavailable_sessions_and_locks_key_problems() {
+        assert_eq!(badge_without_session(false), TrayBadge::Hidden);
+        assert_eq!(badge_without_session(true), TrayBadge::Locked);
         let unlocked = EncryptionState::Unlocked {
             profile_fingerprint: None,
         };

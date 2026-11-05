@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
-import { catalog, nativeCatalog, desktopCatalog, desktopOnlyKeys } from "../src/catalog.mjs";
+import { catalog, nativeCatalog, desktopCatalog, desktopOnlyKeys, desktopOverrides } from "../src/catalog.mjs";
 import { icoFrameAlphas } from "../scripts/icon-alpha.mjs";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -291,8 +291,8 @@ test("generated desktop copy applies the desktop catalog overrides", () => {
 test("desktop override keys are catalog keys or explicit desktop-only additions", () => {
   const desktopOverrideKeys = [
     "hosted_join_headline", "hosted_join_body", "device_approval_headline", "device_approval_body",
-    "hosted_unlock_body", "hosted_unlock_cta", "hosted_subscribe_legal", "hosted_subscribe_restore",
-    "hosted_subscribe_store_unavailable", "hosted_purchase_pending_body", "passphrase_create_body",
+    "hosted_unlock_body", "hosted_unlock_cta",
+    "hosted_subscribe_store_unavailable", "passphrase_create_body",
     "passphrase_native_cta", "passphrase_native_note", "passphrase_ack_label", "permissions_notifications",
     "permissions_login", "permissions_desktop_note", "self_hosted_body", "hosted_preview_native_only",
     "passphrase_weak",
@@ -306,6 +306,36 @@ test("desktop override keys are catalog keys or explicit desktop-only additions"
   for (const key of desktopOnlyKeys) {
     assert.ok(!(key in catalog), `${key} must be absent from shared catalog`);
   }
+});
+
+test("retired desktop overrides fall back to shared copy", () => {
+  const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
+  for (const key of ["hosted_subscribe_restore", "hosted_subscribe_legal", "hosted_purchase_pending_body"]) {
+    assert.ok(!(key in desktopOverrides), `${key} must not be a desktop override`);
+    assert.equal(desktopCatalog[key], catalog[key]);
+    assert.ok(desktop.includes(`${key}: ${JSON.stringify(catalog[key])},`), `desktop copy must use the shared ${key}`);
+  }
+});
+
+test("store, account, startup, and re-enrol copy is desktop-only and generated", () => {
+  const desktopOnlyPattern = /^(store_|attachment_storage_addon_|billing_elsewhere_|account_billing_intro_|account_portal_cta$|account_delete_|account_deleted_|startup_|reenrol_|updates_app_store_delivered$|hosted_sign_in_(group_label|waiting)$|hosted_session_recovery_body$)/;
+  const keys = Object.keys(desktopOverrides).filter(key => desktopOnlyPattern.test(key));
+  assert.equal(keys.length, 69, "every key in the UX spec catalog section must be present");
+  const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const ios = readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8");
+
+  for (const key of keys) {
+    assert.ok(desktopOnlyKeys.includes(key), `${key} must be listed in desktopOnlyKeys`);
+    assert.ok(!(key in catalog), `${key} must be absent from the shared catalog`);
+    assert.ok(!(key in nativeCatalog), `${key} must be absent from the native catalog`);
+    assert.ok(desktop.includes(`${key}: ${JSON.stringify(desktopOverrides[key])},`), `desktop copy is missing ${key}`);
+    assert.ok(!android.includes(`peppy_${key}"`), `${key} must not reach Android`);
+    assert.ok(!ios.includes(`"peppy.${key}"`), `${key} must not reach iOS`);
+  }
+
+  assert.equal(desktopOverrides.store_renewal_notice, "Payment is charged to your Apple Account when you confirm the purchase. Subscriptions renew automatically unless you cancel at least 24 hours before the end of the current period. You can manage or cancel your subscription in your Apple Account settings.");
+  assert.equal(desktopOverrides.billing_elsewhere_other_body, "This subscription was started outside the App Store, so it can't be changed in this app.");
 });
 
 test("native copy is generated from the shared catalog only", () => {

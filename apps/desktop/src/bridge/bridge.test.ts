@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import purchaseOptionsFixture from "./purchase-options.fixture.json";
 
 const eventMock = vi.hoisted(() => ({
   handler: undefined as ((event: { payload: unknown }) => void) | undefined,
@@ -218,6 +219,16 @@ describe("bridge subscriptions", () => {
     await tauriBridge.cancel_history_search({ attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2", query: "must not cross the bridge" } as never);
     await tauriBridge.attachment_retention_status?.();
     await tauriBridge.attachment_retention_state?.("attachment-id");
+    await tauriBridge.hosted_delete_account();
+    await tauriBridge.startup_status();
+    await tauriBridge.set_open_in_background(true);
+    await tauriBridge.open_login_items();
+    await tauriBridge.purchase_options();
+    await tauriBridge.store_products();
+    await tauriBridge.store_purchase("product-id");
+    await tauriBridge.store_restore();
+    await tauriBridge.open_store_subscriptions();
+    await tauriBridge.billing_summary();
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_devices", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(2, "revoke_device", { deviceId: "device-id" });
@@ -238,6 +249,16 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(17, "cancel_history_search", { input: { attemptId: "e2719a52-d647-49ec-bb81-6da2a24e8cc2" } });
     expect(invokeMock).toHaveBeenNthCalledWith(18, "attachment_retention_status", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(19, "attachment_retention_state", { attachmentId: "attachment-id" });
+    expect(invokeMock).toHaveBeenNthCalledWith(20, "hosted_delete_account", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(21, "startup_status", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(22, "set_open_in_background", { enabled: true });
+    expect(invokeMock).toHaveBeenNthCalledWith(23, "open_login_items", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(24, "purchase_options", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(25, "store_products", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(26, "store_purchase", { productId: "product-id" });
+    expect(invokeMock).toHaveBeenNthCalledWith(27, "store_restore", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(28, "open_store_subscriptions", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(29, "billing_summary", undefined);
   });
 
   it("opens a media viewer with its conversation, attachment, and message", async () => {
@@ -264,6 +285,23 @@ describe("fixture draft saves", () => {
     expect(await fixtureBridge.mark_all_read()).toBe("0");
     const state = await fixtureBridge.load_state();
     expect(state.conversations.every(conversation => conversation.unread === 0)).toBe(true);
+  });
+
+  it("provides sensible development-only billing and sign-in values", async () => {
+    expect(await fixtureBridge.billing_summary()).toEqual({ provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    expect((await fixtureBridge.hosted_account()).providers).toEqual(expect.arrayContaining(["google", "apple"]));
+  });
+
+  it("provides sensible development-only startup and purchase values", async () => {
+    expect(await fixtureBridge.startup_status()).toEqual({ state: "off", background: false });
+    await fixtureBridge.set_start_at_login(true);
+    await fixtureBridge.set_open_in_background(true);
+    expect(await fixtureBridge.startup_status()).toEqual({ state: "on", background: true });
+    expect(await fixtureBridge.purchase_options()).toEqual(purchaseOptionsFixture.direct);
+    expect(await fixtureBridge.store_products()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "plan" }),
+      expect.objectContaining({ kind: "storage", storageBytes: expect.any(Number) }),
+    ]));
   });
 
   it("updates only an established fixture conversation pin state", async () => {

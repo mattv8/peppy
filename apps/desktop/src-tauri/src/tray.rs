@@ -2,6 +2,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use crate::{
+    distribution::Distribution,
     error::{BridgeError, BridgeResult},
     heads::PanelLayout,
     updates::types::{UpdatePhase, UpdateStatus},
@@ -32,11 +33,21 @@ struct UpdateItem {
     label: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LockMenu {
+    Verified,
+    #[default]
+    Checking,
+    Locked,
+    Unavailable,
+}
+
+#[derive(Clone, Default)]
 struct MenuState {
     heads: Vec<(String, String)>,
     recents: Vec<(String, String)>,
     update: Option<UpdateItem>,
+    lock: LockMenu,
 }
 
 fn menu_state() -> &'static Mutex<MenuState> {
@@ -105,8 +116,24 @@ pub fn install(
 }
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let state = menu_state().lock().expect("tray menu state poisoned");
-    build_menu_with(app, &state.heads, &state.recents, state.update.as_ref())
+    let state = menu_state()
+        .lock()
+        .expect("tray menu state poisoned")
+        .clone();
+    let heads = visible_conversation_entries(state.lock, &state.heads);
+    let recents = visible_conversation_entries(state.lock, &state.recents);
+    build_menu_with(app, heads, recents, state.update.as_ref(), state.lock)
+}
+
+fn visible_conversation_entries(
+    lock: LockMenu,
+    entries: &[(String, String)],
+) -> &[(String, String)] {
+    if lock == LockMenu::Verified {
+        entries
+    } else {
+        &[]
+    }
 }
 
 fn build_menu_with(
@@ -114,12 +141,23 @@ fn build_menu_with(
     heads: &[(String, String)],
     recents: &[(String, String)],
     update: Option<&UpdateItem>,
+    lock: LockMenu,
 ) -> tauri::Result<Menu<tauri::Wry>> {
-    let open = MenuItem::with_id(app, "open", "Open Peppy", true, None::<&str>)?;
+    let (status, open_label) = match lock {
+        LockMenu::Verified => (None, "Open Peppy"),
+        LockMenu::Checking => (Some("Checking lock…"), "Open Peppy"),
+        LockMenu::Locked => (Some("Locked"), "Open Peppy to Unlock"),
+        LockMenu::Unavailable => (Some("Lock check failed"), "Open Peppy to Try Again"),
+    };
+    let verified = lock == LockMenu::Verified;
+    let open = MenuItem::with_id(app, "open", open_label, true, None::<&str>)?;
+    let status = status
+        .map(|label| MenuItem::with_id(app, "lock-status", label, false, None::<&str>))
+        .transpose()?;
     let update = update
         .map(|item| MenuItem::with_id(app, UPDATE_ID, &item.label, true, None::<&str>))
         .transpose()?;
-    let compose = MenuItem::with_id(app, "compose", "New message", true, None::<&str>)?;
+    let compose = MenuItem::with_id(app, "compose", "New message", verified, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Peppy", true, None::<&str>)?;
 
@@ -134,7 +172,7 @@ fn build_menu_with(
                 app,
                 format!("{RECENT_OPEN_PREFIX}{conversation_id}"),
                 label,
-                true,
+                verified,
                 None::<&str>,
             )
         })
@@ -147,14 +185,14 @@ fn build_menu_with(
             app,
             format!("{HEAD_OPEN_PREFIX}{conversation_id}"),
             format!("Open {name}"),
-            true,
+            verified,
             None::<&str>,
         )?);
         head_items.push(MenuItem::with_id(
             app,
             format!("{HEAD_DISMISS_PREFIX}{conversation_id}"),
             format!("Dismiss {name}"),
-            true,
+            verified,
             None::<&str>,
         )?);
     }
@@ -166,17 +204,20 @@ fn build_menu_with(
         app,
         "floating-conversations",
         "Floating conversations",
-        !heads.is_empty(),
+        verified && !heads.is_empty(),
         &head_refs,
     )?;
 
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
+    if let Some(status) = status.as_ref() {
+        items.push(status);
+    }
     items.push(&open);
     if let Some(update) = update.as_ref() {
         items.push(update);
     }
     items.push(&compose);
-    if !recent_items.is_empty() {
+    if verified && !recent_items.is_empty() {
         items.push(&recent_top_separator);
         items.push(&recent_heading);
         items.extend(
@@ -239,6 +280,13 @@ pub fn set_recent_conversations(app: &AppHandle, recents: &[(String, String)]) -
     apply_menu(app)
 }
 
+pub fn set_lock_menu(app: &AppHandle, lock: LockMenu) -> bool {
+    if let Ok(mut state) = menu_state().lock() {
+        state.lock = lock;
+    }
+    apply_menu(app)
+}
+
 pub fn set_update_status(app: &AppHandle, status: &UpdateStatus) -> bool {
     if let Ok(mut state) = menu_state().lock() {
         state.update = update_item(status);
@@ -247,14 +295,23 @@ pub fn set_update_status(app: &AppHandle, status: &UpdateStatus) -> bool {
 }
 
 fn apply_menu(app: &AppHandle) -> bool {
-    let Ok(menu) = build_menu(app) else {
-        return false;
-    };
-    app.tray_by_id(TRAY_ID)
-        .is_some_and(|tray| tray.set_menu(Some(menu)).is_ok())
+    let app = app.clone();
+    app.clone()
+        .run_on_main_thread(move || {
+            let Ok(menu) = build_menu(&app) else {
+                return;
+            };
+            let _ = app
+                .tray_by_id(TRAY_ID)
+                .is_some_and(|tray| tray.set_menu(Some(menu)).is_ok());
+        })
+        .is_ok()
 }
 
 fn update_item(status: &UpdateStatus) -> Option<UpdateItem> {
+    if status.distribution == Distribution::AppStore {
+        return None;
+    }
     match status.phase {
         UpdatePhase::Ready if status.can_restart => Some(UpdateItem {
             label: "Update ready — Restart Peppy".into(),
@@ -322,8 +379,6 @@ pub fn open_composer_mode(
         .resizable(true)
         .visible(false)
         .focused(true);
-    #[cfg(target_os = "macos")]
-    let builder = builder.transparent(true);
     let builder = if effective_panel {
         builder.always_on_top(true)
     } else {
@@ -817,6 +872,18 @@ mod tests {
     }
 
     #[test]
+    fn lock_menu_hides_conversation_names_without_discarding_them() {
+        let entries = vec![("id".into(), "Private conversation".into())];
+        assert!(visible_conversation_entries(LockMenu::Checking, &entries).is_empty());
+        assert!(visible_conversation_entries(LockMenu::Locked, &entries).is_empty());
+        assert!(visible_conversation_entries(LockMenu::Unavailable, &entries).is_empty());
+        assert_eq!(
+            visible_conversation_entries(LockMenu::Verified, &entries),
+            entries.as_slice()
+        );
+    }
+
+    #[test]
     fn recent_rows_keep_newest_first_sanitize_and_cap_at_five() {
         let recents = (0..7)
             .map(|index| (format!("id-{index}"), format!(" Name\n{index} ")))
@@ -829,9 +896,27 @@ mod tests {
     }
 
     #[test]
+    fn app_store_distribution_builds_no_update_menu_items() {
+        let mut status =
+            UpdateStatus::idle("1.0.0".into(), crate::updates::types::UpdateChannel::Stable);
+        status.distribution = Distribution::AppStore;
+        for phase in [
+            UpdatePhase::Ready,
+            UpdatePhase::Deferred,
+            UpdatePhase::Installed,
+            UpdatePhase::AuthorizationRequired,
+        ] {
+            status.phase = phase;
+            status.can_restart = true;
+            assert!(update_item(&status).is_none(), "{phase:?} must be hidden");
+        }
+    }
+
+    #[test]
     fn update_menu_surfaces_only_actionable_restart_or_authorization() {
         let mut status =
             UpdateStatus::idle("1.0.0".into(), crate::updates::types::UpdateChannel::Stable);
+        status.distribution = Distribution::Direct;
         assert!(update_item(&status).is_none());
         status.phase = UpdatePhase::Ready;
         status.can_restart = true;

@@ -57,6 +57,11 @@ on:
         required: false
         type: string
         default: ''
+      macos_distribution:
+        description: macOS package distribution (direct or app-store)
+        required: false
+        type: string
+        default: direct
     secrets:
       PEPPY_UPDATER_PRIVATE_KEY:
         required: false
@@ -80,7 +85,17 @@ on:
         required: false
       APPLE_TEAM_ID:
         required: false
-      PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET:
+      APPLE_MAS_CERTIFICATE_P12:
+        required: false
+      APPLE_MAS_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_MAS_INSTALLER_CERTIFICATE:
+        required: false
+      APPLE_MAS_PROVISIONING_PROFILE_BASE64:
+        required: false
+      APPLE_MAS_SIGNING_IDENTITY:
+        required: false
+      APPLE_MAS_INSTALLER_IDENTITY:
         required: false
       PEPPY_ANDROID_KEYSTORE_BASE64:
         required: false
@@ -132,11 +147,22 @@ on:
         required: false
         type: string
         default: ''
+      macos_build_number:
+        description: Mac App Store CFBundleVersion; required for app-store builds, unique and increasing per app record
+        required: false
+        type: string
+        default: ''
       android_firebase_app_config:
         description: Public Firebase Android app configuration JSON for the official Android artifact
         required: false
         type: string
         default: ''
+      macos_distribution:
+        description: macOS package distribution
+        required: false
+        type: choice
+        options: [direct, app-store]
+        default: direct
 
 permissions:
   contents: read
@@ -307,7 +333,7 @@ jobs:
 
   desktop-development-artifacts:
     if: inputs.build_desktop != false
-    environment: "${{ inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}"
+    environment: "${{ inputs.macos_distribution == 'app-store' && 'mac-app-store' || inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}"
     strategy:
       fail-fast: false
       matrix:
@@ -362,6 +388,7 @@ jobs:
         env:
           PEPPY_MACOS_SIGNING_MODE: ${{ vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id' }}
           PEPPY_WINDOWS_SIGNING_MODE: ${{ vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode' }}
+          PEPPY_MACOS_DISTRIBUTION: ${{ inputs.macos_distribution || 'direct' }}
         run: bash .github/scripts/release-signing-readiness.sh --validate-modes
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -419,11 +446,10 @@ jobs:
           BUNDLES: ${{ matrix.bundles }}
           VERSION: ${{ inputs.version }}
           WIX_VERSION: ${{ inputs.wix_version }}
+          MACOS_BUILD_NUMBER: ${{ inputs.macos_build_number }}
           TRUSTED_UPDATE_BUILD: ${{ inputs.trusted_update_build }}
           PEPPY_UPDATE_CHANNEL: ${{ inputs.update_channel }}
           PEPPY_UPDATE_PUBLIC_KEY: ${{ inputs.trusted_update_build && vars.PEPPY_UPDATE_PUBLIC_KEY || '' }}
-          PEPPY_DESKTOP_GOOGLE_CLIENT_ID: ${{ inputs.trusted_update_build && vars.PEPPY_DESKTOP_GOOGLE_CLIENT_ID || '' }}
-          PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET: ${{ inputs.trusted_update_build && secrets.PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD || '' }}
           PEPPY_MACOS_SIGNING_MODE: ${{ inputs.trusted_update_build && (vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id') || '' }}
@@ -434,6 +460,13 @@ jobs:
           APPLE_ID: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+          PEPPY_MACOS_DISTRIBUTION: ${{ inputs.macos_distribution || 'direct' }}
+          APPLE_MAS_CERTIFICATE_P12: ${{ inputs.macos_distribution == 'app-store' && runner.os == 'macOS' && secrets.APPLE_MAS_CERTIFICATE_P12 || '' }}
+          APPLE_MAS_CERTIFICATE_PASSWORD: ${{ inputs.macos_distribution == 'app-store' && runner.os == 'macOS' && secrets.APPLE_MAS_CERTIFICATE_PASSWORD || '' }}
+          APPLE_MAS_INSTALLER_CERTIFICATE: ${{ inputs.macos_distribution == 'app-store' && runner.os == 'macOS' && secrets.APPLE_MAS_INSTALLER_CERTIFICATE || '' }}
+          APPLE_MAS_PROVISIONING_PROFILE_BASE64: ${{ inputs.macos_distribution == 'app-store' && runner.os == 'macOS' && secrets.APPLE_MAS_PROVISIONING_PROFILE_BASE64 || '' }}
+          APPLE_MAS_SIGNING_IDENTITY: ${{ inputs.macos_distribution == 'app-store' && runner.os == 'macOS' && secrets.APPLE_MAS_SIGNING_IDENTITY || '' }}
+          APPLE_MAS_INSTALLER_IDENTITY: ${{ inputs.macos_distribution == 'app-store' && runner.os == 'macOS' && secrets.APPLE_MAS_INSTALLER_IDENTITY || '' }}
         run: infra/release/build-desktop-bundles.sh
       - if: always() && runner.os == 'Windows' && inputs.trusted_update_build && vars.PEPPY_WINDOWS_SIGNING_MODE != 'none'
         name: Remove protected Authenticode certificate
