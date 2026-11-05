@@ -51,20 +51,42 @@
       "type": "string"
     },
     "GatewayRoute": {
-      "properties": {
-        "gateway_device_id": {
-          "format": "uuid",
-          "type": "string"
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "gateway_device_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "subscription_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "gateway_device_id",
+            "subscription_id"
+          ],
+          "type": "object"
         },
-        "subscription_id": {
-          "type": "string"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "gateway_device_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "rcs_link"
+            }
+          },
+          "required": [
+            "kind",
+            "gateway_device_id"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "gateway_device_id",
-        "subscription_id"
-      ],
-      "type": "object"
+      ]
     },
     "SourceSequence": {
       "type": "string"

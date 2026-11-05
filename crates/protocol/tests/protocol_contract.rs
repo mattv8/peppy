@@ -21,7 +21,7 @@ fn envelope() -> Envelope {
         crypto_suite: 1,
         profile_fingerprint: "a".repeat(64),
         purpose: EnvelopePurpose::Command,
-        route: Some(GatewayRoute {
+        route: Some(GatewayRoute::Carrier {
             gateway_device_id: DeviceId::new(),
             subscription_id: "sim:42:generation:7".into(),
         }),
@@ -29,6 +29,106 @@ fn envelope() -> Envelope {
         origin_tag: None,
         ciphertext: vec![1, 2, 3],
     }
+}
+
+fn legacy_carrier_envelope() -> Envelope {
+    Envelope {
+        protocol_version: 1,
+        envelope_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+        command_id: Some("00000000-0000-0000-0000-000000000002".parse().unwrap()),
+        vault_id: "00000000-0000-0000-0000-000000000003".parse().unwrap(),
+        producer_device_id: "00000000-0000-0000-0000-000000000004".parse().unwrap(),
+        producer_sequence: SourceSequence(9),
+        key_epoch: 2,
+        crypto_suite: 3,
+        profile_fingerprint: "a".repeat(64),
+        purpose: EnvelopePurpose::Command,
+        route: Some(GatewayRoute::Carrier {
+            gateway_device_id: "00000000-0000-0000-0000-000000000005".parse().unwrap(),
+            subscription_id: "sim:fixture".into(),
+        }),
+        compaction: None,
+        origin_tag: None,
+        ciphertext: vec![1, 2, 3],
+    }
+}
+
+#[test]
+fn carrier_route_json_is_byte_stable_fixture() {
+    let envelope = legacy_carrier_envelope();
+    assert_eq!(
+        serde_json::to_string(&envelope.route).unwrap(),
+        r#"{"gateway_device_id":"00000000-0000-0000-0000-000000000005","subscription_id":"sim:fixture"}"#
+    );
+}
+
+#[test]
+fn carrier_route_aad_is_byte_stable_fixture() {
+    let envelope = legacy_carrier_envelope();
+    assert_eq!(
+        envelope.aad_bytes().unwrap(),
+        base64::engine::general_purpose::STANDARD
+            .decode("cGVwcHktZW52ZWxvcGUtYWFkLXYxAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAkAAAACAANhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhAQEAAAAAAAAAAAAAAAAAAAACAQAAAAAAAAAAAAAAAAAAAAUAC3NpbTpmaXh0dXJl")
+            .unwrap(),
+    );
+    assert_eq!(
+        envelope.wire_digest().unwrap(),
+        [
+            0x12, 0x86, 0x46, 0xe3, 0xb4, 0x68, 0xbd, 0x6b, 0x0a, 0x32, 0x2c, 0x28, 0x72, 0x96,
+            0xfa, 0xe9, 0x60, 0x35, 0x30, 0x59, 0x52, 0x59, 0xc4, 0x07, 0x3f, 0xc0, 0x83, 0xfa,
+            0x10, 0xa6, 0x76, 0x5d,
+        ]
+    );
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyGatewayRoute {
+    gateway_device_id: DeviceId,
+    subscription_id: String,
+}
+
+#[test]
+fn carrier_route_cross_version_round_trip() {
+    let legacy_json = r#"{"gateway_device_id":"00000000-0000-0000-0000-000000000005","subscription_id":"sim:fixture"}"#;
+    let route = serde_json::from_str::<GatewayRoute>(legacy_json).unwrap();
+    assert_eq!(serde_json::to_string(&route).unwrap(), legacy_json);
+
+    let legacy =
+        serde_json::from_str::<LegacyGatewayRoute>(&serde_json::to_string(&route).unwrap())
+            .unwrap();
+    assert_eq!(
+        legacy.gateway_device_id.to_string(),
+        "00000000-0000-0000-0000-000000000005"
+    );
+    assert_eq!(legacy.subscription_id, "sim:fixture");
+}
+
+#[test]
+fn rcs_link_route_requires_known_kind() {
+    let gateway_device_id = "00000000-0000-0000-0000-000000000005";
+    let route = GatewayRoute::RcsLink {
+        gateway_device_id: gateway_device_id.parse().unwrap(),
+    };
+    assert_eq!(
+        serde_json::to_string(&route).unwrap(),
+        format!(r#"{{"kind":"rcs_link","gateway_device_id":"{gateway_device_id}"}}"#),
+    );
+    let unknown_kind = format!(r#"{{"kind":"unknown","gateway_device_id":"{gateway_device_id}"}}"#);
+    assert!(serde_json::from_str::<GatewayRoute>(&unknown_kind).is_err());
+    let missing_kind = format!(r#"{{"gateway_device_id":"{gateway_device_id}"}}"#);
+    assert!(serde_json::from_str::<GatewayRoute>(&missing_kind).is_err());
+}
+
+#[test]
+fn legacy_parser_rejects_rcs_link_route() {
+    let gateway_device_id = "00000000-0000-0000-0000-000000000005";
+    let route = format!(r#"{{"kind":"rcs_link","gateway_device_id":"{gateway_device_id}"}}"#);
+    assert!(serde_json::from_str::<LegacyGatewayRoute>(&route).is_err());
+    let extra_subscription = format!(
+        r#"{{"kind":"rcs_link","gateway_device_id":"{gateway_device_id}","subscription_id":"sim:fixture"}}"#
+    );
+    assert!(serde_json::from_str::<GatewayRoute>(&extra_subscription).is_err());
 }
 
 #[test]
@@ -309,6 +409,7 @@ fn generated_schemas_have_resolvable_references_and_derived_ts() {
     assert!(contracts.typescript.contains("crypto_suite"));
     assert!(contracts.typescript.contains("profile_fingerprint"));
     assert!(contracts.typescript.contains("command_id?: string | null;"));
+    assert!(contracts.typescript.contains("kind: 'rcs_link';"));
 }
 
 #[test]

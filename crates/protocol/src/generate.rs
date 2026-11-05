@@ -118,6 +118,9 @@ fn schema_to_ts(schema: &Value) -> String {
             .map(type_name)
             .unwrap_or_else(|| "unknown".into());
     }
+    if let Some(value) = schema.get("const").and_then(Value::as_str) {
+        return format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"));
+    }
     if let Some(values) = schema.get("enum").and_then(Value::as_array) {
         return values
             .iter()
