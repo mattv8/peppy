@@ -1042,6 +1042,9 @@ mod tests {
                    DROP TABLE rcs_mapping_proofs;
                    DROP TABLE rcs_conversation_mappings;
                    DROP TABLE rcs_send_ledger;
+                    DROP TABLE rcs_link_status_projection;
+                    DROP TABLE rcs_link_eligibility_projection;
+                    DROP TABLE rcs_capability_published;
                    ALTER TABLE attempts DROP COLUMN finalized_transport;
                    DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark');
                  UPDATE schema_meta SET version=34;",
