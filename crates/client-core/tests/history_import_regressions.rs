@@ -84,7 +84,10 @@ fn remove_rcs_mapping_schema(connection: &rusqlite::Connection) {
             "DROP TABLE rcs_send_ledger;
               DROP TABLE rcs_mapping_proofs;
               DROP TABLE rcs_conversation_mappings;
-              ALTER TABLE attempts DROP COLUMN finalized_transport;",
+               ALTER TABLE attempts DROP COLUMN finalized_transport;
+               DROP TABLE rcs_capability_published;
+               DROP TABLE rcs_link_eligibility_projection;
+               DROP TABLE rcs_link_status_projection;",
         )
         .unwrap();
 }
@@ -153,7 +156,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 47);
+    assert_eq!(version, 48);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -260,7 +263,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 47);
+    assert_eq!(version, 48);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -515,11 +518,9 @@ fn legacy_numeric_sms_and_mms_history_state_normalizes_and_finishes() {
     client
         .advance_mms_backfill_page("gateway", "sim-1", MmsBackfillPhase::History, "4")
         .unwrap();
-    assert!(
-        client
-            .finish_mms_backfill_phase("gateway", "sim-1", MmsBackfillPhase::History, "100", true,)
-            .unwrap()
-    );
+    assert!(client
+        .finish_mms_backfill_phase("gateway", "sim-1", MmsBackfillPhase::History, "100", true,)
+        .unwrap());
 }
 
 #[test]

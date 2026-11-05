@@ -49,11 +49,15 @@ pub struct RcsEligibilityProjection {
 }
 
 pub(crate) fn valid_status(value: &RcsLinkStatusEvent) -> bool {
-    value.capability_revision > 0 && value.observed_at_ms >= 0
+    value.capability_revision > 0
+        && value.capability_revision <= i64::MAX as u64
+        && (0..i64::MAX).contains(&value.observed_at_ms)
 }
 
 pub(crate) fn valid_eligibility(value: &RcsEligibilityProjection) -> bool {
-    value.mapping_revision > 0 && value.observed_at_ms >= 0
+    value.mapping_revision > 0
+        && value.mapping_revision <= i64::MAX as u64
+        && (0..i64::MAX).contains(&value.observed_at_ms)
 }
 
 pub(crate) fn apply_status(
@@ -65,7 +69,9 @@ pub(crate) fn apply_status(
     if producer != value.gateway_device_id || !valid_status(value) {
         return Ok(false);
     }
-    let sequence = i64::try_from(sequence).map_err(|_| Error::Database)?;
+    let Ok(sequence) = i64::try_from(sequence) else {
+        return Ok(false);
+    };
     conn.execute(
         "INSERT INTO rcs_link_status_projection(gateway_device_id,state,availability,health,phone_responsive,observed_at_ms,capability_revision,feature_bits,producer_sequence) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(gateway_device_id) DO UPDATE SET state=excluded.state,availability=excluded.availability,health=excluded.health,phone_responsive=excluded.phone_responsive,observed_at_ms=excluded.observed_at_ms,capability_revision=excluded.capability_revision,feature_bits=excluded.feature_bits,producer_sequence=excluded.producer_sequence WHERE excluded.capability_revision > rcs_link_status_projection.capability_revision OR (excluded.capability_revision=rcs_link_status_projection.capability_revision AND excluded.producer_sequence > rcs_link_status_projection.producer_sequence)",
         params![value.gateway_device_id.to_string(), capability_state(value.state), value.availability, value.health, value.phone_responsive, value.observed_at_ms, value.capability_revision, value.feature_bits, sequence],
@@ -82,7 +88,9 @@ pub(crate) fn apply_eligibility(
     if producer != value.gateway_device_id || !valid_eligibility(value) {
         return Ok(false);
     }
-    let sequence = i64::try_from(sequence).map_err(|_| Error::Database)?;
+    let Ok(sequence) = i64::try_from(sequence) else {
+        return Ok(false);
+    };
     conn.execute(
         "INSERT INTO rcs_link_eligibility_projection(gateway_device_id,conversation_id,eligibility,feature_bits,mapping_revision,observed_at_ms,producer_sequence) VALUES(?,?,?,?,?,?,?) ON CONFLICT(gateway_device_id,conversation_id) DO UPDATE SET eligibility=excluded.eligibility,feature_bits=excluded.feature_bits,mapping_revision=excluded.mapping_revision,observed_at_ms=excluded.observed_at_ms,producer_sequence=excluded.producer_sequence WHERE excluded.mapping_revision > rcs_link_eligibility_projection.mapping_revision OR (excluded.mapping_revision=rcs_link_eligibility_projection.mapping_revision AND excluded.producer_sequence > rcs_link_eligibility_projection.producer_sequence)",
         params![value.gateway_device_id.to_string(), value.conversation_id.to_string(), eligibility(value.eligibility), value.feature_bits, value.mapping_revision, value.observed_at_ms, sequence],
@@ -102,7 +110,7 @@ pub(crate) fn current_gateway(
                 && availability
                 && health
                 && phone_responsive
-                && now_ms.saturating_sub(observed) <= RCS_CAPABILITY_STALE_MS
+                && fresh_at(now_ms, observed)
         },
     ))
 }
@@ -117,7 +125,9 @@ pub(crate) fn projection(
     row.map(|(kind, feature_bits, mapping_revision, observed_at_ms)| {
         Ok(RcsEligibilityProjection {
             conversation_id: conversation,
-            eligibility: if now_ms.saturating_sub(observed_at_ms) > RCS_CAPABILITY_STALE_MS {
+            eligibility: if !current_gateway(conn, gateway, now_ms)?
+                || !fresh_at(now_ms, observed_at_ms)
+            {
                 RcsEligibility::Unknown
             } else {
                 parse_eligibility(&kind)?
@@ -129,6 +139,10 @@ pub(crate) fn projection(
         })
     })
     .transpose()
+}
+
+fn fresh_at(now_ms: i64, observed_at_ms: i64) -> bool {
+    now_ms >= observed_at_ms && now_ms - observed_at_ms <= RCS_CAPABILITY_STALE_MS
 }
 
 pub(crate) fn capability_state(value: RcsCapabilityState) -> &'static str {

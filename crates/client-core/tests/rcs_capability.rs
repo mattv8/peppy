@@ -122,3 +122,70 @@ fn replacement_events_self_supersede_per_gateway_and_conversation() {
             .iter()
             .any(|reference| reference.producer_sequence == first.producer_sequence))));
 }
+
+#[test]
+fn invalid_sql_revisions_and_future_observations_never_grant_capability() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-bounds", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let mut oversized = status(config.device_id, u64::MAX, 1_000);
+    assert!(matches!(
+        client.publish_rcs_capability(&oversized, &[], 1_000),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert!(client.pending_outbox().unwrap().is_empty());
+
+    oversized.capability_revision = 1;
+    oversized.observed_at_ms = i64::MAX;
+    assert!(client
+        .publish_rcs_capability(&oversized, &[], 1_000)
+        .is_err());
+
+    let status = status(config.device_id, 2, 1_000);
+    let projection = eligibility(config.device_id, conversation, 2, 1_000);
+    client
+        .publish_rcs_capability(&status, &[projection], 1_000)
+        .unwrap();
+    assert!(!client
+        .rcs_gateway_supported(config.device_id, i64::MAX)
+        .unwrap());
+    assert_eq!(
+        client
+            .rcs_eligibility_projection(conversation, config.device_id, i64::MAX)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Unknown
+    );
+}
+
+#[test]
+fn eligibility_requires_a_current_linked_gateway() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-unlinked", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    client
+        .publish_rcs_capability(
+            &status(config.device_id, 1, 1_000),
+            &[eligibility(config.device_id, conversation, 1, 1_000)],
+            1_000,
+        )
+        .unwrap();
+    let mut unlinked = status(config.device_id, 2, 1_001);
+    unlinked.state = RcsCapabilityState::Unlinked;
+    client
+        .publish_rcs_capability(&unlinked, &[], 1_001)
+        .unwrap();
+    assert_eq!(
+        client
+            .rcs_eligibility_projection(conversation, config.device_id, 1_001)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Unknown
+    );
+}
