@@ -3,6 +3,7 @@ package dev.peppy.mobile.googlemessages
 import android.app.NotificationManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -130,6 +131,18 @@ class LinkRuntimeTest {
         LinkRuntime.endPairing()
         assertEquals(null, LinkRuntime.emoji.value)
         assertFalse(LinkRuntime.pairingInProgress.get())
+    }
+
+    @Test
+    fun `runtime event sink records through the production diagnostic path`() {
+        val records = mutableListOf<String>()
+        SyncDiagnostics.configureRuntime(enabled = true) { records += it }
+
+        LinkRuntimeEventSink.record("link", "reset_local", 0)
+
+        assertTrue(records.single().contains("event=27"))
+        assertTrue(records.single().contains("29=17"))
+        SyncDiagnostics.configureRuntime(enabled = false) {}
     }
 
     private fun availableEngine(handle: LinkHandle) = object : LinkEngine {

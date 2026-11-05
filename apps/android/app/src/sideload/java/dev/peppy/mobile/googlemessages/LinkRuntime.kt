@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import android.content.Context
+import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -144,12 +145,9 @@ internal object LinkRuntimeTestHooks {
     @Volatile var eventRecorder: ((String, String, Long) -> Unit)? = null
 }
 
-/** Task 9 installs the production diagnostics sink; the default intentionally records nothing. */
 internal object LinkRuntimeEventSink {
-    @Volatile var productionRecorder: ((String, String, Long) -> Unit)? = null
-
     fun record(kind: String, code: String, value: Long) {
-        productionRecorder?.invoke(kind, code, value)
+        recordGoogleMessagesLinkEvent(kind, code, value)
         LinkRuntimeTestHooks.eventRecorder?.invoke(kind, code, value)
     }
 }
