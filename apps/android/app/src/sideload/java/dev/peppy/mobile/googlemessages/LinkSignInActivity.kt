@@ -16,6 +16,7 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import dev.peppy.mobile.R
@@ -33,6 +34,11 @@ class LinkSignInActivity : AppCompatActivity() {
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (::webView.isInitialized && webView.canGoBack()) webView.goBack() else wipe { finishWith(OUTCOME_CANCELLED) }
+            }
+        })
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         WebView.setWebContentsDebuggingEnabled(false)
         Thread {
@@ -176,8 +182,14 @@ class LinkSignInActivity : AppCompatActivity() {
 
     private fun startPairing() {
         val cookies = pendingCookies ?: return finishWith(OUTCOME_ERROR)
+        if (!LinkSignInRuntime.beginPairing()) {
+            pendingCookies = null
+            releaseLease()
+            finishWith(OUTCOME_ERROR)
+            return
+        }
         GoogleMessagesLinkService.start(this)
-        val queued = LinkSignInRuntime.submitPairing {
+        val queued = LinkSignInRuntime.executePairing {
             try {
                 (LinkRuntime.handle(applicationContext) as? LinkOpenResult.Open)?.handle?.pair(CookieFilter.json(cookies))
             } catch (_: Exception) {
@@ -186,6 +198,7 @@ class LinkSignInActivity : AppCompatActivity() {
                 pendingCookies = null
             }
         }
+        if (!queued) LinkSignInRuntime.endPairing()
         releaseLease()
         finishWith(if (queued) OUTCOME_PAIRING_STARTED else OUTCOME_ERROR)
     }
@@ -203,10 +216,6 @@ class LinkSignInActivity : AppCompatActivity() {
                 finishWith(OUTCOME_BLOCKED)
             }
         }
-    }
-
-    override fun onBackPressed() {
-        if (::webView.isInitialized && webView.canGoBack()) webView.goBack() else wipe { finishWith(OUTCOME_CANCELLED) }
     }
 
     override fun onDestroy() {

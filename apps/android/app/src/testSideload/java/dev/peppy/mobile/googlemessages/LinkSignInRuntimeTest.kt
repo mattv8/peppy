@@ -24,7 +24,8 @@ class LinkSignInRuntimeTest {
     @Test fun `queued pairing always clears the shared flag`() {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        assertTrue(LinkSignInRuntime.submitPairing {
+        assertTrue(LinkSignInRuntime.beginPairing())
+        assertTrue(LinkSignInRuntime.executePairing {
             entered.countDown()
             release.await()
         })
@@ -36,7 +37,8 @@ class LinkSignInRuntimeTest {
     }
 
     @Test fun `throwing pairing clears the shared flag`() {
-        assertTrue(LinkSignInRuntime.submitPairing { error("pair_failed") })
+        assertTrue(LinkSignInRuntime.beginPairing())
+        assertTrue(LinkSignInRuntime.executePairing { error("pair_failed") })
 
         assertTrue(waitForPairingToFinish())
         assertFalse(LinkSignInRuntime.pairingInProgress())
