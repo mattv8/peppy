@@ -55,6 +55,7 @@ import dev.peppy.mobile.advanced.markAdvancedFeaturesSeen
 import dev.peppy.mobile.advanced.showNewFeatureHint
 import dev.peppy.mobile.restrictedsetup.restrictedSetupAvailable
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupEntry
+import dev.peppy.mobile.googlemessages.GoogleMessagesLink
 import dev.peppy.mobile.phoneread.PhoneReadSettings
 import dev.peppy.mobile.syncMessage
 import dev.peppy.mobile.telephony.SimRoutes
@@ -241,6 +242,7 @@ internal fun SmsTab(
                 )
             }
             if (restrictedSetupAvailable(context)) AdvancedFeaturesSection(context, refresh, onChanged)
+            GoogleMessagesLink.Entry(onChanged)
             MmsSettings(context, refresh, databaseOpen, onChanged, detailsOnly = true)
             SmsSettings(context, history)
         }

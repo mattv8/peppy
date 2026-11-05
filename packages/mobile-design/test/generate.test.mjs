@@ -317,6 +317,16 @@ test("retired desktop overrides fall back to shared copy", () => {
   }
 });
 
+test("Google Messages link copy avoids protocol and maturity claims", () => {
+  const maturityTerms = ["experi" + "mental", "be" + "ta", "pre" + "view", "early " + "access", "la" + "bs", "tri" + "al", "un" + "stable"];
+  const maturityPattern = new RegExp(`\\b(${maturityTerms.join("|")})\\b`, "i");
+  for (const [key, value] of Object.entries(catalog)) {
+    if (!key.startsWith("google_messages_link_")) continue;
+    assert.doesNotMatch(value, /\bRCS\b/i, `${key} must not name a protocol`);
+    assert.doesNotMatch(value, maturityPattern, `${key} must use production-ready copy`);
+  }
+});
+
 test("store, account, startup, and re-enrol copy is desktop-only and generated", () => {
   const desktopOnlyPattern = /^(store_|attachment_storage_addon_|billing_elsewhere_|account_billing_intro_|account_portal_cta$|account_delete_|account_deleted_|startup_|reenrol_|updates_app_store_delivered$|hosted_sign_in_(group_label|waiting)$|hosted_session_recovery_body$)/;
   const keys = Object.keys(desktopOverrides).filter(key => desktopOnlyPattern.test(key));
