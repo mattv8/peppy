@@ -254,3 +254,310 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
         Some(SendState::OutcomeUnknown)
     );
 }
+
+fn encrypted_connection(config: &ClientConfig) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+}
+
+fn rcs_command(
+    recipient: &str,
+) -> (
+    tempfile::TempDir,
+    Vault,
+    ClientConfig,
+    Client,
+    CommandId,
+    RcsMappingObservation,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&directory, "sender-rcs", &vault);
+    let gateway_config = config(&directory, "gateway-rcs", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let captured = gateway
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "peer-local".into(),
+            body: String::new(),
+            provider_message_id: Some("provider-rcs-local".into()),
+            imported: true,
+        })
+        .unwrap();
+    let current_observation = observation("peer-local", 1);
+    assert!(matches!(
+        gateway
+            .verify_rcs_mapping(&current_observation, 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let queued = sender
+        .queue_send(
+            OutgoingSms {
+                conversation_id: captured.conversation_id,
+                recipients: vec![recipient.into()],
+                body: String::from('\0'),
+            },
+            GatewayRoute::RcsLink {
+                gateway_device_id: gateway_config.device_id,
+            },
+        )
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&sender);
+    server.sync(&gateway);
+    (
+        directory,
+        vault,
+        gateway_config,
+        gateway,
+        queued.command_id,
+        current_observation,
+    )
+}
+
+#[test]
+fn rcs_retry_is_refused_after_restore_guard_is_recorded() {
+    let (_directory, _vault, _config, gateway, command_id, current) = rcs_command("peer-local");
+    gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    gateway.mark_restored_gateway().unwrap();
+
+    assert!(
+        gateway
+            .retry_rcs_failed_before_submission(command_id, &current, 1_001)
+            .is_err()
+    );
+}
+
+#[test]
+fn rcs_retry_is_refused_after_a_newer_epoch_is_activated() {
+    let (_directory, vault, _config, gateway, command_id, current) = rcs_command("peer-local");
+    gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    let epoch_two = Vault::epoch(vault.id, 2);
+    gateway
+        .unlock(&epoch_two.profile, &epoch_two.header, PASSPHRASE)
+        .unwrap();
+    gateway.activate_epoch(2).unwrap();
+
+    assert!(
+        gateway
+            .retry_rcs_failed_before_submission(command_id, &current, 1_001)
+            .is_err()
+    );
+}
+
+#[test]
+fn rcs_retry_is_refused_when_the_received_command_is_historical() {
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    drop(gateway);
+    let connection = encrypted_connection(&config);
+    connection
+        .execute(
+            "UPDATE command_ledger SET historical=1 WHERE command_id=?",
+            [command_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let gateway = unlocked(&config, &vault);
+
+    assert!(
+        gateway
+            .retry_rcs_failed_before_submission(command_id, &current, 1_001)
+            .is_err()
+    );
+}
+
+#[test]
+fn rcs_initial_permit_binds_the_command_recipient_to_the_mapping_participant() {
+    let (_directory, _vault, _config, gateway, command_id, current) =
+        rcs_command("different-peer-local");
+
+    assert!(
+        gateway
+            .begin_rcs_send_attempt(command_id, &current, 1_000)
+            .is_err()
+    );
+}
+
+#[test]
+fn rcs_retry_rechecks_the_command_recipient_against_the_mapping_participant() {
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    drop(gateway);
+    let connection = encrypted_connection(&config);
+    let payload: String = connection
+        .query_row(
+            "SELECT payload FROM command_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    payload["recipients"] = serde_json::json!(["different-peer-local"]);
+    connection
+        .execute(
+            "UPDATE command_ledger SET payload=? WHERE command_id=?",
+            [payload.to_string(), command_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let gateway = unlocked(&config, &vault);
+
+    assert!(
+        gateway
+            .retry_rcs_failed_before_submission(command_id, &current, 1_001)
+            .is_err()
+    );
+}
+
+#[test]
+fn carrier_proof_rejects_future_extreme_overflow_and_expired_times() {
+    let (_directory, _vault, _config, gateway, _command_id) = carrier_command();
+    let mut unknown = observation("peer-local", 1);
+    unknown.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
+    let command = gateway.pending_commands().unwrap().pop().unwrap();
+    let mut proof = carrier_proof(&command);
+
+    proof.observed_at_ms = 1_001;
+    assert!(gateway.record_carrier_only_proof(&proof, 1_000).is_err());
+    proof.observed_at_ms = i64::MIN;
+    assert!(gateway.record_carrier_only_proof(&proof, 0).is_err());
+    proof.observed_at_ms = i64::MAX;
+    assert!(gateway.record_carrier_only_proof(&proof, i64::MAX).is_err());
+    proof.observed_at_ms = 1_000;
+    assert!(gateway.record_carrier_only_proof(&proof, 31_001).is_err());
+}
+
+#[test]
+fn clock_rollback_invalidates_carrier_proof_until_a_new_lookup_is_recorded() {
+    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let mut unknown = observation("peer-local", 1);
+    unknown.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
+    let command = gateway.pending_commands().unwrap().pop().unwrap();
+    let mut proof = carrier_proof(&command);
+    gateway.record_carrier_only_proof(&proof, 1_000).unwrap();
+    assert_eq!(
+        gateway.begin_send_attempt_at(command_id, 999).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+
+    proof.observed_at_ms = 999;
+    gateway.record_carrier_only_proof(&proof, 999).unwrap();
+    assert!(matches!(
+        gateway.begin_send_attempt_at(command_id, 999).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+}
+
+#[test]
+fn explicit_unlink_restores_regular_carrier_but_never_a_historically_proven_rcs_chat() {
+    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let mut linked = observation("peer-local", 1);
+    linked.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&linked, 1_000).unwrap();
+    assert_eq!(
+        gateway.begin_send_attempt_at(command_id, 1_000).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+    let mut unlinked = linked;
+    unlinked.context_revision = 2;
+    unlinked.mapping_revision = 2;
+    unlinked.observed_at_ms = 1_001;
+    unlinked.link_state = RcsLinkState::Unlinked;
+    gateway.update_rcs_context(&unlinked, 1_001).unwrap();
+    assert!(matches!(
+        gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+
+    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let mapped = observation("peer-local", 1);
+    gateway.verify_rcs_mapping(&mapped, 1_000).unwrap();
+    let mut unlinked = mapped;
+    unlinked.context_revision = 2;
+    unlinked.mapping_revision = 2;
+    unlinked.observed_at_ms = 1_001;
+    unlinked.link_state = RcsLinkState::Unlinked;
+    gateway.update_rcs_context(&unlinked, 1_001).unwrap();
+    assert_eq!(
+        gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+}
+
+#[test]
+fn an_unlinked_observation_without_explicit_owner_action_does_not_enable_carrier() {
+    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let mut linked = observation("peer-local", 1);
+    linked.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&linked, 1_000).unwrap();
+    let mut incidental_unlinked = linked;
+    incidental_unlinked.context_revision = 2;
+    incidental_unlinked.mapping_revision = 2;
+    incidental_unlinked.observed_at_ms = 1_001;
+    incidental_unlinked.link_state = RcsLinkState::Unlinked;
+    gateway
+        .verify_rcs_mapping(&incidental_unlinked, 1_001)
+        .unwrap();
+
+    assert_eq!(
+        gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+}
+
+#[test]
+fn terminal_link_states_do_not_fall_back_to_carrier() {
+    for link_state in [RcsLinkState::NeedsRelink, RcsLinkState::SignedOut] {
+        let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+        let mut unavailable = observation("peer-local", 1);
+        unavailable.google_candidate_count = 0;
+        unavailable.link_state = link_state;
+        gateway.verify_rcs_mapping(&unavailable, 1_000).unwrap();
+        assert_eq!(
+            gateway.begin_send_attempt_at(command_id, 1_000).unwrap(),
+            PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+        );
+    }
+}
+
+#[test]
+fn carrier_only_proof_rejects_multiple_or_mixed_raw_recipients() {
+    let (_directory, _vault, _config, gateway, _command_id) = carrier_command();
+    let mut unknown = observation("peer-local", 1);
+    unknown.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
+    let command = gateway.pending_commands().unwrap().pop().unwrap();
+    let mut proof = carrier_proof(&command);
+    proof.recipients = vec!["peer-local".into(), "different-peer-local".into()];
+    assert!(gateway.record_carrier_only_proof(&proof, 1_000).is_err());
+}

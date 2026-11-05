@@ -1141,6 +1141,44 @@ impl Client {
         Ok(outcome)
     }
 
+    /// Records an owner-requested unlink context. Incidental link errors and absent context never
+    /// authorize carrier fallback after this client has observed linked state.
+    pub fn update_rcs_context(
+        &self,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<(), Error> {
+        if observation.link_state != RcsLinkState::Unlinked {
+            return Err(Error::InvalidRequest("explicit unlink context required"));
+        }
+        now_ms
+            .checked_sub(observation.observed_at_ms)
+            .filter(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(age))
+            .ok_or(Error::InvalidRequest("unlink context is not current"))?;
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        rcs_mapping::verify_and_store(&transaction, observation, now_ms)?;
+        if !rcs_mapping::context_is_current(
+            &transaction,
+            observation.link_generation,
+            observation.session_generation,
+            observation.context_revision,
+            false,
+        )? {
+            return Err(Error::InvalidRequest("unlink context is not current"));
+        }
+        rcs_send::record_intentional_unlink(
+            &transaction,
+            observation.link_generation,
+            observation.session_generation,
+            observation.context_revision,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Returns only a current local mapping; invalidated mappings never authorize a route.
     pub fn rcs_mapping(
         &self,
@@ -3372,17 +3410,7 @@ impl Client {
         if let Some(state) = attempt_state(&tx, command_id)? {
             return Err(Error::AlreadyAttempted(state));
         }
-        if restore_guarded(&tx)? {
-            return Err(Error::InvalidRequest("restore guarded"));
-        }
-        if historical {
-            return Err(Error::InvalidRequest("historical command"));
-        }
-        match active {
-            Some(active) if epoch == active => {}
-            Some(active) if epoch < active => return Err(Error::InvalidRequest("stale epoch")),
-            _ => return Err(Error::InvalidRequest("epoch not active")),
-        }
+        require_received_command_eligible(&tx, active, epoch, historical)?;
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
         if !media_ready
             || message.transport != Transport::Sms
@@ -3391,6 +3419,7 @@ impl Client {
             return Err(Error::InvalidRequest("RCS text required"));
         }
         let mapping = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?;
+        require_exact_rcs_recipient(&message, &mapping)?;
         let tmp_id = uuid::Uuid::new_v4().to_string();
         tx.execute(
             "INSERT INTO attempts(command_id,state,attempted_at_ms) VALUES(?,?,?)",
@@ -3452,6 +3481,7 @@ impl Client {
         now_ms: i64,
     ) -> Result<RcsPermit, Error> {
         let mut guard = self.lock()?;
+        let active = guard.active_epoch;
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -3460,11 +3490,30 @@ impl Client {
                 attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?,
             ));
         }
-        let (payload, revision, digest, google_id, tmp_id): (String, u64, Vec<u8>, String, String) = tx.query_row(
-            "SELECT l.payload,r.mapping_revision,r.proof_digest,r.google_conversation_id,r.tmp_id FROM command_ledger l JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND l.subscription_id=''",
+        let (epoch, historical, payload, revision, digest, google_id, tmp_id): (
+            u32,
+            bool,
+            String,
+            u64,
+            Vec<u8>,
+            String,
+            String,
+        ) = tx.query_row(
+            "SELECT l.key_epoch,l.historical,l.payload,r.mapping_revision,r.proof_digest,r.google_conversation_id,r.tmp_id FROM command_ledger l JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND l.subscription_id=''",
             [command_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
         )?;
+        require_received_command_eligible(&tx, active, epoch, historical)?;
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
         if !media_ready
             || message.transport != Transport::Sms
@@ -3473,6 +3522,7 @@ impl Client {
             return Err(Error::InvalidRequest("RCS text required"));
         }
         let mapping = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?;
+        require_exact_rcs_recipient(&message, &mapping)?;
         if mapping.mapping_revision != revision
             || mapping.proof.digest.as_slice() != digest.as_slice()
             || mapping.google_conversation_id != google_id
@@ -9056,6 +9106,40 @@ fn attempt_state(conn: &Connection, command_id: CommandId) -> Result<Option<Send
     .optional()?
     .map(|state| decode_state(&state))
     .transpose()
+}
+
+fn require_received_command_eligible(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    command_epoch: u32,
+    historical: bool,
+) -> Result<(), Error> {
+    if restore_guarded(conn)? {
+        return Err(Error::InvalidRequest("restore guarded"));
+    }
+    if historical {
+        return Err(Error::InvalidRequest("historical command"));
+    }
+    match active_epoch {
+        Some(active) if command_epoch == active => Ok(()),
+        Some(active) if command_epoch < active => Err(Error::InvalidRequest("stale epoch")),
+        _ => Err(Error::InvalidRequest("epoch not active")),
+    }
+}
+
+fn require_exact_rcs_recipient(
+    message: &MessagePayload,
+    mapping: &RcsMapping,
+) -> Result<(), Error> {
+    let [recipient] = message.recipients.as_slice() else {
+        return Err(Error::InvalidRequest("RCS requires one proven recipient"));
+    };
+    if rcs_mapping::canonical_recipient(recipient).as_deref()
+        != Some(mapping.proof.canonical_participant.as_str())
+    {
+        return Err(Error::InvalidRequest("RCS recipient is not proven"));
+    }
+    Ok(())
 }
 
 fn exact_rcs_mapping(
