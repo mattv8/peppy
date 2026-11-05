@@ -66,6 +66,14 @@ pub enum RcsEligibilityState {
     Unknown,
 }
 
+pub struct SnapshotAccess {
+    pub active_conversation: Option<ConversationId>,
+    pub active_is_existing: bool,
+    pub roster_validated: bool,
+    pub unlocked: bool,
+    pub now_ms: i64,
+}
+
 /// Produces bounded display state only for host-validated, non-simulated gateway devices.
 /// The caller supplies the exact selected existing conversation and unlock state so this view
 /// cannot survive a lock, identity switch, or draft-only selection.
@@ -73,12 +81,9 @@ pub fn snapshot_at(
     client: &Client,
     gateways: &[GatewayView],
     revoked_device_ids: &HashSet<String>,
-    active_conversation: Option<ConversationId>,
-    active_is_existing: bool,
-    unlocked: bool,
-    now_ms: i64,
+    access: SnapshotAccess,
 ) -> Result<Option<RcsStatusSnapshot>, Error> {
-    if !unlocked {
+    if !access.unlocked || !access.roster_validated {
         return Ok(None);
     }
 
@@ -86,16 +91,16 @@ pub fn snapshot_at(
     let mut statuses = Vec::new();
     let mut eligibilities = Vec::new();
     for gateway_id in gateway_ids {
-        let Some(status) = client.rcs_link_status(gateway_id, now_ms)? else {
+        let Some(status) = client.rcs_link_status(gateway_id, access.now_ms)? else {
             continue;
         };
         let current_gateway = current_gateway(&status);
         statuses.push(gateway_status(gateway_id, &status));
-        if active_is_existing
+        if access.active_is_existing
             && current_gateway
-            && let Some(conversation_id) = active_conversation
+            && let Some(conversation_id) = access.active_conversation
             && let Some(projection) =
-                client.rcs_eligibility_projection(conversation_id, gateway_id, now_ms)?
+                client.rcs_eligibility_projection(conversation_id, gateway_id, access.now_ms)?
         {
             eligibilities.push(RcsConversationEligibility {
                 conversation_id: projection.conversation_id.to_string(),
@@ -129,6 +134,7 @@ fn validated_gateway_ids(
         .filter(|gateway| {
             !gateway.simulated
                 && gateway.supports_sms
+                && gateway.availability != crate::GatewayAvailability::UnsupportedPlatform
                 && !revoked_device_ids.contains(&gateway.id)
                 && seen.insert(gateway.id.as_str())
         })
@@ -137,7 +143,8 @@ fn validated_gateway_ids(
 }
 
 fn current_gateway(status: &RcsLinkStatusProjection) -> bool {
-    status.current
+    expiry(status.status.observed_at_ms).is_some()
+        && status.current
         && matches!(status.status.state, RcsCapabilityState::Linked)
         && status.status.availability
         && status.status.health
@@ -174,11 +181,60 @@ fn expiry(observed_at_ms: i64) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateways::{gateway_views, CapabilitiesResponse, DevicesResponse};
 
     #[test]
     fn expiry_matches_core_inclusive_currentness_boundary() {
         assert_eq!(expiry(1_000), Some(1_000 + RCS_CAPABILITY_STALE_MS + 1));
         assert_eq!(expiry(-1), None);
         assert_eq!(expiry(i64::MAX), None);
+    }
+
+    #[test]
+    fn ios_sms_report_is_not_an_rcs_gateway() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({
+            "devices": [{"device_id": id, "role": "owner", "kind": "ios", "revoked": false}]
+        }))
+        .unwrap();
+        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({
+            "capabilities": [{
+                "device_id": id,
+                "simulator": false,
+                "capabilities": {"sims": [{"subscription_id": "sim", "sms": "available", "mms": "unavailable"}]}
+            }]
+        }))
+        .unwrap();
+        let gateways = gateway_views(&devices, &capabilities);
+
+        assert!(gateways[0].supports_sms);
+        assert_eq!(gateways[0].availability, crate::GatewayAvailability::UnsupportedPlatform);
+        assert!(validated_gateway_ids(&gateways, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn current_gateway_rejects_terminal_and_overflowing_statuses() {
+        let gateway = DeviceId::new();
+        let status = |state, observed_at_ms, current| RcsLinkStatusProjection {
+            status: peppy_client_core::RcsLinkStatusEvent {
+                gateway_device_id: gateway,
+                state,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms,
+                capability_revision: u64::MAX,
+                feature_bits: u32::MAX,
+            },
+            current,
+        };
+
+        assert!(current_gateway(&status(RcsCapabilityState::Linked, 1, true)));
+        assert!(!current_gateway(&status(RcsCapabilityState::Unlinked, 1, true)));
+        assert!(!current_gateway(&status(RcsCapabilityState::Linked, i64::MAX, true)));
+        assert!(!current_gateway(&status(RcsCapabilityState::Linked, 1, false)));
+        let view = gateway_status(gateway, &status(RcsCapabilityState::Linked, 1, true));
+        assert_eq!(view.capability_revision, u64::MAX.to_string());
+        assert_eq!(view.observed_at_ms, "1");
     }
 }

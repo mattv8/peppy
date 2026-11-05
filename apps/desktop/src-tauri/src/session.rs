@@ -102,6 +102,7 @@ pub struct NetStatus {
     pub revoked: bool,
     pub gateways: Vec<GatewayView>,
     pub gateways_known: bool,
+    pub rcs_roster_validated: bool,
     pub vault: Option<VaultSummary>,
     pub device_role: Option<String>,
     pub revoked_device_ids: HashSet<String>,
@@ -1478,6 +1479,7 @@ impl Session {
             .map(|c| c.conversation_id)
             .chain(drafts.iter().map(|d| d.conversation_id))
             .collect();
+        let explicitly_requested = requested.is_some();
         let requested = requested
             .and_then(|id| ConversationId::from_str(id).ok())
             .filter(|id| known.contains(id));
@@ -1668,10 +1670,17 @@ impl Session {
                 &self.client,
                 &status.gateways,
                 &status.revoked_device_ids,
-                active,
-                active.is_some_and(|id| conversations.iter().any(|item| item.conversation_id == id)),
-                unlocked,
-                now_ms(),
+                dto::rcs_status::SnapshotAccess {
+                    active_conversation: active,
+                    active_is_existing: !explicitly_requested
+                        || (requested.is_some()
+                            && active.is_some_and(|id| {
+                                conversations.iter().any(|item| item.conversation_id == id)
+                            })),
+                    roster_validated: status.rcs_roster_validated,
+                    unlocked,
+                    now_ms: now_ms(),
+                },
             )
             .map_err(core_error)?
         };

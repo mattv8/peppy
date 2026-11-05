@@ -253,7 +253,10 @@ fn native_snapshot_projects_current_rcs_only_for_the_selected_existing_conversat
         .unwrap();
     let mut gateway_view = gateway(&gateway_id, true, false);
     gateway_view.simulated = false;
-    session.set_status(|status| status.gateways = vec![gateway_view]);
+    session.set_status(|status| {
+        status.gateways = vec![gateway_view];
+        status.rcs_roster_validated = true;
+    });
     let outbox_before_snapshot = session.client.pending_outbox_count().unwrap();
 
     let snapshot = session
@@ -270,6 +273,23 @@ fn native_snapshot_projects_current_rcs_only_for_the_selected_existing_conversat
     assert_eq!(rcs.gateways[0].gateway_id, gateway_id);
     assert_eq!(rcs.eligibilities[0].conversation_id, conversation.to_string());
     assert_eq!(rcs.eligibilities[0].eligibility, peppy_desktop_api::RcsEligibilityState::Eligible);
+    for invalid_conversation in [uuid::Uuid::new_v4().to_string(), "not-a-conversation".into()] {
+        let snapshot = session
+            .snapshot(
+                Some(&invalid_conversation),
+                None,
+                crate::head(),
+                None,
+                Default::default(),
+            )
+            .unwrap()
+            .0;
+        assert!(snapshot
+            .rcs_status
+            .unwrap()
+            .eligibilities
+            .is_empty());
+    }
     assert_eq!(session.client.pending_outbox_count().unwrap(), outbox_before_snapshot);
 }
 

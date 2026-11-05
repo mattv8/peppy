@@ -231,12 +231,16 @@ pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
         .map_err(sync_net_error)?;
     let views = gateway_views(&devices, &capabilities);
     let device_role = extract_device_role(&devices, &session.binding.device_id);
+    let rcs_roster_validated = device_role.is_some();
     let changed = {
         let mut status = session.status.lock().unwrap_or_else(|p| p.into_inner());
-        let changed =
-            !status.gateways_known || status.gateways != views || status.device_role != device_role;
+        let changed = !status.gateways_known
+            || status.gateways != views
+            || status.device_role != device_role
+            || status.rcs_roster_validated != rcs_roster_validated;
         status.gateways = views.clone();
         status.gateways_known = true;
+        status.rcs_roster_validated = rcs_roster_validated;
         status.device_role = device_role;
         status.revoked_device_ids = devices
             .devices

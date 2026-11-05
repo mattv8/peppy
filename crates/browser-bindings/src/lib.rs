@@ -188,6 +188,8 @@ struct HostContext {
     gateways: Option<Vec<GatewayView>>,
     #[serde(skip)]
     revoked_device_ids: std::collections::HashSet<String>,
+    #[serde(skip)]
+    rcs_roster_validated: bool,
     /// Set only by the worker context path; never deserialized from renderer host context.
     #[serde(skip)]
     outbox_rejected: bool,
@@ -441,6 +443,7 @@ impl BrowserCore {
             Some(_) => return Err(invalid()),
             None => false,
         };
+        let explicitly_requested = args.get("conversationId").is_some();
         let requested = args
             .get("conversationId")
             .and_then(Value::as_str)
@@ -586,10 +589,17 @@ impl BrowserCore {
             client,
             self.context.gateways.as_deref().unwrap_or_default(),
             &self.context.revoked_device_ids,
-            active,
-            active.is_some_and(|id| conversations.iter().any(|item| item.conversation_id == id)),
-            unlocked,
-            now_ms(),
+            dto::rcs_status::SnapshotAccess {
+                active_conversation: active,
+                active_is_existing: !explicitly_requested
+                    || (requested.is_some()
+                        && active.is_some_and(|id| {
+                            conversations.iter().any(|item| item.conversation_id == id)
+                        })),
+                roster_validated: self.context.rcs_roster_validated,
+                unlocked,
+                now_ms: now_ms(),
+            },
         )
         .map_err(core)?;
         serde_json::to_value(dto::Snapshot {
@@ -1041,7 +1051,7 @@ mod tests {
                     conversation_id: conversation,
                     eligibility: RcsEligibility::Eligible,
                     feature_bits: 99,
-                    mapping_revision: 1,
+                    mapping_revision: i64::MAX as u64,
                     observed_at_ms: now,
                     gateway_device_id: gateway,
                 }],
@@ -1053,14 +1063,49 @@ mod tests {
         ));
         let outbox_before_snapshot = core.client().unwrap().pending_outbox_count().unwrap();
 
+        let cached_snapshot = value(&core.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
+        ));
+        assert!(cached_snapshot["rcsStatus"].is_null());
+        value(&core.dispatch(
+            &json!({"command":"_worker_apply_server_context","args":{
+                "connection":"connected",
+                "devices":{"devices":[{"device_id":gateway,"role":"gateway","revoked":false}]},
+                "capabilities":{"capabilities":[{"device_id":gateway,"simulator":false,"capabilities":{"sims":[{"subscription_id":"sim","sms":"available","mms":"unavailable"}]}}]}
+            }}).to_string(),
+        ));
+
         let snapshot = value(&core.dispatch(
             &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
         ));
         assert_eq!(snapshot["rcsStatus"]["gateways"][0]["gatewayId"], gateway.to_string());
         assert_eq!(snapshot["rcsStatus"]["eligibilities"][0]["conversationId"], conversation.to_string());
         assert_eq!(snapshot["rcsStatus"]["eligibilities"][0]["eligibility"], "eligible");
+        assert_eq!(
+            snapshot["rcsStatus"]["eligibilities"][0]["mappingRevision"],
+            (i64::MAX as u64).to_string()
+        );
         assert!(snapshot["rcsStatus"]["gateways"][0]["featureBits"].is_null());
         assert!(snapshot["rcsStatus"]["eligibilities"][0]["featureBits"].is_null());
+        for invalid_conversation in [ConversationId::new().to_string(), "not-a-conversation".into()] {
+            let snapshot = value(&core.dispatch(
+                &json!({"command":"snapshot","args":{"conversationId":invalid_conversation}}).to_string(),
+            ));
+            assert!(snapshot["rcsStatus"]["eligibilities"].as_array().unwrap().is_empty());
+        }
+        let revoked: Value = serde_json::from_str(&core.dispatch(
+            &json!({"command":"_worker_apply_server_context","args":{
+                "connection":"connected",
+                "devices":{"devices":[{"device_id":gateway,"role":"gateway","revoked":true}]},
+                "capabilities":{"capabilities":[]}
+            }}).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(revoked["error"]["code"], "device-revoked");
+        let revoked_snapshot = value(&core.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
+        ));
+        assert!(revoked_snapshot["rcsStatus"].is_null());
         assert_eq!(core.client().unwrap().pending_outbox_count().unwrap(), outbox_before_snapshot);
     }
 
