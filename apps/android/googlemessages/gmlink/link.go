@@ -182,7 +182,10 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 	defer func() {
 		cancel()
 		link.mu.Lock()
-		link.pairCancel, link.pairDone = nil, nil
+		// Clear only this pair's own handles: a newer pair may already own them.
+		if link.pairDone == done {
+			link.pairCancel, link.pairDone = nil, nil
+		}
 		link.mu.Unlock()
 		if !completed {
 			code := pairCode(err)
@@ -605,7 +608,7 @@ func (link *Link) transportStop(code string) {
 // Any other state is left alone, and nothing is persisted or reported unless it changed.
 func (link *Link) transition(state, code string) {
 	link.mu.Lock()
-	if link.state != stateLinked {
+	if link.state != stateLinked || link.unlinking {
 		link.mu.Unlock()
 		return
 	}
@@ -634,7 +637,8 @@ func pairingState(state string) bool {
 // that changed under it.
 func (link *Link) signOutIf(code string, allowed func(state string) bool) {
 	link.mu.Lock()
-	if !allowed(link.state) {
+	// An unlink in progress owns the state change; events from stopped clients must not undo it.
+	if !allowed(link.state) || link.unlinking {
 		link.mu.Unlock()
 		return
 	}

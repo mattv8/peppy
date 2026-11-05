@@ -363,12 +363,18 @@ func (fixture *phoneFixture) queue(data *gmproto.RPCMessageData) {
 		panic(err)
 	}
 	fixture.mu.Lock()
-	defer fixture.mu.Unlock()
-	if fixture.current != nil {
-		fixture.current <- block
+	current := fixture.current
+	if current == nil {
+		fixture.pending = append(fixture.pending, block)
+		fixture.mu.Unlock()
 		return
 	}
-	fixture.pending = append(fixture.pending, block)
+	fixture.mu.Unlock()
+	// The lock is released before the send, so a stream that exits meanwhile cannot deadlock on it.
+	select {
+	case current <- block:
+	case <-fixture.stop:
+	}
 }
 
 func (fixture *phoneFixture) streamLongPoll(writer http.ResponseWriter, request *http.Request) {
@@ -431,6 +437,10 @@ type safetyHost struct {
 	holdState   string
 	holdReached chan struct{}
 	release     chan struct{}
+
+	holdEvent        string
+	holdEventReached chan struct{}
+	holdEventRelease chan struct{}
 }
 
 func newSafetyHost() *safetyHost {
@@ -519,8 +529,30 @@ func (host *safetyHost) countEvent(kind, code string) int {
 
 func (host *safetyHost) Event(kind, code string, _ int64) {
 	host.mu.Lock()
+	hold := host.holdEvent == code
+	reached, release := host.holdEventReached, host.holdEventRelease
+	if hold {
+		host.holdEvent = ""
+	}
+	host.mu.Unlock()
+	if hold {
+		close(reached)
+		<-release
+	}
+	host.mu.Lock()
 	defer host.mu.Unlock()
 	host.events = append(host.events, eventCode{kind, code})
+}
+
+// holdNextEvent makes the next event with the given code block inside Event until the
+// returned release channel is closed. reached closes when the host is holding it.
+func (host *safetyHost) holdNextEvent(code string) (reached, release chan struct{}) {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	host.holdEvent = code
+	host.holdEventReached = make(chan struct{})
+	host.holdEventRelease = make(chan struct{})
+	return host.holdEventReached, host.holdEventRelease
 }
 
 func (host *safetyHost) ShowEmoji(emoji string) {
