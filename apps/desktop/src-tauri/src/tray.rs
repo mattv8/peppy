@@ -369,21 +369,9 @@ pub fn open_composer_mode(
             .map_err(|_| BridgeError::new("window", "Could not show the composer window."))?;
         return Ok(());
     }
-    let url = composer_url(conversation, effective_panel);
-    let (width, height) = composer_size(effective_panel);
-    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title("Peppy message")
-        .inner_size(width, height)
-        .min_inner_size(320.0, 360.0)
-        .decorations(false)
-        .resizable(true)
-        .visible(false)
-        .focused(true);
-    let builder = if effective_panel {
-        builder.always_on_top(true)
-    } else {
-        builder
-    };
+    let config = composer_window_config(conversation, effective_panel);
+    let builder = WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|_| BridgeError::new("window", "Could not open the composer window."))?;
     let window = builder
         .build()
         .map_err(|_| BridgeError::new("window", "Could not open the composer window."))?;
@@ -416,6 +404,33 @@ fn composer_size(head_panel: bool) -> (f64, f64) {
     }
 }
 
+fn composer_window_config(
+    conversation: ConversationId,
+    head_panel: bool,
+) -> tauri::utils::config::WindowConfig {
+    let (width, height) = composer_size(head_panel);
+    tauri::utils::config::WindowConfig {
+        label: format!("{COMPOSER_PREFIX}{conversation}"),
+        url: WebviewUrl::App(composer_url(conversation, head_panel).into()),
+        title: "Peppy message".into(),
+        width,
+        height,
+        min_width: Some(320.0),
+        min_height: Some(360.0),
+        decorations: cfg!(target_os = "macos"),
+        #[cfg(target_os = "macos")]
+        title_bar_style: tauri::utils::TitleBarStyle::Overlay,
+        #[cfg(target_os = "macos")]
+        hidden_title: true,
+        resizable: true,
+        visible: false,
+        focus: true,
+        transparent: false,
+        always_on_top: head_panel,
+        ..Default::default()
+    }
+}
+
 fn configure_composer(window: &tauri::WebviewWindow, head_panel: bool) {
     let saved = composer_conversation(window.label())
         .and_then(|id| crate::heads_runtime::panel_layout(window.app_handle(), &id.to_string()));
@@ -438,7 +453,6 @@ fn configure_composer(window: &tauri::WebviewWindow, head_panel: bool) {
     let _ = window.set_always_on_top(head_panel);
     crate::sync_media_viewer_topmost(window.app_handle(), window.label(), head_panel);
     crate::window_chrome::prepare_material(window, head_panel);
-    crate::window_chrome::sync_webview_window(window, head_panel);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -712,6 +726,62 @@ mod tests {
         assert_eq!(composer_conversation(&format!("composer-{id}")), Some(id));
         assert_eq!(composer_conversation("composer-../../etc"), None);
         assert_eq!(composer_conversation("main"), None);
+    }
+
+    fn assert_composer_creation_config(
+        config: &tauri::utils::config::WindowConfig,
+        conversation: ConversationId,
+        head_panel: bool,
+    ) {
+        let (width, height) = if head_panel {
+            (340.0, 440.0)
+        } else {
+            (420.0, 560.0)
+        };
+        assert_eq!(config.label, format!("composer-{conversation}"));
+        assert_eq!(
+            config.url,
+            WebviewUrl::App(composer_url(conversation, head_panel).into())
+        );
+        assert_eq!(config.title, "Peppy message");
+        assert_eq!((config.width, config.height), (width, height));
+        assert_eq!(
+            (config.min_width, config.min_height),
+            (Some(320.0), Some(360.0))
+        );
+        assert!(!config.center);
+        assert_eq!((config.x, config.y), (None, None));
+        assert!(config.resizable);
+        assert!(!config.visible);
+        assert!(config.focus);
+        assert!(!config.transparent);
+        assert_eq!(config.always_on_top, head_panel);
+
+        #[cfg(target_os = "macos")]
+        {
+            assert!(
+                config.decorations,
+                "macOS composers require a titled native frame"
+            );
+            assert_eq!(config.title_bar_style, tauri::utils::TitleBarStyle::Overlay);
+            assert!(config.hidden_title);
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert!(!config.decorations);
+    }
+
+    #[test]
+    fn standalone_composer_creation_config_requires_an_opaque_titled_macos_frame() {
+        let conversation = ConversationId::new();
+        let config = composer_window_config(conversation, false);
+        assert_composer_creation_config(&config, conversation, false);
+    }
+
+    #[test]
+    fn panel_composer_creation_config_requires_an_opaque_titled_macos_frame() {
+        let conversation = ConversationId::new();
+        let config = composer_window_config(conversation, true);
+        assert_composer_creation_config(&config, conversation, true);
     }
 
     #[test]

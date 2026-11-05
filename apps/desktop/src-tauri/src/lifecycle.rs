@@ -923,8 +923,7 @@ fn restore_after_failure(app: &tauri::AppHandle, failure: &Failure) {
             crate::tray::show_main(app);
             restored = true;
         } else if let Some(window) = app.get_webview_window(label) {
-            let _ = window.show();
-            let _ = window.set_focus();
+            let _ = crate::window_chrome::recover_window(&window);
             restored = true;
         }
     }
