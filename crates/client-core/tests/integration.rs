@@ -49,6 +49,7 @@ mod notifications;
 mod phone_read;
 mod phone_read_ingest;
 mod provider_archive;
+mod rcs_mapping;
 mod recipient_identity;
 mod repair_dedup;
 mod replay_batch;

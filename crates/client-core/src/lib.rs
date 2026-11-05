@@ -111,7 +111,11 @@ pub use phone_read::{
     PHONE_READ_EFFECT_TTL_MS, PhoneReadCandidate, PhoneReadEffect, PhoneReadTransport,
     ProviderRowRef,
 };
-pub use rcs_mapping::{RcsMapping, RcsMappingClass, RcsMappingProof};
+pub use rcs_mapping::{
+    RCS_MAPPING_FRESHNESS_MS, RCS_MAPPING_PROOF_VERSION, RcsConversationType, RcsLinkState,
+    RcsMapping, RcsMappingClass, RcsMappingObservation, RcsMappingOutcome, RcsMappingProof,
+    RcsMappingRefusal, RcsParticipantObservation, RcsSendMode,
+};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -1109,15 +1113,20 @@ pub enum ContactBookSelection {
 }
 
 impl Client {
-    /// Stores a local-only exact mapping proof. It never emits an envelope.
-    pub fn store_rcs_mapping(&self, mapping: &RcsMapping) -> Result<(), Error> {
+    /// Verifies host facts and atomically stores a local-only exact mapping proof.
+    /// The proof digest is computed by core; host-provided digests are never accepted.
+    pub fn verify_rcs_mapping(
+        &self,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<RcsMappingOutcome, Error> {
         let mut store = self.lock()?;
         let transaction = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        rcs_mapping::put(&transaction, mapping)?;
+        let outcome = rcs_mapping::verify_and_store(&transaction, observation, now_ms)?;
         transaction.commit()?;
-        Ok(())
+        Ok(outcome)
     }
 
     /// Returns only a current local mapping; invalidated mappings never authorize a route.
