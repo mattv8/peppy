@@ -163,14 +163,22 @@ async fn listen_once(state: &Inner) -> Result<(), sqlx::Error> {
 }
 
 async fn setup_listener(pool: &PgPool, timeout: Duration) -> Result<PgListener, sqlx::Error> {
-    tokio::time::timeout(timeout, async {
+    within_setup_deadline(timeout, async {
         let mut listener = PgListener::connect_with(pool).await?;
         listener.eager_reconnect(false);
         listener.listen(LIVE_NOTIFY_CHANNEL).await?;
         Ok(listener)
     })
     .await
-    .map_err(|_| sqlx::Error::PoolTimedOut)?
+}
+
+async fn within_setup_deadline<T>(
+    timeout: Duration,
+    setup: impl Future<Output = Result<T, sqlx::Error>>,
+) -> Result<T, sqlx::Error> {
+    tokio::time::timeout(timeout, setup)
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)?
 }
 
 fn set_ready(state: &Inner, ready: bool) {
@@ -229,6 +237,23 @@ mod tests {
         .expect("listener should register");
     }
 
+    async fn retained_counts(pool: &PgPool) -> (i64, i64, i64) {
+        (
+            sqlx::query_scalar("SELECT count(*) FROM event_log")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT count(*) FROM encrypted_records")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT count(*) FROM device_wake_jobs")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+        )
+    }
+
     #[tokio::test]
     async fn postgres_notification_delivers_once_to_another_replica_without_replay() {
         let database_url = std::env::var("TEST_DATABASE_URL")
@@ -238,6 +263,8 @@ mod tests {
             .connect(&database_url)
             .await
             .unwrap();
+        crate::MIGRATOR.run(&pool).await.unwrap();
+        let retained_before = retained_counts(&pool).await;
         let vault_id = VaultId(Uuid::from_u128(1));
         let foreign_vault_id = VaultId(Uuid::from_u128(2));
         let sender_device_id = DeviceId(Uuid::from_u128(3));
@@ -330,6 +357,7 @@ mod tests {
         drop(remote_backend);
         let mut no_replay = remote_hub.register(vault_id, receiver_device_id);
         assert_eq!(no_replay.receiver.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(retained_counts(&pool).await, retained_before);
     }
 
     #[tokio::test]
@@ -349,11 +377,16 @@ mod tests {
         wait_ready(&backend).await;
         let mut readiness = backend.subscribe_readiness();
 
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
         sqlx::query(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name=$1",
         )
         .bind(&application_name)
-        .execute(&pool)
+        .execute(&admin)
         .await
         .unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -374,5 +407,15 @@ mod tests {
 
         drop(backend);
         assert!(!*readiness.borrow_and_update());
+    }
+
+    #[tokio::test]
+    async fn stalled_subscription_setup_reaches_the_configured_deadline() {
+        let result = within_setup_deadline(
+            Duration::from_millis(20),
+            std::future::pending::<Result<(), sqlx::Error>>(),
+        )
+        .await;
+        assert!(matches!(result, Err(sqlx::Error::PoolTimedOut)));
     }
 }
