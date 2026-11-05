@@ -31,25 +31,45 @@ class LinkSignInActivity : AppCompatActivity() {
     private var pendingCookies: FilteredCookies? = null
     private var signInLease: LinkSignInRuntime.Lease? = null
     private var host: TextView? = null
+    private val lifecycleLock = Any()
+    private var destroyed = false
+    private var startupReady = false
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
+        setContentView(loadingView())
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (::webView.isInitialized && webView.canGoBack()) webView.goBack() else wipe { finishWith(OUTCOME_CANCELLED) }
+                if (!ownsReadyLease()) finishWith(OUTCOME_CANCELLED)
+                else if (::webView.isInitialized && webView.canGoBack()) webView.goBack()
+                else wipe { finishWith(OUTCOME_CANCELLED) }
             }
         })
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         WebView.setWebContentsDebuggingEnabled(false)
         Thread {
+            synchronized(lifecycleLock) { if (destroyed) return@Thread }
             val lease = LinkSignInRuntime.acquireLease() ?: run {
                 runOnUiThread { finishWith(OUTCOME_BLOCKED) }
                 return@Thread
             }
-            signInLease = lease
+            synchronized(lifecycleLock) {
+                if (destroyed) {
+                    LinkSignInRuntime.releaseLease(lease)
+                    return@Thread
+                }
+                signInLease = lease
+            }
             if (!GoogleMessagesLink.awaitSignInReady(applicationContext)) {
                 runOnUiThread { wipe { finishWith(OUTCOME_BLOCKED) } }
                 return@Thread
+            }
+            synchronized(lifecycleLock) {
+                if (destroyed) {
+                    LinkSignInRuntime.releaseLease(lease)
+                    return@Thread
+                }
+                startupReady = true
             }
             val opened = LinkRuntime.handle(applicationContext)
             runOnUiThread {
@@ -62,6 +82,7 @@ class LinkSignInActivity : AppCompatActivity() {
     }
 
     private fun initializeWebView() {
+        if (!ownsReadyLease() || LinkSignInRuntime.isSignInBlocked()) return
         val cookies = CookieManager.getInstance()
         if (cookies.hasCookies()) {
             wipe { finishWith(OUTCOME_ERROR) }
@@ -83,7 +104,8 @@ class LinkSignInActivity : AppCompatActivity() {
         })
         host = TextView(this@LinkSignInActivity).apply {
             text = "accounts.google.com"
-            contentDescription = "google-messages-link-signin-host"
+            id = R.id.google_messages_link_signin_host
+            contentDescription = text
         }
         addView(host)
         addView(webView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -161,7 +183,7 @@ class LinkSignInActivity : AppCompatActivity() {
         }
         onlyPhone.setOnCheckedChangeListener { _, checked -> link.isEnabled = checked }
         setContentView(android.widget.ScrollView(this).padForSystemBars().apply {
-            contentDescription = "google-messages-link-confirm-screen"
+            id = R.id.google_messages_link_confirm_screen
             addView(LinearLayout(this@LinkSignInActivity).apply {
             orientation = LinearLayout.VERTICAL
             addView(TextView(this@LinkSignInActivity).apply {
@@ -182,14 +204,14 @@ class LinkSignInActivity : AppCompatActivity() {
 
     private fun startPairing() {
         val cookies = pendingCookies ?: return finishWith(OUTCOME_ERROR)
-        if (!LinkSignInRuntime.beginPairing()) {
+        val attempt = LinkSignInRuntime.beginPairing() ?: run {
             pendingCookies = null
             releaseLease()
             finishWith(OUTCOME_ERROR)
             return
         }
         GoogleMessagesLinkService.start(this)
-        val queued = LinkSignInRuntime.executePairing {
+        val queued = LinkSignInRuntime.executePairing(attempt) {
             try {
                 (LinkRuntime.handle(applicationContext) as? LinkOpenResult.Open)?.handle?.pair(CookieFilter.json(cookies))
             } catch (_: Exception) {
@@ -198,19 +220,22 @@ class LinkSignInActivity : AppCompatActivity() {
                 pendingCookies = null
             }
         }
-        if (!queued) LinkSignInRuntime.endPairing()
+        if (!queued) LinkSignInRuntime.finishPairing(attempt)
         releaseLease()
         finishWith(if (queued) OUTCOME_PAIRING_STARTED else OUTCOME_ERROR)
     }
 
     private fun wipe(after: () -> Unit) {
+        val owner = signInLease ?: return finishWith(OUTCOME_CANCELLED)
+        if (!startupReady || !LinkSignInRuntime.ownsLease(owner)) return finishWith(OUTCOME_CANCELLED)
         if (!teardownStarted.compareAndSet(false, true)) return
         CookieManager.getInstance().removeAllCookies {
             CookieManager.getInstance().flush()
             WebStorage.getInstance().deleteAllData()
             val cleared = WebViewDataFiles.deleteStaleData(File(applicationInfo.dataDir), cacheDir)
             if (::webView.isInitialized) webView.destroy()
-            releaseLease()
+            LinkSignInRuntime.completeCleanup(owner, cleared)
+            signInLease = null
             if (cleared && !isFinishing && !isDestroyed) after() else if (!cleared) {
                 GoogleMessagesLink.blockSignInAfterCleanupFailure()
                 finishWith(OUTCOME_BLOCKED)
@@ -220,14 +245,27 @@ class LinkSignInActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         pendingCookies = null
-        if (::webView.isInitialized && !isFinishing) wipe {}
-        if (!::webView.isInitialized) releaseLease()
+        synchronized(lifecycleLock) { destroyed = true }
+        if (::webView.isInitialized && !isFinishing && ownsLease()) wipe {}
+        else releaseLease()
         super.onDestroy()
     }
 
     private fun releaseLease() {
-        signInLease?.let(LinkSignInRuntime::releaseLease)
-        signInLease = null
+        synchronized(lifecycleLock) {
+            signInLease?.let(LinkSignInRuntime::releaseLease)
+            signInLease = null
+        }
+    }
+
+    private fun ownsLease(): Boolean = synchronized(lifecycleLock) { startupReady && LinkSignInRuntime.ownsLease(signInLease) }
+
+    private fun ownsReadyLease(): Boolean = synchronized(lifecycleLock) { !destroyed && startupReady && LinkSignInRuntime.ownsLease(signInLease) }
+
+    private fun loadingView() = TextView(this).apply {
+        id = R.id.google_messages_link_signin_loading
+        text = getString(R.string.peppy_google_messages_link_signin_loading)
+        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
 
     private fun finishWith(outcome: String) {

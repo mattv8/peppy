@@ -10,7 +10,9 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class LinkSignInActivityTest {
-    @After fun reset() = LinkSignInRuntime.resetForTest()
+    @After fun reset() {
+        LinkSignInRuntime.resetForTest()
+    }
 
     @Test fun `launches with the sideload AppCompat theme`() {
         Robolectric.buildActivity(LinkSignInActivity::class.java).setup().pause().stop().destroy()

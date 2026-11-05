@@ -21,15 +21,15 @@ internal object LinkSignInRuntime {
         if (lease === candidate) lease = null
     }
 
-    fun beginPairing(): Boolean = LinkRuntime.pairingInProgress.compareAndSet(false, true)
+    fun beginPairing(): PairingAttempt? = LinkRuntime.tryBeginPairing()?.let(::PairingAttempt)
 
-    fun executePairing(pair: () -> Unit): Boolean {
+    fun executePairing(attempt: PairingAttempt, pair: () -> Unit): Boolean {
         return try {
             pairingExecutor.execute {
                 try {
                     runCatching(pair)
                 } finally {
-                    endPairing()
+                    finishPairing(attempt)
                 }
             }
             true
@@ -38,9 +38,7 @@ internal object LinkSignInRuntime {
         }
     }
 
-    fun endPairing() {
-        LinkRuntime.pairingInProgress.set(false)
-    }
+    fun finishPairing(attempt: PairingAttempt): Boolean = LinkRuntime.endPairing(attempt.token)
 
     fun pairingInProgress(): Boolean = LinkRuntime.pairingInProgress.get()
 
@@ -48,13 +46,21 @@ internal object LinkSignInRuntime {
 
     fun isSignInBlocked(): Boolean = synchronized(lock) { signInBlocked }
 
+    fun completeCleanup(candidate: Lease, success: Boolean): Boolean = synchronized(lock) {
+        if (lease !== candidate) return false
+        if (!success) signInBlocked = true
+        lease = null
+        true
+    }
+
     internal fun resetForTest() = synchronized(lock) {
         lease = null
         signInBlocked = false
-        LinkRuntime.pairingInProgress.set(false)
+        LinkRuntime.endPairing()
     }
 
     class Lease internal constructor(val generation: Long)
+    class PairingAttempt internal constructor(val token: Long)
 
     private var nextGeneration = 0L
 }

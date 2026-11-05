@@ -93,7 +93,11 @@ object WebViewDataFiles {
         return cookiesDeleted && cacheDeleted
     }
 
-    fun deleteAll(files: List<File>): Boolean = files.all(File::delete)
+    fun deleteAll(files: List<File>): Boolean {
+        var deleted = true
+        files.forEach { file -> if (!file.delete()) deleted = false }
+        return deleted
+    }
 
     private fun File.deleteRecursivelyOrMissing(): Boolean = !exists() || deleteRecursively()
 }

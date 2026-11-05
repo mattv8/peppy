@@ -18,4 +18,13 @@ class WebViewDataFilesTest {
         assertTrue(WebViewDataFiles.deleteCookieDatabases(root))
         assertFalse(cookie.exists())
     }
+
+    @Test fun `continues deleting after an earlier file fails`() {
+        val root = Files.createTempDirectory("webview-data").toFile()
+        val blocked = root.resolve("blocked").also { it.mkdirs(); it.resolve("child").writeText("x") }
+        val later = root.resolve("Cookies-later").also { it.writeText("x") }
+
+        assertFalse(WebViewDataFiles.deleteAll(listOf(blocked, later)))
+        assertFalse(later.exists())
+    }
 }

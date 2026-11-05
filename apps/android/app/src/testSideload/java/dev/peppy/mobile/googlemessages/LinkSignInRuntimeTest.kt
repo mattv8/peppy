@@ -10,7 +10,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LinkSignInRuntimeTest {
-    @After fun reset() = LinkSignInRuntime.resetForTest()
+    @After fun reset() {
+        LinkSignInRuntime.resetForTest()
+    }
 
     @Test fun `only one activity holds the WebView lease`() {
         val first = LinkSignInRuntime.acquireLease()
@@ -24,8 +26,8 @@ class LinkSignInRuntimeTest {
     @Test fun `queued pairing always clears the shared flag`() {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        assertTrue(LinkSignInRuntime.beginPairing())
-        assertTrue(LinkSignInRuntime.executePairing {
+        val attempt = requireNotNull(LinkSignInRuntime.beginPairing())
+        assertTrue(LinkSignInRuntime.executePairing(attempt) {
             entered.countDown()
             release.await()
         })
@@ -37,11 +39,19 @@ class LinkSignInRuntimeTest {
     }
 
     @Test fun `throwing pairing clears the shared flag`() {
-        assertTrue(LinkSignInRuntime.beginPairing())
-        assertTrue(LinkSignInRuntime.executePairing { error("pair_failed") })
+        val attempt = requireNotNull(LinkSignInRuntime.beginPairing())
+        assertTrue(LinkSignInRuntime.executePairing(attempt) { error("pair_failed") })
 
         assertTrue(waitForPairingToFinish())
         assertFalse(LinkSignInRuntime.pairingInProgress())
+    }
+
+    @Test fun `failed cleanup poisons before releasing the WebView lease`() {
+        val lease = requireNotNull(LinkSignInRuntime.acquireLease())
+
+        assertTrue(LinkSignInRuntime.completeCleanup(lease, success = false))
+        assertTrue(LinkSignInRuntime.isSignInBlocked())
+        assertNull(LinkSignInRuntime.acquireLease())
     }
 
     private fun waitForPairingToFinish(): Boolean {
