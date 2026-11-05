@@ -87,8 +87,11 @@ object WebViewDataFiles {
 
     fun deleteCookieDatabases(dataDir: File): Boolean = deleteAll(cookieDatabases(dataDir))
 
-    fun deleteStaleData(dataDir: File, cacheDir: File): Boolean =
-        deleteCookieDatabases(dataDir) && File(cacheDir, "WebView").deleteRecursivelyOrMissing()
+    fun deleteStaleData(dataDir: File, cacheDir: File): Boolean {
+        val cookiesDeleted = deleteCookieDatabases(dataDir)
+        val cacheDeleted = File(cacheDir, "WebView").deleteRecursivelyOrMissing()
+        return cookiesDeleted && cacheDeleted
+    }
 
     fun deleteAll(files: List<File>): Boolean = files.all(File::delete)
 

@@ -3,6 +3,7 @@ package dev.peppy.mobile.googlemessages
 import android.content.Intent
 import android.os.Bundle
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
@@ -20,31 +21,38 @@ import androidx.core.view.WindowInsetsCompat
 import dev.peppy.mobile.R
 import java.io.ByteArrayInputStream
 import java.io.File
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 class LinkSignInActivity : AppCompatActivity() {
-    private val worker = Executors.newSingleThreadExecutor()
-    private val pairingStarted = AtomicBoolean(false)
+    private val cookiesCaptured = AtomicBoolean(false)
+    private val teardownStarted = AtomicBoolean(false)
     private lateinit var webView: WebView
     private var pendingCookies: FilteredCookies? = null
+    private var signInLease: LinkSignInRuntime.Lease? = null
+    private var host: TextView? = null
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         WebView.setWebContentsDebuggingEnabled(false)
-        worker.execute {
+        Thread {
+            val lease = LinkSignInRuntime.acquireLease() ?: run {
+                runOnUiThread { finishWith(OUTCOME_BLOCKED) }
+                return@Thread
+            }
+            signInLease = lease
             if (!GoogleMessagesLink.awaitSignInReady(applicationContext)) {
                 runOnUiThread { wipe { finishWith(OUTCOME_BLOCKED) } }
-                return@execute
+                return@Thread
             }
             val opened = LinkRuntime.handle(applicationContext)
             runOnUiThread {
+                if (!LinkSignInRuntime.ownsLease(lease) || isFinishing || isDestroyed) return@runOnUiThread
                 val handle = (opened as? LinkOpenResult.Open)?.handle
                 val status = handle?.let { runCatching { LinkStatus.parse(it.status()) }.getOrNull() }
                 if (status?.state !in PAIRABLE_STATES) wipe { finishWith(OUTCOME_ERROR) } else initializeWebView()
             }
-        }
+        }.start()
     }
 
     private fun initializeWebView() {
@@ -67,6 +75,11 @@ class LinkSignInActivity : AppCompatActivity() {
             text = getString(R.string.peppy_google_messages_link_signin_title)
             accessibilityHeading()
         })
+        host = TextView(this@LinkSignInActivity).apply {
+            text = "accounts.google.com"
+            contentDescription = "google-messages-link-signin-host"
+        }
+        addView(host)
         addView(webView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         addView(Button(this@LinkSignInActivity).apply {
             text = getString(R.string.peppy_google_messages_link_signin_blocked_action)
@@ -88,9 +101,13 @@ class LinkSignInActivity : AppCompatActivity() {
             if (NavigationAllowlist.permits(request.url.toString())) null else blockedResponse()
 
         override fun onPageFinished(view: WebView, url: String) {
-            if (NavigationAllowlist.isConfig(url) && pairingStarted.compareAndSet(false, true)) {
+            if (NavigationAllowlist.isConfig(url) && cookiesCaptured.compareAndSet(false, true)) {
                 readCookiesAndConfirm(cookies.getCookie(CONFIG_URL).orEmpty())
             }
+        }
+
+        override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+            host?.text = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
@@ -113,7 +130,11 @@ class LinkSignInActivity : AppCompatActivity() {
             addView(TextView(this@LinkSignInActivity).apply { text = getString(R.string.peppy_google_messages_link_signin_load_error) })
             addView(Button(this@LinkSignInActivity).apply {
                 text = getString(R.string.peppy_try_again)
-                setOnClickListener { setContentView(signInLayout()); webView.loadUrl(ACCOUNT_CHOOSER) }
+                setOnClickListener {
+                    (webView.parent as? ViewGroup)?.removeView(webView)
+                    setContentView(signInLayout())
+                    webView.loadUrl(ACCOUNT_CHOOSER)
+                }
             })
             addView(Button(this@LinkSignInActivity).apply {
                 text = getString(R.string.peppy_cancel)
@@ -133,7 +154,9 @@ class LinkSignInActivity : AppCompatActivity() {
             setOnClickListener { isEnabled = false; startPairing() }
         }
         onlyPhone.setOnCheckedChangeListener { _, checked -> link.isEnabled = checked }
-        setContentView(LinearLayout(this).padForSystemBars().apply {
+        setContentView(android.widget.ScrollView(this).padForSystemBars().apply {
+            contentDescription = "google-messages-link-confirm-screen"
+            addView(LinearLayout(this@LinkSignInActivity).apply {
             orientation = LinearLayout.VERTICAL
             addView(TextView(this@LinkSignInActivity).apply {
                 text = getString(R.string.peppy_google_messages_link_confirm_title)
@@ -145,33 +168,40 @@ class LinkSignInActivity : AppCompatActivity() {
             addView(link)
             addView(Button(this@LinkSignInActivity).apply {
                 text = getString(R.string.peppy_cancel)
-                setOnClickListener { pendingCookies = null; finishWith(OUTCOME_DECLINED) }
+                setOnClickListener { pendingCookies = null; releaseLease(); finishWith(OUTCOME_DECLINED) }
+            })
             })
         })
     }
 
     private fun startPairing() {
         val cookies = pendingCookies ?: return finishWith(OUTCOME_ERROR)
-        LinkRuntime.pairingInProgress.set(true)
         GoogleMessagesLinkService.start(this)
-        worker.execute {
+        val queued = LinkSignInRuntime.submitPairing {
             try {
                 (LinkRuntime.handle(applicationContext) as? LinkOpenResult.Open)?.handle?.pair(CookieFilter.json(cookies))
+            } catch (_: Exception) {
+                LinkRuntimeEventSink.record("link", "pair_failed", 0)
             } finally {
                 pendingCookies = null
-                LinkRuntime.pairingInProgress.set(false)
             }
         }
-        finishWith(OUTCOME_PAIRING_STARTED)
+        releaseLease()
+        finishWith(if (queued) OUTCOME_PAIRING_STARTED else OUTCOME_ERROR)
     }
 
     private fun wipe(after: () -> Unit) {
+        if (!teardownStarted.compareAndSet(false, true)) return
         CookieManager.getInstance().removeAllCookies {
             CookieManager.getInstance().flush()
             WebStorage.getInstance().deleteAllData()
-            WebViewDataFiles.deleteStaleData(File(applicationInfo.dataDir), cacheDir)
+            val cleared = WebViewDataFiles.deleteStaleData(File(applicationInfo.dataDir), cacheDir)
             if (::webView.isInitialized) webView.destroy()
-            after()
+            releaseLease()
+            if (cleared && !isFinishing && !isDestroyed) after() else if (!cleared) {
+                LinkSignInRuntime.blockSignIn()
+                finishWith(OUTCOME_BLOCKED)
+            }
         }
     }
 
@@ -182,8 +212,13 @@ class LinkSignInActivity : AppCompatActivity() {
     override fun onDestroy() {
         pendingCookies = null
         if (::webView.isInitialized && !isFinishing) wipe {}
-        worker.shutdownNow()
+        if (!::webView.isInitialized) releaseLease()
         super.onDestroy()
+    }
+
+    private fun releaseLease() {
+        signInLease?.let(LinkSignInRuntime::releaseLease)
+        signInLease = null
     }
 
     private fun finishWith(outcome: String) {

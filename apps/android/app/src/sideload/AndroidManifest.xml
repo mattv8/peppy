@@ -13,7 +13,7 @@
             android:name="dev.peppy.mobile.googlemessages.LinkSignInActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|fontScale|density"
             android:exported="false"
-            android:theme="@style/AppTheme"
+            android:theme="@style/GoogleMessagesLinkSignInTheme"
             android:windowSoftInputMode="adjustResize" />
         <service
             android:name="dev.peppy.mobile.restrictedsetup.RestrictedSetupService"
