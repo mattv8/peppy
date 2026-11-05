@@ -554,9 +554,25 @@ fn mismatched_authenticated_producer_cannot_claim_a_gateway_or_wedge_valid_updat
 fn equal_revisions_use_producer_sequence_without_allowing_revision_rollback() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
-    let target = unlocked(&config(&directory, "rcs-capability-order", &vault), &vault);
+    let target_config = config(&directory, "rcs-capability-order", &vault);
+    let target = unlocked(&target_config, &vault);
     let gateway = DeviceId::new();
     let conversation = ConversationId::new();
+    let stored_eligibility = || {
+        let connection = Connection::open(&target_config.database_path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+            )
+            .unwrap();
+        connection
+            .query_row(
+                "SELECT eligibility,mapping_revision,observed_at_ms FROM rcs_link_eligibility_projection WHERE gateway_device_id=? AND conversation_id=?",
+                [gateway.to_string(), conversation.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, i64>(2)?)),
+            )
+            .unwrap()
+    };
 
     let mut unavailable = status(gateway, 5, 1_000);
     unavailable.state = RcsCapabilityState::Unavailable;
@@ -641,20 +657,52 @@ fn equal_revisions_use_producer_sequence_without_allowing_revision_rollback() {
         ),
     ];
 
-    for (index, envelope) in initial
-        .iter()
-        .chain(&lower_sequence)
-        .chain(&higher_sequence)
-        .chain(&older_revision)
-        .enumerate()
-    {
+    let mut cursor = 0_u64;
+    let mut ingest_and_apply = |envelopes: &[Envelope]| {
+        for envelope in envelopes {
+            cursor += 1;
+            assert_eq!(
+                target.ingest(envelope, Cursor(cursor)).unwrap(),
+                IngestResult::Journaled
+            );
+        }
+        let report = target.apply_pending(20).unwrap();
+        assert_eq!((report.applied, report.quarantined), (2, 0));
         assert_eq!(
-            target.ingest(envelope, Cursor(index as u64 + 1)).unwrap(),
-            IngestResult::Journaled
+            target.replay_progress().unwrap().processed_through,
+            Cursor(cursor)
         );
-    }
-    let report = target.apply_pending(20).unwrap();
-    assert_eq!((report.applied, report.quarantined), (8, 0));
+    };
+
+    ingest_and_apply(&initial);
+    let status = target.rcs_link_status(gateway, 1_004).unwrap().unwrap();
+    assert_eq!(status.status.capability_revision, 5);
+    assert_eq!(status.status.state, RcsCapabilityState::Unavailable);
+    assert_eq!(status.status.observed_at_ms, 1_000);
+    let projection = target
+        .rcs_eligibility_projection(conversation, gateway, 1_004)
+        .unwrap()
+        .unwrap();
+    assert_eq!(projection.mapping_revision, 5);
+    assert_eq!(projection.observed_at_ms, 1_000);
+    assert_eq!(projection.eligibility, RcsEligibility::Unknown);
+    assert_eq!(stored_eligibility(), ("not_eligible".into(), 5, 1_000));
+
+    ingest_and_apply(&lower_sequence);
+    let status = target.rcs_link_status(gateway, 1_004).unwrap().unwrap();
+    assert_eq!(status.status.capability_revision, 5);
+    assert_eq!(status.status.state, RcsCapabilityState::Unavailable);
+    assert_eq!(status.status.observed_at_ms, 1_000);
+    let projection = target
+        .rcs_eligibility_projection(conversation, gateway, 1_004)
+        .unwrap()
+        .unwrap();
+    assert_eq!(projection.mapping_revision, 5);
+    assert_eq!(projection.observed_at_ms, 1_000);
+    assert_eq!(projection.eligibility, RcsEligibility::Unknown);
+    assert_eq!(stored_eligibility(), ("not_eligible".into(), 5, 1_000));
+
+    ingest_and_apply(&higher_sequence);
     let status = target.rcs_link_status(gateway, 1_004).unwrap().unwrap();
     assert_eq!(status.status.capability_revision, 5);
     assert_eq!(status.status.state, RcsCapabilityState::Linked);
@@ -666,6 +714,21 @@ fn equal_revisions_use_producer_sequence_without_allowing_revision_rollback() {
     assert_eq!(projection.mapping_revision, 5);
     assert_eq!(projection.observed_at_ms, 1_002);
     assert_eq!(projection.eligibility, RcsEligibility::Eligible);
+    assert_eq!(stored_eligibility(), ("eligible".into(), 5, 1_002));
+
+    ingest_and_apply(&older_revision);
+    let status = target.rcs_link_status(gateway, 1_004).unwrap().unwrap();
+    assert_eq!(status.status.capability_revision, 5);
+    assert_eq!(status.status.state, RcsCapabilityState::Linked);
+    assert_eq!(status.status.observed_at_ms, 1_002);
+    let projection = target
+        .rcs_eligibility_projection(conversation, gateway, 1_004)
+        .unwrap()
+        .unwrap();
+    assert_eq!(projection.mapping_revision, 5);
+    assert_eq!(projection.observed_at_ms, 1_002);
+    assert_eq!(projection.eligibility, RcsEligibility::Eligible);
+    assert_eq!(stored_eligibility(), ("eligible".into(), 5, 1_002));
 }
 
 #[test]
