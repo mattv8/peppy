@@ -198,9 +198,9 @@ fn v2_plaintext_gateway_condition_and_control_lengths_are_exact() {
 #[test]
 fn v2_maximum_notify_payloads_use_the_real_relay_wrapper() {
     for (kind, expected) in [
-        (EphemeralSignalV2Kind::Typing, 7_546),
-        (EphemeralSignalV2Kind::Challenge, 1_033),
-        (EphemeralSignalV2Kind::SessionAck, 1_035),
+        (EphemeralSignalV2Kind::Typing, 7_599),
+        (EphemeralSignalV2Kind::Challenge, 1_086),
+        (EphemeralSignalV2Kind::SessionAck, 1_088),
     ] {
         let mut frame = signal(kind);
         frame.key_epoch = u32::MAX;
@@ -216,6 +216,7 @@ fn v2_maximum_notify_payloads_use_the_real_relay_wrapper() {
             }
         ]);
         let bytes = serde_json::to_vec(&serde_json::json!({
+            "instance_id":"00000000-0000-0000-0000-000000000001",
             "vault_id":"00000000-0000-0000-0000-000000000002", "frame": frame,
         }))
         .unwrap()
