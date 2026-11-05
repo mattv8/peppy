@@ -3,9 +3,9 @@ package gmlink
 import (
 	"errors"
 	"net/http"
-	"sync/atomic"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/util"
 	"go.mau.fi/util/exhttp"
 )
 
@@ -13,7 +13,6 @@ var (
 	errRedirectResponse = errors.New("redirect refused")
 	errServerResponse   = errors.New("server response refused")
 	errRequestRefused   = errors.New("request refused")
-	unlinkAllowed       atomic.Bool
 )
 
 type transportStatusError struct {
@@ -36,8 +35,8 @@ func newGuardedSettings(auth *libgm.AuthData, persist func() error, onStop func(
 }
 
 func guardedSettings(settings exhttp.ClientSettings, auth *libgm.AuthData, persist func() error, onStop func(string)) exhttp.ClientSettings {
-	guard := newGuardedTransport(auth, persist, onStop)
 	settings.TransportOverride = func(config exhttp.ClientSettings) http.RoundTripper {
+		guard := newGuardedTransport(auth, persist, onStop)
 		guard.setBase(config)
 		return guard
 	}
@@ -51,10 +50,8 @@ func newGuardedTransport(auth *libgm.AuthData, persist func() error, onStop func
 func (guard *transportGuard) setBase(settings exhttp.ClientSettings) {
 	transport := &http.Transport{}
 	guard.base = settings.Configure(transport)
-	if configured, ok := guard.base.(*http.Transport); ok {
-		configured.Protocols = new(http.Protocols)
-		configured.Protocols.SetHTTP1(true)
-	}
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
 }
 
 func (guard *transportGuard) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -76,7 +73,9 @@ func (guard *transportGuard) RoundTrip(request *http.Request) (*http.Response, e
 	}
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
 		_ = response.Body.Close()
-		guard.stop("cookie_refused")
+		if request.URL.Path == "/web/config" {
+			guard.stop("cookie_refused")
+		}
 		return nil, transportStatusError{cause: errRedirectResponse, status: response.StatusCode}
 	}
 	if response.StatusCode >= http.StatusInternalServerError {
@@ -111,8 +110,6 @@ func (guard *transportGuard) updateCookies(response *http.Response) bool {
 	return changed
 }
 
-func allowUnlinkOnce() { unlinkAllowed.Store(true) }
-
 func isAllowedRequest(request *http.Request) bool {
 	if request.URL.Scheme != "https" || request.URL.RawQuery != "" {
 		return false
@@ -125,8 +122,8 @@ func isAllowedRequest(request *http.Request) bool {
 	if host != "instantmessaging-pa.googleapis.com" && host != "instantmessaging-pa.clients6.google.com" {
 		return false
 	}
-	if path == "/$rpc/google.internal.communications.instantmessaging.v1.Registration/RevokeRelayPairing" {
-		return unlinkAllowed.CompareAndSwap(true, false)
+	if request.URL.String() == util.RevokeRelayPairingURL {
+		return false
 	}
 	switch path {
 	case "/$rpc/google.internal.communications.instantmessaging.v1.Pairing/RegisterPhoneRelay",

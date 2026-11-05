@@ -7,22 +7,26 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/rs/zerolog"
+	zlog "github.com/rs/zerolog/log"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/util"
 	"go.mau.fi/util/exhttp"
 )
 
 const (
-	syntheticConfigURL  = "https://messages.google.com/web/config"
-	syntheticSendPath   = "/$rpc/google.internal.communications.instantmessaging.v1.Messaging/SendMessage"
-	syntheticRevokePath = "/$rpc/google.internal.communications.instantmessaging.v1.Registration/RevokeRelayPairing"
+	syntheticConfigURL = "https://messages.google.com/web/config"
+	syntheticSendPath  = "/$rpc/google.internal.communications.instantmessaging.v1.Messaging/SendMessage"
 )
 
 func syntheticCookies() map[string]string {
@@ -108,7 +112,11 @@ func TestUnknownHostRefused(t *testing.T) {
 }
 
 func TestUploadAndRevokePathsRefused(t *testing.T) {
-	server := httptest.NewTLSServer(http.NotFoundHandler())
+	var arrivals atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		arrivals.Add(1)
+		writer.WriteHeader(http.StatusNotFound)
+	}))
 	defer server.Close()
 	client := safetyClient(t, server, nil, nil)
 	client.AuthData.TachyonAuthToken = []byte("synthetic")
@@ -117,6 +125,9 @@ func TestUploadAndRevokePathsRefused(t *testing.T) {
 	_, revokeErr := client.UnpairBugle()
 	if !errors.Is(uploadErr, errRequestRefused) || !errors.Is(revokeErr, errRequestRefused) {
 		t.Fatalf("upload=%v revoke=%v", uploadErr, revokeErr)
+	}
+	if arrivals.Load() != 0 {
+		t.Fatalf("refused requests reached server %d times", arrivals.Load())
 	}
 }
 
@@ -137,17 +148,25 @@ func TestConfigLoginRedirectIsCookieRefusal(t *testing.T) {
 }
 
 func TestRedirectNotFollowedAndCookiePersistedBeforeReturn(t *testing.T) {
+	var redirected atomic.Bool
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/synthetic" {
+			redirected.Store(true)
+		}
 		writer.Header().Add("Set-Cookie", "SAPISID=rotated; Secure")
 		writer.Header().Set("Location", "/synthetic")
 		writer.WriteHeader(http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
 	persisted := false
-	client := safetyClient(t, server, func() error { persisted = true; return nil }, nil)
+	var client *libgm.Client
+	client = safetyClient(t, server, func() error {
+		persisted = client.AuthData.Cookies["SAPISID"] == "rotated"
+		return nil
+	}, nil)
 	err := client.FetchConfig(context.Background())
-	if !errors.Is(err, errRedirectResponse) || !persisted {
-		t.Fatalf("error=%v persisted=%t", err, persisted)
+	if !errors.Is(err, errRedirectResponse) || !persisted || redirected.Load() {
+		t.Fatalf("error=%v persisted=%t redirected=%t", err, persisted, redirected.Load())
 	}
 }
 
@@ -164,30 +183,130 @@ func TestPersistFailureStopsLink(t *testing.T) {
 	}
 }
 
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (buffer *syncBuffer) Write(value []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buf.Write(value)
+}
+
+func (buffer *syncBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buf.String()
+}
+
+func captureUpstreamOutput(t *testing.T) (*syncBuffer, func()) {
+	t.Helper()
+	captured := &syncBuffer{}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(captured, reader)
+		close(done)
+	}()
+	stdout, stderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = writer, writer
+	stdLog := log.Writer()
+	log.SetOutput(captured)
+	defaultLogger := zerolog.DefaultContextLogger
+	globalLogger := zlog.Logger
+	sink := zerolog.New(captured).Level(zerolog.TraceLevel)
+	zerolog.DefaultContextLogger = &sink
+	zlog.Logger = sink
+	return captured, func() {
+		zerolog.DefaultContextLogger = defaultLogger
+		zlog.Logger = globalLogger
+		log.SetOutput(stdLog)
+		os.Stdout, os.Stderr = stdout, stderr
+		_ = writer.Close()
+		<-done
+		_ = reader.Close()
+	}
+}
+
 func TestUpstreamLoggersSilent(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusForbidden)
 		_, _ = writer.Write([]byte("synthetic"))
 	}))
 	defer server.Close()
+	previousLevel := zerolog.GlobalLevel()
+	zerolog.SetGlobalLevel(zerolog.Disabled)
+	t.Cleanup(func() { zerolog.SetGlobalLevel(previousLevel) })
+	captured, restore := captureUpstreamOutput(t)
 	if err := safetyClient(t, server, nil, nil).FetchConfig(context.Background()); err == nil {
 		t.Fatal("FetchConfig unexpectedly succeeded")
 	}
+	restore()
+	if output := captured.String(); output != "" {
+		t.Fatalf("upstream wrote output: %q", output)
+	}
 }
 
-func TestUnlinkPathAllowedOnlyOnce(t *testing.T) {
-	request, err := http.NewRequest(http.MethodPost, "https://instantmessaging-pa.googleapis.com"+syntheticRevokePath, bytes.NewReader([]byte("synthetic")))
+func TestBugleRevokePathAlwaysRefused(t *testing.T) {
+	var arrivals atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/$rpc/google.internal.communications.instantmessaging.v1.Pairing/RevokeRelayPairing" {
+			arrivals.Add(1)
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := safetyClient(t, server, nil, nil)
+	client.AuthData.TachyonAuthToken = []byte("synthetic")
+	client.AuthData.Browser = &gmproto.Device{}
+	_, err := client.UnpairBugle()
+	if !errors.Is(err, errRequestRefused) || arrivals.Load() != 0 {
+		t.Fatalf("error=%v arrivals=%d", err, arrivals.Load())
+	}
+	request, err := http.NewRequest(http.MethodPost, util.RevokeRelayPairingURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if isAllowedRequest(request) {
-		t.Fatal("unlink allowed without owner action")
+		t.Fatal("Bugle revoke path is allowed")
 	}
-	allowUnlinkOnce()
-	if !isAllowedRequest(request) {
-		t.Fatal("unlink not allowed after owner action")
+}
+
+func TestOnlyConfigRedirectStopsLink(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Location", "/synthetic")
+		writer.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+	stopped := ""
+	_, err := safetyClient(t, server, nil, func(code string) { stopped = code }).SendMessage(context.Background(), syntheticSendRequest())
+	var statusErr transportStatusError
+	if !errors.As(err, &statusErr) || stopped != "" {
+		t.Fatalf("error=%v stop=%q", err, stopped)
 	}
-	if isAllowedRequest(request) {
-		t.Fatal("unlink allowed more than once")
+}
+
+func TestSettingsReuseBuildsIndependentGuards(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	auth := libgm.NewAuthData()
+	auth.SetCookies(syntheticCookies())
+	settings := guardedSettings(safetyDialSettings(server), auth, nil, nil)
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			client := libgm.NewClient(auth, nil, zerolog.Nop(), settings)
+			defer client.Disconnect()
+			_ = client.FetchConfig(context.Background())
+		}()
 	}
+	wait.Wait()
 }

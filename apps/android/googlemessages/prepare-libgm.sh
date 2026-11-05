@@ -19,11 +19,11 @@ chmod -R u+w "$destination"
 
 cd "$root"
 shasum -a 256 -c upstream-safety.patch.sha256
-patch -d "$destination" -p0 < upstream-safety.patch
+patch -F 0 -d "$destination" -p0 < upstream-safety.patch
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cp -R "$source_dir" "$tmp/module"
 chmod -R u+w "$tmp/module"
-patch -d "$tmp/module" -p0 < upstream-safety.patch
+patch -F 0 -d "$tmp/module" -p0 < upstream-safety.patch
 diff -ruN "$tmp/module" "$destination"
