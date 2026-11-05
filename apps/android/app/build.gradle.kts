@@ -40,6 +40,8 @@ fun strictBooleanProperty(name: String): Boolean = providers.gradleProperty(name
 
 val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
 val peppySideloadDebugSigning = strictBooleanProperty("peppySideloadDebugSigning")
+val peppyGoogleMessagesLink = providers.gradleProperty("peppyGoogleMessagesLink").map { it.toBooleanStrict() }.getOrElse(false)
+val googleMessagesAar = rootProject.layout.projectDirectory.file("googlemessages/build/gmlink.aar")
 val releaseTaskRequested = gradle.startParameter.taskNames.any { taskName ->
     taskName.contains("release", ignoreCase = true) || taskName.contains("sideload", ignoreCase = true)
 }
@@ -267,6 +269,8 @@ android {
         getByName("main").jniLibs.srcDir("src/main/jniLibs")
         getByName("debug").res.srcDir(developmentTlsResources)
         getByName("sideload").manifest.srcFile("src/sideload/AndroidManifest.xml")
+        getByName("sideload").java.srcDir(if (peppyGoogleMessagesLink) "src/sideloadGmlinkOn/java" else "src/sideloadGmlinkOff/java")
+        if (peppyGoogleMessagesLink) getByName("sideload").assets.srcDir("src/sideloadGmlinkOn/assets")
     }
 
     testOptions {
@@ -340,6 +344,10 @@ dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     add("sideloadImplementation", project(":libadb"))
+    if (peppyGoogleMessagesLink) {
+        check(googleMessagesAar.asFile.isFile) { "peppyGoogleMessagesLink=true needs apps/android/googlemessages/build-aar.sh first" }
+        add("sideloadImplementation", files(googleMessagesAar))
+    }
 }
 
 configurations.configureEach {
@@ -649,6 +657,24 @@ fun archiveContainsEntry(archives: List<File>, name: String): Boolean = archives
     ZipFile(archiveFile).use { archive -> archive.getEntry(name) != null }
 }
 
+val googleMessagesDexPrefix = "Ldev/peppy/gmlink/"
+val googleMessagesNativeLibrary = "libgojni.so"
+val googleMessagesNotice = "assets/third_party/AGPL-3.0.txt"
+
+fun googleMessagesLinkArtifacts(archives: List<File>, noticePath: String = googleMessagesNotice): Set<String> = buildSet {
+    if (archives.any { archive ->
+            ZipFile(archive).use { zip -> zip.entries().asSequence().any { it.name.matches(Regex("(?:base/)?lib/[^/]+/$googleMessagesNativeLibrary")) } }
+        }) add(googleMessagesNativeLibrary)
+    if (archiveDexContains(archives, googleMessagesDexPrefix)) add("dev/peppy/gmlink/")
+    if (archiveContainsEntry(archives, noticePath)) add(noticePath)
+}
+
+fun verifyGoogleMessagesLinkExclusion(archives: List<File>, variant: String, noticePath: String = googleMessagesNotice) {
+    check(googleMessagesLinkArtifacts(archives, noticePath).isEmpty()) {
+        "$variant archive must not contain Google Messages link artifacts: ${googleMessagesLinkArtifacts(archives, noticePath)}"
+    }
+}
+
 fun verifyRestrictedSetupManifest(mergedManifest: File, variant: String) {
     check(mergedManifest.isFile) { "Expected merged $variant manifest at $mergedManifest" }
     val parserFactory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
@@ -781,6 +807,7 @@ fun verifyReleaseRestrictedSetupAabExclusion() {
         !archiveEntryContains(archives, "base/manifest/AndroidManifest.xml", "android.permission.CHANGE_NETWORK_STATE")) {
         "Release AAB manifest must not contain restricted setup content"
     }
+    verifyGoogleMessagesLinkExclusion(archives, "Release AAB", "base/$googleMessagesNotice")
 }
 
 val verifyReleaseRestrictedSetupExclusion = verifyRestrictedSetupExclusionTask("release")
@@ -819,6 +846,21 @@ val verifySideloadManifestSecurity = tasks.register("verifySideloadManifestSecur
         val sideloadManifest = layout.buildDirectory
             .file("intermediates/merged_manifests/sideload/processSideloadManifest/AndroidManifest.xml").get().asFile
         verifySideloadManifestSecurity(sideloadManifest)
+    }
+}
+
+val verifySideloadGoogleMessagesLink = tasks.register("verifySideloadGoogleMessagesLink") {
+    dependsOn("packageSideload")
+
+    doLast {
+        val metadata = layout.buildDirectory.file("outputs/apk/sideload/output-metadata.json").get().asFile
+        val artifacts = googleMessagesLinkArtifacts(apksFromMetadata(metadata, "sideload"))
+        val required = setOf(googleMessagesNativeLibrary, "dev/peppy/gmlink/", googleMessagesNotice)
+        if (peppyGoogleMessagesLink) {
+            check(artifacts == required) { "Sideload APK must contain all Google Messages link artifacts: missing ${required - artifacts}" }
+        } else {
+            check(artifacts.isEmpty()) { "Sideload APK must not contain Google Messages link artifacts: $artifacts" }
+        }
     }
 }
 
@@ -861,6 +903,19 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
             "Synthetic sideload notice must fail the release APK exclusion guard"
         }
 
+        ZipOutputStream(fixtureApk.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("classes.dex"))
+            archive.write("${googleMessagesDexPrefix}Gmlink;".toByteArray())
+            archive.closeEntry()
+            archive.putNextEntry(ZipEntry("lib/arm64-v8a/$googleMessagesNativeLibrary"))
+            archive.closeEntry()
+            archive.putNextEntry(ZipEntry(googleMessagesNotice))
+            archive.closeEntry()
+        }
+        check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isFailure) {
+            "Synthetic Google Messages link APK artifacts must fail the release exclusion guard"
+        }
+
         val fixtureAab = fixtureDirectory.resolve("app-release.aab")
         ZipOutputStream(fixtureAab.outputStream()).use { archive ->
             archive.putNextEntry(ZipEntry("base/dex/classes.dex"))
@@ -879,6 +934,19 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
         }
         check(archiveContainsEntryPrefix(listOf(fixtureAab), "base/assets/third_party/")) {
             "Synthetic sideload notice must fail the release AAB exclusion guard"
+        }
+
+        ZipOutputStream(fixtureAab.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("base/dex/classes.dex"))
+            archive.write("${googleMessagesDexPrefix}Gmlink;".toByteArray())
+            archive.closeEntry()
+            archive.putNextEntry(ZipEntry("base/lib/arm64-v8a/$googleMessagesNativeLibrary"))
+            archive.closeEntry()
+            archive.putNextEntry(ZipEntry("base/$googleMessagesNotice"))
+            archive.closeEntry()
+        }
+        check(runCatching { verifyGoogleMessagesLinkExclusion(listOf(fixtureAab), "Release AAB", "base/$googleMessagesNotice") }.isFailure) {
+            "Synthetic Google Messages link AAB artifacts must fail the release exclusion guard"
         }
 
         ZipOutputStream(fixtureApk.outputStream()).use { archive ->
@@ -916,8 +984,16 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
     }
 }
 
+verifyReleaseManifestSecurity.configure {
+    dependsOn(verifyReleaseRestrictedSetupExclusionFixtures)
+}
+
 tasks.matching { it.name == "assembleRelease" }.configureEach {
     dependsOn(verifyReleaseRestrictedSetupExclusion)
+    doLast {
+        val metadata = layout.buildDirectory.file("outputs/apk/release/output-metadata.json").get().asFile
+        verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK")
+    }
 }
 
 tasks.matching { it.name == "bundleRelease" }.configureEach {
@@ -927,10 +1003,14 @@ tasks.matching { it.name == "bundleRelease" }.configureEach {
 
 tasks.matching { it.name == "assembleDebug" }.configureEach {
     dependsOn(verifyDebugRestrictedSetupExclusion)
+    doLast {
+        val metadata = layout.buildDirectory.file("outputs/apk/debug/output-metadata.json").get().asFile
+        verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "debug"), "Debug APK")
+    }
 }
 
 tasks.matching { it.name == "assembleSideload" }.configureEach {
-    dependsOn(verifySideloadRestrictedSetupInclusion, verifySideloadManifestSecurity)
+    dependsOn(verifySideloadRestrictedSetupInclusion, verifySideloadManifestSecurity, verifySideloadGoogleMessagesLink)
 }
 
 gradle.projectsEvaluated {
