@@ -290,6 +290,8 @@ pub(super) struct ApiState {
     live_backend: Arc<crate::live_postgres::PgLiveBackend>,
     #[cfg(test)]
     live_backend_override: Option<Arc<dyn crate::live::LiveBackend>>,
+    #[cfg(test)]
+    live_publish_timeout: Duration,
     live_readiness: tokio::sync::watch::Receiver<bool>,
     live_rate_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
 }
@@ -544,6 +546,7 @@ fn build_router_with_live_backend(
     #[cfg(test)] live_override: Option<(
         Arc<dyn crate::live::LiveBackend>,
         tokio::sync::watch::Receiver<bool>,
+        Duration,
     )>,
 ) -> Result<(Router, Maintenance), &'static str> {
     let RouterAuthorization {
@@ -580,9 +583,9 @@ fn build_router_with_live_backend(
     ));
     let live_readiness = live_backend.subscribe_readiness();
     #[cfg(test)]
-    let (live_backend_override, live_readiness) = match live_override {
-        Some((backend, readiness)) => (Some(backend), readiness),
-        None => (None, live_readiness),
+    let (live_backend_override, live_readiness, live_publish_timeout) = match live_override {
+        Some((backend, readiness, publish_timeout)) => (Some(backend), readiness, publish_timeout),
+        None => (None, live_readiness, LIVE_PUBLISH_TIMEOUT),
     };
     let router = Router::new()
         .route("/v1/vault", get(vault_header))
@@ -707,6 +710,8 @@ fn build_router_with_live_backend(
         live_backend,
         #[cfg(test)]
         live_backend_override,
+        #[cfg(test)]
+        live_publish_timeout,
         live_readiness,
         live_rate_limiter: Arc::new(std::sync::Mutex::new(
             crate::live::LiveRateLimiter::default(),
@@ -2874,6 +2879,8 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
                         frame.clone(),
                         &mut cancellation,
                         &mut readiness,
+                        #[cfg(test)]
+                        state.live_publish_timeout,
                     )
                     .await
                     {
@@ -2960,12 +2967,15 @@ async fn live_send(
     }
 }
 
+const LIVE_PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn live_publish(
     backend: &dyn crate::live::LiveBackend,
     vault_id: VaultId,
     frame: LiveFrameV1,
     cancellation: &mut tokio::sync::watch::Receiver<bool>,
     readiness: &mut tokio::sync::watch::Receiver<bool>,
+    #[cfg(test)] publish_timeout: Duration,
 ) -> LiveWait {
     if *cancellation.borrow_and_update() {
         return LiveWait::Cancelled;
@@ -2977,7 +2987,13 @@ async fn live_publish(
         biased;
         _ = cancellation.changed() => LiveWait::Cancelled,
         _ = readiness.changed() => LiveWait::Unavailable,
-        result = tokio::time::timeout(Duration::from_secs(5), backend.publish(vault_id, frame)) => {
+        result = tokio::time::timeout(
+            #[cfg(test)]
+            publish_timeout,
+            #[cfg(not(test))]
+            LIVE_PUBLISH_TIMEOUT,
+            backend.publish(vault_id, frame),
+        ) => {
             if matches!(result, Ok(Ok(()))) { LiveWait::Complete } else { LiveWait::Unavailable }
         },
     }
@@ -3445,7 +3461,6 @@ async fn send_replay(
 }
 
 #[cfg(test)]
-#[path = "../tests/live_socket.rs"]
 mod live_socket_tests;
 
 #[cfg(test)]

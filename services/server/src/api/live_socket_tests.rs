@@ -33,6 +33,7 @@ use super::*;
 struct FakeLiveBackend {
     started: Arc<AtomicUsize>,
     completed: Arc<AtomicUsize>,
+    dropped: Arc<AtomicUsize>,
     release: Arc<Notify>,
     stall: bool,
 }
@@ -42,6 +43,7 @@ impl FakeLiveBackend {
         Self {
             started: Arc::new(AtomicUsize::new(0)),
             completed: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(AtomicUsize::new(0)),
             release: Arc::new(Notify::new()),
             stall: false,
         }
@@ -62,13 +64,31 @@ impl crate::live::LiveBackend for FakeLiveBackend {
         _frame: EphemeralSignalV1,
     ) -> Pin<Box<dyn Future<Output = Result<(), crate::live::LiveBackendError>> + Send + '_>> {
         Box::pin(async move {
+            let mut drop_acknowledgement = PublishDropAcknowledgement {
+                dropped: self.dropped.clone(),
+                completed: false,
+            };
             self.started.fetch_add(1, Ordering::SeqCst);
             if self.stall {
                 self.release.notified().await;
             }
             self.completed.fetch_add(1, Ordering::SeqCst);
+            drop_acknowledgement.completed = true;
             Ok(())
         })
+    }
+}
+
+struct PublishDropAcknowledgement {
+    dropped: Arc<AtomicUsize>,
+    completed: bool,
+}
+
+impl Drop for PublishDropAcknowledgement {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -85,6 +105,14 @@ struct LiveTestServer {
 
 impl LiveTestServer {
     async fn start(backend: FakeLiveBackend, ready: bool) -> Self {
+        Self::start_with_publish_timeout(backend, ready, LIVE_PUBLISH_TIMEOUT).await
+    }
+
+    async fn start_with_publish_timeout(
+        backend: FakeLiveBackend,
+        ready: bool,
+        publish_timeout: Duration,
+    ) -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; live socket tests never silently skip");
         let admin = PgPoolOptions::new()
@@ -144,7 +172,7 @@ impl LiveTestServer {
             None,
             PushConfigAdvertisement::default(),
             authorization,
-            Some((Arc::new(backend), readiness)),
+            Some((Arc::new(backend), readiness, publish_timeout)),
         )
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -201,6 +229,36 @@ fn signal(sender: Uuid) -> String {
     .to_string()
 }
 
+fn pad_json_to(mut json: String, byte_length: usize) -> String {
+    assert!(json.len() <= byte_length);
+    json.extend(std::iter::repeat_n(' ', byte_length - json.len()));
+    json
+}
+
+async fn expect_strict_hello(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    let first = socket.next().await.unwrap().unwrap();
+    let tungstenite::Message::Text(text) = first else {
+        panic!("hello was not the first text frame")
+    };
+    assert_eq!(
+        serde_json::from_str::<LiveHelloV1>(&text).unwrap(),
+        LiveHelloV1::new()
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+        serde_json::json!({
+            "type": "hello",
+            "protocol_version": 1,
+            "max_ttl_ms": 15000,
+            "max_ciphertext_bytes": 5700
+        })
+    );
+}
+
 async fn next_close(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -248,28 +306,16 @@ async fn unauthenticated_live_upgrade_is_rejected_before_switching_protocols() {
 async fn authenticated_live_socket_receives_strict_hello_as_first_frame() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let mut socket = server.connect().await;
-    let first = socket.next().await.unwrap().unwrap();
-    let tungstenite::Message::Text(text) = first else {
-        panic!("hello was not a text frame")
-    };
-    assert_eq!(
-        serde_json::from_str::<LiveHelloV1>(&text).unwrap(),
-        LiveHelloV1::new()
-    );
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&text).unwrap(),
-        serde_json::json!({
-            "type": "hello", "protocol_version": 1, "max_ttl_ms": 15000, "max_ciphertext_bytes": 5700
-        })
-    );
+    expect_strict_hello(&mut socket).await;
     server.shutdown().await;
 }
 
 #[tokio::test]
 async fn sender_mismatch_closes_with_fixed_policy_reason() {
-    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let backend = FakeLiveBackend::immediate();
+    let server = LiveTestServer::start(backend.clone(), true).await;
     let mut socket = server.connect().await;
-    let _ = socket.next().await;
+    expect_strict_hello(&mut socket).await;
     socket
         .send(tungstenite::Message::Text(signal(Uuid::new_v4()).into()))
         .await
@@ -277,6 +323,8 @@ async fn sender_mismatch_closes_with_fixed_policy_reason() {
     let close = next_close(&mut socket).await;
     assert_eq!(close.code, CloseCode::Policy);
     assert_eq!(close.reason, "invalid_live_frame");
+    assert_eq!(backend.started.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.completed.load(Ordering::SeqCst), 0);
     server.shutdown().await;
 }
 
@@ -285,7 +333,7 @@ async fn replaced_socket_with_inflight_output_cannot_finish_publish_after_takeov
     let backend = FakeLiveBackend::stalled();
     let server = LiveTestServer::start(backend.clone(), true).await;
     let mut replaced = server.connect().await;
-    let _ = replaced.next().await;
+    expect_strict_hello(&mut replaced).await;
     replaced
         .send(tungstenite::Message::Text(
             signal(server.owner_device).into(),
@@ -295,14 +343,14 @@ async fn replaced_socket_with_inflight_output_cannot_finish_publish_after_takeov
     wait_for_count(&backend.started, 1).await;
 
     let mut replacement = server.connect().await;
-    let _ = replacement.next().await;
+    expect_strict_hello(&mut replacement).await;
     tokio::time::timeout(Duration::from_secs(2), async {
         while replaced.next().await.is_some() {}
     })
     .await
     .expect("replaced socket remained active");
+    wait_for_count(&backend.dropped, 1).await;
     backend.release.notify_waiters();
-    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(backend.completed.load(Ordering::SeqCst), 0);
     server.shutdown().await;
 }
@@ -312,7 +360,7 @@ async fn stalled_backend_publish_is_cancelled_within_a_bounded_takeover_window()
     let backend = FakeLiveBackend::stalled();
     let server = LiveTestServer::start(backend.clone(), true).await;
     let mut first = server.connect().await;
-    let _ = first.next().await;
+    expect_strict_hello(&mut first).await;
     first
         .send(tungstenite::Message::Text(
             signal(server.owner_device).into(),
@@ -322,13 +370,41 @@ async fn stalled_backend_publish_is_cancelled_within_a_bounded_takeover_window()
     wait_for_count(&backend.started, 1).await;
     let started = tokio::time::Instant::now();
     let mut replacement = server.connect().await;
-    let _ = replacement.next().await;
+    expect_strict_hello(&mut replacement).await;
     tokio::time::timeout(Duration::from_secs(2), async {
         while first.next().await.is_some() {}
     })
     .await
     .expect("stalled publish ignored cancellation");
     assert!(started.elapsed() < Duration::from_secs(2));
+    wait_for_count(&backend.dropped, 1).await;
+    assert_eq!(backend.completed.load(Ordering::SeqCst), 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn stalled_backend_publish_times_out_without_takeover() {
+    let backend = FakeLiveBackend::stalled();
+    let server = LiveTestServer::start_with_publish_timeout(
+        backend.clone(),
+        true,
+        Duration::from_millis(100),
+    )
+    .await;
+    let mut socket = server.connect().await;
+    expect_strict_hello(&mut socket).await;
+    socket
+        .send(tungstenite::Message::Text(
+            signal(server.owner_device).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_count(&backend.started, 1).await;
+
+    let close = next_close(&mut socket).await;
+    assert_eq!(close.code, CloseCode::Error);
+    assert_eq!(close.reason, "live_unavailable");
+    wait_for_count(&backend.dropped, 1).await;
     assert_eq!(backend.completed.load(Ordering::SeqCst), 0);
     server.shutdown().await;
 }
@@ -350,17 +426,29 @@ async fn unavailable_backend_rejects_authenticated_upgrade_with_503() {
 }
 
 #[tokio::test]
-async fn oversized_application_frame_closes_with_fixed_policy_reason() {
-    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+async fn native_message_limit_rejects_oversized_valid_json_before_publication() {
+    let backend = FakeLiveBackend::immediate();
+    let server = LiveTestServer::start(backend.clone(), true).await;
     let mut socket = server.connect().await;
-    let _ = socket.next().await;
+    expect_strict_hello(&mut socket).await;
+
+    let at_limit = pad_json_to(signal(server.owner_device), 8_192);
     socket
-        .send(tungstenite::Message::Text("x".repeat(8_193).into()))
+        .send(tungstenite::Message::Text(at_limit.into()))
+        .await
+        .unwrap();
+    wait_for_count(&backend.completed, 1).await;
+
+    let oversized = pad_json_to(signal(server.owner_device), 8_193);
+    socket
+        .send(tungstenite::Message::Text(oversized.into()))
         .await
         .unwrap();
     let close = next_close(&mut socket).await;
     assert_eq!(close.code, CloseCode::Policy);
     assert_eq!(close.reason, "invalid_live_frame");
+    assert_eq!(backend.started.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.completed.load(Ordering::SeqCst), 1);
     server.shutdown().await;
 }
 
@@ -370,7 +458,7 @@ async fn invalid_utf8_application_frame_closes_with_fixed_policy_reason() {
 
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let mut socket = server.connect().await;
-    let _ = socket.next().await;
+    expect_strict_hello(&mut socket).await;
     // A masked, final text frame containing invalid UTF-8. Writing the wire frame
     // directly is necessary because tungstenite refuses to construct invalid text.
     let mask = [1_u8, 2, 3, 4];
@@ -399,7 +487,7 @@ async fn invalid_utf8_application_frame_closes_with_fixed_policy_reason() {
 async fn readiness_loss_disconnects_established_socket_as_unavailable() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let mut socket = server.connect().await;
-    let _ = socket.next().await;
+    expect_strict_hello(&mut socket).await;
     server._readiness_sender.send(false).unwrap();
     let close = next_close(&mut socket).await;
     assert_eq!(close.code, CloseCode::Error);
