@@ -87,7 +87,7 @@ class GoogleMessagesLinkService : Service() {
                     if (nowMillis() - waitStartedAt >= MAX_PAIRING_WAIT_MS) return
                     if (!sleepInterruptibly(PAIRING_WAIT_MS)) return
                 }
-                ServiceAction.RUN -> runWithRetry(handle)
+                ServiceAction.RUN -> return runWithRetry(handle)
             }
         }
     }
@@ -118,8 +118,13 @@ class GoogleMessagesLinkService : Service() {
 
     private fun cancelWorker() {
         cancelled = true
-        LinkRuntime.stopRunningHandle()
+        LinkRuntime.closeHandleForServiceStop()
         synchronized(lock) { worker?.interrupt() }
+    }
+
+    private fun joinWorker() {
+        val current = synchronized(lock) { worker }
+        if (current != null && current !== Thread.currentThread()) runCatching { current.join(SERVICE_STOP_JOIN_MS) }
     }
 
     private fun refreshNotificationAfterEvent() {
@@ -189,7 +194,7 @@ class GoogleMessagesLinkService : Service() {
         }
         fun start(context: Context) { try { ContextCompat.startForegroundService(context, Intent(context, GoogleMessagesLinkService::class.java)) } catch (_: IllegalStateException) {} catch (_: SecurityException) {} }
         fun stop(context: Context) { stopAndAwait(context); cancelAttention(context) }
-        fun stopAndAwait(context: Context) { active?.cancelWorker(); context.stopService(Intent(context, GoogleMessagesLinkService::class.java)) }
+        fun stopAndAwait(context: Context) { active?.let { it.cancelWorker(); it.joinWorker() }; context.stopService(Intent(context, GoogleMessagesLinkService::class.java)) }
         internal fun stopActiveWorker() { active?.cancelWorker() }
         fun cancelAttention(context: Context) { NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID) }
         internal fun onLinkEvent(kind: String, code: String) {
@@ -203,5 +208,6 @@ class GoogleMessagesLinkService : Service() {
         private fun canPostNotifications(context: Context): Boolean =
             (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) &&
                 NotificationManagerCompat.from(context).areNotificationsEnabled()
+        private const val SERVICE_STOP_JOIN_MS = 2_000L
     }
 }

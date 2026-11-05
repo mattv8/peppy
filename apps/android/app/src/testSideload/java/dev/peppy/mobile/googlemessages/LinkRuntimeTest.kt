@@ -145,6 +145,18 @@ class LinkRuntimeTest {
     }
 
     @Test
+    fun `stale pairing completion cannot end a newer attempt`() {
+        val first = LinkRuntime.tryBeginPairing()!!
+        assertTrue(LinkRuntime.endPairing(first))
+        val second = LinkRuntime.tryBeginPairing()!!
+
+        assertFalse(LinkRuntime.endPairing(first))
+
+        assertTrue(LinkRuntime.pairingInProgress.get())
+        assertTrue(LinkRuntime.endPairing(second))
+    }
+
+    @Test
     fun `runtime event sink records through the production diagnostic path`() {
         val records = mutableListOf<String>()
         SyncDiagnostics.configureRuntime(enabled = true) { records += it }

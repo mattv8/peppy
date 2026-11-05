@@ -49,6 +49,7 @@ object LinkRuntime {
             store(context).wipe()
             emoji.value = null
             pairingInProgress.set(false)
+            pairingGeneration += 1
         }
         recordEvent("link", "reset_local", 0)
         signalChange()
@@ -58,23 +59,45 @@ object LinkRuntime {
         cachedHandle?.stop()
     }
 
-    /** Begins one owner-requested Pair or Relink attempt and fences the prior emoji. */
-    fun beginPairing(): Boolean = synchronized(this) {
-        if (!pairingInProgress.compareAndSet(false, true)) return false
+    /** Fences a cancelled service from entering Go Run without deleting sealed state. */
+    internal fun closeHandleForServiceStop() = synchronized(this) {
+        cachedHandle?.close()
+        cachedHandle = null
+        handleGeneration += 1
+    }
+
+    /** Claims one owner-requested Pair or Relink attempt, returning its opaque generation token. */
+    fun tryBeginPairing(): Long? = synchronized(this) {
+        if (!pairingInProgress.compareAndSet(false, true)) return null
+        pairingGeneration += 1
+        emoji.value = null
+        signalChange()
+        pairingGeneration
+    }
+
+    /** Compatibility admission helper. New callers must retain [tryBeginPairing]'s token. */
+    fun beginPairing(): Boolean = tryBeginPairing() != null
+
+    /** Completes exactly the attempt that acquired [attempt]; stale finally blocks are inert. */
+    fun endPairing(attempt: Long): Boolean = synchronized(this) {
+        if (!pairingInProgress.get() || attempt != pairingGeneration) return false
+        pairingInProgress.set(false)
         pairingGeneration += 1
         emoji.value = null
         signalChange()
         true
     }
 
-    /** Completes an owner-requested attempt; callers must invoke this in `finally`. */
+    /** Compatibility helper for callers that cannot yet retain an attempt token. */
     fun endPairing(): Boolean = synchronized(this) {
-        if (!pairingInProgress.compareAndSet(true, false)) return false
+        if (!pairingInProgress.get()) return false
+        endPairing(pairingGeneration)
+    }
+
+    private fun clearCurrentPairing() {
         pairingGeneration += 1
-        pairingInProgress.set(false)
         emoji.value = null
         signalChange()
-        true
     }
 
     internal fun resetForTest() = synchronized(this) {
@@ -132,8 +155,7 @@ object LinkRuntime {
         if (!pairingInProgress.get() || generation != pairingGeneration) return@synchronized
         pairingInProgress.set(false)
         pairingGeneration += 1
-        emoji.value = null
-        signalChange()
+        clearCurrentPairing()
     }
 }
 
