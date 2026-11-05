@@ -123,7 +123,7 @@ pub use rcs_native::{
     LocalRcsTargetSnapshot, NativeCarrierRouteBinding, NativeOwnNumberSource,
     NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing, NativeRcsParticipant,
     NativeRcsSimPayload, NativeRcsTargetClass, NativeSettingsCurrentness,
-    NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
+    NativeSettingsProvenance, NativeRcsCommitProjection, restricted_native_rcs_handoff_schema,
 };
 pub use rcs_capability::{RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent, RcsLinkStatusProjection};
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};

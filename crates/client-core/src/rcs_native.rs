@@ -57,6 +57,7 @@ pub struct NativeRcsOutgoing {
     pub rcs_chats_enabled: bool,
 }
 
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum NativeSettingsProvenance {
     CurrentEvent,
@@ -81,6 +82,8 @@ pub struct NativeRcsEvidence {
     pub settings_observed_at_ms: i64,
     pub settings_stream_epoch: u64,
     pub settings_currentness: NativeSettingsCurrentness,
+    /// Every current Google settings SIM record; this is never a shared DTO.
+    pub current_settings_sims: Vec<NativeRcsOutgoing>,
     pub settings_validated_at_ms: i64,
     pub conversation_observed_at_ms: i64,
 }
@@ -93,6 +96,7 @@ pub enum NativeRcsTargetClass {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LocalRcsTargetSnapshot {
+    pub proof_version: u32,
     pub google_conversation_id: String,
     pub participants: Vec<NativeRcsParticipant>,
     pub class: NativeRcsTargetClass,
@@ -106,8 +110,20 @@ pub struct LocalRcsTargetSnapshot {
     pub evidence: NativeRcsEvidence,
 }
 
+/// Private commit input emitted only by core from a durable `RcsPermit`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NativeRcsCommitProjection {
+    pub command_id: String,
+    pub tmp_id: String,
+    pub mapping_revision: u64,
+    pub proof_version: u32,
+    pub proof_digest: Vec<u8>,
+    pub message_body: String,
+    pub target: LocalRcsTargetSnapshot,
+}
+
 /// Schema for the restricted local-native handoff only; it is not an event or public relay API.
 pub fn restricted_native_rcs_handoff_schema() -> serde_json::Value {
-    serde_json::to_value(schema_for!(LocalRcsTargetSnapshot))
+    serde_json::to_value(schema_for!(NativeRcsCommitProjection))
         .expect("native RCS handoff schema is serializable")
 }

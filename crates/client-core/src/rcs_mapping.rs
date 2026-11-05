@@ -147,7 +147,7 @@ pub(crate) fn verify_and_store(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<RcsMappingOutcome, Error> {
-    if now_ms.saturating_sub(observation.observed_at_ms).abs() > RCS_MAPPING_FRESHNESS_MS {
+    if !is_fresh(now_ms, observation.observed_at_ms) {
         return Ok(RcsMappingOutcome::Refused(
             RcsMappingRefusal::StaleObservation,
         ));
@@ -182,7 +182,7 @@ fn verify(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<RcsMappingOutcome, Error> {
-    if now_ms.saturating_sub(observation.observed_at_ms).abs() > RCS_MAPPING_FRESHNESS_MS {
+    if !is_fresh(now_ms, observation.observed_at_ms) {
         return Ok(RcsMappingOutcome::Refused(
             RcsMappingRefusal::StaleObservation,
         ));
@@ -374,6 +374,8 @@ fn native_observation_is_current(
         && evidence.settings_stream_epoch > 0
         && evidence.settings_provenance == NativeSettingsProvenance::CurrentEvent
         && evidence.settings_currentness == NativeSettingsCurrentness::ContinuousVerifiedFeed
+        && evidence.settings_observed_at_ms >= 0
+        && evidence.settings_observed_at_ms <= evidence.settings_validated_at_ms
         && fresh(evidence.settings_validated_at_ms)
         && fresh(evidence.conversation_observed_at_ms)
         && binding.carrier_route_id == observation.selected_sim_id
@@ -388,6 +390,26 @@ fn native_observation_is_current(
         && outgoing.outgoing_id == outgoing.sim_participant_id
         && !outgoing.outgoing_id.is_empty()
         && outgoing.rcs_chats_enabled
+        && evidence.current_settings_sims.iter().filter(|sim| {
+            sim.rcs_chats_enabled
+                && sim.sim_participant_id == outgoing.outgoing_id
+                && sim.sim_payload == outgoing.sim_payload
+        }).count() == 1
+        && evidence.current_settings_sims.iter().filter(|sim| {
+            canonical_e164(&sim.own_identity_raw).as_deref() == Some(own_identity)
+        }).count() == 1
+        && evidence.current_settings_sims.iter().any(|sim| {
+            sim.rcs_chats_enabled
+                && sim.sim_participant_id == outgoing.outgoing_id
+                && canonical_e164(&sim.own_identity_raw).as_deref() == Some(own_identity)
+                && sim.sim_payload == outgoing.sim_payload
+        })
+}
+
+fn is_fresh(now_ms: i64, observed_at_ms: i64) -> bool {
+    now_ms
+        .checked_sub(observed_at_ms)
+        .is_some_and(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(&age))
 }
 
 fn validated_visible_participants(
@@ -576,7 +598,19 @@ pub(crate) fn update_context(
         )
         .optional()?;
     if let Some(current) = current {
-        let current: RcsContext = serde_json::from_str(&current).map_err(|_| Error::Database)?;
+        let current: RcsContext = match serde_json::from_str(&current) {
+            Ok(current) => current,
+            Err(_) => {
+                let legacy: LegacyRcsContext = serde_json::from_str(&current).map_err(|_| Error::Database)?;
+                if (observation.link_generation, observation.session_generation, observation.context_revision)
+                    < (legacy.link_generation, legacy.session_generation, legacy.context_revision) {
+                    return Ok(ContextUpdate::Retired);
+                }
+                invalidate_all_mappings(conn, "legacy_context")?;
+                conn.execute("INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", params![RCS_CONTEXT_KEY, context])?;
+                return Ok(ContextUpdate::Changed);
+            }
+        };
         if (
             observation.link_generation,
             observation.session_generation,
@@ -626,7 +660,7 @@ pub(crate) fn mapping_matches_observation(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<bool, Error> {
-    if now_ms.saturating_sub(mapping.verified_at_ms).abs() > RCS_MAPPING_FRESHNESS_MS {
+    if !is_fresh(now_ms, mapping.verified_at_ms) {
         return Ok(false);
     }
     let Some(context) = conn
@@ -734,6 +768,8 @@ struct RcsContext {
     outgoing_id: String,
     sim_participant_id: String,
     own_number: String,
+    sim_payload_two: i32,
+    sim_payload_sim_number: i32,
     canonicalizer_revision: u32,
     link_state: u8,
 }
@@ -746,6 +782,8 @@ impl RcsContext {
             && self.outgoing_id == other.outgoing_id
             && self.sim_participant_id == other.sim_participant_id
             && self.own_number == other.own_number
+            && self.sim_payload_two == other.sim_payload_two
+            && self.sim_payload_sim_number == other.sim_payload_sim_number
             && self.canonicalizer_revision == other.canonicalizer_revision
             && self.link_state == other.link_state
     }
@@ -763,10 +801,19 @@ fn context_value(observation: &RcsMappingObservation) -> String {
         outgoing_id: observation.outgoing.outgoing_id.clone(),
         sim_participant_id: observation.outgoing.sim_participant_id.clone(),
         own_number: observation.carrier_binding.own_number_raw.clone(),
+        sim_payload_two: observation.outgoing.sim_payload.two,
+        sim_payload_sim_number: observation.outgoing.sim_payload.sim_number,
         canonicalizer_revision: observation.canonicalizer_revision,
         link_state: observation.link_state as u8,
     })
     .expect("RCS context is serializable")
+}
+
+#[derive(Deserialize)]
+struct LegacyRcsContext {
+    link_generation: u64,
+    session_generation: u64,
+    context_revision: u64,
 }
 
 fn invalidate_for_refusal(
@@ -855,7 +902,7 @@ mod tests {
             selected_sim_own_identity: "+12025550100".into(),
             carrier_binding: NativeCarrierRouteBinding { carrier_route_id: "android-subscription-7".into(), android_subscription_id: 7, is_current_default_sms: true, own_number_raw: "+12025550100".into(), own_number_source: crate::NativeOwnNumberSource::SubscriptionManagerPhoneNumber, route_observed_at_ms: 1_000, route_context_revision: 1, same_handset_evidence_id: "verified-handset".into() },
             outgoing: NativeRcsOutgoing { outgoing_id: "google-outgoing".into(), sim_participant_id: "google-outgoing".into(), own_identity_raw: "+12025550100".into(), sim_payload: crate::NativeRcsSimPayload { two: 2, sim_number: 7 }, rcs_chats_enabled: true },
-            native_evidence: NativeRcsEvidence { lifetime: crate::NativeRcsLifetime { runtime_id: "runtime".into(), run_generation: 1, link_generation: 1, session_generation: 1, context_revision: 1 }, lookup_id: "lookup".into(), lookup_complete: true, google_candidate_count: 1, settings_revision: 1, settings_provenance: NativeSettingsProvenance::CurrentEvent, settings_observed_at_ms: 1_000, settings_stream_epoch: 1, settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed, settings_validated_at_ms: 1_000, conversation_observed_at_ms: 1_000 },
+            native_evidence: NativeRcsEvidence { lifetime: crate::NativeRcsLifetime { runtime_id: "runtime".into(), run_generation: 1, link_generation: 1, session_generation: 1, context_revision: 1 }, lookup_id: "lookup".into(), lookup_complete: true, google_candidate_count: 1, settings_revision: 1, settings_provenance: NativeSettingsProvenance::CurrentEvent, settings_observed_at_ms: 1_000, settings_stream_epoch: 1, settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed, current_settings_sims: vec![NativeRcsOutgoing { outgoing_id: "google-outgoing".into(), sim_participant_id: "google-outgoing".into(), own_identity_raw: "+12025550100".into(), sim_payload: crate::NativeRcsSimPayload { two: 2, sim_number: 7 }, rcs_chats_enabled: true }], settings_validated_at_ms: 1_000, conversation_observed_at_ms: 1_000 },
             identity_region: "ZZ".into(),
             observed_at_ms: 1_000,
             link_generation: 1,

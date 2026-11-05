@@ -2,7 +2,7 @@ use crate::{
     CommandId, ConversationId, Error, MessagePayload,
     rcs_mapping::{self, RCS_MAPPING_FRESHNESS_MS, RcsConversationType, RcsMapping,
         RcsMappingClass, RcsMappingObservation, RcsSendMode},
-    rcs_native::{LocalRcsTargetSnapshot, NativeRcsParticipant, NativeRcsTargetClass},
+    rcs_native::{LocalRcsTargetSnapshot, NativeRcsCommitProjection, NativeRcsParticipant, NativeRcsTargetClass},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -239,6 +239,21 @@ pub struct RcsPermit {
     pub message: MessagePayload,
 }
 
+impl RcsPermit {
+    /// Produces the restricted native commit payload; callers cannot supply its target or proof.
+    pub fn native_commit_projection(&self) -> NativeRcsCommitProjection {
+        NativeRcsCommitProjection {
+            command_id: self.command_id.to_string(),
+            tmp_id: self.tmp_id.clone(),
+            mapping_revision: self.mapping_revision,
+            proof_version: self.target.proof_version,
+            proof_digest: self.proof_digest.to_vec(),
+            message_body: self.message.body.clone(),
+            target: self.target.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct StoredRcsTargetIdentity {
     version: u32,
@@ -347,6 +362,7 @@ pub(crate) fn local_target_snapshot(
         RcsMappingClass::SelfChat => NativeRcsTargetClass::SelfChat,
     };
     Ok(LocalRcsTargetSnapshot {
+        proof_version: mapping.proof_version,
         google_conversation_id: mapping.google_conversation_id.clone(),
         participants: observation
             .participants
