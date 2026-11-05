@@ -616,18 +616,33 @@ async fn delivered_live_signal_does_not_change_authenticated_snapshot() {
 
 #[tokio::test]
 async fn live_publish_receive_invalid_and_error_paths_do_not_log_sensitive_data() {
-    const CIPHERTEXT_CANARY: &str = "U0lHTkFMX0NBTkFSWV9OT19MT0c=";
-    const PLAINTEXT_CANARY: &str = "SIGNAL_CANARY_NO_LOG";
+    const SUCCESS_CIPHERTEXT: &str = "U1VDQ0VTU19QQVRIX0NBTkFSWQ==";
+    const SUCCESS_PLAINTEXT: &str = "SUCCESS_PATH_CANARY";
+    const INVALID_CIPHERTEXT: &str = "SU5WQUxJRF9QQVRIX0NBTkFSWQ==";
+    const INVALID_PLAINTEXT: &str = "INVALID_PATH_CANARY";
+    const ERROR_CIPHERTEXT: &str = "RVJST1JfUEFUSF9DQU5BUlk=";
+    const ERROR_PLAINTEXT: &str = "ERROR_PATH_CANARY";
+    const SAFE_SPAN_FIELD: &str = "safe_span_field_collector_control";
 
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_ansi(false)
         .without_time()
+        .with_span_events(
+            tracing_subscriber::fmt::format::FmtSpan::NEW
+                | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+        )
         .with_writer(logs.clone())
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("live tracing test must install the process collector");
+    {
+        let span =
+            tracing::info_span!("live_trace_span_control", safe_span_field = SAFE_SPAN_FIELD);
+        let _entered = span.enter();
+        // Intentionally no event: this proves span-only fields reach the collector.
+    }
 
     let backend = FakeLiveBackend::immediate();
     let server = LiveTestServer::start(backend.clone(), true).await;
@@ -636,45 +651,61 @@ async fn live_publish_receive_invalid_and_error_paths_do_not_log_sensitive_data(
     let mut peer = server.connect_peer().await;
     expect_strict_hello(&mut peer).await;
 
-    let canary_frame = signal_with_ciphertext(server.owner_device, CIPHERTEXT_CANARY);
+    let success_frame = signal_with_ciphertext(server.owner_device, SUCCESS_CIPHERTEXT);
     sender
-        .send(tungstenite::Message::Text(canary_frame.clone().into()))
+        .send(tungstenite::Message::Text(success_frame.clone().into()))
         .await
         .unwrap();
     let received = next_text(&mut peer).await;
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&received).unwrap(),
-        serde_json::from_str::<serde_json::Value>(&canary_frame).unwrap()
+        serde_json::from_str::<serde_json::Value>(&success_frame).unwrap()
     );
+    wait_for_count(&backend.completed, 1).await;
 
+    let mismatched_sender = Uuid::new_v4();
+    let invalid_frame = signal_with_ciphertext(mismatched_sender, INVALID_CIPHERTEXT);
     sender
-        .send(tungstenite::Message::Text(signal(Uuid::new_v4()).into()))
+        .send(tungstenite::Message::Text(invalid_frame.clone().into()))
         .await
         .unwrap();
     let invalid_close = next_close(&mut sender).await;
+    assert_eq!(invalid_close.code, CloseCode::Policy);
     assert_eq!(invalid_close.reason, "invalid_live_frame");
+    assert_eq!(backend.started.load(Ordering::SeqCst), 1);
 
     backend.fail.store(true, Ordering::SeqCst);
-    peer.send(tungstenite::Message::Text(
-        signal(server.peer_device).into(),
-    ))
-    .await
-    .unwrap();
+    let error_frame = signal_with_ciphertext(server.peer_device, ERROR_CIPHERTEXT);
+    peer.send(tungstenite::Message::Text(error_frame.clone().into()))
+        .await
+        .unwrap();
     let error_close = next_close(&mut peer).await;
+    assert_eq!(error_close.code, CloseCode::Error);
     assert_eq!(error_close.reason, "live_unavailable");
+    assert_eq!(backend.started.load(Ordering::SeqCst), 2);
+    assert_eq!(backend.completed.load(Ordering::SeqCst), 1);
 
     let captured = logs.text();
     assert!(captured.contains(TRACE_COLLECTOR_SENTINEL));
+    assert!(captured.contains(SAFE_SPAN_FIELD));
     let vault_id = server.vault.to_string();
     let owner_device_id = server.owner_device.to_string();
     let peer_device_id = server.peer_device.to_string();
+    let mismatched_sender_id = mismatched_sender.to_string();
     for secret in [
-        CIPHERTEXT_CANARY,
-        PLAINTEXT_CANARY,
-        canary_frame.as_str(),
+        SUCCESS_CIPHERTEXT,
+        SUCCESS_PLAINTEXT,
+        success_frame.as_str(),
+        INVALID_CIPHERTEXT,
+        INVALID_PLAINTEXT,
+        invalid_frame.as_str(),
+        ERROR_CIPHERTEXT,
+        ERROR_PLAINTEXT,
+        error_frame.as_str(),
         vault_id.as_str(),
         owner_device_id.as_str(),
         peer_device_id.as_str(),
+        mismatched_sender_id.as_str(),
     ] {
         assert!(
             !captured.contains(secret),
