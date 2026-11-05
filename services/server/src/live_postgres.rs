@@ -18,6 +18,7 @@ use uuid::Uuid;
 const LIVE_NOTIFY_CHANNEL: &str = "peppy_live_v1";
 const MAX_NOTIFY_PAYLOAD_BYTES: usize = 8_000;
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const LISTEN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +34,7 @@ struct Inner {
     hub: LiveHub,
     ready: AtomicBool,
     readiness: tokio::sync::watch::Sender<bool>,
+    listen_setup_timeout: Duration,
 }
 
 /// PostgreSQL `LISTEN`/`NOTIFY` relay for best-effort live frames. Notifications
@@ -44,6 +46,10 @@ pub(crate) struct PgLiveBackend {
 
 impl PgLiveBackend {
     pub(crate) fn new(pool: PgPool, hub: LiveHub) -> Self {
+        Self::new_with_setup_timeout(pool, hub, LISTEN_SETUP_TIMEOUT)
+    }
+
+    fn new_with_setup_timeout(pool: PgPool, hub: LiveHub, listen_setup_timeout: Duration) -> Self {
         let (readiness, _) = tokio::sync::watch::channel(false);
         let inner = Arc::new(Inner {
             pool,
@@ -51,6 +57,7 @@ impl PgLiveBackend {
             hub,
             ready: AtomicBool::new(false),
             readiness,
+            listen_setup_timeout,
         });
         let listener_task = tokio::spawn(listener_loop(Arc::downgrade(&inner)));
         Self {
@@ -134,8 +141,7 @@ async fn listener_loop(inner: Weak<Inner>) {
 }
 
 async fn listen_once(state: &Inner) -> Result<(), sqlx::Error> {
-    let mut listener = PgListener::connect_with(&state.pool).await?;
-    listener.listen(LIVE_NOTIFY_CHANNEL).await?;
+    let mut listener = setup_listener(&state.pool, state.listen_setup_timeout).await?;
     set_ready(state, true);
     loop {
         let Some(notification) = listener.try_recv().await? else {
@@ -156,6 +162,17 @@ async fn listen_once(state: &Inner) -> Result<(), sqlx::Error> {
     }
 }
 
+async fn setup_listener(pool: &PgPool, timeout: Duration) -> Result<PgListener, sqlx::Error> {
+    tokio::time::timeout(timeout, async {
+        let mut listener = PgListener::connect_with(pool).await?;
+        listener.eager_reconnect(false);
+        listener.listen(LIVE_NOTIFY_CHANNEL).await?;
+        Ok(listener)
+    })
+    .await
+    .map_err(|_| sqlx::Error::PoolTimedOut)?
+}
+
 fn set_ready(state: &Inner, ready: bool) {
     state.ready.store(ready, Ordering::Release);
     state.readiness.send_replace(ready);
@@ -174,15 +191,24 @@ fn live_now_ms() -> u64 {
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use std::str::FromStr;
     use tokio::sync::mpsc::error::TryRecvError;
 
     fn frame(sender_device_id: DeviceId, expires_at_ms: u64) -> EphemeralSignalV1 {
+        frame_at(sender_device_id, live_now_ms(), expires_at_ms)
+    }
+
+    fn frame_at(
+        sender_device_id: DeviceId,
+        sent_at_ms: u64,
+        expires_at_ms: u64,
+    ) -> EphemeralSignalV1 {
         EphemeralSignalV1 {
             protocol_version: 1,
             kind: "typing".into(),
             sender_device_id,
             key_epoch: 1,
-            sent_at_ms: live_now_ms().to_string(),
+            sent_at_ms: sent_at_ms.to_string(),
             expires_at_ms: expires_at_ms.to_string(),
             sequence: "1".into(),
             ciphertext_b64: STANDARD.encode([0_u8; 32]),
@@ -248,8 +274,31 @@ mod tests {
         assert_eq!(local_receiver.try_recv(), Err(TryRecvError::Empty));
         assert_eq!(foreign_receiver.try_recv(), Err(TryRecvError::Empty));
 
-        let expired = frame(sender_device_id, live_now_ms().saturating_sub(1));
+        let now = live_now_ms();
+        let expired = frame_at(sender_device_id, now - 2_000, now - 1_000);
+        assert!(expired.validate().is_ok());
         local_backend.publish(vault_id, expired).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), remote_receiver.recv())
+                .await
+                .is_err()
+        );
+
+        let future = frame_at(sender_device_id, now + 31_000, now + 32_000);
+        assert!(future.validate().is_ok());
+        local_backend.publish(vault_id, future).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), remote_receiver.recv())
+                .await
+                .is_err()
+        );
+
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(LIVE_NOTIFY_CHANNEL)
+            .bind("{\"unexpected\":true}")
+            .execute(&pool)
+            .await
+            .unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(100), remote_receiver.recv())
                 .await
@@ -268,6 +317,16 @@ mod tests {
                 .is_err()
         );
 
+        let mut largest = frame(sender_device_id, live_now_ms() + 10_000);
+        largest.ciphertext_b64 = STANDARD.encode(vec![0_u8; 5_700]);
+        let serialized = serde_json::to_string(&Notify {
+            instance_id: Uuid::from_u128(5),
+            vault_id: vault_id.0,
+            frame: largest,
+        })
+        .unwrap();
+        assert!(serialized.len() < MAX_NOTIFY_PAYLOAD_BYTES);
+
         drop(remote_backend);
         let mut no_replay = remote_hub.register(vault_id, receiver_device_id);
         assert_eq!(no_replay.receiver.try_recv(), Err(TryRecvError::Empty));
@@ -277,18 +336,26 @@ mod tests {
     async fn listener_loss_and_backend_drop_mark_readiness_unavailable() {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required for PostgreSQL live relay tests");
+        let application_name = format!("peppy-live-test-{}", Uuid::new_v4());
+        let options = sqlx::postgres::PgConnectOptions::from_str(&database_url)
+            .unwrap()
+            .application_name(&application_name);
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
-            .connect(&database_url)
+            .connect_with(options)
             .await
             .unwrap();
         let backend = PgLiveBackend::new(pool.clone(), LiveHub::new());
         wait_ready(&backend).await;
         let mut readiness = backend.subscribe_readiness();
 
-        tokio::time::timeout(Duration::from_secs(2), pool.close())
-            .await
-            .expect("pool closes listener connection");
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name=$1",
+        )
+        .bind(&application_name)
+        .execute(&pool)
+        .await
+        .unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while *readiness.borrow_and_update() {
                 readiness
@@ -298,8 +365,12 @@ mod tests {
             }
         })
         .await
-        .expect("listener loss marks backend unavailable");
+        .expect("terminated listener marks backend unavailable before reconnect");
         assert!(!backend.is_ready());
+
+        tokio::time::timeout(Duration::from_secs(2), pool.close())
+            .await
+            .expect("pool closes listener connection");
 
         drop(backend);
         assert!(!*readiness.borrow_and_update());
