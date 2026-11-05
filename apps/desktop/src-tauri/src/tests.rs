@@ -1957,22 +1957,14 @@ mod real_server {
             .into_iter()
             .next()
             .expect("gateway received the routed command");
-        let peppy_client_core::ReceivedCommand::Carrier {
-            command_id,
-            subscription_id,
-            ..
-        } = command
-        else {
-            panic!("expected a carrier command");
-        };
-        assert_eq!(subscription_id, "sim-1");
+        assert_eq!(command.subscription_id, "sim-1");
         assert!(matches!(
-            gateway.client.begin_send_attempt(command_id).unwrap(),
+            gateway.client.begin_send_attempt(command.command_id).unwrap(),
             PermitDecision::Permit(_)
         ));
         gateway
             .client
-            .record_send_result(command_id, SendResult::Sent)
+            .record_send_result(command.command_id, SendResult::Sent)
             .unwrap();
         gateway.sync().await;
         let conversation =
@@ -2233,10 +2225,7 @@ mod real_server {
         assert!(matches!(
             gateway
                 .client
-                .begin_send_attempt(match command {
-                    peppy_client_core::ReceivedCommand::Carrier { command_id, .. } => command_id,
-                    _ => panic!("expected a carrier command"),
-                })
+                .begin_send_attempt(command.command_id)
                 .unwrap(),
             PermitDecision::Blocked(peppy_client_core::PermitBlock::MediaUnavailable)
         ));
