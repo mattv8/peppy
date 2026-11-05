@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.text.format.DateUtils
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
@@ -67,6 +68,7 @@ internal interface GoogleMessagesLinkPanelHost {
     val emoji: StateFlow<String?>
     val permissionResults: StateFlow<Long>
     val notificationsGranted: Boolean
+    val isChangingConfigurations: Boolean
     fun open(): LinkOpenResult
     fun resetLocalState()
     fun pairingInProgress(): Boolean
@@ -94,6 +96,7 @@ private fun GoogleMessagesLinkPanelContent(
     onChanged: () -> Unit,
 ) {
     val context = LocalContext.current
+    val activity = LocalActivity.current
     if (!GoogleMessagesLink.available(context)) return
     val scope = rememberCoroutineScope()
     val owner = LocalLifecycleOwner.current
@@ -121,9 +124,10 @@ private fun GoogleMessagesLinkPanelContent(
         signInContinuation?.also { signInContinuation = null }
             ?.invoke(outcome.data?.getStringExtra("dev.peppy.mobile.googlemessages.outcome"))
     }
-    val host = injectedHost ?: remember(context) {
+    val host = injectedHost ?: remember(context, activity) {
         AndroidGoogleMessagesLinkPanelHost(
             context = context,
+            changingConfigurations = { activity?.isChangingConfigurations == true },
             permissionResults = platformPermissionResults,
             requestPermission = { permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) },
             launchSignIn = { onResult ->
@@ -158,7 +162,7 @@ private fun GoogleMessagesLinkPanelContent(
             if (event == Lifecycle.Event.ON_RESUME) {
                 resume++
                 batteryRefresh++
-            } else if (event == Lifecycle.Event.ON_STOP) {
+            } else if (event == Lifecycle.Event.ON_STOP && !host.isChangingConfigurations) {
                 pendingNotificationAction = null
             }
         }
@@ -293,6 +297,7 @@ private fun GoogleMessagesLinkPanelContent(
 
 private class AndroidGoogleMessagesLinkPanelHost(
     private val context: android.content.Context,
+    private val changingConfigurations: () -> Boolean,
     override val permissionResults: StateFlow<Long>,
     private val requestPermission: () -> Unit,
     private val launchSignIn: ((String?) -> Unit) -> Unit,
@@ -301,6 +306,8 @@ private class AndroidGoogleMessagesLinkPanelHost(
     override val emoji = LinkRuntime.emoji
     override val notificationsGranted: Boolean
         get() = Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    override val isChangingConfigurations: Boolean
+        get() = changingConfigurations()
 
     override fun open() = LinkRuntime.handle(context.applicationContext)
     override fun resetLocalState() = LinkRuntime.resetLocalState(context.applicationContext)
@@ -338,14 +345,14 @@ private class AndroidGoogleMessagesLinkPanelHost(
     if (busy) Text(stringResource(R.string.peppy_google_messages_link_working), Modifier.semantics { liveRegion = LiveRegionMode.Polite })
     when (status.state) {
         "unlinked" -> { Text(stringResource(R.string.peppy_google_messages_link_unlinked_body), Modifier.testTag("google-messages-link-unlinked")); Text(stringResource(R.string.peppy_google_messages_link_replaces_browser)); if (signInBlocked) Text(stringResource(R.string.peppy_google_messages_link_start_blocked)) else PanelButton(stringResource(R.string.peppy_google_messages_link_action_link), !busy && !pairingInProgress, "google-messages-link-start", onStart) }
-        "pairing" -> Pairing(emoji, notificationsOff, onAllowNotifications)
+        "pairing" -> Pairing(emoji, notificationsOff, busy, onAllowNotifications)
         "linked" -> Linked(status, busy, checkResult, notificationsOff, batteryAllowed, batteryUnavailable, onCheck, onReconnect, onBattery, onAllowNotifications, onUnlink, onRemove)
         "needs_relink" -> { Text(stringResource(R.string.peppy_google_messages_link_needs_relink_body), Modifier.testTag("google-messages-link-needs-relink")); PanelButton(stringResource(R.string.peppy_google_messages_link_action_relink), !busy && !pairingInProgress, "google-messages-link-relink", onRelink); Secondary(stringResource(R.string.peppy_google_messages_link_action_unlink), !busy, "google-messages-link-unlink", onUnlink); TextButton(onClick = onRemove, enabled = !busy, modifier = Modifier.testTag("google-messages-link-remove-local")) { Text(stringResource(R.string.peppy_google_messages_link_action_remove_local)) } }
         "signed_out" -> { Text(stringResource(R.string.peppy_google_messages_link_signed_out_body), Modifier.testTag("google-messages-link-signed-out")); PanelButton(stringResource(R.string.peppy_google_messages_link_action_sign_in_again), !busy && !pairingInProgress, "google-messages-link-sign-in-again", onStart); TextButton(onClick = onRemove, enabled = !busy, modifier = Modifier.testTag("google-messages-link-remove-local")) { Text(stringResource(R.string.peppy_google_messages_link_action_remove_local)) } }
     }
 }
 
-@Composable private fun Pairing(emoji: String?, notificationsOff: Boolean, onAllowNotifications: () -> Unit) { if (emoji == null) Text(stringResource(R.string.peppy_google_messages_link_pairing_connecting), Modifier.testTag("google-messages-link-pairing").semantics { liveRegion = LiveRegionMode.Polite }) else Column(Modifier.testTag("google-messages-link-emoji-card").semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Assertive }) { Text(stringResource(R.string.peppy_google_messages_link_pairing_emoji_instruction)); Text(emoji, Modifier.testTag("google-messages-link-emoji"), style = MaterialTheme.typography.displayLarge); Text(stringResource(R.string.peppy_google_messages_link_pairing_emoji_hint)) }; if (notificationsOff) Notifications(busy = false, onAllow = onAllowNotifications) }
+@Composable private fun Pairing(emoji: String?, notificationsOff: Boolean, busy: Boolean, onAllowNotifications: () -> Unit) { if (emoji == null) Text(stringResource(R.string.peppy_google_messages_link_pairing_connecting), Modifier.testTag("google-messages-link-pairing").semantics { liveRegion = LiveRegionMode.Polite }) else Column(Modifier.testTag("google-messages-link-emoji-card").semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Assertive }) { Text(stringResource(R.string.peppy_google_messages_link_pairing_emoji_instruction)); Text(emoji, Modifier.testTag("google-messages-link-emoji"), style = MaterialTheme.typography.displayLarge); Text(stringResource(R.string.peppy_google_messages_link_pairing_emoji_hint)) }; if (notificationsOff) Notifications(busy = busy, onAllow = onAllowNotifications) }
 
 @Composable private fun Linked(status: LinkStatus, busy: Boolean, checkResult: Int?, notificationsOff: Boolean, batteryAllowed: Boolean, batteryUnavailable: Boolean, onCheck: () -> Unit, onReconnect: () -> Unit, onBattery: () -> Unit, onAllowNotifications: () -> Unit, onUnlink: () -> Unit, onRemove: () -> Unit) { Text(stringResource(R.string.peppy_google_messages_link_linked_body), Modifier.testTag("google-messages-link-linked")); val connection = when { !status.running -> R.string.peppy_google_messages_link_connection_not_running; !status.phoneResponding -> R.string.peppy_google_messages_link_connection_phone_not_responding; !status.healthy -> R.string.peppy_google_messages_link_connection_unconfirmed; else -> R.string.peppy_google_messages_link_connection_connected }; LinkStatusRow("google-messages-link-connection", stringResource(R.string.peppy_google_messages_link_connection_label), stringResource(connection)); LinkStatusRow("google-messages-link-last-ok", stringResource(R.string.peppy_google_messages_link_last_ok_label), if (status.lastOkMs == 0L) stringResource(R.string.peppy_google_messages_link_last_ok_never) else DateUtils.getRelativeTimeSpanString(status.lastOkMs).toString()); if (!status.running) { Text(stringResource(R.string.peppy_google_messages_link_help_not_running)); if (status.stopCode != "persist_failed") TextButton(onClick = onReconnect, enabled = !busy, modifier = Modifier.testTag("google-messages-link-reconnect")) { Text(stringResource(R.string.peppy_google_messages_link_action_reconnect)) } } else { if (!status.phoneResponding) Text(stringResource(R.string.peppy_google_messages_link_help_phone_not_responding)) else if (!status.healthy) Text(stringResource(R.string.peppy_google_messages_link_help_unconfirmed)); PanelButton(if (busy) stringResource(R.string.peppy_google_messages_link_checking) else stringResource(R.string.peppy_google_messages_link_action_check_now), !busy, "google-messages-link-check-now", onCheck) }; checkResult?.let { Text(stringResource(if (it >= 0) R.string.peppy_google_messages_link_check_ok else R.string.peppy_google_messages_link_check_failed), Modifier.testTag("google-messages-link-check-result").semantics { liveRegion = LiveRegionMode.Polite }) }; SettingToggleRow(stringResource(R.string.peppy_google_messages_link_battery_title), batteryAllowed, !busy, { onBattery() }, "google-messages-link-battery-row", stringResource(R.string.peppy_google_messages_link_battery_subtitle), stringResource(R.string.peppy_toggle_android_open_settings), stringResource(if (batteryAllowed) R.string.peppy_toggle_android_battery_allowed else R.string.peppy_toggle_android_battery_delayed)); if (batteryUnavailable) Text(stringResource(R.string.peppy_toggle_android_battery_unavailable), Modifier.testTag("google-messages-link-battery-unavailable")); if (notificationsOff) Notifications(busy, onAllowNotifications); Secondary(stringResource(R.string.peppy_google_messages_link_action_unlink), !busy, "google-messages-link-unlink", onUnlink); if (status.stopCode == "persist_failed") TextButton(onClick = onRemove, enabled = !busy, modifier = Modifier.testTag("google-messages-link-remove-local")) { Text(stringResource(R.string.peppy_google_messages_link_action_remove_local)) } }
 

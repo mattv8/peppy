@@ -187,24 +187,61 @@ class GoogleMessagesLinkPanelTest {
         check(host.resetCalls == 1)
     }
 
-    @Test fun `pending link permission survives recreation and continues exactly once`() {
+    @Test fun `pending link permission survives configuration stop save recreate exactly once`() {
         val host = FakePanelHost(FakeHandle("unlinked"), notificationsGranted = false)
         val restoration = StateRestorationTester(compose)
+        var owner: LifecycleOwner = resumedOwner()
         GoogleMessagesLinkTestHooks.available = true
-        restoration.setContent { PeppyTheme { GoogleMessagesLinkPanel(host) {} } }
+        restoration.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                PeppyTheme { GoogleMessagesLinkPanel(host) {} }
+            }
+        }
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-start").performClick()
         compose.onNodeWithTag("google-messages-link-consent-sheet-confirm")
             .performSemanticsAction(SemanticsActions.OnClick)
         compose.waitUntil { host.permissionRequests == 1 }
 
+        host.isChangingConfigurations = true
+        compose.runOnIdle { (owner.lifecycle as LifecycleRegistry).handleLifecycleEvent(Lifecycle.Event.ON_STOP) }
+        owner = resumedOwner()
         restoration.emulateSavedInstanceStateRestore()
+        host.isChangingConfigurations = false
         host.completePermissionRequest(granted = false)
         compose.waitUntil { host.signInLaunches == 1 }
         host.completePermissionRequest(granted = true)
         compose.waitForIdle()
         check(host.signInLaunches == 1)
         check(host.serviceStarts == 0)
+    }
+
+    @Test fun `pending relink permission survives configuration stop save recreate exactly once`() {
+        val host = FakePanelHost(FakeHandle("needs_relink"), notificationsGranted = false)
+        val restoration = StateRestorationTester(compose)
+        var owner: LifecycleOwner = resumedOwner()
+        GoogleMessagesLinkTestHooks.available = true
+        restoration.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                PeppyTheme { GoogleMessagesLinkPanel(host) {} }
+            }
+        }
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-relink").fetchSemanticsNodes().isNotEmpty() }
+        confirm("google-messages-link-relink")
+        compose.waitUntil { host.permissionRequests == 1 }
+
+        host.isChangingConfigurations = true
+        compose.runOnIdle { (owner.lifecycle as LifecycleRegistry).handleLifecycleEvent(Lifecycle.Event.ON_STOP) }
+        owner = resumedOwner()
+        restoration.emulateSavedInstanceStateRestore()
+        host.isChangingConfigurations = false
+        host.completePermissionRequest(granted = false)
+        compose.waitUntil { host.relinkCalls == 1 }
+        host.completePermissionRequest(granted = true)
+        compose.waitForIdle()
+        check(host.relinkCalls == 1)
+        check(host.serviceStarts == 1)
+        check(host.signInLaunches == 0)
     }
 
     @Test fun `stopping while permission is pending cancels the confirmed action`() {
@@ -356,6 +393,37 @@ class GoogleMessagesLinkPanelTest {
         releaseUnlink.countDown()
     }
 
+    @Test fun `pairing notifications stay disabled while relink is held`() {
+        val relinkEntered = CountDownLatch(1)
+        val releaseRelink = CountDownLatch(1)
+        val handle = FakeHandle("linked").apply {
+            relinkAction = { relinkEntered.countDown(); awaitIgnoringInterrupts(releaseRelink) }
+        }
+        val host = FakePanelHost(handle, notificationsGranted = false)
+        showPanel(host)
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notifications-allow").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-notifications-allow").performClick()
+        host.completePermissionRequest(granted = false)
+        compose.waitUntil { host.permissionRequests == 1 }
+
+        handle.state = "needs_relink"
+        host.signalChange()
+        confirm("google-messages-link-relink")
+        compose.waitUntil { host.permissionRequests == 2 }
+        host.completePermissionRequest(granted = false)
+        compose.waitUntil(5_000) { relinkEntered.count == 0L }
+        handle.state = "pairing"
+        host.emojiFlow.value = "😀"
+        host.signalChange()
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-emoji-card").fetchSemanticsNodes().isNotEmpty() }
+
+        val application = ApplicationProvider.getApplicationContext<android.app.Application>()
+        compose.onNodeWithTag("google-messages-link-notifications-allow").assertIsNotEnabled()
+        check(host.permissionRequests == 2)
+        check(shadowOf(application).nextStartedActivity == null)
+        releaseRelink.countDown()
+    }
+
     @Test
     @Config(sdk = [35], qualifiers = "w320dp-h480dp")
     fun `large text keeps actions reachable and exposes merged live regions`() {
@@ -387,6 +455,10 @@ class GoogleMessagesLinkPanelTest {
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Assertive))
             .assertTextContains("😀", substring = true)
         check(compose.onAllNodesWithTag("google-messages-link-emoji", useUnmergedTree = false).fetchSemanticsNodes().isEmpty())
+    }
+
+    private fun resumedOwner(): LifecycleOwner = object : LifecycleOwner {
+        override val lifecycle = LifecycleRegistry(this).apply { currentState = Lifecycle.State.RESUMED }
     }
 
     private fun confirm(actionTag: String, confirmTag: String = "$actionTag-sheet-confirm") {
@@ -447,6 +519,7 @@ class GoogleMessagesLinkPanelTest {
         private val openResult: () -> LinkOpenResult = { LinkOpenResult.Open(handle) },
         private val onReset: () -> Unit = { handle.state = "unlinked" },
     ) : GoogleMessagesLinkPanelHost {
+        override var isChangingConfigurations = false
         private val changesFlow = MutableStateFlow(0L)
         override val changes: StateFlow<Long> = changesFlow
         val emojiFlow = MutableStateFlow<String?>(null)
