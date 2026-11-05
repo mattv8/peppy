@@ -9,5 +9,9 @@ object GoogleMessagesLink {
 
     fun available(context: Context): Boolean = LinkEngines.current.available
 
-    fun onAppStart(context: Context) = Unit
+    fun onAppStart(context: Context) {
+        GoogleMessagesLinkService.createNotificationChannel(context.applicationContext)
+    }
+
+    fun signInBlocked(context: Context): Boolean = false
 }

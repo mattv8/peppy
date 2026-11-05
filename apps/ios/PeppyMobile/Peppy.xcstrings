@@ -3571,6 +3571,86 @@
         }
       }
     },
+    "peppy.google_messages_link_notif_channel_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_channel_desc": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows while Peppy keeps the Google Messages link connected."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_pairing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for you to confirm on this phone."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_connected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connected."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_phone_not_responding": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone not responding."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting…"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_attention": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The link needs attention. Open Peppy."
+          }
+        }
+      }
+    },
     "peppy.remote_messaging_notifications_disabled": {
       "localizations": {
         "en": {

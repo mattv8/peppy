@@ -358,6 +358,14 @@
     <string name="peppy_remote_messaging_notif_locked">Unlock Peppy to continue syncing</string>
     <string name="peppy_remote_messaging_notif_channel_name">Remote messaging</string>
     <string name="peppy_remote_messaging_notif_channel_desc">Shows while Peppy is keeping your phone connected for faster syncing.</string>
+    <string name="peppy_google_messages_link_notif_channel_name">Google Messages link</string>
+    <string name="peppy_google_messages_link_notif_channel_desc">Shows while Peppy keeps the Google Messages link connected.</string>
+    <string name="peppy_google_messages_link_notif_title">Google Messages link</string>
+    <string name="peppy_google_messages_link_notif_text_pairing">Waiting for you to confirm on this phone.</string>
+    <string name="peppy_google_messages_link_notif_text_connected">Connected.</string>
+    <string name="peppy_google_messages_link_notif_text_phone_not_responding">Phone not responding.</string>
+    <string name="peppy_google_messages_link_notif_text_reconnecting">Reconnecting…</string>
+    <string name="peppy_google_messages_link_notif_text_attention">The link needs attention. Open Peppy.</string>
     <string name="peppy_remote_messaging_notifications_disabled">Notifications are off. Live sync can still reconnect; allow notifications to show its ongoing status.</string>
     <string name="peppy_remote_messaging_allow_notifications">Allow notifications</string>
     <string name="peppy_remote_messaging_recovery_required">Re-pair this phone to enable remote messaging.</string>
