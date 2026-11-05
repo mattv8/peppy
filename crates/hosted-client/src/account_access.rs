@@ -548,6 +548,53 @@ mod tests {
     }
 
     #[test]
+    fn immediate_cancellation_is_a_non_dismissible_read_only_notice() {
+        let notice = notice(&read_only(Some(AccountAccessReason::Canceled)));
+        assert_eq!(notice.kind, AccountNoticeKind::ReadOnlyCanceled);
+        assert_eq!(notice.severity, NoticeSeverity::Error);
+        assert_eq!(notice.deadline, None);
+        assert!(!notice.dismissible);
+        assert_eq!(notice.snooze_key, "read_only_canceled:none");
+    }
+
+    #[test]
+    fn read_only_cancellation_wins_over_a_stale_scheduled_ending() {
+        let deadline = NOW + 5 * SECONDS_PER_DAY;
+        let response = response(
+            AccountAccessLevel::ReadOnly,
+            AccountAccessState::EndingScheduled,
+            Some(AccountAccessReason::Canceled),
+            Some(deadline),
+        );
+        let notice = notice(&response);
+        assert_eq!(notice.kind, AccountNoticeKind::ReadOnlyCanceled);
+        assert_eq!(notice.severity, NoticeSeverity::Error);
+        assert_ne!(notice.kind, AccountNoticeKind::EndingScheduled);
+        assert_eq!(notice.deadline, Some(deadline));
+    }
+
+    #[test]
+    fn immediate_cancellation_replaces_a_scheduled_ending_snooze_key() {
+        let ending = notice(&read_write(
+            AccountAccessState::EndingScheduled,
+            Some(NOW + 5 * SECONDS_PER_DAY),
+        ));
+        let canceled = notice(&read_only(Some(AccountAccessReason::Canceled)));
+        assert_eq!(ending.kind, AccountNoticeKind::EndingScheduled);
+        assert_eq!(canceled.kind, AccountNoticeKind::ReadOnlyCanceled);
+        assert_ne!(ending.snooze_key, canceled.snooze_key);
+        assert!(!canceled.dismissible);
+    }
+
+    #[test]
+    fn resubscribing_clears_a_read_only_cancellation_notice() {
+        assert_eq!(
+            account_notice(&read_write(AccountAccessState::Ok, None), NOW, &trusted(),),
+            None
+        );
+    }
+
+    #[test]
     fn unknown_access_never_produces_a_notice() {
         for state in [
             AccountAccessState::PaymentFailedGrace,
