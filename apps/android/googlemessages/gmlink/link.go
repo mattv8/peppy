@@ -40,8 +40,8 @@ type Link struct {
 	healthy     bool
 	responding  bool
 	lastOKMS    int64
-	stop        chan struct{}
-	stopOnce    sync.Once
+	closed      bool
+	stopRun     context.CancelFunc
 	pairCancel  context.CancelFunc
 
 	changes chan any
@@ -49,10 +49,12 @@ type Link struct {
 
 var openLink atomic.Pointer[Link]
 
-const (
+// Call deadlines. These are variables only so tests can inject short deadlines
+// against a fixture that never answers; production never reassigns them.
+var (
 	configTimeout   = 30 * time.Second
-	connectTimeout  = 30 * time.Second
 	unpairTimeout   = 30 * time.Second
+	healthTimeout   = 30 * time.Second
 	pairWaitTimeout = 5 * time.Minute
 )
 
@@ -66,7 +68,7 @@ func Open(state []byte, host Host) (*Link, error) {
 		return nil, err
 	}
 	zerolog.SetGlobalLevel(zerolog.Disabled)
-	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, seq: decoded.Seq, changes: make(chan any, 64), stop: make(chan struct{})}
+	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, seq: decoded.Seq, changes: make(chan any, 64)}
 	if len(decoded.Auth) > 0 && string(decoded.Auth) != "null" {
 		link.auth = libgm.NewAuthData()
 		if err := json.Unmarshal(decoded.Auth, link.auth); err != nil {
@@ -95,10 +97,11 @@ func Open(state []byte, host Host) (*Link, error) {
 // Close aborts work, stops Run, and releases the process-wide link slot.
 func (link *Link) Close() {
 	link.mu.Lock()
+	link.closed = true
 	if link.pairCancel != nil {
 		link.pairCancel()
 	}
-	link.stopOnce.Do(func() { close(link.stop) })
+	link.stopRunLocked()
 	link.mu.Unlock()
 	openLink.CompareAndSwap(link, nil)
 }
@@ -112,7 +115,7 @@ func (link *Link) Pair(cookiesJSON []byte) error {
 	}
 	auth := libgm.NewAuthData()
 	auth.SetCookies(cookies)
-	return link.pair(auth, false)
+	return link.pair(auth, false, "")
 }
 
 // Relink repairs an existing link using its stored cookies.
@@ -123,14 +126,17 @@ func (link *Link) Relink() error {
 		return errors.New("relink_refused")
 	}
 	auth := link.auth.CopyForRepair()
+	storedSource := link.auth.Mobile.GetSourceID()
 	link.mu.Unlock()
-	return link.pair(auth, true)
+	return link.pair(auth, true, storedSource)
 }
 
-func (link *Link) pair(auth *libgm.AuthData, relink bool) (err error) {
+// pair runs one pairing. A relink must name the same account as storedSource
+// before any pairing request is sent.
+func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (err error) {
 	link.mu.Lock()
 	previous := link.state
-	if (!relink && previous != stateUnlinked && previous != stateSignedOut) || (relink && previous != stateNeedsRelink) {
+	if link.closed || (!relink && previous != stateUnlinked && previous != stateSignedOut) || (relink && previous != stateNeedsRelink) {
 		link.mu.Unlock()
 		return errors.New("pair_refused")
 	}
@@ -162,28 +168,32 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool) (err error) {
 	err = client.FetchConfig(configCtx)
 	cancelConfig()
 	if err != nil {
-		return link.pairResultError(err)
+		return link.pairResultError(err, relink)
 	}
 	email := client.Config.GetDeviceInfo().GetEmail()
 	if email == "" {
-		return errors.New("pair_failed")
+		return pairFailure("pair_failed")
 	}
+	if relink && !strings.EqualFold(email, storedSource) {
+		return pairFailure("account_mismatch")
+	}
+	// The pairing long poll lives as long as the pair, so the phone's replies can arrive.
 	startCtx, cancelStart := context.WithTimeout(ctx, configTimeout)
-	emoji, pairing, err := client.StartGaiaPairing(startCtx, startCtx)
+	emoji, pairing, err := client.StartGaiaPairing(startCtx, ctx)
 	cancelStart()
 	if err != nil {
-		return link.pairResultError(err)
+		return link.pairResultError(err, relink)
 	}
 	link.host.ShowEmoji(emoji)
 	finishCtx, cancelFinish := context.WithTimeout(ctx, pairWaitTimeout)
 	_, err = client.FinishGaiaPairing(finishCtx, pairing)
 	cancelFinish()
 	if err != nil {
-		return link.pairResultError(err)
+		return link.pairResultError(err, relink)
 	}
 	if !strings.EqualFold(email, auth.Mobile.GetSourceID()) {
 		link.signOut("account_mismatch")
-		return errors.New("account_mismatch")
+		return pairFailure("account_mismatch")
 	}
 	link.mu.Lock()
 	link.auth, link.state, link.pairingFrom, link.stopCode = auth, stateLinked, "", ""
@@ -218,17 +228,18 @@ func (link *Link) restorePair(previous, code string) bool {
 	return true
 }
 
-// Run keeps the linked client connected until Stop or Close.
+// Run keeps the linked client connected until Stop, Close or a terminal state.
 func (link *Link) Run() error {
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
 	link.mu.Lock()
-	if link.running || link.state != stateLinked || link.auth.Browser == nil {
+	if link.closed || link.running || link.state != stateLinked || link.auth.Browser == nil {
 		link.mu.Unlock()
 		return errors.New("run_refused")
 	}
 	auth := link.auth
 	client := link.newClient(auth)
-	link.client, link.running = client, true
-	stop := link.stop
+	link.client, link.running, link.stopRun = client, true, cancelRun
 	link.mu.Unlock()
 	defer func() {
 		link.mu.Lock()
@@ -236,17 +247,21 @@ func (link *Link) Run() error {
 			link.client = nil
 		}
 		link.running = false
+		link.stopRun = nil
 		link.mu.Unlock()
 		client.Disconnect()
 	}()
 	client.SetPingInterval(20 * time.Minute)
-	configCtx, cancelConfig := context.WithTimeout(context.Background(), configTimeout)
+	configCtx, cancelConfig := context.WithTimeout(runCtx, configTimeout)
 	err := client.FetchConfig(configCtx)
 	cancelConfig()
 	if err != nil {
 		if isCookieRefusal(err) {
-			link.signOut("cookie_refused")
+			// The transport has already signed the link out for the /web/config redirect.
 			return errors.New("cookie_refused")
+		}
+		if runCtx.Err() != nil {
+			return nil
 		}
 		link.emit("conn", "temporary_error", 0)
 		return errors.New("run_retryable")
@@ -255,10 +270,8 @@ func (link *Link) Run() error {
 		link.signOut("account_mismatch")
 		return errors.New("account_mismatch")
 	}
-	connectCtx, cancelConnect := context.WithTimeout(context.Background(), connectTimeout)
-	err = client.Connect(connectCtx)
-	cancelConnect()
-	if err != nil {
+	// The long poll lives as long as Run, so it takes the run context rather than a deadline.
+	if err := client.Connect(runCtx); err != nil {
 		if isFatalAuthError(err) {
 			link.signOut("signed_out")
 			return errors.New("fatal_refresh")
@@ -270,7 +283,7 @@ func (link *Link) Run() error {
 	link.healthy = true
 	link.mu.Unlock()
 	link.emit("conn", "ready", 0)
-	<-stop
+	<-runCtx.Done()
 	return nil
 }
 
@@ -283,7 +296,7 @@ func (link *Link) CheckHealth() int64 {
 		link.recordHealth(false, 0)
 		return -1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), healthTimeout)
 	defer cancel()
 	started := time.Now()
 	_, err := client.ListConversations(ctx, &gmproto.ListConversationsRequest{Count: 1, Folder: gmproto.ListConversationsRequest_INBOX})
@@ -334,8 +347,15 @@ func (link *Link) Unlink() error {
 // Stop ends Run without changing link state.
 func (link *Link) Stop() {
 	link.mu.Lock()
-	link.stopOnce.Do(func() { close(link.stop) })
+	link.stopRunLocked()
 	link.mu.Unlock()
+}
+
+// stopRunLocked cancels the current Run, if any. Callers hold link.mu.
+func (link *Link) stopRunLocked() {
+	if link.stopRun != nil {
+		link.stopRun()
+	}
 }
 
 // Status returns the public, non-secret link status JSON.
@@ -420,12 +440,19 @@ func (link *Link) projectEvent(event any) {
 	}
 }
 
+// transportStop receives the transport's stop requests. A /web/config redirect
+// signs out a linked or needs_relink link. During Pair or Relink the outcome is
+// decided by the error that call returns.
 func (link *Link) transportStop(code string) {
-	if code == "cookie_refused" {
-		link.signOut("signed_out")
-		return
-	}
-	if code == "persist_failed" {
+	switch code {
+	case "cookie_refused":
+		link.mu.Lock()
+		state := link.state
+		link.mu.Unlock()
+		if state == stateLinked || state == stateNeedsRelink {
+			link.signOut(code)
+		}
+	case "persist_failed":
 		link.stopFatal(code, false)
 	}
 }
@@ -461,7 +488,7 @@ func (link *Link) stopFatal(code string, wipe bool) {
 	if wipe {
 		link.state, link.pairingFrom, link.auth = stateSignedOut, "", libgm.NewAuthData()
 	}
-	link.stopOnce.Do(func() { close(link.stop) })
+	link.stopRunLocked()
 	link.mu.Unlock()
 	link.emit("link", code, 0)
 }
@@ -504,16 +531,27 @@ func (link *Link) emit(kind, code string, value int64) {
 	}
 }
 
-func (link *Link) pairResultError(err error) error {
-	if isCookieRefusal(err) {
+// pairFailure is a fixed pair outcome. Its text is the reason code the host sees.
+type pairFailure string
+
+func (code pairFailure) Error() string { return string(code) }
+
+// pairResultError maps a failed pair step to its fixed code. A relink that the
+// phone refuses for its cookies signs out, because the stored cookies are dead.
+func (link *Link) pairResultError(err error, relink bool) error {
+	if relink && isCookieRefusal(err) {
 		link.signOut("cookie_refused")
-		return errors.New("cookie_refused")
 	}
-	return errors.New(pairCode(err))
+	return pairFailure(pairCode(err))
 }
 
 func pairCode(err error) string {
+	var failure pairFailure
 	switch {
+	case errors.As(err, &failure):
+		return string(failure)
+	case isCookieRefusal(err):
+		return "cookie_refused"
 	case errors.Is(err, context.Canceled):
 		return "pair_cancelled"
 	case errors.Is(err, libgm.ErrNoDevicesFound):
@@ -524,7 +562,7 @@ func pairCode(err error) string {
 		return "pair_wrong_emoji"
 	case errors.Is(err, libgm.ErrPairingCancelled):
 		return "pair_cancelled"
-	case errors.Is(err, libgm.ErrPairingTimeout), errors.Is(err, libgm.ErrPairingInitTimeout):
+	case errors.Is(err, libgm.ErrPairingTimeout), errors.Is(err, libgm.ErrPairingInitTimeout), errors.Is(err, context.DeadlineExceeded):
 		return "pair_timeout"
 	default:
 		return "pair_failed"

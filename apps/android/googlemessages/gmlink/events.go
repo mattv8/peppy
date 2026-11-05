@@ -1,7 +1,7 @@
 package gmlink
 
 var eventCodes = []eventCode{
-	{"link", "pair_ok"}, {"link", "pair_failed"}, {"link", "pair_no_phone"},
+	{"link", "pair_ok"}, {"link", "pair_failed"}, {"link", "pair_no_phone"}, {"link", "cookie_refused"},
 	{"link", "pair_multiple_phones"}, {"link", "pair_wrong_emoji"}, {"link", "pair_cancelled"},
 	{"link", "pair_timeout"}, {"link", "account_mismatch"}, {"link", "relink_needed"},
 	{"link", "relink_ok"}, {"link", "relink_failed"}, {"link", "signed_out"},

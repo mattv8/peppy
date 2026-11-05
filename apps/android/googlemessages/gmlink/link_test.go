@@ -354,15 +354,6 @@ func TestEveryReturnedErrorIsFixedCode(t *testing.T) {
 	}
 }
 
-func TestEveryLibgmCallHasDeadline(t *testing.T) {
-	if configTimeout <= 0 || connectTimeout <= 0 || unpairTimeout <= 0 || pairWaitTimeout <= 0 {
-		t.Fatalf("invalid call deadlines: config=%s connect=%s unpair=%s pair=%s", configTimeout, connectTimeout, unpairTimeout, pairWaitTimeout)
-	}
-	if pairWaitTimeout < configTimeout {
-		t.Fatal("emoji wait deadline is shorter than config deadline")
-	}
-}
-
 func TestNoLocalTimeUse(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {

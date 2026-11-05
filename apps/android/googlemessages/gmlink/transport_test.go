@@ -17,7 +17,6 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
-	zlog "github.com/rs/zerolog/log"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/util"
@@ -216,14 +215,11 @@ func captureUpstreamOutput(t *testing.T) (*syncBuffer, func()) {
 	os.Stdout, os.Stderr = writer, writer
 	stdLog := log.Writer()
 	log.SetOutput(captured)
-	defaultLogger := zerolog.DefaultContextLogger
-	globalLogger := zlog.Logger
-	sink := zerolog.New(captured).Level(zerolog.TraceLevel)
-	zerolog.DefaultContextLogger = &sink
-	zlog.Logger = sink
+	// The zerolog globals are not swapped here: libgm reads them from goroutines
+	// that can outlive a test, so a write would race with those reads. Clients
+	// use zerolog.Nop() and Open disables the global level, so stdout, stderr and
+	// the std log are the sinks that can actually receive upstream output.
 	return captured, func() {
-		zerolog.DefaultContextLogger = defaultLogger
-		zlog.Logger = globalLogger
 		log.SetOutput(stdLog)
 		os.Stdout, os.Stderr = stdout, stderr
 		_ = writer.Close()

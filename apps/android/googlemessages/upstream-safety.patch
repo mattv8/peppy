@@ -1,73 +1,5 @@
 # Contains excerpts of go.mau.fi/mautrix-gmessages (AGPL-3.0-or-later). See README.md.
---- pkg/libgm/pair_google.go
-+++ pkg/libgm/pair_google.go
-@@ -380,28 +380,22 @@
- 	primaryDevices, err := c.getGaiaPrimaryDevices(ctx)
- 	if err != nil {
- 		return "", nil, fmt.Errorf("failed to prepare gaia pairing: %w", err)
--	}
--	if len(primaryDevices) == 0 {
--		return "", nil, ErrNoDevicesFound
--	} else if len(primaryDevices) > 1 {
--		// Sort by last seen time, newest first
--		slices.SortFunc(primaryDevices, func(a, b *primaryDeviceID) int {
--			return b.LastSeen.Compare(a.LastSeen)
--		})
--		zerolog.Ctx(ctx).Warn().
--			Any("devices", primaryDevices).
--			Int("hacky_device_switcher", c.GaiaHackyDeviceSwitcher).
--			Msg("Found multiple primary-looking devices for gaia pairing")
- 	}
- 	if c.AuthData.DestPhoneID != 0 {
- 		primaryDevices = slices.DeleteFunc(primaryDevices, func(pd *primaryDeviceID) bool {
- 			return pd.UnknownTS != c.AuthData.DestPhoneID
- 		})
--		if len(primaryDevices) == 0 {
-+	}
-+	if len(primaryDevices) == 0 {
-+		if c.AuthData.DestPhoneID != 0 {
- 			return "", nil, ErrPhoneNotFound
- 		}
-+		return "", nil, ErrNoDevicesFound
- 	}
--	destRegDev := primaryDevices[c.GaiaHackyDeviceSwitcher%len(primaryDevices)]
-+	if len(primaryDevices) != 1 {
-+		return "", nil, ErrHadMultipleDevices
-+	}
-+	destRegDev := primaryDevices[0]
- 	zerolog.Ctx(ctx).Debug().
- 		Str("dest_reg_uuid", destRegDev.RegID).
- 		Uint64("dest_reg_unknown_int", destRegDev.UnknownInt).
---- pkg/libgm/methods.go
-+++ pkg/libgm/methods.go
-@@ -5,6 +5,7 @@
- 
- 	"go.mau.fi/util/ptr"
- 
-+	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
- 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
- )
- 
-@@ -143,6 +144,7 @@
- }
- 
- func (c *Client) SetActiveSession(ctx context.Context) error {
-+	c.triggerEvent(&events.ActiveSessionSet{})
- 	c.getSessionHandler().ResetSessionID()
- 	return c.getSessionHandler().sendMessageNoResponse(ctx, SendMessageParams{
- 		Action:    gmproto.ActionType_GET_UPDATES,
---- pkg/libgm/events/ready.go
-+++ pkg/libgm/events/ready.go
-@@ -15,6 +15,9 @@
- 
- type AuthTokenRefreshed struct{}
- 
-+// ActiveSessionSet marks an active-session claim without carrying content.
-+type ActiveSessionSet struct{}
-+
- type GaiaLoggedOut struct{}
- 
- type NoDataReceived struct{}
+diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
 --- pkg/libgm/client.go
 +++ pkg/libgm/client.go
 @@ -151,9 +151,9 @@
@@ -82,6 +14,41 @@
  
  	pingInterval             time.Duration
  	alertTimeoutCount        int
+@@ -443,9 +443,6 @@
+ 	c.AuthData.AddCookiesToRequest(req)
+ 
+ 	resp, err := c.http.Do(req)
+-	if resp != nil {
+-		c.AuthData.UpdateCookiesFromResponse(resp)
+-	}
+ 	config, err := typedHTTPResponse[*gmproto.Config](resp, err)
+ 	if err != nil {
+ 		return nil, err
+diff -ruN a/pkg/libgm/events/ready.go b/pkg/libgm/events/ready.go
+--- pkg/libgm/events/ready.go
++++ pkg/libgm/events/ready.go
+@@ -15,6 +15,9 @@
+ 
+ type AuthTokenRefreshed struct{}
+ 
++// ActiveSessionSet marks an active-session claim without carrying content.
++type ActiveSessionSet struct{}
++
+ type GaiaLoggedOut struct{}
+ 
+ type NoDataReceived struct{}
+diff -ruN a/pkg/libgm/http.go b/pkg/libgm/http.go
+--- pkg/libgm/http.go
++++ pkg/libgm/http.go
+@@ -63,7 +63,6 @@
+ 		if reqErr != nil {
+ 			return res, reqErr
+ 		}
+-		c.AuthData.UpdateCookiesFromResponse(res)
+ 		if longPoll || res.StatusCode < 500 || attempt >= ServerErrorMaxAttempts {
+ 			return res, nil
+ 		}
+diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
 --- pkg/libgm/longpoll.go
 +++ pkg/libgm/longpoll.go
 @@ -454,12 +454,11 @@
@@ -150,3 +117,61 @@
  	if conn != nil {
  		_ = (*conn).Close()
  	}
+diff -ruN a/pkg/libgm/methods.go b/pkg/libgm/methods.go
+--- pkg/libgm/methods.go
++++ pkg/libgm/methods.go
+@@ -5,6 +5,7 @@
+ 
+ 	"go.mau.fi/util/ptr"
+ 
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
+ 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+ )
+ 
+@@ -143,6 +144,7 @@
+ }
+ 
+ func (c *Client) SetActiveSession(ctx context.Context) error {
++	c.triggerEvent(&events.ActiveSessionSet{})
+ 	c.getSessionHandler().ResetSessionID()
+ 	return c.getSessionHandler().sendMessageNoResponse(ctx, SendMessageParams{
+ 		Action:    gmproto.ActionType_GET_UPDATES,
+diff -ruN a/pkg/libgm/pair_google.go b/pkg/libgm/pair_google.go
+--- pkg/libgm/pair_google.go
++++ pkg/libgm/pair_google.go
+@@ -381,27 +381,21 @@
+ 	if err != nil {
+ 		return "", nil, fmt.Errorf("failed to prepare gaia pairing: %w", err)
+ 	}
+-	if len(primaryDevices) == 0 {
+-		return "", nil, ErrNoDevicesFound
+-	} else if len(primaryDevices) > 1 {
+-		// Sort by last seen time, newest first
+-		slices.SortFunc(primaryDevices, func(a, b *primaryDeviceID) int {
+-			return b.LastSeen.Compare(a.LastSeen)
+-		})
+-		zerolog.Ctx(ctx).Warn().
+-			Any("devices", primaryDevices).
+-			Int("hacky_device_switcher", c.GaiaHackyDeviceSwitcher).
+-			Msg("Found multiple primary-looking devices for gaia pairing")
+-	}
+ 	if c.AuthData.DestPhoneID != 0 {
+ 		primaryDevices = slices.DeleteFunc(primaryDevices, func(pd *primaryDeviceID) bool {
+ 			return pd.UnknownTS != c.AuthData.DestPhoneID
+ 		})
+-		if len(primaryDevices) == 0 {
++	}
++	if len(primaryDevices) == 0 {
++		if c.AuthData.DestPhoneID != 0 {
+ 			return "", nil, ErrPhoneNotFound
+ 		}
++		return "", nil, ErrNoDevicesFound
+ 	}
+-	destRegDev := primaryDevices[c.GaiaHackyDeviceSwitcher%len(primaryDevices)]
++	if len(primaryDevices) != 1 {
++		return "", nil, ErrHadMultipleDevices
++	}
++	destRegDev := primaryDevices[0]
+ 	zerolog.Ctx(ctx).Debug().
+ 		Str("dest_reg_uuid", destRegDev.RegID).
+ 		Uint64("dest_reg_unknown_int", destRegDev.UnknownInt).
