@@ -245,6 +245,25 @@ fn skip_panel_persist(recorded: Option<PhysicalRect>, actual: PhysicalRect) -> b
     recorded.is_some_and(|written| same_geometry(written, actual))
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn should_restore_panel_topmost(fullscreen: Option<bool>, topmost: Option<bool>) -> bool {
+    fullscreen == Some(false) && topmost == Some(false)
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_windowed_panel(window: &tauri::Window) -> bool {
+    let (Ok(fullscreen), Ok(topmost)) = (window.is_fullscreen(), window.is_always_on_top()) else {
+        return false;
+    };
+    if fullscreen {
+        return false;
+    }
+    if should_restore_panel_topmost(Some(fullscreen), Some(topmost)) {
+        return window.set_always_on_top(true).is_ok();
+    }
+    true
+}
+
 fn panel_layout_from_physical(frame: &HeadFrame, rect: PhysicalRect) -> crate::heads::PanelLayout {
     let scale = if frame.scale_factor.is_finite() {
         frame.scale_factor.max(1.0)
@@ -285,6 +304,10 @@ pub(crate) fn panel_window_event(window: &tauri::Window, event: &WindowEvent) {
     if !matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
         || !is_panel(window.app_handle(), window.label())
     {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if !prepare_windowed_panel(window) {
         return;
     }
     let Ok(position) = window.outer_position() else {
@@ -338,6 +361,10 @@ pub(crate) fn panel_window_event(window: &tauri::Window, event: &WindowEvent) {
             return;
         };
         if !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false) {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if window.is_fullscreen().ok() != Some(false) {
             return;
         }
         let Ok(position) = window.outer_position() else {
@@ -1836,8 +1863,7 @@ pub(crate) async fn dismiss_generation(
                 crate::lifecycle::request_window(app, &label, crate::lifecycle::Action::Close)
             {
                 if let Some(window) = app.get_webview_window(&label) {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                    let _ = crate::window_chrome::recover_window(&window);
                 }
                 return Err(error);
             }
@@ -2593,6 +2619,15 @@ mod tests {
         };
         assert!(skip_panel_persist(Some(rect), rect));
         assert!(!skip_panel_persist(None, rect));
+    }
+
+    #[test]
+    fn windowed_panel_without_topmost_restores_it() {
+        assert!(should_restore_panel_topmost(Some(false), Some(false)));
+        assert!(!should_restore_panel_topmost(Some(true), Some(false)));
+        assert!(!should_restore_panel_topmost(Some(false), Some(true)));
+        assert!(!should_restore_panel_topmost(None, Some(false)));
+        assert!(!should_restore_panel_topmost(Some(false), None));
     }
 
     #[test]
