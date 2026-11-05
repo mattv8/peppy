@@ -68,14 +68,15 @@ select:focus-visible {
 [data-tone-picker-panel] [role="radiogroup"] > span { display: block; margin-bottom: 4px; color: var(--peppy-text-secondary); font-size: 11px; font-weight: 700; }
 [data-tone-option] { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid color-mix(in srgb, var(--peppy-text-primary) 18%, transparent); border-radius: 50%; background: var(--tone-swatch); color: var(--peppy-avatar-glyph); }
 [data-tone-option="auto"] { display: flex; justify-content: flex-start; gap: 6px; width: 100%; margin-bottom: 8px; padding: 0 6px; border-radius: var(--peppy-control-radius); background: var(--tone-swatch); }
+[data-tone-option="auto"] svg { margin-left: auto; }
 [data-tone-option][aria-checked="true"] { box-shadow: 0 0 0 2px var(--peppy-text-primary), 0 0 0 4px var(--peppy-glass-surface); }
 [data-tone-option]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 3px; }
-[data-tone-option]:hover { box-shadow: 0 0 0 2px var(--peppy-surface-hover); }
+[data-tone-option]:not([aria-checked="true"]):hover { box-shadow: 0 0 0 2px var(--peppy-surface-hover); }
 [data-tone-option][aria-disabled="true"] { opacity: .6; cursor: progress; }
 [data-tone-picker-panel] p:empty { margin: 0; }
 [data-tone-picker-grid] { display: grid; grid-template-columns: repeat(6, 28px); justify-content: space-between; gap: 8px; }
 @media (max-width: 600px) { [data-tone-picker-grid] { grid-template-columns: repeat(6, 32px); } [data-tone-picker-grid] [data-tone-option] { width: 32px; height: 32px; } [data-tone-option="auto"] { height: 32px; } }
-@media (forced-colors: active) { [data-tone-picker-panel] { border-color: CanvasText; background: Canvas; box-shadow: none; } [data-tone-option] { forced-color-adjust: none; } [data-tone-option][aria-checked="true"] { outline-color: Highlight; } }
+@media (forced-colors: active) { [data-tone-picker-panel] { border-color: CanvasText; background: Canvas; box-shadow: none; } [data-tone-option], [data-tone-picker-swatch], [data-tone-picker-dot] { forced-color-adjust: none; } [data-tone-option][aria-checked="true"] { outline-color: Highlight; } }
 .titlebar {
   container: titlebar / inline-size;
   position: relative;
