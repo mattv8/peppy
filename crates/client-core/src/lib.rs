@@ -55,6 +55,7 @@ mod mms_backfill;
 mod mms_identity;
 mod notifications;
 mod phone_read;
+mod rcs_mapping;
 mod sms_acquisition;
 mod sms_reconciliation;
 mod snapshot_projection;
@@ -110,6 +111,7 @@ pub use phone_read::{
     PHONE_READ_EFFECT_TTL_MS, PhoneReadCandidate, PhoneReadEffect, PhoneReadTransport,
     ProviderRowRef,
 };
+pub use rcs_mapping::{RcsMapping, RcsMappingClass, RcsMappingProof};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -123,7 +125,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 45;
+const SCHEMA_VERSION: i64 = 46;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1107,6 +1109,24 @@ pub enum ContactBookSelection {
 }
 
 impl Client {
+    /// Stores a local-only exact mapping proof. It never emits an envelope.
+    pub fn store_rcs_mapping(&self, mapping: &RcsMapping) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        rcs_mapping::put(&transaction, mapping)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Returns only a current local mapping; invalidated mappings never authorize a route.
+    pub fn rcs_mapping(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<RcsMapping>, Error> {
+        rcs_mapping::get(&self.lock()?.conn, conversation_id)
+    }
     /// Opens (or shares) the per-canonical-path owner. A second open must present the same key
     /// and identity. A wrong key is reported, never treated as a new database.
     pub fn open(config: ClientConfig, db_key: DatabaseKey) -> Result<Self, Error> {
@@ -5609,6 +5629,39 @@ fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
         "key_epoch INTEGER NOT NULL DEFAULT 0",
     )
 }
+const MIGRATION_46: &str = "
+CREATE TABLE rcs_conversation_mappings(
+  peppy_conversation_id TEXT PRIMARY KEY,
+  google_conversation_id TEXT NOT NULL,
+  class TEXT NOT NULL CHECK(class IN ('one_to_one','self_chat')),
+  proof_version INTEGER NOT NULL,
+  proof_hash BLOB NOT NULL CHECK(length(proof_hash)=32),
+  mapping_revision INTEGER NOT NULL,
+  verified_at_ms INTEGER NOT NULL,
+  invalidated_at_ms INTEGER,
+  invalidation_code TEXT
+);
+CREATE UNIQUE INDEX rcs_mappings_google_active ON rcs_conversation_mappings(google_conversation_id) WHERE invalidated_at_ms IS NULL;
+CREATE TABLE rcs_mapping_proofs(
+  peppy_conversation_id TEXT NOT NULL REFERENCES rcs_conversation_mappings(peppy_conversation_id),
+  mapping_revision INTEGER NOT NULL,
+  canonical_participant TEXT NOT NULL,
+  identity_region TEXT NOT NULL,
+  own_identity TEXT NOT NULL,
+  PRIMARY KEY(peppy_conversation_id,mapping_revision)
+);
+CREATE TABLE rcs_send_ledger(
+  command_id TEXT PRIMARY KEY,
+  tmp_id TEXT NOT NULL UNIQUE,
+  mapping_revision INTEGER NOT NULL,
+  proof_digest BLOB NOT NULL CHECK(length(proof_digest)=32),
+  google_conversation_id TEXT NOT NULL,
+  attempted_at_ms INTEGER NOT NULL,
+  transport_ack_at_ms INTEGER,
+  transport_ack_code TEXT,
+  retry_of_command_id TEXT
+);
+";
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "outbox", "origin_tag TEXT")
@@ -5781,6 +5834,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_43)?;
             tx.execute_batch(MIGRATION_44)?;
             apply_migration_45(&tx)?;
+            tx.execute_batch(MIGRATION_46)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5789,7 +5843,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=44)) => {
+        Some(version @ (4..=45)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5909,6 +5963,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 44 {
                 apply_migration_45(&tx)?;
+            }
+            if version <= 45 {
+                tx.execute_batch(MIGRATION_46)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;

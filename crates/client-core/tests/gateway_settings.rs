@@ -105,6 +105,35 @@ fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
     .unwrap()
 }
 
+fn index_exists(conn: &rusqlite::Connection, index: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?)",
+        [index],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn assert_rcs_mapping_schema(conn: &rusqlite::Connection) {
+    for table in [
+        "rcs_conversation_mappings",
+        "rcs_mapping_proofs",
+        "rcs_send_ledger",
+    ] {
+        assert!(table_exists(conn, table), "missing {table}");
+    }
+    assert!(index_exists(conn, "rcs_mappings_google_active"));
+}
+
+fn remove_rcs_mapping_schema(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "DROP TABLE rcs_send_ledger;
+         DROP TABLE rcs_mapping_proofs;
+         DROP TABLE rcs_conversation_mappings;",
+    )
+    .unwrap();
+}
+
 fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
@@ -135,13 +164,7 @@ fn assert_notification_reply_spike_removed(conn: &rusqlite::Connection) {
         "gateway_settings",
         "reply_via_google_messages_enabled"
     ));
-    assert!(!conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='notification_reply_submissions_match')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap());
+    assert!(!index_exists(conn, "notification_reply_submissions_match"));
 }
 
 #[test]
@@ -163,6 +186,7 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
     drop(client);
 
     let conn = encrypted_connection(&config);
+    remove_rcs_mapping_schema(&conn);
     conn.execute_batch(
         "DROP TABLE conversation_folders;
          DROP INDEX sender_unblock_requests_conversation;
@@ -191,12 +215,13 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        45
+        46
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert!(table_exists(&conn, "sender_blocklists"));
     assert!(column_exists(&conn, "sender_unblock_requests", "key_epoch"));
     assert_notification_reply_spike_removed(&conn);
+    assert_rcs_mapping_schema(&conn);
 }
 
 #[test]
@@ -219,10 +244,11 @@ fn notification_reply_spike_repairs_already_upgraded_database() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        45
+        46
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert_notification_reply_spike_removed(&conn);
+    assert_rcs_mapping_schema(&conn);
 }
 
 #[test]
@@ -252,6 +278,94 @@ fn notification_reply_repair_leaves_normal_database_untouched() {
         .unwrap(),
         "archived"
     );
+    assert_rcs_mapping_schema(&conn);
+}
+
+#[test]
+fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-v45-upgrade", &vault);
+    let client = open(&config);
+    let settings = GatewaySettings {
+        mirroring_enabled: true,
+        mirroring_wifi_only: true,
+        skip_silent: false,
+        sms_sync_enabled: false,
+        mms_sync_enabled: true,
+        media_wifi_only: false,
+        phone_read_enabled: true,
+    };
+    client.set_gateway_settings(settings.clone()).unwrap();
+    drop(client);
+
+    let conn = encrypted_connection(&config);
+    remove_rcs_mapping_schema(&conn);
+    conn.execute("UPDATE schema_meta SET version=45", [])
+        .unwrap();
+    drop(conn);
+
+    let upgraded = open(&config);
+    assert_eq!(upgraded.gateway_settings().unwrap(), settings);
+    drop(upgraded);
+
+    let conn = encrypted_connection(&config);
+    assert_eq!(
+        conn.query_row("SELECT version FROM schema_meta", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        46
+    );
+    assert_eq!(
+        conn.query_row("SELECT v FROM metadata WHERE k='device_id'", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+        config.device_id.to_string()
+    );
+    assert_rcs_mapping_schema(&conn);
+}
+
+#[test]
+fn version_47_database_is_rejected_without_resetting_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-v47-rejected", &vault);
+    let client = open(&config);
+    let settings = GatewaySettings {
+        mirroring_enabled: true,
+        ..GatewaySettings::default()
+    };
+    client.set_gateway_settings(settings.clone()).unwrap();
+    drop(client);
+
+    let conn = encrypted_connection(&config);
+    conn.execute("UPDATE schema_meta SET version=47", [])
+        .unwrap();
+    drop(conn);
+
+    assert!(matches!(
+        Client::open(config.clone(), DatabaseKey::new(&DB_KEY).unwrap()),
+        Err(Error::UnsupportedSchema)
+    ));
+
+    let conn = encrypted_connection(&config);
+    assert_eq!(
+        conn.query_row("SELECT version FROM schema_meta", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        47
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT mirroring_enabled FROM gateway_settings WHERE id=1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap(),
+        settings.mirroring_enabled
+    );
+    assert_rcs_mapping_schema(&conn);
 }
 
 #[test]
@@ -477,6 +591,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
         ],
     )
     .unwrap();
+    remove_rcs_mapping_schema(&conn);
     roll_back_migrations_after_version_25(&conn);
     conn.execute("UPDATE schema_meta SET version=25", [])
         .unwrap();
@@ -500,7 +615,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 45);
+    assert_eq!(version, 46);
     assert_eq!(status, (42, "sent".into(), None));
 }
 
@@ -519,6 +634,7 @@ fn version_17_upgrade_seeds_legacy_policy_only_once() {
         "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
     )
     .unwrap();
+    remove_rcs_mapping_schema(&conn);
     roll_back_migrations_after_version_25(&conn);
     conn.execute_batch(
         "DROP TABLE gateway_settings; DROP TABLE outbox_attachments; \
