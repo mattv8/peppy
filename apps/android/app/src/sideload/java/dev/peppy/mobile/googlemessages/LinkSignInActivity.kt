@@ -47,27 +47,27 @@ class LinkSignInActivity : AppCompatActivity() {
         })
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         WebView.setWebContentsDebuggingEnabled(false)
-        Thread {
-            synchronized(lifecycleLock) { if (destroyed) return@Thread }
+        launchStartup {
+            synchronized(lifecycleLock) { if (destroyed) return@launchStartup }
             val lease = LinkSignInRuntime.acquireLease() ?: run {
                 runOnUiThread { finishWith(OUTCOME_BLOCKED) }
-                return@Thread
+                return@launchStartup
             }
             synchronized(lifecycleLock) {
                 if (destroyed) {
                     LinkSignInRuntime.releaseLease(lease)
-                    return@Thread
+                    return@launchStartup
                 }
                 signInLease = lease
             }
-            if (!GoogleMessagesLink.awaitSignInReady(applicationContext)) {
+            if (!awaitSignInReady()) {
                 runOnUiThread { wipe { finishWith(OUTCOME_BLOCKED) } }
-                return@Thread
+                return@launchStartup
             }
             synchronized(lifecycleLock) {
                 if (destroyed) {
                     LinkSignInRuntime.releaseLease(lease)
-                    return@Thread
+                    return@launchStartup
                 }
                 startupReady = true
             }
@@ -78,14 +78,25 @@ class LinkSignInActivity : AppCompatActivity() {
                 val status = handle?.let { runCatching { LinkStatus.parse(it.status()) }.getOrNull() }
                 if (status?.state !in PAIRABLE_STATES) wipe { finishWith(OUTCOME_ERROR) } else initializeWebView()
             }
-        }.start()
+        }
     }
+
+    private fun launchStartup(task: () -> Unit) {
+        LinkSignInActivityTestHooks.startupExecutor?.invoke(task) ?: Thread(task).start()
+    }
+
+    private fun awaitSignInReady(): Boolean =
+        LinkSignInActivityTestHooks.awaitSignInReady?.invoke(applicationContext)
+            ?: GoogleMessagesLink.awaitSignInReady(applicationContext)
+
+    private fun cookieManager(): CookieManager =
+        LinkSignInActivityTestHooks.cookieManager?.invoke() ?: CookieManager.getInstance()
 
     private fun initializeWebView() {
         if (!ownsReadyLease() || LinkSignInRuntime.isSignInBlocked()) return
         val owner = signInLease ?: return
         if (!LinkSignInRuntime.markWebAccess(owner)) return
-        val cookies = CookieManager.getInstance()
+        val cookies = cookieManager()
         if (cookies.hasCookies()) {
             wipe { finishWith(OUTCOME_ERROR) }
             return
@@ -241,9 +252,10 @@ class LinkSignInActivity : AppCompatActivity() {
             return
         }
         if (!teardownStarted.compareAndSet(false, true)) return
-        CookieManager.getInstance().removeAllCookies {
+        val cookies = cookieManager()
+        cookies.removeAllCookies {
             if (!LinkSignInRuntime.mayRunCleanup(owner)) return@removeAllCookies
-            CookieManager.getInstance().flush()
+            cookies.flush()
             WebStorage.getInstance().deleteAllData()
             val cleared = WebViewDataFiles.deleteStaleData(File(applicationInfo.dataDir), cacheDir)
             if (::webView.isInitialized) webView.destroy()
@@ -311,5 +323,17 @@ class LinkSignInActivity : AppCompatActivity() {
         const val CONFIG_URL = "https://messages.google.com/web/config"
         const val ACCOUNT_CHOOSER = "https://accounts.google.com/AccountChooser?continue=$CONFIG_URL"
         val PAIRABLE_STATES = setOf("unlinked", "signed_out")
+    }
+}
+
+internal object LinkSignInActivityTestHooks {
+    @Volatile var startupExecutor: ((() -> Unit) -> Unit)? = null
+    @Volatile var awaitSignInReady: ((android.content.Context) -> Boolean)? = null
+    @Volatile var cookieManager: (() -> CookieManager)? = null
+
+    fun reset() {
+        startupExecutor = null
+        awaitSignInReady = null
+        cookieManager = null
     }
 }
