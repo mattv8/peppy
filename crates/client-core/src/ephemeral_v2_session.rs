@@ -170,7 +170,9 @@ impl EphemeralV2SessionState {
         let Some(validated) = self.validated.get(&input.peer).copied() else {
             return self.challenge_for(input.peer, input.session, input.received_mono_ms.0);
         };
-        if validated.session != input.session || input.received_mono_ms.0 >= validated.lease_deadline_mono_ms {
+        if validated.session != input.session
+            || input.received_mono_ms.0 >= validated.lease_deadline_mono_ms
+        {
             return self.challenge_for(input.peer, input.session, input.received_mono_ms.0);
         }
 
@@ -194,7 +196,9 @@ impl EphemeralV2SessionState {
                 .lease_deadline_mono_ms
                 .min(input.wire_deadline_mono_ms.0),
         );
-        let action = if input.state == SessionTypingState::Stopped || record.admit_start(input.received_mono_ms.0) {
+        let action = if input.state == SessionTypingState::Stopped
+            || record.admit_start(input.received_mono_ms.0)
+        {
             Some(SessionAction {
                 routing: input.routing,
                 peer: input.peer,
@@ -207,11 +211,13 @@ impl EphemeralV2SessionState {
         } else {
             None
         };
-        let challenge = if validated.lease_deadline_mono_ms - input.received_mono_ms.0 <= RENEWAL_WINDOW_MS {
-            self.challenge_for(input.peer, input.session, input.received_mono_ms.0)?.challenge
-        } else {
-            None
-        };
+        let challenge =
+            if validated.lease_deadline_mono_ms - input.received_mono_ms.0 <= RENEWAL_WINDOW_MS {
+                self.challenge_for(input.peer, input.session, input.received_mono_ms.0)?
+                    .challenge
+            } else {
+                None
+            };
         Ok(SessionTransition {
             session_update: None,
             action,
@@ -229,7 +235,9 @@ impl EphemeralV2SessionState {
             return Err(SessionError::Capacity);
         }
         let episode = self.episodes.entry(intent.peer).or_default();
-        if episode.cooldown_until_mono_ms.is_some_and(|until| intent.issued_mono_ms.0 < until)
+        if episode
+            .cooldown_until_mono_ms
+            .is_some_and(|until| intent.issued_mono_ms.0 < until)
             || episode.attempts >= MAX_EPISODE_CHALLENGES
         {
             return Err(SessionError::Capacity);
@@ -259,7 +267,11 @@ impl EphemeralV2SessionState {
         };
         if input.session != pending.peer_session
             || input.nonce != pending.nonce
-            || input.received_mono_ms.0.saturating_sub(pending.issued_mono_ms) >= CHALLENGE_TIMEOUT_MS
+            || input
+                .received_mono_ms
+                .0
+                .saturating_sub(pending.issued_mono_ms)
+                >= CHALLENGE_TIMEOUT_MS
         {
             return Ok(SessionTransition::default());
         }
@@ -279,7 +291,10 @@ impl EphemeralV2SessionState {
             session.lease_deadline_mono_ms = lease_deadline_mono_ms;
             SessionTransition::default()
         } else {
-            let token = self.next_session_token.checked_add(1).ok_or(SessionError::CounterExhausted)?;
+            let token = self
+                .next_session_token
+                .checked_add(1)
+                .ok_or(SessionError::CounterExhausted)?;
             let revision = self
                 .next_validation_revision
                 .checked_add(1)
@@ -330,7 +345,10 @@ impl EphemeralV2SessionState {
             self.pending.remove(&peer);
         }
         let episode = self.episodes.entry(peer).or_default();
-        if episode.cooldown_until_mono_ms.is_some_and(|until| now_ms < until) {
+        if episode
+            .cooldown_until_mono_ms
+            .is_some_and(|until| now_ms < until)
+        {
             return Ok(SessionTransition::default());
         }
         if episode.cooldown_until_mono_ms.is_some() {
@@ -344,7 +362,9 @@ impl EphemeralV2SessionState {
             );
             return Ok(SessionTransition::default());
         }
-        if episode.last_issue_mono_ms.is_some_and(|last| now_ms.saturating_sub(last) < CHALLENGE_SPACING_MS)
+        if episode
+            .last_issue_mono_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) < CHALLENGE_SPACING_MS)
             || self.pending.len() >= MAX_PENDING
         {
             return Ok(SessionTransition::default());
@@ -361,7 +381,12 @@ impl EphemeralV2SessionState {
 
     fn has_record_capacity(&self, peer: DeviceId) -> bool {
         self.records.len() < MAX_GLOBAL_RECORDS
-            && self.records.keys().filter(|(record_peer, _)| *record_peer == peer).count() < MAX_PEER_RECORDS
+            && self
+                .records
+                .keys()
+                .filter(|(record_peer, _)| *record_peer == peer)
+                .count()
+                < MAX_PEER_RECORDS
     }
 }
 
@@ -369,7 +394,9 @@ impl ConversationRecord {
     fn admit_start(&mut self, now_ms: u64) -> bool {
         self.emitted_starts
             .retain(|start| now_ms.saturating_sub(*start) < QUOTA_WINDOW_MS);
-        if self.last_emitted_start_mono_ms.is_some_and(|last| now_ms.saturating_sub(last) < QUOTA_INTERVAL_MS)
+        if self
+            .last_emitted_start_mono_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) < QUOTA_INTERVAL_MS)
             || self.emitted_starts.len() >= 20
         {
             return false;
@@ -385,86 +412,429 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    fn device(value: u128) -> DeviceId { DeviceId(Uuid::from_u128(value)) }
-    fn conversation(value: u128) -> ConversationId { ConversationId(Uuid::from_u128(value)) }
-    fn session(value: u8) -> SessionId { SessionId([value; 16]) }
-    fn nonce(value: u8) -> ChallengeNonce { ChallengeNonce([value; 16]) }
-    fn typing(peer: DeviceId, session: SessionId, conversation: ConversationId, sequence: u64, state: SessionTypingState, now: u64) -> AuthenticatedTyping {
-        AuthenticatedTyping { peer, session, conversation, sequence: AuthenticatedSequence(sequence), state, routing: RoutedTyping::Display, received_mono_ms: MonoTime(now), wire_deadline_mono_ms: MonoTime(now + LEASE_MS) }
+    fn device(value: u128) -> DeviceId {
+        DeviceId(Uuid::from_u128(value))
     }
-    fn validate(state: &mut EphemeralV2SessionState, peer: DeviceId, peer_session: SessionId, at: u64) -> SessionTransition {
-        let intent = state.observe_typing(typing(peer, peer_session, conversation(1), 1, SessionTypingState::Started, at)).unwrap().challenge.unwrap();
+    fn conversation(value: u128) -> ConversationId {
+        ConversationId(Uuid::from_u128(value))
+    }
+    fn session(value: u8) -> SessionId {
+        SessionId([value; 16])
+    }
+    fn nonce(value: u8) -> ChallengeNonce {
+        ChallengeNonce([value; 16])
+    }
+    fn typing(
+        peer: DeviceId,
+        session: SessionId,
+        conversation: ConversationId,
+        sequence: u64,
+        state: SessionTypingState,
+        now: u64,
+    ) -> AuthenticatedTyping {
+        AuthenticatedTyping {
+            peer,
+            session,
+            conversation,
+            sequence: AuthenticatedSequence(sequence),
+            state,
+            routing: RoutedTyping::Display,
+            received_mono_ms: MonoTime(now),
+            wire_deadline_mono_ms: MonoTime(now + LEASE_MS),
+        }
+    }
+    fn validate(
+        state: &mut EphemeralV2SessionState,
+        peer: DeviceId,
+        peer_session: SessionId,
+        at: u64,
+    ) -> SessionTransition {
+        let intent = state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                1,
+                SessionTypingState::Started,
+                at,
+            ))
+            .unwrap()
+            .challenge
+            .unwrap();
         state.record_challenge(intent, nonce(1)).unwrap();
-        state.accept_ack(AuthenticatedAck { peer, session: peer_session, challenger_session: session(9), nonce: nonce(1), sequence_floor: AuthenticatedSequence(100), received_mono_ms: MonoTime(at + 1) }).unwrap()
+        state
+            .accept_ack(AuthenticatedAck {
+                peer,
+                session: peer_session,
+                challenger_session: session(9),
+                nonce: nonce(1),
+                sequence_floor: AuthenticatedSequence(100),
+                received_mono_ms: MonoTime(at + 1),
+            })
+            .unwrap()
     }
 
     #[test]
     fn delayed_ack_keeps_high_water_and_rejects_replay() {
-        let peer = device(1); let peer_session = session(2); let mut state = EphemeralV2SessionState::new(session(9));
-        let initial = validate(&mut state, peer, peer_session, 0).session_update.unwrap();
-        assert_eq!((initial.replaced_session_token, initial.current_session_token, initial.validation_revision), (None, 1, 1));
-        let renewal = state.observe_typing(typing(peer, peer_session, conversation(1), 102, SessionTypingState::Started, 10_000)).unwrap().challenge.unwrap();
+        let peer = device(1);
+        let peer_session = session(2);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        let initial = validate(&mut state, peer, peer_session, 0)
+            .session_update
+            .unwrap();
+        assert_eq!(
+            (
+                initial.replaced_session_token,
+                initial.current_session_token,
+                initial.validation_revision
+            ),
+            (None, 1, 1)
+        );
+        let renewal = state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                102,
+                SessionTypingState::Started,
+                10_000,
+            ))
+            .unwrap()
+            .challenge
+            .unwrap();
         state.record_challenge(renewal, nonce(2)).unwrap();
-        assert!(state.observe_typing(typing(peer, peer_session, conversation(1), 103, SessionTypingState::Stopped, 10_001)).unwrap().action.is_some());
-        state.accept_ack(AuthenticatedAck { peer, session: peer_session, challenger_session: session(9), nonce: nonce(2), sequence_floor: AuthenticatedSequence(100), received_mono_ms: MonoTime(10_002) }).unwrap();
-        assert_eq!(state.observe_typing(typing(peer, peer_session, conversation(1), 102, SessionTypingState::Started, 10_003)).unwrap(), SessionTransition::default());
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                103,
+                SessionTypingState::Stopped,
+                10_001
+            ))
+            .unwrap()
+            .action
+            .is_some());
+        state
+            .accept_ack(AuthenticatedAck {
+                peer,
+                session: peer_session,
+                challenger_session: session(9),
+                nonce: nonce(2),
+                sequence_floor: AuthenticatedSequence(100),
+                received_mono_ms: MonoTime(10_002),
+            })
+            .unwrap();
+        assert_eq!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(1),
+                    102,
+                    SessionTypingState::Started,
+                    10_003
+                ))
+                .unwrap(),
+            SessionTransition::default()
+        );
     }
 
     #[test]
     fn pending_renewal_blocks_expired_lease_without_new_nonce() {
-        let peer = device(1); let peer_session = session(2); let mut state = EphemeralV2SessionState::new(session(9));
+        let peer = device(1);
+        let peer_session = session(2);
+        let mut state = EphemeralV2SessionState::new(session(9));
         validate(&mut state, peer, peer_session, 0);
-        let renewal = state.observe_typing(typing(peer, peer_session, conversation(1), 101, SessionTypingState::Started, 10_000)).unwrap().challenge.unwrap();
+        let renewal = state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                101,
+                SessionTypingState::Started,
+                10_000,
+            ))
+            .unwrap()
+            .challenge
+            .unwrap();
         state.record_challenge(renewal, nonce(2)).unwrap();
-        assert!(state.observe_typing(typing(peer, peer_session, conversation(1), 102, SessionTypingState::Started, LEASE_MS)).unwrap().challenge.is_none());
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                102,
+                SessionTypingState::Started,
+                LEASE_MS
+            ))
+            .unwrap()
+            .challenge
+            .is_none());
     }
 
     #[test]
     fn flood_cannot_replenish_attempts_or_extend_cooldown() {
-        let peer = device(1); let mut state = EphemeralV2SessionState::new(session(9));
-        for at in [0, 10_000, 20_000] { let intent = state.observe_typing(typing(peer, session(2), conversation(1), 1, SessionTypingState::Started, at)).unwrap().challenge.unwrap(); state.record_challenge(intent, nonce((at / 10_000 + 1) as u8)).unwrap(); }
-        assert!(state.observe_typing(typing(peer, session(2), conversation(1), 1, SessionTypingState::Started, 30_000)).unwrap().challenge.is_none());
-        assert!(state.observe_typing(typing(peer, session(2), conversation(1), 1, SessionTypingState::Started, 89_999)).unwrap().challenge.is_none());
-        assert!(state.observe_typing(typing(peer, session(2), conversation(1), 1, SessionTypingState::Started, 90_000)).unwrap().challenge.is_some());
+        let peer = device(1);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        for at in [0, 10_000, 20_000] {
+            let intent = state
+                .observe_typing(typing(
+                    peer,
+                    session(2),
+                    conversation(1),
+                    1,
+                    SessionTypingState::Started,
+                    at,
+                ))
+                .unwrap()
+                .challenge
+                .unwrap();
+            state
+                .record_challenge(intent, nonce((at / 10_000 + 1) as u8))
+                .unwrap();
+        }
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                session(2),
+                conversation(1),
+                1,
+                SessionTypingState::Started,
+                30_000
+            ))
+            .unwrap()
+            .challenge
+            .is_none());
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                session(2),
+                conversation(1),
+                1,
+                SessionTypingState::Started,
+                89_999
+            ))
+            .unwrap()
+            .challenge
+            .is_none());
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                session(2),
+                conversation(1),
+                1,
+                SessionTypingState::Started,
+                90_000
+            ))
+            .unwrap()
+            .challenge
+            .is_some());
     }
 
     #[test]
     fn installs_and_replaces_with_checked_peer_update() {
-        let peer = device(1); let mut state = EphemeralV2SessionState::new(session(9));
+        let peer = device(1);
+        let mut state = EphemeralV2SessionState::new(session(9));
         validate(&mut state, peer, session(2), 0);
-        let intent = state.observe_typing(typing(peer, session(3), conversation(1), 1, SessionTypingState::Started, 20_000)).unwrap().challenge.unwrap(); state.record_challenge(intent, nonce(2)).unwrap();
-        let update = state.accept_ack(AuthenticatedAck { peer, session: session(3), challenger_session: session(9), nonce: nonce(2), sequence_floor: AuthenticatedSequence(1), received_mono_ms: MonoTime(20_001) }).unwrap().session_update.unwrap();
-        assert_eq!(update.replaced_session_token, Some(1)); assert_eq!(update.current_session_token, 2); assert_eq!(update.validation_revision, 2);
+        let intent = state
+            .observe_typing(typing(
+                peer,
+                session(3),
+                conversation(1),
+                1,
+                SessionTypingState::Started,
+                20_000,
+            ))
+            .unwrap()
+            .challenge
+            .unwrap();
+        state.record_challenge(intent, nonce(2)).unwrap();
+        let update = state
+            .accept_ack(AuthenticatedAck {
+                peer,
+                session: session(3),
+                challenger_session: session(9),
+                nonce: nonce(2),
+                sequence_floor: AuthenticatedSequence(1),
+                received_mono_ms: MonoTime(20_001),
+            })
+            .unwrap()
+            .session_update
+            .unwrap();
+        assert_eq!(update.replaced_session_token, Some(1));
+        assert_eq!(update.current_session_token, 2);
+        assert_eq!(update.validation_revision, 2);
     }
 
     #[test]
     fn wrong_ack_tuple_has_no_authority() {
-        let peer = device(1); let mut state = EphemeralV2SessionState::new(session(9));
-        let intent = state.observe_typing(typing(peer, session(2), conversation(1), 1, SessionTypingState::Started, 0)).unwrap().challenge.unwrap(); state.record_challenge(intent, nonce(1)).unwrap();
-        for ack in [AuthenticatedAck { peer: device(2), session: session(2), challenger_session: session(9), nonce: nonce(1), sequence_floor: AuthenticatedSequence(1), received_mono_ms: MonoTime(1) }, AuthenticatedAck { peer, session: session(3), challenger_session: session(9), nonce: nonce(1), sequence_floor: AuthenticatedSequence(1), received_mono_ms: MonoTime(1) }, AuthenticatedAck { peer, session: session(2), challenger_session: session(9), nonce: nonce(2), sequence_floor: AuthenticatedSequence(1), received_mono_ms: MonoTime(1) }] { assert_eq!(state.accept_ack(ack).unwrap(), SessionTransition::default()); }
+        let peer = device(1);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        let intent = state
+            .observe_typing(typing(
+                peer,
+                session(2),
+                conversation(1),
+                1,
+                SessionTypingState::Started,
+                0,
+            ))
+            .unwrap()
+            .challenge
+            .unwrap();
+        state.record_challenge(intent, nonce(1)).unwrap();
+        for ack in [
+            AuthenticatedAck {
+                peer: device(2),
+                session: session(2),
+                challenger_session: session(9),
+                nonce: nonce(1),
+                sequence_floor: AuthenticatedSequence(1),
+                received_mono_ms: MonoTime(1),
+            },
+            AuthenticatedAck {
+                peer,
+                session: session(3),
+                challenger_session: session(9),
+                nonce: nonce(1),
+                sequence_floor: AuthenticatedSequence(1),
+                received_mono_ms: MonoTime(1),
+            },
+            AuthenticatedAck {
+                peer,
+                session: session(2),
+                challenger_session: session(9),
+                nonce: nonce(2),
+                sequence_floor: AuthenticatedSequence(1),
+                received_mono_ms: MonoTime(1),
+            },
+        ] {
+            assert_eq!(state.accept_ack(ack).unwrap(), SessionTransition::default());
+        }
     }
 
     #[test]
     fn conversations_have_independent_three_second_quotas_and_suppression_consumes_order() {
-        let peer = device(1); let peer_session = session(2); let mut state = EphemeralV2SessionState::new(session(9)); validate(&mut state, peer, peer_session, 0);
-        assert!(state.observe_typing(typing(peer, peer_session, conversation(1), 101, SessionTypingState::Started, 1)).unwrap().action.is_some());
-        assert!(state.observe_typing(typing(peer, peer_session, conversation(2), 101, SessionTypingState::Started, 1)).unwrap().action.is_some());
-        assert!(state.observe_typing(typing(peer, peer_session, conversation(1), 102, SessionTypingState::Started, 2)).unwrap().action.is_none());
-        assert!(state.observe_typing(typing(peer, peer_session, conversation(1), 102, SessionTypingState::Started, 3_001)).unwrap().action.is_none());
+        let peer = device(1);
+        let peer_session = session(2);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        validate(&mut state, peer, peer_session, 0);
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                101,
+                SessionTypingState::Started,
+                1
+            ))
+            .unwrap()
+            .action
+            .is_some());
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(2),
+                101,
+                SessionTypingState::Started,
+                1
+            ))
+            .unwrap()
+            .action
+            .is_some());
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                102,
+                SessionTypingState::Started,
+                2
+            ))
+            .unwrap()
+            .action
+            .is_none());
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                102,
+                SessionTypingState::Started,
+                3_001
+            ))
+            .unwrap()
+            .action
+            .is_none());
     }
 
     #[test]
     fn stale_outcome_keeps_host_fence_metadata() {
-        let peer = device(1); let peer_session = session(2); let mut state = EphemeralV2SessionState::new(session(9)); validate(&mut state, peer, peer_session, 0);
-        let action = state.observe_typing(typing(peer, peer_session, conversation(1), 101, SessionTypingState::Stopped, 1)).unwrap().action.unwrap();
-        assert_eq!((action.peer, action.session_token, action.sequence), (peer, 1, AuthenticatedSequence(101)));
+        let peer = device(1);
+        let peer_session = session(2);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        validate(&mut state, peer, peer_session, 0);
+        let action = state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                101,
+                SessionTypingState::Stopped,
+                1,
+            ))
+            .unwrap()
+            .action
+            .unwrap();
+        assert_eq!(
+            (action.peer, action.session_token, action.sequence),
+            (peer, 1, AuthenticatedSequence(101))
+        );
     }
 
     #[test]
     fn cap_refusal_preserves_existing_state() {
-        let peer = device(1); let peer_session = session(2); let mut state = EphemeralV2SessionState::new(session(9)); validate(&mut state, peer, peer_session, 0);
-        for id in 0..MAX_PEER_RECORDS as u128 { state.observe_typing(typing(peer, peer_session, conversation(id), 101, SessionTypingState::Stopped, 1)).unwrap(); }
-        assert!(state.observe_typing(typing(peer, peer_session, conversation(999), 101, SessionTypingState::Stopped, 1)).unwrap().action.is_none());
-        assert!(state.observe_typing(typing(peer, peer_session, conversation(0), 102, SessionTypingState::Stopped, 2)).unwrap().action.is_some());
+        let peer = device(1);
+        let peer_session = session(2);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        validate(&mut state, peer, peer_session, 0);
+        for id in 0..MAX_PEER_RECORDS as u128 {
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(id),
+                    101,
+                    SessionTypingState::Stopped,
+                    1,
+                ))
+                .unwrap();
+        }
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(999),
+                101,
+                SessionTypingState::Stopped,
+                1
+            ))
+            .unwrap()
+            .action
+            .is_none());
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(0),
+                102,
+                SessionTypingState::Stopped,
+                2
+            ))
+            .unwrap()
+            .action
+            .is_some());
     }
 }
