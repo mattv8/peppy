@@ -18,7 +18,7 @@ func TestLateRotationAfterUnlinkWritesNothing(t *testing.T) {
 	link, host := openSafetyLink(t, nil)
 	setSafetyState(link, stateNeedsRelink, auth)
 	candidate := auth.CopyForRepair()
-	client := link.newClient(candidate, link.persistRotated(candidate))
+	client := link.newClient(candidate, link.persistRotated(candidate, make(chan struct{})))
 	t.Cleanup(client.Disconnect)
 
 	if err := link.Unlink(); err != nil {
@@ -46,7 +46,7 @@ func TestUnlinkWaitsForCommittingPair(t *testing.T) {
 		knobs.gaiaFinish = true
 	})
 	link, host := openSafetyLink(t, nil)
-	reached, release := host.holdNextLinkedPersist()
+	reached, release := host.holdNextPersist("linked")
 	pairResult := make(chan error, 1)
 	go func() { pairResult <- link.Pair(canaryCookieJSON(t)) }()
 	awaitEmoji(t, host)

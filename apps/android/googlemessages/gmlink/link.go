@@ -47,6 +47,7 @@ type Link struct {
 	responding  bool
 	lastOKMS    int64
 	closed      bool
+	unlinking   bool
 	stopRun     context.CancelFunc
 	pairCancel  context.CancelFunc
 	pairDone    chan struct{}
@@ -141,6 +142,10 @@ func (link *Link) Relink() error {
 		link.mu.Unlock()
 		return errLinkClosed
 	}
+	if link.unlinking {
+		link.mu.Unlock()
+		return errors.New("unlink_in_progress")
+	}
 	if link.state != stateNeedsRelink {
 		link.mu.Unlock()
 		return errors.New("relink_refused")
@@ -159,6 +164,10 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 	if link.closed {
 		link.mu.Unlock()
 		return errLinkClosed
+	}
+	if link.unlinking {
+		link.mu.Unlock()
+		return errors.New("unlink_in_progress")
 	}
 	if (!relink && previous != stateUnlinked && previous != stateSignedOut) || (relink && previous != stateNeedsRelink) {
 		link.mu.Unlock()
@@ -189,7 +198,7 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 	}
 	persist := link.persist
 	if relink {
-		persist = link.persistRotated(auth)
+		persist = link.persistRotated(auth, done)
 	}
 	client := link.newClient(auth, persist)
 	defer client.Disconnect()
@@ -275,6 +284,10 @@ func (link *Link) Run() error {
 	if link.closed {
 		link.mu.Unlock()
 		return errLinkClosed
+	}
+	if link.unlinking {
+		link.mu.Unlock()
+		return errors.New("run_refused")
 	}
 	if link.running || link.state != stateLinked || link.auth.Browser == nil {
 		link.mu.Unlock()
@@ -370,6 +383,12 @@ func (link *Link) Unlink() error {
 		link.mu.Unlock()
 		return errLinkClosed
 	}
+	if link.unlinking {
+		link.mu.Unlock()
+		return errors.New("unlink_in_progress")
+	}
+	// From here until the final block, Pair, Relink and Run are refused.
+	link.unlinking = true
 	var pairDone chan struct{}
 	if link.pairCancel != nil {
 		link.pairCancel()
@@ -384,10 +403,18 @@ func (link *Link) Unlink() error {
 	}
 	link.Stop()
 	link.mu.Lock()
+	if link.closed {
+		// Close landed while the pair unwound: no remote call, nothing persisted.
+		link.unlinking = false
+		link.mu.Unlock()
+		return errLinkClosed
+	}
 	auth := link.auth
 	paired := auth != nil && auth.PairingID != uuid.Nil
-	// Leaving pairing here stops a pair that is still unwinding from committing.
-	link.state, link.pairingFrom = stateUnlinked, ""
+	if link.state == statePairing {
+		// A pair that outlived the bound must not commit over the unlink.
+		link.state, link.pairingFrom = stateUnlinked, ""
+	}
 	link.mu.Unlock()
 	var err error
 	if paired {
@@ -398,8 +425,9 @@ func (link *Link) Unlink() error {
 		client.Disconnect()
 	}
 	link.mu.Lock()
-	link.auth = libgm.NewAuthData()
+	link.state, link.pairingFrom, link.auth = stateUnlinked, "", libgm.NewAuthData()
 	link.healthy, link.responding, link.lastOKMS = false, false, 0
+	link.unlinking = false
 	if err != nil {
 		link.stopCode = "unlink_remote_failed"
 	} else {
@@ -407,6 +435,9 @@ func (link *Link) Unlink() error {
 	}
 	link.mu.Unlock()
 	if persistErr := link.persist(); persistErr != nil {
+		if errors.Is(persistErr, errLinkClosed) {
+			return errLinkClosed
+		}
 		link.stopFatal("persist_failed", false)
 		return errPersistFailed
 	}
@@ -457,15 +488,16 @@ func (link *Link) newClient(auth *libgm.AuthData, persist func() error) *libgm.C
 }
 
 // persistRotated persists a relink's rotated cookies. The stored auth takes them, so a
-// relink that fails keeps the rotations. Only a pair that still owns the link takes
-// them: a rotation that lands after sign-out or unlink writes nothing.
-func (link *Link) persistRotated(candidate *libgm.AuthData) func() error {
+// relink that fails keeps the rotations. Only the pair that created the client, while it
+// still owns the link, takes them: a rotation from an earlier pair, or one that lands
+// after sign-out or unlink, writes nothing.
+func (link *Link) persistRotated(candidate *libgm.AuthData, owner chan struct{}) func() error {
 	return func() error {
 		candidate.CookiesLock.RLock()
 		cookies := maps.Clone(candidate.Cookies)
 		candidate.CookiesLock.RUnlock()
 		link.mu.Lock()
-		if link.state != statePairing {
+		if link.state != statePairing || link.pairDone != owner {
 			link.mu.Unlock()
 			return nil
 		}

@@ -57,6 +57,8 @@ type fixtureKnobs struct {
 	failStatus     int
 	hangSend       bool
 	hangAction     gmproto.ActionType
+	gateSend       bool
+	gateAction     gmproto.ActionType
 }
 
 // phoneFixture stands in for Google's servers on localhost. It answers config,
@@ -65,8 +67,11 @@ type phoneFixture struct {
 	server    *httptest.Server
 	auth      *libgm.AuthData
 	rotations atomic.Int32
-	blocks    chan []byte
+	current   chan []byte
+	pending   [][]byte
 	stop      chan struct{}
+	gate      chan struct{}
+	gateOnce  sync.Once
 
 	mu         sync.Mutex
 	knobs      fixtureKnobs
@@ -83,7 +88,7 @@ type phoneFixture struct {
 // auth is the link's auth: the fixture decrypts its requests and encrypts replies.
 func newPhoneFixture(t *testing.T, auth *libgm.AuthData) *phoneFixture {
 	t.Helper()
-	fixture := &phoneFixture{auth: auth, blocks: make(chan []byte, 16), stop: make(chan struct{})}
+	fixture := &phoneFixture{auth: auth, stop: make(chan struct{}), gate: make(chan struct{})}
 	fixture.server = httptest.NewTLSServer(http.HandlerFunc(fixture.serve))
 	installSafetyDialer(t, fixture.server)
 	t.Cleanup(fixture.server.Close)
@@ -106,6 +111,11 @@ func installSafetyDialer(t *testing.T, server *httptest.Server) {
 	previous := exhttp.SensibleClientSettings
 	exhttp.SensibleClientSettings = safetyDialSettings(server)
 	t.Cleanup(func() { exhttp.SensibleClientSettings = previous })
+}
+
+// openGate releases requests held by gateSend.
+func (fixture *phoneFixture) openGate() {
+	fixture.gateOnce.Do(func() { close(fixture.gate) })
 }
 
 func (fixture *phoneFixture) configure(change func(knobs *fixtureKnobs)) {
@@ -265,6 +275,16 @@ func (fixture *phoneFixture) handleSend(writer http.ResponseWriter, request *htt
 		fixture.hold(request)
 		return
 	}
+	if knobs.gateSend && action == knobs.gateAction {
+		// The request waits until the test opens the gate, then is answered normally.
+		select {
+		case <-fixture.gate:
+		case <-request.Context().Done():
+			return
+		case <-fixture.stop:
+			return
+		}
+	}
 	writeEmptyFixturePBLite(writer)
 	switch action {
 	case gmproto.ActionType_LIST_CONVERSATIONS:
@@ -332,7 +352,9 @@ func (fixture *phoneFixture) deliverGaiaInit(requestID string) {
 	fixture.queue(&gmproto.RPCMessageData{Action: gmproto.ActionType_CREATE_GAIA_PAIRING_CLIENT_INIT, SessionID: requestID, UnencryptedData: mustMarshal(container)})
 }
 
-// queue sends one DataEvent to the next long-poll stream.
+// queue delivers one DataEvent to the most recently connected long-poll stream. Only
+// the newest stream receives replies: an older stream belongs to a finished client.
+// Replies sent before any stream connects wait for the next one.
 func (fixture *phoneFixture) queue(data *gmproto.RPCMessageData) {
 	messageData := mustMarshal(data)
 	incoming := &gmproto.IncomingRPCMessage{ResponseID: uuid.NewString(), BugleRoute: gmproto.BugleRoute_DataEvent, MessageData: messageData}
@@ -340,10 +362,13 @@ func (fixture *phoneFixture) queue(data *gmproto.RPCMessageData) {
 	if err != nil {
 		panic(err)
 	}
-	select {
-	case fixture.blocks <- block:
-	case <-fixture.stop:
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.current != nil {
+		fixture.current <- block
+		return
 	}
+	fixture.pending = append(fixture.pending, block)
 }
 
 func (fixture *phoneFixture) streamLongPoll(writer http.ResponseWriter, request *http.Request) {
@@ -351,12 +376,29 @@ func (fixture *phoneFixture) streamLongPoll(writer http.ResponseWriter, request 
 	if !ok {
 		return
 	}
+	// Drain the body so the server notices when this client disconnects.
+	_, _ = io.Copy(io.Discard, request.Body)
+	blocks := make(chan []byte, 16)
+	fixture.mu.Lock()
+	fixture.current = blocks
+	for _, block := range fixture.pending {
+		blocks <- block
+	}
+	fixture.pending = nil
+	fixture.mu.Unlock()
+	defer func() {
+		fixture.mu.Lock()
+		if fixture.current == blocks {
+			fixture.current = nil
+		}
+		fixture.mu.Unlock()
+	}()
 	_, _ = writer.Write([]byte("[["))
 	flusher.Flush()
 	first := true
 	for {
 		select {
-		case block := <-fixture.blocks:
+		case block := <-blocks:
 			if !first {
 				_, _ = writer.Write([]byte(","))
 			}
@@ -386,7 +428,8 @@ type safetyHost struct {
 	events      []eventCode
 	emoji       chan string
 	failPersist bool
-	holdLinked  chan struct{}
+	holdState   string
+	holdReached chan struct{}
 	release     chan struct{}
 }
 
@@ -400,10 +443,10 @@ func (host *safetyHost) PersistState(state []byte) error {
 		host.mu.Unlock()
 		return errors.New("synthetic persistence failure")
 	}
-	hold := host.holdLinked != nil && bytes.Contains(state, []byte(`"state":"linked"`))
-	reached, release := host.holdLinked, host.release
+	hold := host.holdState != "" && bytes.Contains(state, []byte(`"state":"`+host.holdState+`"`))
+	reached, release := host.holdReached, host.release
 	if hold {
-		host.holdLinked = nil
+		host.holdState = ""
 	}
 	host.mu.Unlock()
 	if hold {
@@ -416,15 +459,37 @@ func (host *safetyHost) PersistState(state []byte) error {
 	return nil
 }
 
-// holdNextLinkedPersist makes the next envelope that commits a link block inside
+// holdNextPersist makes the next envelope with the given state block inside
 // PersistState until the returned release channel is closed. reached closes when the
 // host is holding it.
-func (host *safetyHost) holdNextLinkedPersist() (reached, release chan struct{}) {
+func (host *safetyHost) holdNextPersist(state string) (reached, release chan struct{}) {
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	host.holdLinked = make(chan struct{})
+	host.holdState = state
+	host.holdReached = make(chan struct{})
 	host.release = make(chan struct{})
-	return host.holdLinked, host.release
+	return host.holdReached, host.release
+}
+
+// callWithin runs a call that must return promptly; a call still blocked fails the test.
+func callWithin(t *testing.T, description string, call func() error) error {
+	t.Helper()
+	result := make(chan error, 1)
+	go func() { result <- call() }()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s blocked; it should return promptly", description)
+		return nil
+	}
+}
+
+// statesSince returns the envelopes the host received after the first n.
+func (host *safetyHost) statesSince(n int) [][]byte {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	return append([][]byte(nil), host.states[n:]...)
 }
 
 func (host *safetyHost) setFailPersist(fail bool) {
