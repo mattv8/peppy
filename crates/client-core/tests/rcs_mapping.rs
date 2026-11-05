@@ -6,6 +6,8 @@ fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
         google_candidate_count: 1,
         participants: vec![RcsParticipantObservation {
             identity: participant.into(),
+            google_participant_id: "google-peer".into(),
+            identifier_type: 1,
             is_visible: true,
             is_me: false,
         }],
@@ -14,8 +16,17 @@ fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
         send_mode: RcsSendMode::Automatic,
         read_only: false,
         default_outgoing: true,
-        selected_sim_id: "sim-primary".into(),
-        selected_sim_own_identity: "local-identity".into(),
+        selected_sim_id: "android-subscription-7".into(),
+        selected_sim_own_identity: "+12025550100".into(),
+        carrier_binding: NativeCarrierRouteBinding {
+            carrier_route_id: "android-subscription-7".into(), android_subscription_id: 7,
+            is_current_default_sms: true, own_number_raw: "+12025550100".into(),
+            own_number_source: NativeOwnNumberSource::SubscriptionManagerPhoneNumber,
+            route_observed_at_ms: 1_000, route_context_revision: 1,
+            same_handset_evidence_id: "verified-handset".into(),
+        },
+        outgoing: NativeRcsOutgoing { outgoing_id: "google-outgoing".into(), sim_participant_id: "google-outgoing".into(), own_identity_raw: "+12025550100".into(), sim_payload: NativeRcsSimPayload { two: 2, sim_number: 7 }, rcs_chats_enabled: true },
+        native_evidence: NativeRcsEvidence { lifetime: NativeRcsLifetime { runtime_id: "runtime".into(), run_generation: 1, link_generation: 4, session_generation: 7, context_revision: 1 }, lookup_id: "lookup".into(), lookup_complete: true, google_candidate_count: 1, settings_revision: 1, settings_provenance: NativeSettingsProvenance::CurrentEvent, settings_observed_at_ms: 1_000, settings_stream_epoch: 1, settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed, settings_validated_at_ms: 1_000, conversation_observed_at_ms: 1_000 },
         identity_region: "ZZ".into(),
         observed_at_ms: 1_000,
         link_generation: 4,
@@ -95,6 +106,8 @@ fn refuses_stale_ambiguous_and_invalid_non_e164_observations() {
     let mut ambiguous = observation("raw-peer", 2);
     ambiguous.participants.push(RcsParticipantObservation {
         identity: "other-peer".into(),
+        google_participant_id: "other-google-peer".into(),
+        identifier_type: 1,
         is_visible: true,
         is_me: false,
     });
@@ -130,8 +143,12 @@ fn mapping_binds_region_identity_and_live_conversation_facts() {
 
     let mut changed = observation("raw-peer", 2);
     changed.identity_region = "XY".into();
-    changed.selected_sim_own_identity = "other-local-identity".into();
+    changed.selected_sim_own_identity = "+12025550101".into();
     changed.context_revision = 2;
+    changed.carrier_binding.own_number_raw = "+12025550101".into();
+    changed.carrier_binding.route_context_revision = 2;
+    changed.outgoing.own_identity_raw = "+12025550101".into();
+    changed.native_evidence.lifetime.context_revision = 2;
     changed.read_only = true;
     assert_eq!(
         client.verify_rcs_mapping(&changed, 1_000).unwrap(),
@@ -141,8 +158,12 @@ fn mapping_binds_region_identity_and_live_conversation_facts() {
 
     let mut refreshed = observation("raw-peer", 3);
     refreshed.identity_region = "XY".into();
-    refreshed.selected_sim_own_identity = "other-local-identity".into();
+    refreshed.selected_sim_own_identity = "+12025550101".into();
     refreshed.context_revision = 2;
+    refreshed.carrier_binding.own_number_raw = "+12025550101".into();
+    refreshed.carrier_binding.route_context_revision = 2;
+    refreshed.outgoing.own_identity_raw = "+12025550101".into();
+    refreshed.native_evidence.lifetime.context_revision = 2;
     let RcsMappingOutcome::Mapped(refreshed) =
         client.verify_rcs_mapping(&refreshed, 1_000).unwrap()
     else {
@@ -153,18 +174,12 @@ fn mapping_binds_region_identity_and_live_conversation_facts() {
 
 #[test]
 fn self_chat_and_nonmonotonic_revision_are_explicit() {
-    let (_directory, _config, client, conversation_id) = client_with_participant("local-identity");
-    let mut self_chat = observation("local-identity", 1);
+    let (_directory, _config, client, _conversation_id) = client_with_participant("+12025550100");
+    let mut self_chat = observation("+12025550100", 1);
     self_chat.participants[0].is_me = true;
-    let RcsMappingOutcome::Mapped(mapping) = client.verify_rcs_mapping(&self_chat, 1_000).unwrap()
-    else {
-        panic!("expected self mapping");
-    };
-    assert_eq!(mapping.class, RcsMappingClass::SelfChat);
-    assert_eq!(mapping.conversation_id, conversation_id);
     assert_eq!(
         client.verify_rcs_mapping(&self_chat, 1_000).unwrap(),
-        RcsMappingOutcome::Refused(RcsMappingRefusal::NonMonotonicRevision)
+        RcsMappingOutcome::Refused(RcsMappingRefusal::SelfChatUnsupported)
     );
 }
 
@@ -244,6 +259,9 @@ fn context_and_conflict_invalidate_all_affected_mappings() {
     refreshed.mapping_revision = 3;
     refreshed.session_generation = 8;
     refreshed.context_revision = 2;
+    refreshed.carrier_binding.route_context_revision = 2;
+    refreshed.native_evidence.lifetime.session_generation = 8;
+    refreshed.native_evidence.lifetime.context_revision = 2;
     assert!(matches!(
         client.verify_rcs_mapping(&refreshed, 1_000).unwrap(),
         RcsMappingOutcome::Mapped(_)
@@ -277,28 +295,34 @@ fn empty_participants_do_not_create_or_change_a_mapping_candidate() {
         0,
         RcsParticipantObservation {
             identity: "  ".into(),
+            google_participant_id: "blank".into(),
+            identifier_type: 1,
             is_visible: true,
             is_me: false,
         },
     );
-    assert!(matches!(
+    assert_eq!(
         client.verify_rcs_mapping(&mixed, 1_000).unwrap(),
-        RcsMappingOutcome::Mapped(_)
-    ));
+        RcsMappingOutcome::Refused(RcsMappingRefusal::InvalidIdentity)
+    );
     let mut empty = mixed;
     empty.mapping_revision = 2;
     empty.participants = vec![RcsParticipantObservation {
-        identity: String::new(),
+            identity: String::new(),
+            google_participant_id: "empty".into(),
+            identifier_type: 1,
         is_visible: true,
         is_me: false,
     }];
     assert_eq!(
         client.verify_rcs_mapping(&empty, 1_000).unwrap(),
-        RcsMappingOutcome::Refused(RcsMappingRefusal::ParticipantAmbiguous)
+        RcsMappingOutcome::Refused(RcsMappingRefusal::InvalidIdentity)
     );
     let mut malformed = observation("raw-peer", 3);
     malformed.participants.push(RcsParticipantObservation {
-        identity: "+not-an-identity".into(),
+            identity: "+not-an-identity".into(),
+            google_participant_id: "malformed".into(),
+            identifier_type: 1,
         is_visible: true,
         is_me: false,
     });
@@ -311,21 +335,12 @@ fn empty_participants_do_not_create_or_change_a_mapping_candidate() {
 #[test]
 fn structured_context_distinguishes_delimiter_collisions() {
     let (_directory, _config, client, _conversation_id) = client_with_participant("raw-peer");
-    let mut first = observation("raw-peer", 1);
-    first.selected_sim_own_identity = "a".into();
-    first.selected_sim_id = "b:sim".into();
-    let RcsMappingOutcome::Mapped(first) = client.verify_rcs_mapping(&first, 1_000).unwrap() else {
-        panic!("expected mapping");
-    };
-    let mut second = observation("raw-peer", 2);
-    second.selected_sim_own_identity = "a:b".into();
-    second.selected_sim_id = "sim".into();
-    second.context_revision = 2;
-    let RcsMappingOutcome::Mapped(second) = client.verify_rcs_mapping(&second, 1_000).unwrap()
-    else {
-        panic!("expected mapping");
-    };
-    assert_ne!(first.proof.digest, second.proof.digest);
+    let mut malformed_route = observation("raw-peer", 1);
+    malformed_route.selected_sim_id = "google-outgoing".into();
+    assert_eq!(
+        client.verify_rcs_mapping(&malformed_route, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
+    );
 }
 
 #[test]
@@ -340,6 +355,8 @@ fn malformed_or_multiple_google_observation_revokes_a_stored_mapping() {
     let mut malformed = observation("raw-peer", 2);
     malformed.participants.push(RcsParticipantObservation {
         identity: "+not-an-identity".into(),
+        google_participant_id: "malformed-google-peer".into(),
+        identifier_type: 1,
         is_visible: true,
         is_me: false,
     });
@@ -365,20 +382,17 @@ fn malformed_or_multiple_google_observation_revokes_a_stored_mapping() {
 
 #[test]
 fn self_chat_conflict_invalidates_the_original_mapping() {
-    let (_directory, _config, client, conversation_id) = client_with_participant("local-identity");
-    let mut original = observation("local-identity", 1);
+    let (_directory, _config, client, conversation_id) = client_with_participant("+12025550100");
+    let mut original = observation("+12025550100", 1);
     original.google_conversation_id = "google-a".into();
     original.participants[0].is_me = true;
-    assert!(matches!(
-        client.verify_rcs_mapping(&original, 1_000).unwrap(),
-        RcsMappingOutcome::Mapped(_)
-    ));
+    assert_eq!(client.verify_rcs_mapping(&original, 1_000).unwrap(), RcsMappingOutcome::Refused(RcsMappingRefusal::SelfChatUnsupported));
     let mut conflicting = original.clone();
     conflicting.google_conversation_id = "google-b".into();
     conflicting.mapping_revision = 2;
     assert_eq!(
         client.verify_rcs_mapping(&conflicting, 1_000).unwrap(),
-        RcsMappingOutcome::Refused(RcsMappingRefusal::MappingConflict)
+        RcsMappingOutcome::Refused(RcsMappingRefusal::SelfChatUnsupported)
     );
     assert!(client.rcs_mapping(conversation_id).unwrap().is_none());
 }

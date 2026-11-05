@@ -2,6 +2,7 @@ use crate::{
     CommandId, ConversationId, Error, MessagePayload,
     rcs_mapping::{self, RCS_MAPPING_FRESHNESS_MS, RcsConversationType, RcsMapping,
         RcsMappingClass, RcsMappingObservation, RcsSendMode},
+    rcs_native::{LocalRcsTargetSnapshot, NativeRcsParticipant, NativeRcsTargetClass},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -233,11 +234,14 @@ pub struct RcsPermit {
     pub mapping_revision: u64,
     pub proof_digest: [u8; 32],
     pub google_conversation_id: String,
+    /// Restricted local-native transport projection, constructed during core admission.
+    pub target: LocalRcsTargetSnapshot,
     pub message: MessagePayload,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct StoredRcsTargetIdentity {
+    version: u32,
     google_conversation_id: String,
     canonical_participant: String,
     own_identity: String,
@@ -247,6 +251,12 @@ struct StoredRcsTargetIdentity {
     session_generation: u64,
     canonicalizer_revision: u32,
     self_chat: bool,
+    outgoing_id: String,
+    sim_participant_id: String,
+    sim_payload_two: i32,
+    sim_payload_sim_number: i32,
+    canonical_os_own_identity: String,
+    canonical_google_own_identity: String,
 }
 
 pub(crate) fn record_rcs_target_identity(
@@ -282,8 +292,10 @@ pub(crate) fn has_same_rcs_target_identity(
     else {
         return Ok(false);
     };
-    let stored: StoredRcsTargetIdentity =
-        serde_json::from_str(&value).map_err(|_| Error::Database)?;
+    let Ok(stored) = serde_json::from_str::<StoredRcsTargetIdentity>(&value) else {
+        // v1 frozen identities lack concrete outgoing/payload binding and cannot authorize retry.
+        return Ok(false);
+    };
     Ok(stored == target_identity(mapping, observation)?)
 }
 
@@ -295,10 +307,12 @@ fn target_identity(
         || observation.conversation_type != RcsConversationType::Rcs
         || observation.send_mode != RcsSendMode::Automatic
         || !observation.default_outgoing
+        || mapping.proof_version != rcs_mapping::RCS_MAPPING_PROOF_VERSION
     {
         return Err(Error::InvalidRequest("RCS target identity is not current"));
     }
     Ok(StoredRcsTargetIdentity {
+        version: 2,
         google_conversation_id: mapping.google_conversation_id.clone(),
         canonical_participant: mapping.proof.canonical_participant.clone(),
         own_identity: mapping.proof.own_identity.clone(),
@@ -308,6 +322,52 @@ fn target_identity(
         session_generation: observation.session_generation,
         canonicalizer_revision: observation.canonicalizer_revision,
         self_chat: mapping.class == RcsMappingClass::SelfChat,
+        outgoing_id: observation.outgoing.outgoing_id.clone(),
+        sim_participant_id: observation.outgoing.sim_participant_id.clone(),
+        sim_payload_two: observation.outgoing.sim_payload.two,
+        sim_payload_sim_number: observation.outgoing.sim_payload.sim_number,
+        canonical_os_own_identity: canonical_e164(&observation.carrier_binding.own_number_raw)?,
+        canonical_google_own_identity: canonical_e164(&observation.outgoing.own_identity_raw)?,
+    })
+}
+
+fn canonical_e164(identity: &str) -> Result<String, Error> {
+    rcs_mapping::canonical_recipient(identity)
+        .filter(|identity| identity.starts_with('+'))
+        .ok_or(Error::InvalidRequest("RCS own identity must be E.164"))
+}
+
+pub(crate) fn local_target_snapshot(
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+) -> Result<LocalRcsTargetSnapshot, Error> {
+    target_identity(mapping, observation)?;
+    let class = match mapping.class {
+        RcsMappingClass::OneToOne => NativeRcsTargetClass::OneToOne,
+        RcsMappingClass::SelfChat => NativeRcsTargetClass::SelfChat,
+    };
+    Ok(LocalRcsTargetSnapshot {
+        google_conversation_id: mapping.google_conversation_id.clone(),
+        participants: observation
+            .participants
+            .iter()
+            .map(|participant| NativeRcsParticipant {
+                identity: participant.identity.clone(),
+                google_participant_id: participant.google_participant_id.clone(),
+                identifier_type: participant.identifier_type,
+                is_visible: participant.is_visible,
+                is_me: participant.is_me,
+            })
+            .collect(),
+        class,
+        canonical_recipient: mapping.proof.canonical_participant.clone(),
+        canonical_own_identity: mapping.proof.own_identity.clone(),
+        identity_region: mapping.proof.identity_region.clone(),
+        canonicalizer_revision: observation.canonicalizer_revision,
+        selected_sim_id: observation.selected_sim_id.clone(),
+        carrier_binding: observation.carrier_binding.clone(),
+        outgoing: observation.outgoing.clone(),
+        evidence: observation.native_evidence.clone(),
     })
 }
 

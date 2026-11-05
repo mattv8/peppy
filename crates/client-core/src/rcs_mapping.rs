@@ -1,10 +1,16 @@
-use crate::{ConversationId, Error};
+use crate::{
+    ConversationId, Error,
+    rcs_native::{
+        NativeCarrierRouteBinding, NativeRcsEvidence, NativeRcsOutgoing,
+        NativeSettingsCurrentness, NativeSettingsProvenance,
+    },
+};
 use phonenumber::{Mode, parse};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const RCS_MAPPING_PROOF_VERSION: u32 = 1;
+pub const RCS_MAPPING_PROOF_VERSION: u32 = 2;
 pub const RCS_MAPPING_FRESHNESS_MS: i64 = 30_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +43,8 @@ pub enum RcsSendMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RcsParticipantObservation {
     pub identity: String,
+    pub google_participant_id: String,
+    pub identifier_type: i32,
     pub is_visible: bool,
     pub is_me: bool,
 }
@@ -56,6 +64,9 @@ pub struct RcsMappingObservation {
     pub default_outgoing: bool,
     pub selected_sim_id: String,
     pub selected_sim_own_identity: String,
+    pub carrier_binding: NativeCarrierRouteBinding,
+    pub outgoing: NativeRcsOutgoing,
+    pub native_evidence: NativeRcsEvidence,
     pub identity_region: String,
     pub observed_at_ms: i64,
     pub link_generation: u64,
@@ -82,6 +93,7 @@ pub enum RcsMappingRefusal {
     NonMonotonicRevision,
     RetiredContext,
     PeppyConversationUncertain,
+    SelfChatUnsupported,
 }
 
 impl RcsMappingRefusal {
@@ -100,6 +112,7 @@ impl RcsMappingRefusal {
             Self::NonMonotonicRevision => "nonmonotonic_revision",
             Self::RetiredContext => "retired_context",
             Self::PeppyConversationUncertain => "peppy_conversation_uncertain",
+            Self::SelfChatUnsupported => "self_chat_unsupported",
         }
     }
 }
@@ -174,7 +187,10 @@ fn verify(
             RcsMappingRefusal::StaleObservation,
         ));
     }
-    if observation.google_candidate_count != 1 {
+    if observation.google_candidate_count != 1
+        || !observation.native_evidence.lookup_complete
+        || observation.native_evidence.google_candidate_count != 1
+    {
         return Ok(RcsMappingOutcome::Refused(
             RcsMappingRefusal::GoogleConversationAmbiguous,
         ));
@@ -189,7 +205,7 @@ fn verify(
         || observation.status != "eligible"
         || observation.send_mode != RcsSendMode::Automatic
         || observation.read_only
-        || !observation.default_outgoing
+        || observation.default_outgoing != !observation.outgoing.outgoing_id.is_empty()
         || observation.selected_sim_id.is_empty()
         || observation.identity_region.is_empty()
     {
@@ -198,7 +214,7 @@ fn verify(
         ));
     }
 
-    let own_identity = match canonical_identity(&observation.selected_sim_own_identity) {
+    let own_identity = match canonical_e164(&observation.selected_sim_own_identity) {
         Some(identity) => identity,
         None => {
             return Ok(RcsMappingOutcome::Refused(
@@ -211,6 +227,18 @@ fn verify(
         Err(reason) => return Ok(RcsMappingOutcome::Refused(reason)),
     };
 
+    if !native_observation_is_current(observation, now_ms, &own_identity) {
+        return Ok(RcsMappingOutcome::Refused(
+            RcsMappingRefusal::IneligibleConversation,
+        ));
+    }
+
+    if visible.iter().filter(|participant| participant.is_me).any(|participant| {
+        canonical_identity(&participant.identity).as_deref() != Some(own_identity.as_str())
+    }) {
+        return Ok(RcsMappingOutcome::Refused(RcsMappingRefusal::SelfChatMismatch));
+    }
+
     let non_self = visible
         .iter()
         .filter(|participant| !participant.is_me)
@@ -221,7 +249,9 @@ fn verify(
                 && canonical_identity(&participant.identity).as_deref()
                     == Some(own_identity.as_str())
         }) {
-            (RcsMappingClass::SelfChat, own_identity.clone())
+            return Ok(RcsMappingOutcome::Refused(
+                RcsMappingRefusal::SelfChatUnsupported,
+            ));
         } else {
             return Ok(RcsMappingOutcome::Refused(
                 RcsMappingRefusal::SelfChatMismatch,
@@ -316,6 +346,50 @@ fn canonical_identity(identity: &str) -> Option<String> {
     canonical_recipient(identity)
 }
 
+fn canonical_e164(identity: &str) -> Option<String> {
+    let identity = canonical_identity(identity)?;
+    identity.starts_with('+').then_some(identity)
+}
+
+fn native_observation_is_current(
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+    own_identity: &str,
+) -> bool {
+    let evidence = &observation.native_evidence;
+    let binding = &observation.carrier_binding;
+    let outgoing = &observation.outgoing;
+    let fresh = |observed_at_ms| {
+        now_ms
+            .checked_sub(observed_at_ms)
+            .is_some_and(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(&age))
+    };
+    !evidence.lifetime.runtime_id.is_empty()
+        && evidence.lifetime.run_generation > 0
+        && evidence.lifetime.link_generation == observation.link_generation
+        && evidence.lifetime.session_generation == observation.session_generation
+        && evidence.lifetime.context_revision == observation.context_revision
+        && !evidence.lookup_id.is_empty()
+        && evidence.settings_revision > 0
+        && evidence.settings_stream_epoch > 0
+        && evidence.settings_provenance == NativeSettingsProvenance::CurrentEvent
+        && evidence.settings_currentness == NativeSettingsCurrentness::ContinuousVerifiedFeed
+        && fresh(evidence.settings_validated_at_ms)
+        && fresh(evidence.conversation_observed_at_ms)
+        && binding.carrier_route_id == observation.selected_sim_id
+        && binding.carrier_route_id
+            == format!("android-subscription-{}", binding.android_subscription_id)
+        && binding.is_current_default_sms
+        && binding.route_context_revision == observation.context_revision
+        && fresh(binding.route_observed_at_ms)
+        && !binding.same_handset_evidence_id.is_empty()
+        && canonical_e164(&binding.own_number_raw).as_deref() == Some(own_identity)
+        && canonical_e164(&outgoing.own_identity_raw).as_deref() == Some(own_identity)
+        && outgoing.outgoing_id == outgoing.sim_participant_id
+        && !outgoing.outgoing_id.is_empty()
+        && outgoing.rcs_chats_enabled
+}
+
 fn validated_visible_participants(
     observation: &RcsMappingObservation,
 ) -> Result<Vec<&RcsParticipantObservation>, RcsMappingRefusal> {
@@ -325,15 +399,12 @@ fn validated_visible_participants(
         .filter(|participant| participant.is_visible)
         .collect::<Vec<_>>();
     if visible.iter().any(|participant| {
-        !participant.identity.trim().is_empty()
-            && canonical_identity(&participant.identity).is_none()
+        participant.identity.trim().is_empty()
+            || participant.google_participant_id.trim().is_empty()
+            || canonical_identity(&participant.identity).is_none()
     }) {
         return Err(RcsMappingRefusal::InvalidIdentity);
     }
-    let visible = visible
-        .into_iter()
-        .filter(|participant| !participant.identity.trim().is_empty())
-        .collect::<Vec<_>>();
     (!visible.is_empty())
         .then_some(visible)
         .ok_or(RcsMappingRefusal::ParticipantAmbiguous)
@@ -413,12 +484,18 @@ fn proof_digest(
     participants: &[&RcsParticipantObservation],
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"peppy/rcs-mapping-proof/v1\0");
+    digest.update(b"peppy/rcs-mapping-proof/v2\0");
     for value in [
         &observation.google_conversation_id,
         &observation.status,
         &observation.selected_sim_id,
         &observation.identity_region,
+        &observation.carrier_binding.carrier_route_id,
+        &observation.carrier_binding.own_number_raw,
+        &observation.carrier_binding.same_handset_evidence_id,
+        &observation.outgoing.outgoing_id,
+        &observation.outgoing.sim_participant_id,
+        &observation.outgoing.own_identity_raw,
     ] {
         digest.update((value.len() as u64).to_be_bytes());
         digest.update(value.as_bytes());
@@ -436,17 +513,37 @@ fn proof_digest(
     ]);
     digest.update(observation.link_generation.to_be_bytes());
     digest.update(observation.session_generation.to_be_bytes());
+    digest.update(observation.context_revision.to_be_bytes());
     digest.update(observation.canonicalizer_revision.to_be_bytes());
     digest.update(observation.mapping_revision.to_be_bytes());
+    digest.update(observation.carrier_binding.android_subscription_id.to_be_bytes());
+    digest.update(observation.carrier_binding.route_context_revision.to_be_bytes());
+    digest.update([
+        u8::from(observation.carrier_binding.is_current_default_sms),
+        u8::from(observation.outgoing.rcs_chats_enabled),
+    ]);
+    digest.update(observation.outgoing.sim_payload.two.to_be_bytes());
+    digest.update(observation.outgoing.sim_payload.sim_number.to_be_bytes());
     let mut participants = participants
         .iter()
         .filter_map(|participant| {
-            canonical_identity(&participant.identity).map(|identity| (participant.is_me, identity))
+            canonical_identity(&participant.identity).map(|identity| {
+                (
+                    participant.is_visible,
+                    participant.is_me,
+                    participant.identifier_type,
+                    participant.google_participant_id.as_str(),
+                    identity,
+                )
+            })
         })
         .collect::<Vec<_>>();
     participants.sort_unstable();
-    for (is_me, identity) in participants {
-        digest.update([u8::from(is_me)]);
+    for (is_visible, is_me, identifier_type, google_participant_id, identity) in participants {
+        digest.update([u8::from(is_visible), u8::from(is_me)]);
+        digest.update(identifier_type.to_be_bytes());
+        digest.update((google_participant_id.len() as u64).to_be_bytes());
+        digest.update(google_participant_id.as_bytes());
         digest.update((identity.len() as u64).to_be_bytes());
         digest.update(identity.as_bytes());
     }
@@ -556,13 +653,13 @@ pub(crate) fn mapping_matches_observation(
     {
         return Ok(false);
     }
+    let own_identity = match canonical_e164(&observation.selected_sim_own_identity) {
+        Some(identity) if native_observation_is_current(observation, now_ms, &identity) => identity,
+        _ => return Ok(false),
+    };
     let visible = match validated_visible_participants(observation) {
         Ok(visible) => visible,
         Err(_) => return Ok(false),
-    };
-    let own_identity = match canonical_identity(&observation.selected_sim_own_identity) {
-        Some(identity) => identity,
-        None => return Ok(false),
     };
     if mapping.proof.digest != proof_digest(observation, mapping.class, &own_identity, &visible) {
         return Ok(false);
@@ -634,6 +731,9 @@ struct RcsContext {
     identity_region: String,
     own_identity: String,
     sim_id: String,
+    outgoing_id: String,
+    sim_participant_id: String,
+    own_number: String,
     canonicalizer_revision: u32,
     link_state: u8,
 }
@@ -643,6 +743,9 @@ impl RcsContext {
         self.identity_region == other.identity_region
             && self.own_identity == other.own_identity
             && self.sim_id == other.sim_id
+            && self.outgoing_id == other.outgoing_id
+            && self.sim_participant_id == other.sim_participant_id
+            && self.own_number == other.own_number
             && self.canonicalizer_revision == other.canonicalizer_revision
             && self.link_state == other.link_state
     }
@@ -654,9 +757,12 @@ fn context_value(observation: &RcsMappingObservation) -> String {
         session_generation: observation.session_generation,
         context_revision: observation.context_revision,
         identity_region: observation.identity_region.clone(),
-        own_identity: canonical_identity(&observation.selected_sim_own_identity)
+        own_identity: canonical_e164(&observation.selected_sim_own_identity)
             .unwrap_or_default(),
         sim_id: observation.selected_sim_id.clone(),
+        outgoing_id: observation.outgoing.outgoing_id.clone(),
+        sim_participant_id: observation.outgoing.sim_participant_id.clone(),
+        own_number: observation.carrier_binding.own_number_raw.clone(),
         canonicalizer_revision: observation.canonicalizer_revision,
         link_state: observation.link_state as u8,
     })
@@ -735,6 +841,8 @@ mod tests {
             google_candidate_count: 1,
             participants: vec![RcsParticipantObservation {
                 identity: "raw-peer".into(),
+                google_participant_id: "google-peer".into(),
+                identifier_type: 1,
                 is_visible: true,
                 is_me: false,
             }],
@@ -743,8 +851,11 @@ mod tests {
             send_mode: RcsSendMode::Automatic,
             read_only: false,
             default_outgoing: true,
-            selected_sim_id: "sim".into(),
-            selected_sim_own_identity: "local".into(),
+            selected_sim_id: "android-subscription-7".into(),
+            selected_sim_own_identity: "+12025550100".into(),
+            carrier_binding: NativeCarrierRouteBinding { carrier_route_id: "android-subscription-7".into(), android_subscription_id: 7, is_current_default_sms: true, own_number_raw: "+12025550100".into(), own_number_source: crate::NativeOwnNumberSource::SubscriptionManagerPhoneNumber, route_observed_at_ms: 1_000, route_context_revision: 1, same_handset_evidence_id: "verified-handset".into() },
+            outgoing: NativeRcsOutgoing { outgoing_id: "google-outgoing".into(), sim_participant_id: "google-outgoing".into(), own_identity_raw: "+12025550100".into(), sim_payload: crate::NativeRcsSimPayload { two: 2, sim_number: 7 }, rcs_chats_enabled: true },
+            native_evidence: NativeRcsEvidence { lifetime: crate::NativeRcsLifetime { runtime_id: "runtime".into(), run_generation: 1, link_generation: 1, session_generation: 1, context_revision: 1 }, lookup_id: "lookup".into(), lookup_complete: true, google_candidate_count: 1, settings_revision: 1, settings_provenance: NativeSettingsProvenance::CurrentEvent, settings_observed_at_ms: 1_000, settings_stream_epoch: 1, settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed, settings_validated_at_ms: 1_000, conversation_observed_at_ms: 1_000 },
             identity_region: "ZZ".into(),
             observed_at_ms: 1_000,
             link_generation: 1,
@@ -819,6 +930,8 @@ mod tests {
         let mut malformed = observation;
         malformed.participants.push(RcsParticipantObservation {
             identity: "+not-an-identity".into(),
+            google_participant_id: "malformed-google-peer".into(),
+            identifier_type: 1,
             is_visible: true,
             is_me: false,
         });

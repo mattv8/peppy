@@ -57,6 +57,7 @@ mod notifications;
 mod phone_read;
 mod rcs_capability;
 mod rcs_mapping;
+mod rcs_native;
 mod rcs_send;
 mod sms_acquisition;
 mod sms_reconciliation;
@@ -117,6 +118,12 @@ pub use rcs_mapping::{
     RCS_MAPPING_FRESHNESS_MS, RCS_MAPPING_PROOF_VERSION, RcsConversationType, RcsLinkState,
     RcsMapping, RcsMappingClass, RcsMappingObservation, RcsMappingOutcome, RcsMappingProof,
     RcsMappingRefusal, RcsParticipantObservation, RcsSendMode,
+};
+pub use rcs_native::{
+    LocalRcsTargetSnapshot, NativeCarrierRouteBinding, NativeOwnNumberSource,
+    NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing, NativeRcsParticipant,
+    NativeRcsSimPayload, NativeRcsTargetClass, NativeSettingsCurrentness,
+    NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
 };
 pub use rcs_capability::{RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent};
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
@@ -3561,15 +3568,7 @@ impl Client {
                 params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
             )?;
         }
-        let permit = RcsPermit {
-            command_id,
-            conversation_id: message.record.conversation_id,
-            tmp_id,
-            mapping_revision: mapping.mapping_revision,
-            proof_digest: mapping.proof.digest,
-            google_conversation_id: mapping.google_conversation_id,
-            message,
-        };
+        let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
         tx.commit()?;
         Ok(permit)
     }
@@ -3833,16 +3832,9 @@ impl Client {
                 command_id.to_string()
             ],
         )?;
+        let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
         tx.commit()?;
-        Ok(RcsPermit {
-            command_id,
-            conversation_id: message.record.conversation_id,
-            tmp_id,
-            mapping_revision: mapping.mapping_revision,
-            proof_digest: mapping.proof.digest,
-            google_conversation_id: mapping.google_conversation_id,
-            message,
-        })
+        Ok(permit)
     }
 
     /// Applies evidence only when both local identifiers match; an absent result changes nothing.
@@ -9640,13 +9632,24 @@ fn automatic_rcs_permit(
             params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
         )?;
     }
+    rcs_permit(command_id, message, tmp_id, &mapping, observation)
+}
+
+fn rcs_permit(
+    command_id: CommandId,
+    message: MessagePayload,
+    tmp_id: String,
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+) -> Result<RcsPermit, Error> {
     Ok(RcsPermit {
         command_id,
         conversation_id: message.record.conversation_id,
         tmp_id,
         mapping_revision: mapping.mapping_revision,
         proof_digest: mapping.proof.digest,
-        google_conversation_id: mapping.google_conversation_id,
+        google_conversation_id: mapping.google_conversation_id.clone(),
+        target: rcs_send::local_target_snapshot(mapping, observation)?,
         message,
     })
 }

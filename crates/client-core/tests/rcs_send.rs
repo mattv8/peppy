@@ -8,6 +8,8 @@ fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
         google_candidate_count: 1,
         participants: vec![RcsParticipantObservation {
             identity: participant.into(),
+            google_participant_id: "google-peer".into(),
+            identifier_type: 1,
             is_visible: true,
             is_me: false,
         }],
@@ -16,8 +18,11 @@ fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
         send_mode: RcsSendMode::Automatic,
         read_only: false,
         default_outgoing: true,
-        selected_sim_id: "sim-local".into(),
-        selected_sim_own_identity: "own-local".into(),
+        selected_sim_id: "android-subscription-7".into(),
+        selected_sim_own_identity: "+12025550100".into(),
+        carrier_binding: NativeCarrierRouteBinding { carrier_route_id: "android-subscription-7".into(), android_subscription_id: 7, is_current_default_sms: true, own_number_raw: "+12025550100".into(), own_number_source: NativeOwnNumberSource::SubscriptionManagerPhoneNumber, route_observed_at_ms: 1_000, route_context_revision: 1, same_handset_evidence_id: "verified-handset".into() },
+        outgoing: NativeRcsOutgoing { outgoing_id: "google-outgoing".into(), sim_participant_id: "google-outgoing".into(), own_identity_raw: "+12025550100".into(), sim_payload: NativeRcsSimPayload { two: 2, sim_number: 7 }, rcs_chats_enabled: true },
+        native_evidence: NativeRcsEvidence { lifetime: NativeRcsLifetime { runtime_id: "runtime".into(), run_generation: 1, link_generation: 1, session_generation: 1, context_revision: 1 }, lookup_id: "lookup".into(), lookup_complete: true, google_candidate_count: 1, settings_revision: 1, settings_provenance: NativeSettingsProvenance::CurrentEvent, settings_observed_at_ms: 1_000, settings_stream_epoch: 1, settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed, settings_validated_at_ms: 1_000, conversation_observed_at_ms: 1_000 },
         identity_region: "ZZ".into(),
         observed_at_ms: 1_000,
         context_revision: 1,
@@ -54,7 +59,7 @@ fn carrier_command() -> (tempfile::TempDir, Vault, ClientConfig, Client, Command
             },
             GatewayRoute::Carrier {
                 gateway_device_id: gateway_config.device_id,
-                subscription_id: "sim-local".into(),
+                subscription_id: "android-subscription-7".into(),
             },
         )
         .unwrap();
@@ -164,6 +169,8 @@ fn stale_wrong_sim_wrong_context_and_proven_rcs_never_fall_back_to_carrier() {
     let mut mapped = observation("peer-local", 2);
     mapped.context_revision = 3;
     mapped.observed_at_ms = 1_002;
+    mapped.carrier_binding.route_context_revision = 3;
+    mapped.native_evidence.lifetime.context_revision = 3;
     assert!(matches!(
         gateway.verify_rcs_mapping(&mapped, 1_002).unwrap(),
         RcsMappingOutcome::Mapped(_)
@@ -231,6 +238,14 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
     );
     assert_eq!(permit.mapping_revision, mapping.mapping_revision);
     assert_eq!(permit.proof_digest, mapping.proof.digest);
+    assert_eq!(permit.target.canonical_recipient, "raw:peer-local");
+    assert_eq!(permit.target.selected_sim_id, "android-subscription-7");
+    assert_eq!(permit.target.outgoing.outgoing_id, "google-outgoing");
+    assert_eq!(permit.target.outgoing.sim_payload.two, 2);
+    assert_eq!(permit.target.outgoing.sim_payload.sim_number, 7);
+    assert_eq!(permit.target.carrier_binding.android_subscription_id, 7);
+    assert_ne!(permit.target.selected_sim_id, permit.target.outgoing.outgoing_id);
+    assert_eq!(permit.target.participants[0].google_participant_id, "google-peer");
     assert!(uuid::Uuid::parse_str(&permit.tmp_id).is_ok());
     assert_eq!(
         gateway
@@ -646,6 +661,11 @@ fn rcs_retry_accepts_a_fresh_same_target_proof_after_the_old_proof_expires() {
     refreshed.mapping_revision = 2;
     refreshed.context_revision = 2;
     refreshed.observed_at_ms = 31_001;
+    refreshed.carrier_binding.route_context_revision = 2;
+    refreshed.carrier_binding.route_observed_at_ms = 31_001;
+    refreshed.native_evidence.lifetime.context_revision = 2;
+    refreshed.native_evidence.settings_validated_at_ms = 31_001;
+    refreshed.native_evidence.conversation_observed_at_ms = 31_001;
     gateway.verify_rcs_mapping(&refreshed, 31_001).unwrap();
 
     let retry = gateway
@@ -670,10 +690,17 @@ fn rcs_retry_refuses_changed_sim_or_link_session() {
         changed.mapping_revision = 2;
         changed.context_revision = 2;
         changed.observed_at_ms = 1_001;
+        changed.carrier_binding.route_context_revision = 2;
+        changed.native_evidence.lifetime.context_revision = 2;
+        changed.native_evidence.settings_validated_at_ms = 1_001;
+        changed.native_evidence.conversation_observed_at_ms = 1_001;
         if changed_session {
             changed.session_generation = 2;
+            changed.native_evidence.lifetime.session_generation = 2;
         } else {
-            changed.selected_sim_id = "other-sim-local".into();
+            changed.selected_sim_id = "android-subscription-8".into();
+            changed.carrier_binding.carrier_route_id = "android-subscription-8".into();
+            changed.carrier_binding.android_subscription_id = 8;
         }
         assert!(matches!(
             gateway.verify_rcs_mapping(&changed, 1_001),
@@ -980,7 +1007,7 @@ fn automatic_fresh_carrier_proof_permits_original_sim_once_and_rcs_link_never_ca
     else {
         panic!("fresh proof must permit carrier");
     };
-    assert_eq!(permitted.subscription_id, "sim-local");
+    assert_eq!(permitted.subscription_id, "android-subscription-7");
     assert_eq!(
         gateway
             .begin_automatic_send_attempt(command_id, None, 1_001)
