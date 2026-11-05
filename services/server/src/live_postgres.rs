@@ -100,6 +100,7 @@ impl PgLiveBackend {
 
 impl Drop for PgLiveBackend {
     fn drop(&mut self) {
+        set_ready(&self.inner, false);
         self.listener_task.abort();
     }
 }
@@ -270,5 +271,37 @@ mod tests {
         drop(remote_backend);
         let mut no_replay = remote_hub.register(vault_id, receiver_device_id);
         assert_eq!(no_replay.receiver.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn listener_loss_and_backend_drop_mark_readiness_unavailable() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("TEST_DATABASE_URL is required for PostgreSQL live relay tests");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let backend = PgLiveBackend::new(pool.clone(), LiveHub::new());
+        wait_ready(&backend).await;
+        let mut readiness = backend.subscribe_readiness();
+
+        tokio::time::timeout(Duration::from_secs(2), pool.close())
+            .await
+            .expect("pool closes listener connection");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *readiness.borrow_and_update() {
+                readiness
+                    .changed()
+                    .await
+                    .expect("backend should remain alive");
+            }
+        })
+        .await
+        .expect("listener loss marks backend unavailable");
+        assert!(!backend.is_ready());
+
+        drop(backend);
+        assert!(!*readiness.borrow_and_update());
     }
 }
