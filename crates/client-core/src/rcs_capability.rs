@@ -48,6 +48,12 @@ pub struct RcsEligibilityProjection {
     pub gateway_device_id: DeviceId,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RcsLinkStatusProjection {
+    pub status: RcsLinkStatusEvent,
+    pub current: bool,
+}
+
 pub(crate) fn valid_status(value: &RcsLinkStatusEvent) -> bool {
     value.capability_revision > 0
         && value.capability_revision <= i64::MAX as u64
@@ -141,6 +147,31 @@ pub(crate) fn projection(
     .transpose()
 }
 
+pub(crate) fn status_projection(
+    conn: &Connection,
+    gateway: DeviceId,
+    now_ms: i64,
+) -> Result<Option<RcsLinkStatusProjection>, Error> {
+    let row: Option<(String, bool, bool, bool, i64, u64, u32)> = conn
+        .query_row("SELECT state,availability,health,phone_responsive,observed_at_ms,capability_revision,feature_bits FROM rcs_link_status_projection WHERE gateway_device_id=?", [gateway.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)))
+        .optional()?;
+    row.map(|(state, availability, health, phone_responsive, observed_at_ms, capability_revision, feature_bits)| {
+        Ok(RcsLinkStatusProjection {
+            current: current_gateway(conn, gateway, now_ms)?,
+            status: RcsLinkStatusEvent {
+                gateway_device_id: gateway,
+                state: parse_state(&state)?,
+                availability,
+                health,
+                phone_responsive,
+                observed_at_ms,
+                capability_revision,
+                feature_bits,
+            },
+        })
+    }).transpose()
+}
+
 fn fresh_at(now_ms: i64, observed_at_ms: i64) -> bool {
     now_ms >= observed_at_ms && now_ms - observed_at_ms <= RCS_CAPABILITY_STALE_MS
 }
@@ -167,5 +198,32 @@ fn parse_eligibility(value: &str) -> Result<RcsEligibility, Error> {
         "not_eligible" => Ok(RcsEligibility::NotEligible),
         "unknown" => Ok(RcsEligibility::Unknown),
         _ => Err(Error::Database),
+    }
+}
+
+fn parse_state(value: &str) -> Result<RcsCapabilityState, Error> {
+    match value {
+        "linked" => Ok(RcsCapabilityState::Linked),
+        "unlinked" => Ok(RcsCapabilityState::Unlinked),
+        "needs_relink" => Ok(RcsCapabilityState::NeedsRelink),
+        "signed_out" => Ok(RcsCapabilityState::SignedOut),
+        "unavailable" => Ok(RcsCapabilityState::Unavailable),
+        _ => Err(Error::Database),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn strict_top_level_capability_fields_allow_authenticated_compaction_only() {
+        let valid = json!({"kind":"rcs_link_status", "status": {}, "compaction": {}});
+        assert!(crate::strict_rcs_capability_payload(&valid).is_ok());
+        for forbidden in ["google_id", "phone", "name", "token", "stop_code"] {
+            let mut value = valid.clone();
+            value.as_object_mut().unwrap().insert(forbidden.into(), json!("x"));
+            assert!(crate::strict_rcs_capability_payload(&value).is_err());
+        }
     }
 }

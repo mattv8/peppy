@@ -125,7 +125,7 @@ pub use rcs_native::{
     NativeRcsSimPayload, NativeRcsTargetClass, NativeSettingsCurrentness,
     NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
 };
-pub use rcs_capability::{RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent};
+pub use rcs_capability::{RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent, RcsLinkStatusProjection};
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -1232,6 +1232,15 @@ impl Client {
         eligibility: &[RcsEligibilityProjection],
         now_ms: i64,
     ) -> Result<usize, Error> {
+        if eligibility.len() > RCS_CAPABILITY_PUBLISH_BATCH {
+            return Err(Error::InvalidRequest("RCS capability batch exceeds the maximum"));
+        }
+        if status.observed_at_ms > now_ms {
+            return Err(Error::InvalidRequest("future RCS capability status"));
+        }
+        if eligibility.iter().any(|projection| projection.observed_at_ms > now_ms) {
+            return Err(Error::InvalidRequest("future RCS eligibility projection"));
+        }
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         if status.gateway_device_id != ctx.device_id || !rcs_capability::valid_status(status) {
@@ -1249,7 +1258,7 @@ impl Client {
         )? {
             published += 1;
         }
-        for projection in eligibility.iter().take(RCS_CAPABILITY_PUBLISH_BATCH) {
+        for projection in eligibility {
             if projection.gateway_device_id != ctx.device_id || !rcs_capability::valid_eligibility(projection) {
                 return Err(Error::InvalidRequest("invalid RCS eligibility projection"));
             }
@@ -1271,6 +1280,15 @@ impl Client {
     /// Returns the current content-free capability gate for automatic RCS dispatch.
     pub fn rcs_gateway_supported(&self, gateway_device_id: DeviceId, now_ms: i64) -> Result<bool, Error> {
         rcs_capability::current_gateway(&self.lock()?.conn, gateway_device_id, now_ms)
+    }
+
+    /// Sanitized link status for bindings. `current=false` is unknown for capability consumers.
+    pub fn rcs_link_status(
+        &self,
+        gateway_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<Option<RcsLinkStatusProjection>, Error> {
+        rcs_capability::status_projection(&self.lock()?.conn, gateway_device_id, now_ms)
     }
 
     /// A stale peer projection is intentionally returned as `Unknown`, never as send authority.
@@ -6263,18 +6281,18 @@ END;
 ";
 /// Version 47 -> 48: content-free RCS capability projections and publication cadence.
 const MIGRATION_48: &str = "
-CREATE TABLE IF NOT EXISTS rcs_link_status_projection(
+CREATE TABLE rcs_link_status_projection(
   gateway_device_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('linked','unlinked','needs_relink','signed_out','unavailable')),
   availability INTEGER NOT NULL, health INTEGER NOT NULL, phone_responsive INTEGER NOT NULL,
   observed_at_ms INTEGER NOT NULL, capability_revision INTEGER NOT NULL, feature_bits INTEGER NOT NULL, producer_sequence INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS rcs_link_eligibility_projection(
+CREATE TABLE rcs_link_eligibility_projection(
   gateway_device_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
   eligibility TEXT NOT NULL CHECK(eligibility IN ('eligible','not_eligible','unknown')), feature_bits INTEGER NOT NULL,
   mapping_revision INTEGER NOT NULL, observed_at_ms INTEGER NOT NULL, producer_sequence INTEGER NOT NULL,
   PRIMARY KEY(gateway_device_id,conversation_id)
 );
-CREATE TABLE IF NOT EXISTS rcs_capability_published(
+CREATE TABLE rcs_capability_published(
   identity TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL, published_at_ms INTEGER NOT NULL
 );
 ";
@@ -9189,7 +9207,24 @@ fn parse_authenticated_payload(
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
+    strict_rcs_capability_payload(&value)?;
     Ok((serde_json::from_value(value)?, compaction))
+}
+
+/// Legacy payload variants remain forward-compatible. Only the new content-free RCS variants
+/// reject unexpected top-level fields before their typed nested payload is decoded.
+fn strict_rcs_capability_payload(value: &serde_json::Value) -> Result<(), serde_json::Error> {
+    let Some(object) = value.as_object() else { return Ok(()); };
+    let Some(kind) = object.get("kind").and_then(serde_json::Value::as_str) else { return Ok(()); };
+    let allowed: &[&str] = match kind {
+        "rcs_link_status" => &["kind", "status", "compaction"],
+        "rcs_link_eligibility" => &["kind", "eligibility", "compaction"],
+        _ => return Ok(()),
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, "unknown RCS capability field")));
+    }
+    Ok(())
 }
 
 fn seal_with_store(store: &mut Store) -> Result<(), Error> {

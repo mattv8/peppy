@@ -518,9 +518,11 @@ fn legacy_numeric_sms_and_mms_history_state_normalizes_and_finishes() {
     client
         .advance_mms_backfill_page("gateway", "sim-1", MmsBackfillPhase::History, "4")
         .unwrap();
-    assert!(client
-        .finish_mms_backfill_phase("gateway", "sim-1", MmsBackfillPhase::History, "100", true,)
-        .unwrap());
+    assert!(
+        client
+            .finish_mms_backfill_phase("gateway", "sim-1", MmsBackfillPhase::History, "100", true,)
+            .unwrap()
+    );
 }
 
 #[test]

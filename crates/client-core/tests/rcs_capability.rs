@@ -1,4 +1,30 @@
 use super::common::*;
+use peppy_crypto::{KeyPurpose, derive_purpose_key, derive_root_key, encrypt};
+
+fn sealed(vault: &Vault, producer: DeviceId, sequence: u64, payload: PrivatePayload) -> Envelope {
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let mut envelope = Envelope {
+        protocol_version: 1,
+        envelope_id: EnvelopeId::new(),
+        command_id: None,
+        vault_id: vault.id,
+        producer_device_id: producer,
+        producer_sequence: SourceSequence(sequence),
+        key_epoch: 1,
+        crypto_suite: vault.profile.crypto_suite,
+        profile_fingerprint: vault.profile.fingerprint().unwrap(),
+        purpose: EnvelopePurpose::Event,
+        route: None,
+        compaction: None,
+        origin_tag: None,
+        ciphertext: Vec::new(),
+    };
+    let plain = serde_json::to_vec(&payload).unwrap();
+    let encrypted = encrypt(&key, &envelope.aad_bytes().unwrap(), &plain).unwrap();
+    envelope.ciphertext = [encrypted.nonce.as_slice(), &encrypted.ciphertext].concat();
+    envelope
+}
 
 fn status(gateway_device_id: DeviceId, revision: u64, observed_at_ms: i64) -> RcsLinkStatusEvent {
     RcsLinkStatusEvent {
@@ -54,7 +80,7 @@ fn publisher_is_bounded_current_and_expires_stale_projections() {
 
     assert_eq!(
         client
-            .publish_rcs_capability(&status, &[projection.clone()], 1_000)
+            .publish_rcs_capability(&status, std::slice::from_ref(&projection), 1_000)
             .unwrap(),
         2
     );
@@ -63,7 +89,7 @@ fn publisher_is_bounded_current_and_expires_stale_projections() {
         .unwrap());
     assert_eq!(
         client
-            .publish_rcs_capability(&status, &[projection.clone()], 1_001)
+            .publish_rcs_capability(&status, std::slice::from_ref(&projection), 1_001)
             .unwrap(),
         0
     );
@@ -188,4 +214,120 @@ fn eligibility_requires_a_current_linked_gateway() {
             .eligibility,
         RcsEligibility::Unknown
     );
+}
+
+#[test]
+fn oversized_batch_and_future_local_evidence_leave_no_partial_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-batch", &vault);
+    let client = unlocked(&config, &vault);
+    let rows = (0..RCS_CAPABILITY_PUBLISH_BATCH + 1)
+        .map(|_| eligibility(config.device_id, ConversationId::new(), 1, 1_000))
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        client.publish_rcs_capability(&status(config.device_id, 1, 1_000), &rows, 1_000),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert!(client.pending_outbox().unwrap().is_empty());
+
+    assert!(matches!(
+        client.publish_rcs_capability(&status(config.device_id, 1, 1_001), &[], 1_000),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert!(client.pending_outbox().unwrap().is_empty());
+}
+
+#[test]
+fn status_accessor_preserves_state_but_marks_stale_status_unknown_to_consumers() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-status", &vault);
+    let client = unlocked(&config, &vault);
+    let mut unavailable = status(config.device_id, 1, 1_000);
+    unavailable.state = RcsCapabilityState::Unavailable;
+    unavailable.availability = false;
+    client.publish_rcs_capability(&unavailable, &[], 1_000).unwrap();
+    let view = client.rcs_link_status(config.device_id, 1_001).unwrap().unwrap();
+    assert_eq!(view.status.state, RcsCapabilityState::Unavailable);
+    assert!(!view.current);
+    assert!(!client.rcs_gateway_supported(config.device_id, 1_001).unwrap());
+    assert!(!client
+        .rcs_link_status(config.device_id, 1_000 + RCS_CAPABILITY_STALE_MS + 1)
+        .unwrap()
+        .unwrap()
+        .current);
+}
+
+#[test]
+fn invalid_authenticated_capability_events_quarantine_without_wedging_following_updates() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let target_config = config(&directory, "rcs-capability-replay-target", &vault);
+    let target = unlocked(&target_config, &vault);
+    let producer = DeviceId::new();
+    let mut oversized = status(producer, u64::MAX, 1_000);
+    target
+        .ingest(
+            &sealed(
+                &vault,
+                producer,
+                1,
+                PrivatePayload::RcsLinkStatus { status: oversized.clone() },
+            ),
+            Cursor(1),
+        )
+        .unwrap();
+    oversized.capability_revision = 1;
+    target
+        .ingest(
+            &sealed(
+                &vault,
+                producer,
+                u64::MAX,
+                PrivatePayload::RcsLinkStatus { status: oversized.clone() },
+            ),
+            Cursor(2),
+        )
+        .unwrap();
+    target
+        .ingest(
+            &sealed(
+                &vault,
+                producer,
+                3,
+                PrivatePayload::RcsLinkStatus { status: oversized },
+            ),
+            Cursor(3),
+        )
+        .unwrap();
+    target.apply_pending(10).unwrap();
+    assert!(target.rcs_gateway_supported(producer, 1_001).unwrap());
+}
+
+#[test]
+fn mismatched_authenticated_producer_cannot_claim_a_gateway() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let target = unlocked(&config(&directory, "rcs-capability-source", &vault), &vault);
+    let producer = DeviceId::new();
+    let claimed_gateway = DeviceId::new();
+    target
+        .ingest(
+            &sealed(
+                &vault,
+                producer,
+                1,
+                PrivatePayload::RcsLinkStatus {
+                    status: status(claimed_gateway, 1, 1_000),
+                },
+            ),
+            Cursor(1),
+        )
+        .unwrap();
+    target.apply_pending(10).unwrap();
+    assert!(target
+        .rcs_link_status(claimed_gateway, 1_001)
+        .unwrap()
+        .is_none());
 }
