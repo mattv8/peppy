@@ -147,10 +147,15 @@ internal fun GoogleMessagesLinkPanel(onChanged: () -> Unit) {
                     dismissedSeq = dismissedSeq, onDismissNotice = { dismissedSeq = status?.seq; localNotice = null },
                     onStart = { sheet = "consent" }, onRelink = { sheet = "relink" }, onUnlink = { sheet = "unlink" },
                     onRemove = { sheet = "remove" }, onCheck = {
-                        busy = true
-                        scope.launch {
-                            checkResult = withContext(Dispatchers.IO) { checkNotNull(result as? LinkOpenResult.Open).handle.checkHealth().toInt() }
-                            busy = false; refreshAfterAction()
+                        val handle = (result as? LinkOpenResult.Open)?.handle
+                        if (handle != null) {
+                            busy = true
+                            scope.launch {
+                            try { checkResult = withContext(Dispatchers.IO) { handle.checkHealth().toInt() } }
+                            catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                            catch (_: Exception) { checkResult = -1 }
+                            finally { busy = false; refreshAfterAction() }
+                            }
                         }
                     }, onReconnect = { GoogleMessagesLinkService.start(context); refreshAfterAction() },
                     onBattery = { if (batteryAllowed) openBatterySettings() else sheet = "battery" },
@@ -171,22 +176,33 @@ internal fun GoogleMessagesLinkPanel(onChanged: () -> Unit) {
         "relink" -> ConsentSheet(stringResource(R.string.peppy_google_messages_link_relink_title), stringResource(R.string.peppy_google_messages_link_relink_body) + "\n\n" + stringResource(R.string.peppy_google_messages_link_replaces_browser), "google-messages-link-relink-sheet", { sheet = null }, {
             val handle = (result as? LinkOpenResult.Open)?.handle
             sheet = null
-            if (handle != null && LinkRuntime.pairingInProgress.compareAndSet(false, true)) {
-                LinkRuntime.emoji.value = null
+            if (handle != null && LinkRuntime.beginPairing()) {
                 GoogleMessagesLinkService.start(context)
                 busy = true
                 scope.launch {
                     try { withContext(Dispatchers.IO) { handle.relink() } }
-                    finally { LinkRuntime.pairingInProgress.set(false); busy = false; refreshAfterAction() }
+                    catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                    catch (_: Exception) { localNotice = "relink_failed" }
+                    finally { LinkRuntime.endPairing(); busy = false; refreshAfterAction() }
                 }
             }
         }, stringResource(R.string.peppy_google_messages_link_relink_confirm), showPrivacyPolicy = false)
         "unlink" -> Confirmation("unlink", R.string.peppy_google_messages_link_unlink_title, R.string.peppy_google_messages_link_unlink_body, R.string.peppy_google_messages_link_unlink_confirm, { sheet = null }) {
             val handle = (result as? LinkOpenResult.Open)?.handle ?: return@Confirmation
-            busy = true; scope.launch { try { withContext(Dispatchers.IO) { handle.unlink() } } finally { busy = false; refreshAfterAction() } }
+            busy = true; scope.launch {
+                try { withContext(Dispatchers.IO) { handle.unlink() }; localNotice = "unlinked_done" }
+                catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                catch (_: Exception) { localNotice = "unlink_remote_failed" }
+                finally { busy = false; refreshAfterAction() }
+            }
         }
         "remove", "reset" -> Confirmation(sheet ?: "reset", if (sheet == "remove") R.string.peppy_google_messages_link_remove_title else R.string.peppy_google_messages_link_reset_title, if (sheet == "remove") R.string.peppy_google_messages_link_remove_body else R.string.peppy_google_messages_link_reset_body, if (sheet == "remove") R.string.peppy_google_messages_link_remove_confirm else R.string.peppy_google_messages_link_reset_confirm, { sheet = null }) {
-            busy = true; scope.launch { try { withContext(Dispatchers.IO) { LinkRuntime.resetLocalState(context.applicationContext) }; localNotice = "removed" } finally { busy = false; refreshAfterAction() } }
+            busy = true; scope.launch {
+                try { withContext(Dispatchers.IO) { LinkRuntime.resetLocalState(context.applicationContext) }; localNotice = "removed" }
+                catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                catch (_: Exception) { localNotice = "unknown" }
+                finally { busy = false; refreshAfterAction() }
+            }
         }
         "battery" -> ConsentSheet(stringResource(R.string.peppy_google_messages_link_battery_title), stringResource(R.string.peppy_google_messages_link_battery_sheet_body), "google-messages-link-battery-sheet", { sheet = null }, { sheet = null; openBatterySettings() }, stringResource(R.string.peppy_toggle_android_open_settings), showPrivacyPolicy = false)
     }

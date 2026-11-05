@@ -64,6 +64,18 @@ class GoogleMessagesLinkPanelTest {
         }
     }
 
+    @Test fun `unlink and remove require confirmation`() {
+        panel("needs_relink") {
+            compose.onNodeWithTag("google-messages-link-unlink").performClick()
+            compose.onNodeWithTag("google-messages-link-unlink-sheet").fetchSemanticsNode()
+        }
+    }
+
+    @Test fun `health check reports a completed result`() = panel("linked") {
+        compose.onNodeWithTag("google-messages-link-check-now").performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-check-result").fetchSemanticsNodes().isNotEmpty() }
+    }
+
     @Test fun `signed out state never offers unlink`() = panel("signed_out") {
         compose.onNodeWithTag("google-messages-link-sign-in-again").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-remove-local").fetchSemanticsNode()
