@@ -27,6 +27,8 @@ internal object LinkSignInRuntime {
         true
     }
 
+    fun hasWebAccess(candidate: Lease): Boolean = synchronized(lock) { lease === candidate && candidate.webAccessed }
+
     fun beginCleanup(candidate: Lease): Boolean = synchronized(lock) {
         if (lease !== candidate || !candidate.webAccessed || candidate.cleanupStarted) return false
         candidate.cleanupStarted = true

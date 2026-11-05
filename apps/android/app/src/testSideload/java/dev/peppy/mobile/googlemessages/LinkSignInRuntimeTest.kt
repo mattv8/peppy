@@ -59,12 +59,22 @@ class LinkSignInRuntimeTest {
         assertTrue(LinkSignInRuntime.markWebAccess(first))
         assertTrue(LinkSignInRuntime.beginCleanup(first))
 
+        LinkSignInRuntime.releaseLease(first)
         assertNull(LinkSignInRuntime.acquireLease())
         assertTrue(LinkSignInRuntime.mayRunCleanup(first))
         assertTrue(LinkSignInRuntime.completeCleanup(first, success = true))
 
         val second = requireNotNull(LinkSignInRuntime.acquireLease())
         assertFalse(LinkSignInRuntime.mayRunCleanup(first))
+        LinkSignInRuntime.releaseLease(second)
+    }
+
+    @Test fun `untouched startup lease releases immediately`() {
+        val first = requireNotNull(LinkSignInRuntime.acquireLease())
+
+        LinkSignInRuntime.releaseLease(first)
+
+        val second = requireNotNull(LinkSignInRuntime.acquireLease())
         LinkSignInRuntime.releaseLease(second)
     }
 

@@ -228,7 +228,18 @@ class LinkSignInActivity : AppCompatActivity() {
 
     private fun wipe(after: () -> Unit) {
         val owner = signInLease ?: return finishWith(OUTCOME_CANCELLED)
-        if (!startupReady || !LinkSignInRuntime.beginCleanup(owner)) return
+        if (!startupReady || !LinkSignInRuntime.ownsLease(owner)) {
+            releaseLease()
+            if (!destroyed) after()
+            return
+        }
+        if (!LinkSignInRuntime.beginCleanup(owner)) {
+            if (!LinkSignInRuntime.hasWebAccess(owner)) {
+                releaseLease()
+                if (!destroyed) after()
+            }
+            return
+        }
         if (!teardownStarted.compareAndSet(false, true)) return
         CookieManager.getInstance().removeAllCookies {
             if (!LinkSignInRuntime.mayRunCleanup(owner)) return@removeAllCookies
