@@ -226,8 +226,8 @@ select:focus-visible {
   align-items: center;
   margin-right: 4px;
 }
-#titlebar-view-switch [data-variant="icons"] [role="tab"]:hover { background: var(--peppy-surface-hover); }
-#titlebar-view-switch [data-variant="icons"] [role="tab"][aria-selected="true"] { background: var(--peppy-surface-active); }
+#titlebar-view-switch [role="tab"]:hover { background: var(--peppy-surface-hover); }
+#titlebar-view-switch [role="tab"][aria-selected="true"] { background: var(--peppy-surface-active); }
 .titlebar-status + .window-controls-windows {
   margin-left: 4px;
 }
@@ -542,12 +542,15 @@ select:focus-visible {
 .conversation-select { display: flex; width: 100%; min-width: 0; height: 100%; align-items: center; gap: 8px; padding: 8px; border: 0; background: transparent; color: inherit; text-align: left; }
 [data-conversation-actions] { position: absolute; inset-block: 0; right: 6px; display: flex; align-items: center; gap: 2px; background: var(--conversation-row-surface); opacity: 0; pointer-events: none; transition: opacity var(--peppy-duration-fast) var(--peppy-ease-out); }
 [data-conversation-actions]::before { position: absolute; top: 0; right: 100%; width: 24px; height: 100%; background: linear-gradient(to right, transparent, var(--conversation-row-surface)); content: ""; opacity: 0; pointer-events: none; transition: opacity var(--peppy-duration-fast) var(--peppy-ease-out); }
-.conversation-pin, .conversation-popout, .conversation-delete { width: 32px; height: 32px; flex: 0 0 32px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--peppy-text-secondary); pointer-events: none; }
-.conversation-row:hover [data-conversation-actions], .conversation-row:has(:focus-visible) [data-conversation-actions], .conversation-row:has(.conversation-pin.pending) [data-conversation-actions], .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions], .conversation-row:has(.conversation-delete:disabled) [data-conversation-actions] { opacity: 1; }
-.conversation-row:hover [data-conversation-actions] > button, .conversation-row:has(:focus-visible) [data-conversation-actions] > button, .conversation-row:has(.conversation-pin.pending) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete:disabled) [data-conversation-actions] > button { pointer-events: auto; }
-.conversation-row:hover [data-conversation-actions]::before, .conversation-row:has(:focus-visible) [data-conversation-actions]::before, .conversation-row:has(.conversation-pin.pending) [data-conversation-actions]::before, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions]::before { opacity: 1; }
-.conversation-select:focus-visible, .conversation-pin:focus-visible, .conversation-popout:focus-visible, .conversation-delete:focus-visible { outline-offset: -2px; }
-.conversation-pin:hover, .conversation-popout:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+.conversation-pin, .conversation-popout, .conversation-folder-action, .conversation-delete { width: 28px; height: 28px; flex: 0 0 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--peppy-text-secondary); pointer-events: none; }
+.conversation-delete { width: 32px; height: 32px; flex-basis: 32px; }
+.conversation-row:hover [data-conversation-actions], .conversation-row:has(:focus-visible) [data-conversation-actions], .conversation-row:has(.conversation-pin.pending) [data-conversation-actions], .conversation-row:has(.conversation-folder-action.pending) [data-conversation-actions], .conversation-row:has(.conversation-folder-action[aria-expanded="true"]) [data-conversation-actions], .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions], .conversation-row:has(.conversation-delete:disabled) [data-conversation-actions] { opacity: 1; }
+.conversation-row:hover [data-conversation-actions] > button, .conversation-row:has(:focus-visible) [data-conversation-actions] > button, .conversation-row:has(.conversation-pin.pending) [data-conversation-actions] > button, .conversation-row:has(.conversation-folder-action.pending) [data-conversation-actions] > button, .conversation-row:has(.conversation-folder-action[aria-expanded="true"]) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete:disabled) [data-conversation-actions] > button { pointer-events: auto; }
+.conversation-row:hover [data-conversation-actions]::before, .conversation-row:has(:focus-visible) [data-conversation-actions]::before, .conversation-row:has(.conversation-pin.pending) [data-conversation-actions]::before, .conversation-row:has(.conversation-folder-action.pending) [data-conversation-actions]::before, .conversation-row:has(.conversation-folder-action[aria-expanded="true"]) [data-conversation-actions]::before, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions]::before { opacity: 1; }
+.conversation-select:focus-visible, .conversation-pin:focus-visible, .conversation-popout:focus-visible, .conversation-folder-action:focus-visible, .conversation-delete:focus-visible { outline-offset: -2px; }
+.conversation-pin:hover, .conversation-popout:hover, .conversation-folder-action:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+.conversation-folder-action[aria-expanded="true"] { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+.conversation-pin:disabled:not(.pending), .conversation-folder-action:disabled:not(.pending) { opacity: .4; }
 .conversation-delete { color: var(--peppy-text-secondary); }
 .conversation-delete.confirming { background: var(--peppy-danger-hover); color: var(--peppy-danger-text); }
 .conversation-delete:hover { background: var(--peppy-danger-hover); color: var(--peppy-danger-text); }
@@ -562,11 +565,16 @@ select:focus-visible {
   [data-conversation-actions] { position: static; flex: none; background: transparent; opacity: 1; }
   [data-conversation-actions]::before { display: none; }
   [data-conversation-actions] > button { pointer-events: auto; }
-  [data-conversation-actions] > button { width: 44px; height: 44px; flex-basis: 44px; }
+  [data-conversation-actions] > button { width: 36px; height: 36px; flex-basis: 36px; }
+  @media (max-width: 640px) {
+    [data-conversation-actions] > button { width: 44px; height: 44px; flex-basis: 44px; }
+  }
 }
 .conversation-row:hover,
 .conversation-row.selected,
 .conversation-row:has(:focus-visible),
+.conversation-row:has(.conversation-folder-action.pending),
+.conversation-row:has(.conversation-folder-action[aria-expanded="true"]),
 .conversation-row:has(.conversation-delete.confirming),
 .conversation-row:has(.conversation-delete:disabled) {
   --conversation-row-surface: var(--peppy-surface-active);
@@ -1216,7 +1224,8 @@ select:focus-visible {
   #omni-search-clear:focus-visible { outline-color: Highlight; }
   [data-conversation-actions] { background: Canvas; }
   [data-conversation-actions]::before { background: Canvas; }
-  .conversation-pin, .conversation-popout, .conversation-delete { color: ButtonText; }
+  .conversation-pin, .conversation-popout, .conversation-folder-action, .conversation-delete { color: ButtonText; }
+  .conversation-folder-action[aria-expanded="true"], .conversation-folder-action.pending { outline: 1px solid ButtonText; outline-offset: -1px; }
   .conversation-delete.confirming { background: Highlight; color: HighlightText; }
   .attachment-storage-info-button:focus-visible, .attachment-storage-learn-more:focus-visible, .link-button:focus-visible, #billing-elsewhere-manage:focus-visible, #attachment-storage-addon-manage:focus-visible, #attachment-storage-addon-retry:focus-visible, #hosted-store-retry:focus-visible, #hosted-restore-button:focus-visible, #hosted-plan-options .primary-button:focus-visible { outline-color: Highlight; }
   #billing-elsewhere-notice, #attachment-storage-addons, #hosted-store-plan-options, #attachment-storage-addon-options > li, #hosted-plan-options > li, #attachment-storage-addon-skeleton { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; }

@@ -451,6 +451,7 @@ fn history_plan_descends_and_gate_is_one_way() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "client", &vault), &vault);
+    catch_up_initial_replay(&client, 0);
 
     let plans = client
         .plan_sms_scans("install-1", "provider", "50")
@@ -484,6 +485,7 @@ fn history_plan_descends_and_gate_is_one_way() {
     assert_eq!(plans[1].checkpoint.as_deref(), Some("40"));
 
     let timeout_client = unlocked(&config(&dir, "timeout", &vault), &vault);
+    catch_up_initial_replay(&timeout_client, 0);
     assert!(!timeout_client.observe_history_import_gate_at(1).unwrap());
     assert!(
         timeout_client
@@ -492,6 +494,7 @@ fn history_plan_descends_and_gate_is_one_way() {
     );
 
     let rollback_client = unlocked(&config(&dir, "rollback", &vault), &vault);
+    catch_up_initial_replay(&rollback_client, 0);
     assert!(
         !rollback_client
             .observe_history_import_gate_at(1_000_000)
@@ -515,6 +518,7 @@ fn incomplete_history_fences_reconciliation_above_its_frozen_bound() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "client", &vault), &vault);
+    catch_up_initial_replay(&client, 0);
     client
         .plan_sms_scans("install-1", "provider", "100")
         .unwrap();
@@ -588,6 +592,7 @@ fn outstanding_event_outbox_pauses_only_imported_history() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "client", &vault), &vault);
+    catch_up_initial_replay(&client, 0);
     client.open_history_import_gate("contacts_settled").unwrap();
     client
         .plan_sms_scans("install-1", "provider", "500")

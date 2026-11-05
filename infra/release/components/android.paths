@@ -17,4 +17,6 @@ vendor/phonenumber
 infra/build/validate-firebase-app-config.mjs
 infra/release/sign-android-artifacts.sh
 infra/release/verify-android-artifacts.sh
+infra/release/check-elf-alignment.py
+infra/release/verify-android-distribution.sh
 .github/workflows/build-artifacts.yml

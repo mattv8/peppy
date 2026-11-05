@@ -4,17 +4,18 @@
 use peppy_client_core::{
     AttachmentInfo, AttachmentRetentionClass, AttachmentRetentionState, AttachmentState,
     AttachmentUseKind, AttachmentUseOperationKind, AttachmentUseResponse, AttachmentUseState,
-    Captured, CipherObject, Client, ClientConfig, ComposeDraftUpdate, DatabaseKey, DeviceId,
-    Error as CoreError, GatewayHostFacts, GatewayMmsCleanup, GatewayPlatform, GatewaySettings,
-    HistoryImportConditions, IncomingSms, KeyProfile, MAX_SEAL_BATCH, Message, MessageId,
-    MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause, MmsBackfillPhase,
-    MmsBackfillRecheck, MmsBackfillRecheckConditions, MmsBackfillRecheckOutcome,
+    Captured, CipherObject, Client, ClientConfig, ComposeDraftUpdate, ContactBookSelection,
+    DatabaseKey, DeviceId, Error as CoreError, GatewayHostFacts, GatewayMmsCleanup,
+    GatewayPlatform, GatewaySettings, HistoryImportConditions, IncomingSms, KeyProfile,
+    MAX_SEAL_BATCH, Message, MessageId, MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause,
+    MmsBackfillPhase, MmsBackfillRecheck, MmsBackfillRecheckConditions, MmsBackfillRecheckOutcome,
     MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome, MmsLegacyBackfillState,
     MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource, NativeKeyCache, NotificationCapture,
     NotificationCaptureOutcome, NotificationTarget, PermitBlock, PermitDecision,
     PhoneReadCandidate, PhoneReadTransport, ProviderRowRef, QuarantineReason, ReceivedCommand,
-    SendResult, SendState, SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus,
-    SmsReconciliationPlan, SmsScanPlan, SmsSource, Transport, VaultCheckHeader, VaultId,
+    SendResult, SendState, SenderUnblockOutcome, SmsAcquisitionInput, SmsAcquisitionState,
+    SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource, Transport, VaultCheckHeader,
+    VaultId,
 };
 use std::{
     fmt,
@@ -67,6 +68,19 @@ pub struct NativeGatewaySettings {
 pub enum NativeGatewayPlatform {
     Android,
     Ios,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeContactBookSelection {
+    Inherited {
+        book_id: String,
+        retire_book_ids: Vec<String>,
+    },
+    Owned {
+        book_id: String,
+    },
+    Wait,
+    Mint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -274,6 +288,7 @@ pub enum NativeMmsBackfillPause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum NativeMmsBackfillPhase {
     Live,
+    ProviderRescan,
     History,
     Recheck,
 }
@@ -321,6 +336,7 @@ pub struct NativeMmsBackfillScanPlan {
     pub source_generation: String,
     pub subscription_id: String,
     pub cursor: Option<String>,
+    pub provider_rescan_token: Option<String>,
     pub descending: bool,
     pub history_floor: Option<String>,
     pub history_upper_bound: Option<String>,
@@ -483,6 +499,20 @@ pub struct NativeConversation {
     pub conversation_id: String,
     pub unread_count: u64,
     pub pinned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSenderUnblockWork {
+    pub request_id: String,
+    pub numbers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeSenderUnblockOutcome {
+    Unblocked,
+    NotBlocked,
+    NotAllowed,
+    Failed,
 }
 
 /// Sanitized message presentation data. Database keys, passphrases, purpose keys,
@@ -1482,6 +1512,7 @@ fn mms_backfill_pause_view(value: MmsBackfillPause) -> NativeMmsBackfillPause {
 fn mms_backfill_phase(value: NativeMmsBackfillPhase) -> MmsBackfillPhase {
     match value {
         NativeMmsBackfillPhase::Live => MmsBackfillPhase::Live,
+        NativeMmsBackfillPhase::ProviderRescan => MmsBackfillPhase::ProviderRescan,
         NativeMmsBackfillPhase::History => MmsBackfillPhase::History,
         NativeMmsBackfillPhase::Recheck => MmsBackfillPhase::Recheck,
     }
@@ -1489,6 +1520,7 @@ fn mms_backfill_phase(value: NativeMmsBackfillPhase) -> MmsBackfillPhase {
 fn mms_backfill_phase_view(value: MmsBackfillPhase) -> NativeMmsBackfillPhase {
     match value {
         MmsBackfillPhase::Live => NativeMmsBackfillPhase::Live,
+        MmsBackfillPhase::ProviderRescan => NativeMmsBackfillPhase::ProviderRescan,
         MmsBackfillPhase::History => NativeMmsBackfillPhase::History,
         MmsBackfillPhase::Recheck => NativeMmsBackfillPhase::Recheck,
     }
@@ -1551,6 +1583,7 @@ fn mms_backfill_scan_plan_view(value: MmsBackfillScanPlan) -> NativeMmsBackfillS
         source_generation: value.source_generation,
         subscription_id: value.subscription_id,
         cursor: value.cursor,
+        provider_rescan_token: value.provider_rescan_token,
         descending: value.descending,
         history_floor: value.history_floor,
         history_upper_bound: value.history_upper_bound,
@@ -2386,6 +2419,36 @@ impl NativeClient {
         })
         .map(|plans| plans.into_iter().map(mms_backfill_scan_plan_view).collect())
     }
+    pub fn request_mms_provider_rescan(
+        &self,
+        generation: String,
+        scope: String,
+        observed_max_id: String,
+    ) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.request_mms_provider_rescan(&generation, &scope, &observed_max_id)
+        })
+    }
+    pub fn commit_mms_provider_rescan_page(
+        &self,
+        generation: String,
+        scope: String,
+        token: String,
+        expected_cursor: Option<String>,
+        last_durable_id: Option<String>,
+        exhausted: bool,
+    ) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.commit_mms_provider_rescan_page(
+                &generation,
+                &scope,
+                &token,
+                expected_cursor.as_deref(),
+                last_durable_id.as_deref(),
+                exhausted,
+            )
+        })
+    }
     pub fn advance_mms_backfill_page(
         &self,
         generation: String,
@@ -2562,6 +2625,56 @@ impl NativeClient {
         let cursor = parse_cursor(high_water_cursor)?;
         with_client(&self.client, |client| {
             client.record_recovery_snapshot_capacity(cursor, record_count)
+        })
+    }
+
+    /// Records the first server replay watermark observed by the host.
+    pub fn observe_server_high_water(
+        &self,
+        high_water_cursor: String,
+    ) -> Result<(), MobileBindingsError> {
+        let cursor = parse_cursor(high_water_cursor)?;
+        with_client(&self.client, |client| {
+            client.observe_server_high_water(cursor)
+        })
+    }
+
+    pub fn initial_replay_caught_up(&self) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, Client::initial_replay_caught_up)
+    }
+
+    /// Call after unlock and before choosing or minting a native contact book.
+    pub fn register_device_hint(
+        &self,
+        platform: String,
+        hint: Vec<u8>,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.register_device_hint(&platform, &hint)
+        })
+    }
+
+    /// Call when the host cannot read or create its reinstall-stable hint.
+    pub fn register_no_device_hint(&self) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, Client::register_no_device_hint)
+    }
+
+    pub fn contact_book_selection(
+        &self,
+    ) -> Result<NativeContactBookSelection, MobileBindingsError> {
+        with_client(&self.client, Client::contact_book_selection).map(|selection| match selection {
+            ContactBookSelection::Inherited {
+                book_id,
+                retire_book_ids,
+            } => NativeContactBookSelection::Inherited {
+                book_id,
+                retire_book_ids,
+            },
+            ContactBookSelection::Owned { book_id } => {
+                NativeContactBookSelection::Owned { book_id }
+            }
+            ContactBookSelection::Wait => NativeContactBookSelection::Wait,
+            ContactBookSelection::Mint => NativeContactBookSelection::Mint,
         })
     }
     /// Returns the core-filtered upload set for this Android gateway pass.
@@ -3007,6 +3120,75 @@ impl NativeClient {
         })
     }
 
+    pub fn publish_sender_blocklist(
+        &self,
+        numbers: Option<Vec<String>>,
+        can_unblock: bool,
+    ) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.publish_sender_blocklist(numbers, can_unblock)
+        })
+    }
+
+    pub fn reconcile_provider_archive(
+        &self,
+        archived_thread_ids: Vec<String>,
+    ) -> Result<u32, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.reconcile_provider_archive(archived_thread_ids)
+        })
+    }
+
+    pub fn pending_sender_unblocks(
+        &self,
+    ) -> Result<Vec<NativeSenderUnblockWork>, MobileBindingsError> {
+        with_client(&self.client, Client::pending_sender_unblocks).map(|items| {
+            items
+                .into_iter()
+                .map(|item| NativeSenderUnblockWork {
+                    request_id: item.request_id,
+                    numbers: item.numbers,
+                })
+                .collect()
+        })
+    }
+
+    pub fn begin_sender_unblock(&self, request_id: String) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.begin_sender_unblock(&request_id)
+        })
+    }
+
+    pub fn interrupted_sender_unblocks(
+        &self,
+    ) -> Result<Vec<NativeSenderUnblockWork>, MobileBindingsError> {
+        with_client(&self.client, Client::interrupted_sender_unblocks).map(|items| {
+            items
+                .into_iter()
+                .map(|item| NativeSenderUnblockWork {
+                    request_id: item.request_id,
+                    numbers: item.numbers,
+                })
+                .collect()
+        })
+    }
+
+    pub fn complete_sender_unblock(
+        &self,
+        request_id: String,
+        outcome: NativeSenderUnblockOutcome,
+    ) -> Result<(), MobileBindingsError> {
+        let outcome = match outcome {
+            NativeSenderUnblockOutcome::Unblocked => SenderUnblockOutcome::Unblocked,
+            NativeSenderUnblockOutcome::NotBlocked => SenderUnblockOutcome::NotBlocked,
+            NativeSenderUnblockOutcome::NotAllowed => SenderUnblockOutcome::NotAllowed,
+            NativeSenderUnblockOutcome::Failed => SenderUnblockOutcome::Failed,
+        };
+        with_client(&self.client, |client| {
+            client.complete_sender_unblock(&request_id, outcome)
+        })
+    }
+
     pub fn set_conversation_pinned(
         &self,
         conversation_id: String,
@@ -3172,6 +3354,15 @@ impl NativeClient {
     ) -> Result<(), MobileBindingsError> {
         with_client(&self.client, |client| {
             client.set_server_compaction_supported(supported)
+        })
+    }
+
+    pub fn set_server_origin_tags_supported(
+        &self,
+        supported: bool,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_server_origin_tags_supported(supported)
         })
     }
 
@@ -3936,6 +4127,44 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sender_blocklist_gateway_methods_forward_to_core() {
+        let path = TempDatabase::new(format!(
+            "peppy-mobile-sender-blocklist-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let client = open_native_client(NativeOpenConfig {
+            database_path: path.to_string_lossy().into_owned(),
+            vault_id,
+            device_id: uuid::Uuid::new_v4().to_string(),
+            database_key: vec![7; 32],
+        })
+        .unwrap();
+        client
+            .unlock(
+                material.profile_json,
+                material.header_json,
+                "test passphrase".into(),
+            )
+            .unwrap();
+
+        assert!(
+            client
+                .publish_sender_blocklist(Some(vec!["+15555550100".into()]), true)
+                .unwrap()
+        );
+        assert!(
+            !client
+                .publish_sender_blocklist(Some(vec!["+15555550100".into()]), true)
+                .unwrap()
+        );
+        assert_eq!(client.reconcile_provider_archive(Vec::new()).unwrap(), 0);
+        assert!(client.pending_sender_unblocks().unwrap().is_empty());
+        assert!(client.interrupted_sender_unblocks().unwrap().is_empty());
     }
 
     #[test]

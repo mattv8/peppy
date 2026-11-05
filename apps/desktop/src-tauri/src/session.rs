@@ -14,8 +14,8 @@ use crate::{
     sync::DownloadRetryState,
 };
 use peppy_client_core::{
-    AttachmentId, AttachmentInfo, Client, ClientConfig, ConversationId, Cursor, DatabaseKey,
-    DeviceId, DraftId, MediaCursor, MediaMetadata, Message, MessageId, NativeKeyCache,
+    AttachmentId, AttachmentInfo, Client, ClientConfig, ConversationFolder, ConversationId, Cursor,
+    DatabaseKey, DeviceId, DraftId, MediaCursor, MediaMetadata, Message, MessageId, NativeKeyCache,
     ReplayProgress, VaultId,
 };
 use peppy_desktop_api::compose::{self, ComposeError};
@@ -1566,6 +1566,10 @@ impl Session {
                 recipientless_draft: false,
                 draft_only,
                 pinned: conversation.pinned,
+                folder: conversation.folder,
+                folder_reason: conversation.folder_reason,
+                unblock: conversation.unblock,
+                can_unblock: conversation.can_unblock,
             });
         }
         let listed: HashSet<ConversationId> =
@@ -1593,6 +1597,10 @@ impl Session {
                 recipientless_draft: draft.recipients.is_empty(),
                 draft_only: true,
                 pinned: false,
+                folder: ConversationFolder::Inbox,
+                folder_reason: None,
+                unblock: None,
+                can_unblock: false,
             });
         }
         let draft = active

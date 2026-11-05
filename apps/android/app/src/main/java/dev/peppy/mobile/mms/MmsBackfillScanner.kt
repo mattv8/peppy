@@ -9,7 +9,7 @@ import dev.peppy.mobile.gateway.MessageHistoryRequestCoordinator
 import dev.peppy.mobile.gateway.MmsHistoryCaptureAdmission
 
 
-internal enum class MmsBackfillPhase { LIVE, HISTORY, RECHECK }
+internal enum class MmsBackfillPhase { LIVE, PROVIDER_RESCAN, HISTORY, RECHECK }
 internal enum class MmsBackfillRecheckState { PENDING, BLOCKED, UNAVAILABLE, COMPLETE }
 internal enum class MmsBackfillRecheckOutcome { PROGRESS, VERIFIED, UNCHANGED_UNAVAILABLE, UNCHANGED_PART_UNAVAILABLE, TRANSIENT_FAILURE, PROVIDER_CHANGED, AWAITING_PROVIDER }
 internal data class MmsBackfillRecheckConditions(
@@ -34,6 +34,7 @@ internal data class MmsBackfillScanPlan(
     val budget: Int,
     val descending: Boolean = false,
     val historyFloor: String? = null,
+    val providerRescanToken: String? = null,
 )
 
 internal data class MmsBackfillRecheckRequest(
@@ -49,6 +50,7 @@ internal data class MmsBackfillPageResult(
     val more: Boolean,
     val observations: Int = 0,
     val reason: String? = null,
+    val runnable: Boolean = true,
 )
 
 internal interface MmsBackfillCore {
@@ -56,6 +58,14 @@ internal interface MmsBackfillCore {
     fun plans(generation: String, scope: String, observedMaxId: String): List<MmsBackfillScanPlan>
     fun advance(generation: String, scope: String, phase: MmsBackfillPhase, providerId: String)
     fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean): Boolean
+    fun commitProviderRescanPage(
+        generation: String,
+        scope: String,
+        token: String,
+        expectedCursor: String?,
+        lastDurableId: String?,
+        exhausted: Boolean,
+    ): Boolean
     fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions): MmsBackfillRecheck
     fun recordRecheckOutcome(acquisitionId: String, nowMs: Long, outcome: MmsBackfillRecheckOutcome, conditions: MmsBackfillRecheckConditions) = Unit
 }
@@ -75,6 +85,8 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
         scanPage: (MmsBackfillScanPlan) -> MmsBackfillPageResult,
         recheck: (MmsBackfillRecheckRequest) -> MmsBackfillRecheckOutcome?,
         historyAdmission: MmsHistoryCaptureAdmission? = null,
+        canRunPlan: (MmsBackfillScanPlan) -> Boolean = { true },
+        canCommitProviderRescan: () -> Boolean = { true },
     ): Boolean {
         captureMmsStage(MmsDiagnosticStage.MIGRATE) { core.migrate(generation, scope, legacy) }
         var more = false
@@ -85,6 +97,7 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
             SyncTraceField.COUNT to plans.size.toLong(),
         )
         for (plan in plans) {
+            if (!canRunPlan(plan)) continue
             if (plan.paused) {
                 if (plan.phase == MmsBackfillPhase.HISTORY) {
                     historyAdmission.beginSafely()?.let { historyAdmission?.finish(it, 0, exhausted = false, reason = "capacity") }
@@ -136,8 +149,30 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
                 admission?.let { historyAdmission.finishSafely(it, 0, exhausted = false, reason = "provider_error") }
                 throw error
             }
+            if (!result.runnable) continue
             try {
-                result.lastDurableId?.let { core.advance(generation, scope, plan.phase, it) }
+                if (plan.phase == MmsBackfillPhase.PROVIDER_RESCAN) {
+                    if (!canCommitProviderRescan()) continue
+                    if (result.lastDurableId == null && !result.exhausted) {
+                        more = more || result.more
+                        continue
+                    }
+                    val token = requireNotNull(plan.providerRescanToken) { "provider rescan plan missing token" }
+                    if (!core.commitProviderRescanPage(
+                            generation,
+                            scope,
+                            token,
+                            plan.cursor,
+                            result.lastDurableId,
+                            result.exhausted,
+                        )
+                    ) {
+                        more = true
+                        continue
+                    }
+                } else {
+                    result.lastDurableId?.let { core.advance(generation, scope, plan.phase, it) }
+                }
                 if (plan.phase == MmsBackfillPhase.HISTORY) {
                     val bound = requireNotNull(plan.historyUpperBound) { "history plan missing frozen bound" }
                     core.finish(generation, scope, plan.phase, bound, result.exhausted)

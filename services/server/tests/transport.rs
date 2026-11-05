@@ -408,6 +408,11 @@ fn set_fingerprint(mut envelope: Value, fingerprint: &str) -> Value {
     envelope
 }
 
+fn with_origin_tag(mut envelope: Value, tag: [u8; 32]) -> Value {
+    envelope["origin_tag"] = json!(base64::engine::general_purpose::STANDARD.encode(tag));
+    envelope
+}
+
 #[derive(Clone)]
 struct FakeRelay {
     status: Arc<AtomicU16>,
@@ -1510,6 +1515,124 @@ async fn exact_retry_returns_cursor_and_changed_identity_or_sequence_conflicts()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn origin_tags_deduplicate_across_producers_and_preserve_existing_retry_behavior() {
+    let server = TestServer::start().await;
+    let replacement = server.provision_device("device").await;
+    let tag = [7; 32];
+    let first = with_origin_tag(
+        set_fingerprint(
+            event(server.vault, server.owner_device, 1, Uuid::new_v4(), 1),
+            &server.fingerprint,
+        ),
+        tag,
+    );
+    let (status, accepted) = server.post(&server.owner_token, "/v1/events", &first).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted, json!({"cursor":"1","duplicate":false}));
+
+    let duplicate = with_origin_tag(
+        set_fingerprint(
+            event(server.vault, replacement.id, 1, Uuid::new_v4(), 2),
+            &server.fingerprint,
+        ),
+        tag,
+    );
+    let (status, duplicate) = server
+        .post(&replacement.token, "/v1/events", &duplicate)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{duplicate}");
+    assert_eq!(
+        duplicate,
+        json!({"cursor":"1","duplicate":true,"origin_duplicate":true})
+    );
+    let event_count: i64 = sqlx::query_scalar("SELECT count(*) FROM event_log WHERE vault_id=$1")
+        .bind(server.vault)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(event_count, 1);
+
+    let (status, retry) = server.post(&server.owner_token, "/v1/events", &first).await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(retry, json!({"cursor":"1","duplicate":true}));
+
+    let untagged = set_fingerprint(
+        event(server.vault, replacement.id, 2, Uuid::new_v4(), 3),
+        &server.fingerprint,
+    );
+    let (status, untagged) = server
+        .post(&replacement.token, "/v1/events", &untagged)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{untagged}");
+    assert_eq!(untagged, json!({"cursor":"2","duplicate":false}));
+
+    let other_vault = Uuid::new_v4();
+    let (profile, fingerprint) = profile(other_vault, 1);
+    let other_owner = create_owner(&server.pool, profile, vec![1, 2, 3], fingerprint.clone(), 1)
+        .await
+        .unwrap();
+    let other = with_origin_tag(
+        set_fingerprint(
+            event(other_vault, other_owner.device_id, 1, Uuid::new_v4(), 4),
+            &fingerprint,
+        ),
+        tag,
+    );
+    let (status, other) = server
+        .post(&other_owner.device_token, "/v1/events", &other)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(other, json!({"cursor":"1","duplicate":false}));
+
+    let compacted_tag = [8; 32];
+    sqlx::query("INSERT INTO compacted_records(vault_id,producer_device_id,producer_sequence,envelope_id,command_id,cipher_digest,original_cursor,origin_tag) VALUES($1,$2,9,$3,NULL,$4,77,$5)")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .bind(Uuid::new_v4())
+        .bind(vec![9_u8; 32])
+        .bind(compacted_tag.to_vec())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let compacted_duplicate = with_origin_tag(
+        set_fingerprint(
+            event(server.vault, replacement.id, 3, Uuid::new_v4(), 5),
+            &server.fingerprint,
+        ),
+        compacted_tag,
+    );
+    let (status, compacted_duplicate) = server
+        .post(&replacement.token, "/v1/events", &compacted_duplicate)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{compacted_duplicate}");
+    assert_eq!(
+        compacted_duplicate,
+        json!({"cursor":"77","duplicate":true,"origin_duplicate":true})
+    );
+
+    let tagged_command = with_origin_tag(
+        set_fingerprint(
+            command(
+                server.vault,
+                server.owner_device,
+                2,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                replacement.id,
+            ),
+            &server.fingerprint,
+        ),
+        [9; 32],
+    );
+    let (status, rejected) = server
+        .post(&server.owner_token, "/v1/commands", &tagged_command)
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert_eq!(rejected["code"], "invalid_envelope");
     server.shutdown().await;
 }
 

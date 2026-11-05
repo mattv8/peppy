@@ -679,6 +679,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func beginSendAttempt(commandId: String) throws  -> NativePermit
     
+    func beginSenderUnblock(requestId: String) throws  -> Bool
+    
     func beginSmsProviderAcquisition(input: NativeSmsProviderAcquisitionInput) throws  -> NativeSmsAcquisition
     
     func beginSnapshot(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose) throws  -> NativeSnapshotProgress
@@ -709,6 +711,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func cleanupUploadedGatewayMmsCiphertext(limit: UInt32) throws  -> NativeGatewayMmsCleanup
     
+    func commitMmsProviderRescanPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool) throws  -> Bool
+    
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
@@ -719,6 +723,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func completeNotificationDismissal(id: String) throws 
     
     func completePhoneReadEffects(messageIds: [String]) throws 
+    
+    func completeSenderUnblock(requestId: String, outcome: NativeSenderUnblockOutcome) throws 
     
     func completeSmsAcquisition(id: String) throws  -> NativeCaptured
     
@@ -733,6 +739,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func contactApplyEvidenceJson(inputJson: String) throws  -> String
     
     func contactApprovalJson(input: String) throws  -> String
+    
+    func contactBookSelection() throws  -> NativeContactBookSelection
     
     func contactBookView(inputJson: String) throws  -> String
     
@@ -830,7 +838,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func ingestRaw(envelopeJson: Data, cursor: String) throws  -> NativeIngestResult
     
+    func initialReplayCaughtUp() throws  -> Bool
+    
     func installDownloadedAttachment(attachmentId: String, downloadedPath: String) throws 
+    
+    func interruptedSenderUnblocks() throws  -> [NativeSenderUnblockWork]
     
     func invalidateAttachmentRetentionReconciliation() throws 
     
@@ -887,6 +899,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func observeContactScan(inputJson: String) throws  -> String
     
+    /**
+     * Records the first server replay watermark observed by the host.
+     */
+    func observeServerHighWater(highWaterCursor: String) throws 
+    
     func openHistoryImportGate(reason: String) throws  -> Bool
     
     func openNativePlaintextFile(attachmentId: String) throws  -> NativePlaintextHandle
@@ -938,6 +955,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func pendingPhoneReadEffects(nowMs: Int64, limit: UInt32) throws  -> [NativePhoneReadEffect]
     
+    func pendingSenderUnblocks() throws  -> [NativeSenderUnblockWork]
+    
     func pendingUploads() throws  -> [NativeCipherObject]
     
     func phoneReadCandidates(transport: NativePhoneReadTransport, sourceGeneration: String, afterOrder: Int64, limit: UInt32) throws  -> [NativePhoneReadCandidate]
@@ -970,9 +989,13 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFacts) throws  -> String
     
+    func publishSenderBlocklist(numbers: [String]?, canUnblock: Bool) throws  -> Bool
+    
     func receiveCursor() throws  -> String
     
     func reconcileContactApply(inputJson: String) throws  -> String
+    
+    func reconcileProviderArchive(archivedThreadIds: [String]) throws  -> UInt32
     
     func recordGatewayMediaFailure(attachmentId: String, reason: String) throws  -> Bool
     
@@ -981,6 +1004,16 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: UInt64) throws 
     
     func recordSendResult(commandId: String, result: NativeSendResult) throws  -> String
+    
+    /**
+     * Call after unlock and before choosing or minting a native contact book.
+     */
+    func registerDeviceHint(platform: String, hint: Data) throws 
+    
+    /**
+     * Call when the host cannot read or create its reinstall-stable hint.
+     */
+    func registerNoDeviceHint() throws 
     
     func removeNotification(notificationKey: String, instance: String) throws 
     
@@ -1005,6 +1038,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func requestContactRepair() throws 
     
     func requestContactSync(inputJson: String) throws  -> String
+    
+    func requestMmsProviderRescan(generation: String, scope: String, observedMaxId: String) throws  -> Bool
     
     func requestMmsRecheck(generation: String, scope: String, limit: UInt64) throws  -> UInt64
     
@@ -1045,6 +1080,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func setServerCompactionState(supported: Bool, active: Bool) throws  -> String
     
     func setServerCompactionSupported(supported: Bool) throws 
+    
+    func setServerOriginTagsSupported(supported: Bool) throws 
     
     func setSmsAcquisitionState(id: String, state: NativeSmsAcquisitionState, reason: String?) throws 
     
@@ -1359,6 +1396,16 @@ open func beginSendAttempt(commandId: String)throws  -> NativePermit  {
 })
 }
     
+open func beginSenderUnblock(requestId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_sender_unblock(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+})
+}
+    
 open func beginSmsProviderAcquisition(input: NativeSmsProviderAcquisitionInput)throws  -> NativeSmsAcquisition  {
     return try  FfiConverterTypeNativeSmsAcquisition_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1468,6 +1515,21 @@ open func cleanupUploadedGatewayMmsCiphertext(limit: UInt32)throws  -> NativeGat
 })
 }
     
+open func commitMmsProviderRescanPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_provider_rescan_page(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(generation),
+        FfiConverterString.lower(scope),
+        FfiConverterString.lower(token),
+        FfiConverterOptionString.lower(expectedCursor),
+        FfiConverterOptionString.lower(lastDurableId),
+        FfiConverterBool.lower(exhausted),uniffiCallStatus
+    )
+})
+}
+    
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
@@ -1505,6 +1567,16 @@ open func completePhoneReadEffects(messageIds: [String])throws   {try rustCallWi
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_phone_read_effects(
             self.uniffiCloneHandle(),
         FfiConverterSequenceString.lower(messageIds),uniffiCallStatus
+    )
+}
+}
+    
+open func completeSenderUnblock(requestId: String, outcome: NativeSenderUnblockOutcome)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sender_unblock(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(requestId),
+        FfiConverterTypeNativeSenderUnblockOutcome_lower(outcome),uniffiCallStatus
     )
 }
 }
@@ -1578,6 +1650,15 @@ open func contactApprovalJson(input: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_approval_json(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(input),uniffiCallStatus
+    )
+})
+}
+    
+open func contactBookSelection()throws  -> NativeContactBookSelection  {
+    return try  FfiConverterTypeNativeContactBookSelection_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_book_selection(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -1892,6 +1973,15 @@ open func ingestRaw(envelopeJson: Data, cursor: String)throws  -> NativeIngestRe
 })
 }
     
+open func initialReplayCaughtUp()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_initial_replay_caught_up(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func installDownloadedAttachment(attachmentId: String, downloadedPath: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_install_downloaded_attachment(
@@ -1900,6 +1990,15 @@ open func installDownloadedAttachment(attachmentId: String, downloadedPath: Stri
         FfiConverterString.lower(downloadedPath),uniffiCallStatus
     )
 }
+}
+    
+open func interruptedSenderUnblocks()throws  -> [NativeSenderUnblockWork]  {
+    return try  FfiConverterSequenceTypeNativeSenderUnblockWork.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_interrupted_sender_unblocks(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
 }
     
 open func invalidateAttachmentRetentionReconciliation()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
@@ -2162,6 +2261,18 @@ open func observeContactScan(inputJson: String)throws  -> String  {
 })
 }
     
+    /**
+     * Records the first server replay watermark observed by the host.
+     */
+open func observeServerHighWater(highWaterCursor: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_observe_server_high_water(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(highWaterCursor),uniffiCallStatus
+    )
+}
+}
+    
 open func openHistoryImportGate(reason: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2328,6 +2439,15 @@ open func pendingPhoneReadEffects(nowMs: Int64, limit: UInt32)throws  -> [Native
 })
 }
     
+open func pendingSenderUnblocks()throws  -> [NativeSenderUnblockWork]  {
+    return try  FfiConverterSequenceTypeNativeSenderUnblockWork.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_sender_unblocks(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func pendingUploads()throws  -> [NativeCipherObject]  {
     return try  FfiConverterSequenceTypeNativeCipherObject.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2454,6 +2574,17 @@ open func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFa
 })
 }
     
+open func publishSenderBlocklist(numbers: [String]?, canUnblock: Bool)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_sender_blocklist(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionSequenceString.lower(numbers),
+        FfiConverterBool.lower(canUnblock),uniffiCallStatus
+    )
+})
+}
+    
 open func receiveCursor()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2469,6 +2600,16 @@ open func reconcileContactApply(inputJson: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_reconcile_contact_apply(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
+open func reconcileProviderArchive(archivedThreadIds: [String])throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_reconcile_provider_archive(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(archivedThreadIds),uniffiCallStatus
     )
 })
 }
@@ -2515,6 +2656,30 @@ open func recordSendResult(commandId: String, result: NativeSendResult)throws  -
         FfiConverterTypeNativeSendResult_lower(result),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Call after unlock and before choosing or minting a native contact book.
+     */
+open func registerDeviceHint(platform: String, hint: Data)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_register_device_hint(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(platform),
+        FfiConverterData.lower(hint),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Call when the host cannot read or create its reinstall-stable hint.
+     */
+open func registerNoDeviceHint()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_register_no_device_hint(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
 }
     
 open func removeNotification(notificationKey: String, instance: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
@@ -2614,6 +2779,18 @@ open func requestContactSync(inputJson: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_sync(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
+open func requestMmsProviderRescan(generation: String, scope: String, observedMaxId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_mms_provider_rescan(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(generation),
+        FfiConverterString.lower(scope),
+        FfiConverterString.lower(observedMaxId),uniffiCallStatus
     )
 })
 }
@@ -2812,6 +2989,15 @@ open func setServerCompactionState(supported: Bool, active: Bool)throws  -> Stri
 open func setServerCompactionSupported(supported: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_compaction_supported(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(supported),uniffiCallStatus
+    )
+}
+}
+    
+open func setServerOriginTagsSupported(supported: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_origin_tags_supported(
             self.uniffiCloneHandle(),
         FfiConverterBool.lower(supported),uniffiCallStatus
     )
@@ -6907,6 +7093,7 @@ public struct NativeMmsBackfillScanPlan: Equatable, Hashable {
     public var sourceGeneration: String
     public var subscriptionId: String
     public var cursor: String?
+    public var providerRescanToken: String?
     public var descending: Bool
     public var historyFloor: String?
     public var historyUpperBound: String?
@@ -6917,11 +7104,12 @@ public struct NativeMmsBackfillScanPlan: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(phase: NativeMmsBackfillPhase, sourceGeneration: String, subscriptionId: String, cursor: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pause: NativeMmsBackfillPause?, budget: UInt64) {
+    public init(phase: NativeMmsBackfillPhase, sourceGeneration: String, subscriptionId: String, cursor: String?, providerRescanToken: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pause: NativeMmsBackfillPause?, budget: UInt64) {
         self.phase = phase
         self.sourceGeneration = sourceGeneration
         self.subscriptionId = subscriptionId
         self.cursor = cursor
+        self.providerRescanToken = providerRescanToken
         self.descending = descending
         self.historyFloor = historyFloor
         self.historyUpperBound = historyUpperBound
@@ -6951,6 +7139,7 @@ public struct FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer 
                 sourceGeneration: FfiConverterString.read(from: &buf), 
                 subscriptionId: FfiConverterString.read(from: &buf), 
                 cursor: FfiConverterOptionString.read(from: &buf), 
+                providerRescanToken: FfiConverterOptionString.read(from: &buf), 
                 descending: FfiConverterBool.read(from: &buf), 
                 historyFloor: FfiConverterOptionString.read(from: &buf), 
                 historyUpperBound: FfiConverterOptionString.read(from: &buf), 
@@ -6966,6 +7155,7 @@ public struct FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer 
         FfiConverterString.write(value.sourceGeneration, into: &buf)
         FfiConverterString.write(value.subscriptionId, into: &buf)
         FfiConverterOptionString.write(value.cursor, into: &buf)
+        FfiConverterOptionString.write(value.providerRescanToken, into: &buf)
         FfiConverterBool.write(value.descending, into: &buf)
         FfiConverterOptionString.write(value.historyFloor, into: &buf)
         FfiConverterOptionString.write(value.historyUpperBound, into: &buf)
@@ -8170,6 +8360,80 @@ public func FfiConverterTypeNativePhoneReadEffect_lower(_ value: NativePhoneRead
 }
 
 
+/**
+ * Parsed, account-bound Play billing context. `available` means a new Play
+ * purchase may begin, not merely that existing Play metadata can be restored.
+ */
+public struct NativePlayBillingContext: Equatable, Hashable {
+    public var accountId: String
+    public var available: Bool
+    public var productId: String?
+    public var basePlanIds: [String]
+    public var accountBinding: String?
+    public var currentProvider: NativeBillingProvider
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(accountId: String, available: Bool, productId: String?, basePlanIds: [String], accountBinding: String?, currentProvider: NativeBillingProvider) {
+        self.accountId = accountId
+        self.available = available
+        self.productId = productId
+        self.basePlanIds = basePlanIds
+        self.accountBinding = accountBinding
+        self.currentProvider = currentProvider
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativePlayBillingContext: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePlayBillingContext: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePlayBillingContext {
+        return
+            try NativePlayBillingContext(
+                accountId: FfiConverterString.read(from: &buf), 
+                available: FfiConverterBool.read(from: &buf), 
+                productId: FfiConverterOptionString.read(from: &buf), 
+                basePlanIds: FfiConverterSequenceString.read(from: &buf), 
+                accountBinding: FfiConverterOptionString.read(from: &buf), 
+                currentProvider: FfiConverterTypeNativeBillingProvider.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativePlayBillingContext, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.accountId, into: &buf)
+        FfiConverterBool.write(value.available, into: &buf)
+        FfiConverterOptionString.write(value.productId, into: &buf)
+        FfiConverterSequenceString.write(value.basePlanIds, into: &buf)
+        FfiConverterOptionString.write(value.accountBinding, into: &buf)
+        FfiConverterTypeNativeBillingProvider.write(value.currentProvider, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePlayBillingContext_lift(_ buf: RustBuffer) throws -> NativePlayBillingContext {
+    return try FfiConverterTypeNativePlayBillingContext.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePlayBillingContext_lower(_ value: NativePlayBillingContext) -> RustBuffer {
+    return FfiConverterTypeNativePlayBillingContext.lower(value)
+}
+
+
 public struct NativeProviderRowRef: Equatable, Hashable {
     public var sourceGeneration: String
     public var subscriptionId: String
@@ -8411,6 +8675,60 @@ public func FfiConverterTypeNativeRawSnapshotRecord_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeNativeRawSnapshotRecord_lower(_ value: NativeRawSnapshotRecord) -> RustBuffer {
     return FfiConverterTypeNativeRawSnapshotRecord.lower(value)
+}
+
+
+public struct NativeSenderUnblockWork: Equatable, Hashable {
+    public var requestId: String
+    public var numbers: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(requestId: String, numbers: [String]) {
+        self.requestId = requestId
+        self.numbers = numbers
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSenderUnblockWork: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSenderUnblockWork: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSenderUnblockWork {
+        return
+            try NativeSenderUnblockWork(
+                requestId: FfiConverterString.read(from: &buf), 
+                numbers: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSenderUnblockWork, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.requestId, into: &buf)
+        FfiConverterSequenceString.write(value.numbers, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSenderUnblockWork_lift(_ buf: RustBuffer) throws -> NativeSenderUnblockWork {
+    return try FfiConverterTypeNativeSenderUnblockWork.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSenderUnblockWork_lower(_ value: NativeSenderUnblockWork) -> RustBuffer {
+    return FfiConverterTypeNativeSenderUnblockWork.lower(value)
 }
 
 
@@ -10189,6 +10507,177 @@ public func FfiConverterTypeNativeAttachmentUseState_lower(_ value: NativeAttach
 
 
 
+/**
+ * Provider currently associated with the hosted account. `Unknown` is
+ * intentionally non-purchasable.
+ */
+
+public enum NativeBillingProvider: Equatable, Hashable {
+    
+    case none
+    case stripe
+    case play
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeBillingProvider: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeBillingProvider: FfiConverterRustBuffer {
+    typealias SwiftType = NativeBillingProvider
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeBillingProvider {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .none
+        
+        case 2: return .stripe
+        
+        case 3: return .play
+        
+        case 4: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeBillingProvider, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .none:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .stripe:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .play:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeBillingProvider_lift(_ buf: RustBuffer) throws -> NativeBillingProvider {
+    return try FfiConverterTypeNativeBillingProvider.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeBillingProvider_lower(_ value: NativeBillingProvider) -> RustBuffer {
+    return FfiConverterTypeNativeBillingProvider.lower(value)
+}
+
+
+
+
+public enum NativeContactBookSelection: Equatable, Hashable {
+    
+    case inherited(bookId: String, retireBookIds: [String]
+    )
+    case owned(bookId: String
+    )
+    case wait
+    case mint
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeContactBookSelection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeContactBookSelection: FfiConverterRustBuffer {
+    typealias SwiftType = NativeContactBookSelection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeContactBookSelection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .inherited(bookId: try FfiConverterString.read(from: &buf), retireBookIds: try FfiConverterSequenceString.read(from: &buf)
+        )
+        
+        case 2: return .owned(bookId: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .wait
+        
+        case 4: return .mint
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeContactBookSelection, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .inherited(bookId,retireBookIds):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(bookId, into: &buf)
+            FfiConverterSequenceString.write(retireBookIds, into: &buf)
+            
+        
+        case let .owned(bookId):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(bookId, into: &buf)
+            
+        
+        case .wait:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .mint:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeContactBookSelection_lift(_ buf: RustBuffer) throws -> NativeContactBookSelection {
+    return try FfiConverterTypeNativeContactBookSelection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeContactBookSelection_lower(_ value: NativeContactBookSelection) -> RustBuffer {
+    return FfiConverterTypeNativeContactBookSelection.lower(value)
+}
+
+
+
 
 public enum NativeDeviceRetentionAvailability: Equatable, Hashable {
     
@@ -10857,6 +11346,7 @@ public func FfiConverterTypeNativeMmsBackfillPause_lower(_ value: NativeMmsBackf
 public enum NativeMmsBackfillPhase: Equatable, Hashable {
     
     case live
+    case providerRescan
     case history
     case recheck
 
@@ -10882,9 +11372,11 @@ public struct FfiConverterTypeNativeMmsBackfillPhase: FfiConverterRustBuffer {
         
         case 1: return .live
         
-        case 2: return .history
+        case 2: return .providerRescan
         
-        case 3: return .recheck
+        case 3: return .history
+        
+        case 4: return .recheck
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -10898,12 +11390,16 @@ public struct FfiConverterTypeNativeMmsBackfillPhase: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case .history:
+        case .providerRescan:
             writeInt(&buf, Int32(2))
         
         
-        case .recheck:
+        case .history:
             writeInt(&buf, Int32(3))
+        
+        
+        case .recheck:
+            writeInt(&buf, Int32(4))
         
         }
     }
@@ -11593,6 +12089,96 @@ public func FfiConverterTypeNativePhoneReadTransport_lower(_ value: NativePhoneR
 
 
 
+/**
+ * Non-entitling result of an account-bound Play purchase link attempt.
+ */
+
+public enum NativePlayLinkOutcome: Equatable, Hashable {
+    
+    case linked
+    case pending
+    case boundToOtherAccount
+    case notEntitling
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativePlayLinkOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePlayLinkOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = NativePlayLinkOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePlayLinkOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .linked
+        
+        case 2: return .pending
+        
+        case 3: return .boundToOtherAccount
+        
+        case 4: return .notEntitling
+        
+        case 5: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativePlayLinkOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .linked:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .boundToOtherAccount:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .notEntitling:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePlayLinkOutcome_lift(_ buf: RustBuffer) throws -> NativePlayLinkOutcome {
+    return try FfiConverterTypeNativePlayLinkOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePlayLinkOutcome_lower(_ value: NativePlayLinkOutcome) -> RustBuffer {
+    return FfiConverterTypeNativePlayLinkOutcome.lower(value)
+}
+
+
+
 
 public enum NativeRemoteAttachmentState: Equatable, Hashable {
     
@@ -11742,6 +12328,86 @@ public func FfiConverterTypeNativeSendResult_lift(_ buf: RustBuffer) throws -> N
 #endif
 public func FfiConverterTypeNativeSendResult_lower(_ value: NativeSendResult) -> RustBuffer {
     return FfiConverterTypeNativeSendResult.lower(value)
+}
+
+
+
+
+public enum NativeSenderUnblockOutcome: Equatable, Hashable {
+    
+    case unblocked
+    case notBlocked
+    case notAllowed
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeSenderUnblockOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSenderUnblockOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = NativeSenderUnblockOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSenderUnblockOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .unblocked
+        
+        case 2: return .notBlocked
+        
+        case 3: return .notAllowed
+        
+        case 4: return .failed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeSenderUnblockOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .unblocked:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .notBlocked:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .notAllowed:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSenderUnblockOutcome_lift(_ buf: RustBuffer) throws -> NativeSenderUnblockOutcome {
+    return try FfiConverterTypeNativeSenderUnblockOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSenderUnblockOutcome_lower(_ value: NativeSenderUnblockOutcome) -> RustBuffer {
+    return FfiConverterTypeNativeSenderUnblockOutcome.lower(value)
 }
 
 
@@ -12563,6 +13229,30 @@ fileprivate struct FfiConverterOptionTypeNativeStorageCleanupUnavailableReason: 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -13063,6 +13753,31 @@ fileprivate struct FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNativeSenderUnblockWork: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeSenderUnblockWork]
+
+    public static func write(_ value: [NativeSenderUnblockWork], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeSenderUnblockWork.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeSenderUnblockWork] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeSenderUnblockWork]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeSenderUnblockWork.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNativeSmsAcquisition: FfiConverterRustBuffer {
     typealias SwiftType = [NativeSmsAcquisition]
 
@@ -13328,11 +14043,57 @@ public func parseHostedSessionRenewal(json: String, expectedAccountId: String)th
     )
 })
 }
+public func parsePlayBillingContext(json: String, expectedAccountId: String)throws  -> NativePlayBillingContext  {
+    return try  FfiConverterTypeNativePlayBillingContext_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_play_billing_context(
+        FfiConverterString.lower(json),
+        FfiConverterString.lower(expectedAccountId),uniffiCallStatus
+    )
+})
+}
+public func parsePlayBillingLinkResponse(json: String, expectedAccountId: String)throws  -> NativePlayLinkOutcome  {
+    return try  FfiConverterTypeNativePlayLinkOutcome_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_play_billing_link_response(
+        FfiConverterString.lower(json),
+        FfiConverterString.lower(expectedAccountId),uniffiCallStatus
+    )
+})
+}
 public func parsePushConfig(json: String)throws  -> NativePushConfig  {
     return try  FfiConverterTypeNativePushConfig_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_parse_push_config(
         FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+public func playBillingContextPath() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_play_billing_context_path(uniffiCallStatus
+    )
+})
+}
+public func playBillingLinkPath() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_play_billing_link_path(uniffiCallStatus
+    )
+})
+}
+/**
+ * Builds the account-session-authenticated link body. The purchase token is
+ * not logged or retained here; server-side idempotency is bound to that token.
+ */
+public func playBillingLinkRequest(operationId: String, productId: String, purchaseToken: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_play_billing_link_request(
+        FfiConverterString.lower(operationId),
+        FfiConverterString.lower(productId),
+        FfiConverterString.lower(purchaseToken),uniffiCallStatus
     )
 })
 }
@@ -13525,7 +14286,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session_renewal() != 34969) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_play_billing_context() != 14118) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_play_billing_link_response() != 20760) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_push_config() != 51462) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_play_billing_context_path() != 25374) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_play_billing_link_path() != 64957) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_play_billing_link_request() != 52286) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning() != 3935) {
@@ -13621,6 +14397,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_send_attempt() != 43275) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_sender_unblock() != 62168) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_sms_provider_acquisition() != 37196) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13648,6 +14427,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext() != 13469) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_provider_rescan_page() != 8014) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json() != 57580) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13658,6 +14440,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_phone_read_effects() != 18468) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sender_unblock() != 24994) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_acquisition() != 6650) {
@@ -13679,6 +14464,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_approval_json() != 64985) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_book_selection() != 46918) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_book_view() != 44419) {
@@ -13762,7 +14550,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_raw() != 45413) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_initial_replay_caught_up() != 37136) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_install_downloaded_attachment() != 42975) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_interrupted_sender_unblocks() != 39362) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_invalidate_attachment_retention_reconciliation() != 16848) {
@@ -13843,6 +14637,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_contact_scan() != 7624) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_server_high_water() != 10269) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate() != 17220) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13888,6 +14685,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_phone_read_effects() != 55700) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_sender_unblocks() != 42922) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads() != 38265) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13918,10 +14718,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source() != 6609) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_sender_blocklist() != 19267) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_receive_cursor() != 34175) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_reconcile_contact_apply() != 31555) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_reconcile_provider_archive() != 14560) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_gateway_media_failure() != 28910) {
@@ -13934,6 +14740,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_send_result() != 45880) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_register_device_hint() != 17175) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_register_no_device_hint() != 50092) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification() != 35619) {
@@ -13964,6 +14776,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_sync() != 9333) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_provider_rescan() != 54566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_recheck() != 20669) {
@@ -14018,6 +14833,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_compaction_supported() != 14767) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_origin_tags_supported() != 3875) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_acquisition_state() != 18914) {

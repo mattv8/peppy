@@ -73,6 +73,187 @@ fn roll_back_migrations_after_version_25(conn: &rusqlite::Connection) {
     .unwrap();
 }
 
+const NOTIFICATION_REPLY_SPIKE_DDL: &str = "
+    CREATE TABLE notification_reply_submissions(
+      command_id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      normalized_body TEXT NOT NULL,
+      submitted_at_ms INTEGER NOT NULL,
+      resolved INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX notification_reply_submissions_match
+      ON notification_reply_submissions(resolved,conversation_id,normalized_body,submitted_at_ms);
+    ALTER TABLE gateway_settings ADD COLUMN reply_via_google_messages_enabled INTEGER NOT NULL DEFAULT 0;
+";
+
+fn encrypted_connection(config: &ClientConfig) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(&config.database_path).unwrap();
+    conn.execute_batch(
+        "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+    )
+    .unwrap();
+    conn
+}
+
+fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+        [table],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+        rusqlite::params![table, column],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn add_notification_reply_spike(conn: &rusqlite::Connection) {
+    conn.execute_batch(NOTIFICATION_REPLY_SPIKE_DDL).unwrap();
+    conn.execute(
+        "INSERT INTO notification_reply_submissions(command_id,message_id,conversation_id,normalized_body,submitted_at_ms,resolved) VALUES('command','message','conversation','body',1,0)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE gateway_settings SET reply_via_google_messages_enabled=1 WHERE id=1",
+        [],
+    )
+    .unwrap();
+}
+
+fn assert_notification_reply_spike_removed(conn: &rusqlite::Connection) {
+    assert!(!table_exists(conn, "notification_reply_submissions"));
+    assert!(!column_exists(
+        conn,
+        "gateway_settings",
+        "reply_via_google_messages_enabled"
+    ));
+    assert!(!conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='notification_reply_submissions_match')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+}
+
+#[test]
+fn notification_reply_spike_version_43_repairs_and_upgrades() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "notification-reply-v43", &vault);
+    let client = open(&config);
+    let settings = GatewaySettings {
+        mirroring_enabled: true,
+        mirroring_wifi_only: true,
+        skip_silent: false,
+        sms_sync_enabled: false,
+        mms_sync_enabled: false,
+        media_wifi_only: false,
+        phone_read_enabled: true,
+    };
+    client.set_gateway_settings(settings.clone()).unwrap();
+    drop(client);
+
+    let conn = encrypted_connection(&config);
+    conn.execute_batch(
+        "DROP TABLE conversation_folders;
+         DROP INDEX sender_unblock_requests_conversation;
+         DROP TABLE sender_unblock_attempts;
+         DROP TABLE sender_unblock_requests;
+         DROP TABLE sender_blocklists;
+         DROP TABLE provider_archive_observed;
+         DROP TABLE provider_folder_writes;
+         DROP TABLE sender_blocklist_unmapped;
+         DROP INDEX mms_thread_conversations_thread;
+         UPDATE schema_meta SET version=42;",
+    )
+    .unwrap();
+    add_notification_reply_spike(&conn);
+    conn.execute("UPDATE schema_meta SET version=43", [])
+        .unwrap();
+    drop(conn);
+
+    let upgraded = open(&config);
+    assert_eq!(upgraded.gateway_settings().unwrap(), settings);
+    upgraded.set_gateway_settings(settings.clone()).unwrap();
+    drop(upgraded);
+
+    let conn = encrypted_connection(&config);
+    assert_eq!(
+        conn.query_row("SELECT version FROM schema_meta", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        45
+    );
+    assert!(table_exists(&conn, "conversation_folders"));
+    assert!(table_exists(&conn, "sender_blocklists"));
+    assert!(column_exists(&conn, "sender_unblock_requests", "key_epoch"));
+    assert_notification_reply_spike_removed(&conn);
+}
+
+#[test]
+fn notification_reply_spike_repairs_already_upgraded_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "notification-reply-v45", &vault);
+    drop(open(&config));
+
+    let conn = encrypted_connection(&config);
+    conn.execute_batch("DROP TABLE conversation_folders;")
+        .unwrap();
+    add_notification_reply_spike(&conn);
+    drop(conn);
+
+    drop(open(&config));
+
+    let conn = encrypted_connection(&config);
+    assert_eq!(
+        conn.query_row("SELECT version FROM schema_meta", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        45
+    );
+    assert!(table_exists(&conn, "conversation_folders"));
+    assert_notification_reply_spike_removed(&conn);
+}
+
+#[test]
+fn notification_reply_repair_leaves_normal_database_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "notification-reply-normal", &vault);
+    drop(open(&config));
+
+    let conn = encrypted_connection(&config);
+    conn.execute(
+        "INSERT INTO conversation_folders(conversation_id,folder,archived_through_ms,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES('conversation','archived',NULL,1,'writer','producer',1)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    drop(open(&config));
+
+    let conn = encrypted_connection(&config);
+    assert_eq!(
+        conn.query_row(
+            "SELECT folder FROM conversation_folders WHERE conversation_id='conversation'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "archived"
+    );
+}
+
 #[test]
 fn gateway_settings_defaults_persist_and_gate_host_facts() {
     let dir = tempfile::tempdir().unwrap();
@@ -319,7 +500,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 41);
+    assert_eq!(version, 45);
     assert_eq!(status, (42, "sent".into(), None));
 }
 

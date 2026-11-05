@@ -6,6 +6,8 @@
     "generate": "node scripts/generate.mjs",
     "check": "node scripts/generate.mjs --check",
     "test": "node --test",
-    "icons": "node scripts/generate.mjs --icons"
+    "icons": "node scripts/generate.mjs --icons",
+    "play-assets": "node scripts/generate-play-assets.mjs",
+    "check-play-assets": "node scripts/generate-play-assets.mjs --check"
   }
 }

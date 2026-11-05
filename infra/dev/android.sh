@@ -12,6 +12,7 @@ else
 fi
 AVD_NAME=${PEPPY_ANDROID_AVD:-}
 BOOT_TIMEOUT=${PEPPY_ANDROID_BOOT_TIMEOUT:-180}
+ANDROID_BUILD_VARIANT=${PEPPY_ANDROID_BUILD_VARIANT:-debug}
 unset PEPPY_ANDROID_CONTAINER_ARTIFACTS
 
 usage() { echo "Usage: bash infra/dev/android.sh {build|test|run-fast|emulator|forward|deploy|open|smoke|sms} [args...]" >&2; }
@@ -38,10 +39,18 @@ validate_native_clean_selector() {
     case ${PEPPY_ANDROID_FORCE_NATIVE_CLEAN:-0} in ''|0|1) ;; *) die "PEPPY_ANDROID_FORCE_NATIVE_CLEAN must be 0 or 1" ;; esac
 }
 validate_build_options() {
+    local command=$1
     validate_android_abi
     validate_native_clean_selector
     case ${PEPPY_ANDROID_BUILD_BACKEND:-auto} in auto|native|docker) ;; *) die "PEPPY_ANDROID_BUILD_BACKEND must be auto, native, or docker" ;; esac
+    case $ANDROID_BUILD_VARIANT in debug|sideload) ;; *) die "PEPPY_ANDROID_BUILD_VARIANT must be debug or sideload" ;; esac
+    if [[ $command == test && $ANDROID_BUILD_VARIANT == sideload ]]; then
+        die "PEPPY_ANDROID_BUILD_VARIANT=sideload supports build only; test and smoke require debug"
+    fi
 }
+android_variant_task_suffix() { case $ANDROID_BUILD_VARIANT in debug) printf Debug ;; sideload) printf Sideload ;; esac; }
+android_apk_name() { printf 'app-%s.apk\n' "$ANDROID_BUILD_VARIANT"; }
+android_test_apk_name() { printf 'app-%s-androidTest.apk\n' "$ANDROID_BUILD_VARIANT"; }
 selected_rust_targets() {
     case $PEPPY_ANDROID_ABI in
         all) printf '%s\n' aarch64-linux-android x86_64-linux-android ;;
@@ -147,7 +156,7 @@ container_run() {
         docker volume create "peppy-$volume-$uid-$gid" >/dev/null
     done
     prepare_debug_tls
-    DEV_UID=$uid DEV_GID=$gid PEPPY_SOURCE_TREE=$SOURCE_ROOT python3 "$ROOT/infra/dev/dev_tls.py" "${compose_run[@]}" android run "$cmd"
+    PEPPY_ANDROID_BUILD_VARIANT=$ANDROID_BUILD_VARIANT DEV_UID=$uid DEV_GID=$gid PEPPY_SOURCE_TREE=$SOURCE_ROOT python3 "$ROOT/infra/dev/dev_tls.py" "${compose_run[@]}" android run "$cmd"
 }
 accept_licenses() {
     local status
@@ -240,29 +249,35 @@ native_preflight() {
     pkg-config --exists libsodium || die "libsodium is required; run 'brew install libsodium'"
 }
 run_build_body() {
-    local command=$1 gradle_abi
+    local command=$1 gradle_abi variant_task_suffix apk_name test_apk_name
     local -a gradle_args=()
     if [[ $command == test || ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 || ${CI:-} == 1 || ${CI:-} == true ]]; then gradle_args+=(--no-daemon); fi
     gradle_abi=$(gradle_abi_argument)
     if [[ -n $gradle_abi ]]; then gradle_args+=("$gradle_abi"); fi
+    variant_task_suffix=$(android_variant_task_suffix)
+    apk_name=$(android_apk_name)
+    test_apk_name=$(android_test_apk_name)
+    if [[ $command == build && $ANDROID_BUILD_VARIANT == sideload ]]; then
+        gradle_args+=("-PpeppySideloadDebugSigning=true")
+    fi
     bash "$SOURCE_ROOT/infra/compose/verify-android-native.sh"
     if [[ $command == build ]]; then
         if (( ${#gradle_args[@]} )); then
-            (cd "$SOURCE_ROOT/apps/android" && ./gradlew "${gradle_args[@]}" :app:assembleDebug)
+            (cd "$SOURCE_ROOT/apps/android" && ./gradlew "${gradle_args[@]}" ":app:assemble$variant_task_suffix")
         else
-            (cd "$SOURCE_ROOT/apps/android" && ./gradlew :app:assembleDebug)
+            (cd "$SOURCE_ROOT/apps/android" && ./gradlew ":app:assemble$variant_task_suffix")
         fi
         mkdir -p "$ARTIFACTS"
-        install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/debug/app-debug.apk" "$ARTIFACTS/app-debug.apk"
+        install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/$ANDROID_BUILD_VARIANT/$apk_name" "$ARTIFACTS/$apk_name"
     else
         if (( ${#gradle_args[@]} )); then
-            (cd "$SOURCE_ROOT/apps/android" && ./gradlew "${gradle_args[@]}" :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest)
+            (cd "$SOURCE_ROOT/apps/android" && ./gradlew "${gradle_args[@]}" :jvm-smoke:run ":app:test${variant_task_suffix}UnitTest" ":app:lint$variant_task_suffix" ":app:assemble$variant_task_suffix" ":app:assemble${variant_task_suffix}AndroidTest")
         else
-            (cd "$SOURCE_ROOT/apps/android" && ./gradlew :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest)
+            (cd "$SOURCE_ROOT/apps/android" && ./gradlew :jvm-smoke:run ":app:test${variant_task_suffix}UnitTest" ":app:lint$variant_task_suffix" ":app:assemble$variant_task_suffix" ":app:assemble${variant_task_suffix}AndroidTest")
         fi
         mkdir -p "$ARTIFACTS"
-        install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/debug/app-debug.apk" "$ARTIFACTS/app-debug.apk"
-        install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" "$ARTIFACTS/app-debug-androidTest.apk"
+        install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/$ANDROID_BUILD_VARIANT/$apk_name" "$ARTIFACTS/$apk_name"
+        install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/androidTest/$ANDROID_BUILD_VARIANT/$test_apk_name" "$ARTIFACTS/$test_apk_name"
     fi
 }
 run_native() {
@@ -276,7 +291,7 @@ run_native() {
 }
 run_android() {
     local command=$1 backend host
-    validate_build_options
+    validate_build_options "$command"
     if [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]]; then
         echo "android: using in-container Android backend" >&2
         prepare_sdk
@@ -430,7 +445,7 @@ ensure_supported_abi() {
     [[ $abi == arm64-v8a || $abi == x86_64 ]] || die "emulator ABI '$abi' is unsupported; select an arm64-v8a or x86_64 AVD"
     printf '%s\n' "$abi"
 }
-deploy() { local serial; serial=$(adb_serial); test -f "$(apk app-debug.apk)" || die "APK missing; run android-build first"; ensure_supported_abi "$serial" >/dev/null; ensure_debug_loopback "$serial"; adb -s "$serial" install -r "$(apk_for_adb app-debug.apk)"; }
+deploy() { local serial apk_name; serial=$(adb_serial); apk_name=$(android_apk_name); test -f "$(apk "$apk_name")" || die "APK missing; run android-build first"; ensure_supported_abi "$serial" >/dev/null; ensure_debug_loopback "$serial"; adb -s "$serial" install -r "$(apk_for_adb "$apk_name")"; }
 open() {
     local serial output_file output status
     serial=$(adb_serial)
@@ -449,13 +464,18 @@ open() {
     fi
 }
 smoke() {
-    local serial output status
+    local serial output status apk_name test_apk_name
+    if [[ $ANDROID_BUILD_VARIANT == sideload ]]; then
+        die "PEPPY_ANDROID_BUILD_VARIANT=sideload supports build only; test and smoke require debug"
+    fi
     serial=$(adb_serial)
-    if ! test -f "$(apk app-debug.apk)" || ! test -f "$(apk app-debug-androidTest.apk)"; then die "APK(s) missing; run 'bash infra/dev/android.sh test' to build test APKs first"; fi
+    apk_name=$(android_apk_name)
+    test_apk_name=$(android_test_apk_name)
+    if ! test -f "$(apk "$apk_name")" || ! test -f "$(apk "$test_apk_name")"; then die "APK(s) missing; run 'bash infra/dev/android.sh test' to build test APKs first"; fi
     ensure_supported_abi "$serial" >/dev/null
     ensure_debug_loopback "$serial"
-    adb -s "$serial" install -r "$(apk_for_adb app-debug.apk)"
-    adb -s "$serial" install -r "$(apk_for_adb app-debug-androidTest.apk)"
+    adb -s "$serial" install -r "$(apk_for_adb "$apk_name")"
+    adb -s "$serial" install -r "$(apk_for_adb "$test_apk_name")"
     local output_file
     output_file=$(mktemp)
     set +e; adb -s "$serial" shell am instrument -r -w dev.peppy.mobile.test/androidx.test.runner.AndroidJUnitRunner >"$output_file" 2>&1; status=$?; set -e
@@ -474,7 +494,7 @@ run_fast() {
     local serial abi configured_abi
     require_license_approval
     test -f "$ROOT/.env" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
-    validate_build_options
+    validate_build_options build
     configured_abi=$PEPPY_ANDROID_ABI
     serial=$(adb_serial)
     abi=$(ensure_supported_abi "$serial")
@@ -488,7 +508,7 @@ run_fast() {
     PEPPY_ANDROID_CONTAINER_ARTIFACTS="/artifacts/android/fast/$abi"
     export PEPPY_ANDROID_ARTIFACTS PEPPY_ANDROID_CONTAINER_ARTIFACTS
     ensure_debug_loopback "$serial" true
-    rm -f "$(apk app-debug.apk)"
+    rm -f "$(apk "$(android_apk_name)")"
     run_android build
     validate_pinned_emulator "$abi"
     deploy

@@ -13,7 +13,7 @@ import {
   type WheelEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import type { GatewayAvailability, LocalSearchHit, LocalSearchRequest } from "@peppy/desktop-ui/bridge-contracts";
+import type { ConversationFolder, GatewayAvailability, LocalSearchHit, LocalSearchRequest } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
   attachmentStorageRemovalText,
@@ -44,6 +44,7 @@ import {
   RecipientPanel,
   ResizeHandle,
   ShieldAlert,
+  ShieldCheck,
   Smartphone,
   StatusPopover,
   SyncProgress,
@@ -113,6 +114,12 @@ import { openAccountManageUrl, resolveSystemRibbon } from "./notices/systemRibbo
 import { useAccountNotice } from "./notices/useAccountNotice";
 import { AppNoticeBanner, type AppNotice } from "./notices/AppNoticeBanner";
 import { MarkAllReadAction } from "./conversation/MarkAllReadAction";
+import { ConversationFolderConfirmation } from "./conversation/ConversationFolderConfirmation";
+import { ConversationFolderNotice, type FolderNotice } from "./conversation/ConversationFolderNotice";
+import { ConversationFolderSwitcher } from "./conversation/ConversationFolderSwitcher";
+import { SenderUnblockConfirmation } from "./conversation/SenderUnblockConfirmation";
+import { ConversationSpamNotice } from "./conversation/ConversationSpamNotice";
+import { SenderUnblockNotice, type SenderUnblockNoticeState } from "./conversation/SenderUnblockNotice";
 import { peppyCopy } from "./generated/peppyCopy";
 import { MediaLightbox } from "./media/MediaLightbox";
 import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/MediaPanel";
@@ -272,6 +279,7 @@ const PANE_MIN_WIDTH = 360;
 const LIST_COLLAPSE_THRESHOLD = 120;
 const TEXTAREA_LINE_HEIGHT = 22;
 const TEXTAREA_MAX_HEIGHT = 176;
+const FOLDER_SETTLE_MS = 300;
 const NARROW_BROWSER_QUERY = "(max-width: 640px)";
 
 function useNarrowBrowserViewport(browserHost: boolean): boolean {
@@ -1788,6 +1796,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingPinId, setPendingPinId] = useState<string | null>(null);
+  const [folderView, setFolderView] = useState<ConversationFolder>("inbox");
+  const [folderConfirmation, setFolderConfirmation] = useState<{ id: string; name: string; from: ConversationFolder; to: "archived" | "spam"; trigger: HTMLButtonElement }>();
+  const [pendingFolderId, setPendingFolderId] = useState<string | null>(null);
+  const [pendingFolder, setPendingFolder] = useState<ConversationFolder>();
+  const [folderNotice, setFolderNotice] = useState<FolderNotice>();
+  const [senderUnblockConfirmation, setSenderUnblockConfirmation] = useState<{ id: string; name: string; canUnblock: boolean; trigger: HTMLButtonElement }>();
+  const [pendingSenderUnblockId, setPendingSenderUnblockId] = useState<string | null>(null);
+  const [senderUnblockNotice, setSenderUnblockNotice] = useState<SenderUnblockNoticeState>();
   const [overlayHeight, setOverlayHeight] = useState<number | null>(
     typeof ResizeObserver === "undefined" ? 120 : null,
   );
@@ -1832,6 +1848,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const mountedRef = useRef(true);
   const focusRestorePendingRef = useRef(false);
   const pinFocusRestoreRef = useRef<PinFocusRestoreIntent | undefined>(undefined);
+  const folderChangeInFlightRef = useRef(false);
+  const folderSettlingRef = useRef(false);
+  const folderSettleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const refreshInFlightRef = useRef(false);
   const pendingRefreshRef = useRef<RefreshRequest | undefined>(undefined);
   const toneOperationRef = useRef(new Map<string, number>());
@@ -2192,6 +2211,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
 
   const choose = (key: string) => {
+    if (key) setFolderView(snapshotRef.current?.conversations.find((conversation) => conversation.id === key)?.folder ?? "inbox");
     if (selectedRef.current !== key) invalidateReactionNavigation();
     if (detachedHistoryRef.current && detachedHistoryRef.current.conversationId !== key) clearDetached();
     loadSequence.current += 1;
@@ -2909,6 +2929,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, [active?.id, appLock?.locked, snapshot?.encryption.state]);
   const conversationLoaded =
     Boolean(active) && snapshot?.activeConversationId === slotKey;
+  const conversationTabsShown = Boolean(composerConversation) || conversationLoaded;
   const seenReactions = useMemo(() => createSeenReactionLedger({ mode: snapshot?.mode ?? "", origin: snapshot?.connection.origin }), [snapshot?.mode, snapshot?.connection.origin]);
   const reactionScopeKey = JSON.stringify([renderedSearchSessionKey, slotKey]);
   const reactionReadEnabled = conversationLoaded && activeView === "conversations" && conversationTab === "messages" && snapshot?.encryption.state === "unlocked" && !appLock?.locked;
@@ -3858,6 +3879,142 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (mountedRef.current) setPendingPinId(null);
     }
   };
+  const conversationFolderName = (conversationId: string) => {
+    const conversation = snapshotRef.current?.conversations.find((item) => item.id === conversationId);
+    return conversation
+      ? displayConversation(conversation.name, conversation.participants, resolution, conversation.id, conversation.recipientlessDraft).name
+      : "conversation";
+  };
+  const focusAfterFolderChange = (conversationId: string, fallbackConversationId?: string, trigger?: HTMLButtonElement) => {
+    const activeElement = document.activeElement;
+    const confirmation = document.getElementById("conversation-folder-confirmation");
+    const notice = document.getElementById("conversation-folder-notice");
+    const senderConfirmation = document.getElementById("sender-unblock-confirmation");
+    const senderNotice = document.getElementById("sender-unblock-notice");
+    if (activeElement !== document.body && !confirmation?.contains(activeElement) && !notice?.contains(activeElement) && !senderConfirmation?.contains(activeElement) && !senderNotice?.contains(activeElement) && !trigger?.contains(activeElement)) return;
+    if (trigger?.isConnected && !trigger.disabled) {
+      trigger.focus();
+      return;
+    }
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>("[data-conversation-id]")];
+    const target = buttons.find((button) => button.dataset.conversationId === conversationId);
+    const fallback = buttons.find((button) => button.dataset.conversationId === fallbackConversationId);
+    if (target && !target.disabled) target.focus();
+    else if (fallback && !fallback.disabled) fallback.focus();
+    else if (buttons[0] && !buttons[0].disabled) buttons[0].focus();
+    else document.getElementById("conversation-folder-trigger")?.focus();
+  };
+  const restoreFolderFocus = (conversationId: string, fallbackConversationId?: string, trigger?: HTMLButtonElement) => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      focusAfterFolderChange(conversationId, fallbackConversationId, trigger);
+      resolve();
+    });
+  });
+  const startFolderSettle = () => {
+    folderSettlingRef.current = true;
+    clearTimeout(folderSettleTimerRef.current);
+    folderSettleTimerRef.current = setTimeout(() => {
+      folderSettlingRef.current = false;
+    }, FOLDER_SETTLE_MS);
+  };
+  const applyFolderChange = async (conversationId: string, from: ConversationFolder, to: ConversationFolder, trigger?: HTMLButtonElement) => {
+    if (folderChangeInFlightRef.current || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    folderChangeInFlightRef.current = true;
+    const name = conversationFolderName(conversationId);
+    const leavesCurrentView = from === folderView && to !== folderView;
+    const movedIndex = conversations.findIndex((conversation) => conversation.id === conversationId);
+    const fallbackConversationId = leavesCurrentView
+      ? conversations[movedIndex + 1]?.id ?? conversations[movedIndex - 1]?.id
+      : undefined;
+    setPendingFolderId(conversationId);
+    setPendingFolder(to);
+    // The notice appears only once the change settles, so its Undo or Retry is never inert.
+    let nextNotice: FolderNotice | undefined;
+    try {
+      try {
+        await bridge.set_conversation_folder(conversationId, to);
+      } catch {
+        nextNotice = { kind: "error", conversationId, name, from, to };
+        await restoreFolderFocus(conversationId, fallbackConversationId, trigger);
+        return;
+      }
+      try {
+        await refresh();
+      } catch {
+        // The folder change succeeded, so retain its Undo notice when the snapshot refresh fails.
+      }
+      nextNotice = { kind: "success", conversationId, name, from, to };
+      if (leavesCurrentView && selectedRef.current === conversationId) choose("");
+      await restoreFolderFocus(conversationId, fallbackConversationId, leavesCurrentView ? undefined : trigger);
+    } finally {
+      if (mountedRef.current) {
+        setPendingFolderId(null);
+        setPendingFolder(undefined);
+        setFolderConfirmation(undefined);
+        if (nextNotice) {
+          setSenderUnblockNotice(undefined);
+          setFolderNotice(nextNotice);
+        }
+        startFolderSettle();
+      }
+      folderChangeInFlightRef.current = false;
+    }
+  };
+  const requestFolderChange = (conversationId: string, to: ConversationFolder, trigger: HTMLButtonElement) => {
+    if (folderChangeInFlightRef.current || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    const conversation = snapshotRef.current?.conversations.find((item) => item.id === conversationId);
+    const from = conversation?.folder ?? "inbox";
+    if (to === "inbox" && from === "spam" && conversation?.folderReason === "blocked") {
+      setSenderUnblockConfirmation({ id: conversationId, name: conversationFolderName(conversationId), canUnblock: Boolean(conversation.canUnblock), trigger });
+      return;
+    }
+    if (folderSettlingRef.current) return;
+    if (to === "inbox") {
+      void applyFolderChange(conversationId, from, to, trigger);
+      return;
+    }
+    if (folderConfirmation?.id === conversationId && folderConfirmation.to === to) {
+      setFolderConfirmation(undefined);
+      return;
+    }
+    setFolderConfirmation({ id: conversationId, name: conversationFolderName(conversationId), from, to, trigger });
+  };
+  const requestSenderUnblock = async (conversationId: string, name: string, trigger?: HTMLButtonElement) => {
+    if (pendingSenderUnblockId || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    setPendingSenderUnblockId(conversationId);
+    try {
+      await bridge.request_sender_unblock(conversationId);
+      try {
+        await refresh();
+      } catch {
+        // The unblock request succeeded, so retain its success notice when refresh fails.
+      }
+      setSenderUnblockConfirmation(undefined);
+      setFolderNotice(undefined);
+      setSenderUnblockNotice({ kind: "success", id: conversationId, name });
+      // Keep the selected conversation open so its pending unblock notice remains visible.
+      await restoreFolderFocus(conversationId, conversations.find((conversation) => conversation.id !== conversationId)?.id, trigger);
+    } catch {
+      setSenderUnblockConfirmation(undefined);
+      setFolderNotice(undefined);
+      setSenderUnblockNotice({ kind: "error", id: conversationId, name });
+    } finally {
+      if (mountedRef.current) setPendingSenderUnblockId(null);
+    }
+  };
+  useEffect(() => () => clearTimeout(folderSettleTimerRef.current), []);
+  useEffect(() => {
+    if (!folderConfirmation) return;
+    const conversation = snapshot?.conversations.find((item) => item.id === folderConfirmation.id);
+    if (appLock?.locked || snapshot?.encryption.state !== "unlocked" || !folderConfirmation.trigger.isConnected || !conversation || (conversation.folder ?? "inbox") !== folderConfirmation.from)
+      setFolderConfirmation(undefined);
+  }, [appLock?.locked, folderConfirmation, snapshot]);
+  useEffect(() => {
+    if (!senderUnblockConfirmation) return;
+    const conversation = snapshot?.conversations.find((item) => item.id === senderUnblockConfirmation.id);
+    if (appLock?.locked || snapshot?.encryption.state !== "unlocked" || !senderUnblockConfirmation.trigger.isConnected || conversation?.folderReason !== "blocked")
+      setSenderUnblockConfirmation(undefined);
+  }, [appLock?.locked, senderUnblockConfirmation, snapshot]);
 
   const runSetupAction = async (
     action: "origin" | "unlock",
@@ -3907,7 +4064,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
 
   const resolution = useMemo<ContactResolutionMap>(() => ({ ...(snapshot?.contactResolution ?? {}), ...chosenContacts }), [snapshot?.contactResolution, chosenContacts]);
-  const conversations = useMemo<Conversation[]>(() => {
+  const conversationRows = useMemo<Conversation[]>(() => {
     const combined = [
       ...store.localDrafts().map((local) => {
       const recipientIds = local.content.recipientIds;
@@ -3923,10 +4080,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         unread: 0,
         draftOnly: true,
         pinned: false,
+        folder: "inbox" as const,
         recipientlessDraft: recipientIds.length === 0,
       };
     }),
-    ...(snapshot?.conversations ?? []).map(({ id, name, preview, unread, participants, recipientlessDraft, draftOnly, pinned }) => ({
+    ...(snapshot?.conversations ?? []).map(({ id, name, preview, unread, participants, recipientlessDraft, draftOnly, pinned, folder, folderReason, unblock, canUnblock }) => ({
       id,
       ...displayConversation(name, participants, resolution, id, recipientlessDraft),
       preview,
@@ -3934,10 +4092,23 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       recipientlessDraft,
       draftOnly,
       pinned,
+      folder: folder ?? "inbox",
+      folderReason,
+      unblock,
+      canUnblock,
     })),
     ];
     return [...combined.filter((conversation) => conversation.pinned && !conversation.draftOnly), ...combined.filter((conversation) => !conversation.pinned || conversation.draftOnly)];
   }, [draftsVersion, resolution, snapshot?.conversations, store]);
+  const conversations = useMemo(() => conversationRows.filter((conversation) => (conversation.folder ?? "inbox") === folderView), [conversationRows, folderView]);
+  const folderCounts = useMemo<Record<ConversationFolder, number>>(() => conversationRows.reduce<Record<ConversationFolder, number>>((counts, conversation) => {
+    counts[conversation.folder ?? "inbox"] += 1;
+    return counts;
+  }, { inbox: 0, archived: 0, spam: 0 }), [conversationRows]);
+  const folderUnread = useMemo<Record<ConversationFolder, number>>(() => (snapshot?.conversations ?? []).reduce<Record<ConversationFolder, number>>((counts, conversation) => {
+    counts[conversation.folder ?? "inbox"] += conversation.unread;
+    return counts;
+  }, { inbox: 0, archived: 0, spam: 0 }), [snapshot?.conversations]);
   const searchLocal = useCallback(async (request: LocalSearchRequest) => {
     const page = await bridge.search_local(request);
     return {
@@ -4347,8 +4518,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const messages = (
     <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()} copyNativeImage={copyNativeImage} hydrateMediaPreview={hydrateMediaPreview}>
-      {!composerConversation && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="text" />}
-      <div id="tabpanel-messages" role="tabpanel" aria-labelledby="tab-messages" hidden={conversationTab !== "messages"}>
+      <div id="tabpanel-messages" role={conversationTabsShown ? "tabpanel" : undefined} aria-labelledby={conversationTabsShown ? "tab-messages" : undefined} hidden={conversationTab !== "messages"}>
       <MessageList
       key={reactionScopeKey}
       conversation={active}
@@ -4490,13 +4660,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         >
           {!headPanel && <AppTitlebar
             isComposer platform={platform} title={title}
-            viewSwitch={<ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="icons" />}
+            viewSwitch={<ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
             status={composerConnectionDot}
             onMinimize={browserHost ? undefined : () => {}} onMaximize={browserHost ? undefined : () => {}} onClose={browserHost ? undefined : handlers.current.close}
           />}
           {headPanel && <header id="head-panel-header" aria-label={`Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
             <strong data-tauri-drag-region>{title ?? "Conversation"}</strong>
-            <ConversationViewTabs value={conversationTab} onChange={setConversationTab} variant="icons" />
+            <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />
             <span className="head-panel-status">{composerConnectionDot}</span>
             <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}><Minus size={14} strokeWidth={1.75} aria-hidden /></button>
             <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} strokeWidth={1.75} aria-hidden /></button>
@@ -4549,7 +4719,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         actions={snapshot && enrolled && !showSetup ? <>
           <MarkAllReadAction
             key={currentSearchSessionKey()}
-            unreadCount={snapshot.conversations.reduce((total, conversation) => total + conversation.unread, 0)}
+            unreadCount={snapshot.conversations.reduce((total, conversation) => (conversation.folder ?? "inbox") === "inbox" ? total + conversation.unread : total, 0)}
             enabled={snapshot.encryption.state === "unlocked" && !appLock?.locked && !loading}
             markAllRead={() => bridge.mark_all_read()}
             refresh={() => refresh()}
@@ -4646,6 +4816,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 : { width: renderedListWidth, flexBasis: renderedListWidth }
           }
         >
+            <ConversationFolderSwitcher
+              value={folderView}
+              counts={folderCounts}
+              unread={folderUnread}
+              onChange={setFolderView}
+            />
             <ConversationList
             conversations={conversations}
             selectedId={slotKey}
@@ -4653,13 +4829,44 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onPopout={id => void popoutConversation(id)}
               popoutMode={popoutMode}
               onTogglePin={snapshot?.encryption.state === "unlocked" && !appLock?.locked ? (id, pinned) => void toggleConversationPin(id, pinned) : undefined}
+              onRequestFolderChange={snapshot?.encryption.state === "unlocked" && !appLock?.locked ? requestFolderChange : undefined}
               onDelete={id => void deleteDraft(id)}
               onCancelDelete={cancelDeleteDraft}
               deleteConfirmationId={deleteConfirmationId ?? undefined}
               deletingId={deletingId ?? undefined}
               deleteWarningId={listCollapsed ? undefined : "conversation-delete-draft-warning"}
               pendingPinId={pendingPinId ?? undefined}
+              pendingFolderId={pendingFolderId ?? undefined}
+              pendingFolder={pendingFolder}
+              confirmingFolderId={folderConfirmation?.id ?? senderUnblockConfirmation?.id}
+              confirmingFolder={folderConfirmation?.to}
+              emptyLabel={folderView === "archived" ? "No archived conversations" : folderView === "spam" ? "No spam conversations" : undefined}
           />
+              {folderConfirmation && <ConversationFolderConfirmation
+              kind={folderConfirmation.to}
+              name={folderConfirmation.name}
+              trigger={folderConfirmation.trigger}
+              pending={Boolean(pendingFolderId)}
+              onConfirm={() => {
+                void applyFolderChange(folderConfirmation.id, folderConfirmation.from, folderConfirmation.to, folderConfirmation.trigger);
+              }}
+              onCancel={() => setFolderConfirmation(undefined)}
+            />}
+            {folderNotice && <ConversationFolderNotice
+              notice={folderNotice}
+              pending={Boolean(pendingFolderId)}
+              toastHost={threadListToastHost}
+              onUndo={() => void applyFolderChange(folderNotice.conversationId, folderNotice.to, folderNotice.from)}
+              onRetry={() => void applyFolderChange(folderNotice.conversationId, folderNotice.from, folderNotice.to)}
+              onDismiss={() => setFolderNotice(undefined)}
+            />}
+            <SenderUnblockNotice
+              notice={senderUnblockNotice}
+              pending={Boolean(pendingSenderUnblockId) || snapshot?.encryption.state !== "unlocked" || Boolean(appLock?.locked)}
+              toastHost={threadListToastHost}
+              onRetry={() => senderUnblockNotice && void requestSenderUnblock(senderUnblockNotice.id, senderUnblockNotice.name)}
+              onDismiss={() => setSenderUnblockNotice(undefined)}
+            />
         </aside>
         {!settingsOpen && !notificationsOpen && !contactsOpen && !narrowConversationListMode && <ResizeHandle
           id="handle-h1"
@@ -4710,6 +4917,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             </div>
             {contactsOpen && <div id="contacts-header-slot" className="header-actions" ref={setContactsHeaderHost} />}
             <div className="header-actions" hidden={settingsOpen || notificationsOpen || contactsOpen}>
+              {conversationLoaded && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
               {addConversationContactAddress && <button
                 id="add-conversation-contact"
                 aria-label={`Add ${formatPhoneNumber(addConversationContactAddress)} to contacts`}
@@ -4718,6 +4926,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               >
                 <UserPlus size={16} aria-hidden />
               </button>}
+              {active?.folder === "spam" && <button id="header-not-spam" aria-label="Not spam" title={snapshot?.encryption.state !== "unlocked" || appLock?.locked ? "Unavailable while locked" : active.folderReason === "blocked" ? "Not spam (unblocks this number on your phone)" : "Not spam"} aria-haspopup={active.folderReason === "blocked" ? "dialog" : undefined} aria-expanded={active.folderReason === "blocked" ? senderUnblockConfirmation?.id === active.id : undefined} aria-controls={active.folderReason === "blocked" && senderUnblockConfirmation?.id === active.id ? "sender-unblock-confirmation" : undefined} disabled={snapshot?.encryption.state !== "unlocked" || Boolean(appLock?.locked) || Boolean(pendingSenderUnblockId) || Boolean(pendingFolderId)} onClick={event => requestFolderChange(active.id, "inbox", event.currentTarget)}><ShieldCheck size={16} aria-hidden /></button>}
               {!browserHost && conversationLoaded && (
                 <button id="header-popout-conversation"
                   aria-label={popoutMode === "bubble" ? "Open as chat bubble" : "Open in new window"}
@@ -4768,6 +4977,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               {dismissibleNotificationsCount > 100 ? "Dismiss up to 100" : "Dismiss all"}
             </button>}
           </header>
+          {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationSpamNotice folder={active.folder} folderReason={active.folderReason} unblock={active.unblock} />}
+          {senderUnblockConfirmation && <SenderUnblockConfirmation
+            name={senderUnblockConfirmation.name}
+            canUnblock={senderUnblockConfirmation.canUnblock}
+            trigger={senderUnblockConfirmation.trigger}
+            pending={pendingSenderUnblockId === senderUnblockConfirmation.id}
+            onConfirm={() => void requestSenderUnblock(senderUnblockConfirmation.id, senderUnblockConfirmation.name, senderUnblockConfirmation.trigger)}
+            onCancel={() => setSenderUnblockConfirmation(undefined)}
+          />}
           {notificationsOpen && notificationActionNotice && <p id="notifications-action-notice" role="status">{notificationActionNotice}</p>}
           {settingsOpen ? (
             <SettingsView

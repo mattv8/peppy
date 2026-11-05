@@ -3,8 +3,8 @@
 //! This crate neither fetches nor persists browser data. The SharedWorker supplies a controlled
 //! filesystem and must checkpoint it before acknowledging mutating calls.
 use peppy_client_core::{
-    AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, Error as CoreError,
-    Message, MessageId, NotificationPreferences, VaultId,
+    AttachmentId, Client, ClientConfig, ConversationFolder, ConversationId, DatabaseKey, DeviceId,
+    Error as CoreError, Message, MessageId, NotificationPreferences, VaultId,
 };
 use peppy_crypto::{KeyProfile, VaultCheckHeader};
 use peppy_desktop_api::{
@@ -536,6 +536,10 @@ impl BrowserCore {
                 recipientless_draft: false,
                 draft_only,
                 pinned: conversation.pinned,
+                folder: conversation.folder,
+                folder_reason: conversation.folder_reason,
+                unblock: conversation.unblock,
+                can_unblock: conversation.can_unblock,
             });
         }
         for draft in drafts.iter().filter(|draft| {
@@ -564,6 +568,10 @@ impl BrowserCore {
                 recipientless_draft: draft.recipients.is_empty(),
                 draft_only: true,
                 pinned: false,
+                folder: ConversationFolder::Inbox,
+                folder_reason: None,
+                unblock: None,
+                can_unblock: false,
             });
         }
         let keys = client.key_status().map_err(core)?;

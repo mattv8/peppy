@@ -46,6 +46,20 @@ Event and field codes are in [`SyncDiagnostics.kt`](../../apps/android/app/src/m
 
 The five-second acknowledgement target applies only to a healthy network, live process, settled history, and no delayed/retry/recovery work. It is not a delivery guarantee. The observer path does not expedite uploads, keep the process alive, or change periodic fallback.
 
+## Advanced features (sideload)
+
+The sideload build's **Advanced features** card enables two optional Android settings for Peppy itself. It uses one ADB session over Wireless debugging, with no computer. Play and debug builds have no setup path. The transport, [AdbRestrictedSetupTransport.kt](../../apps/android/app/src/sideload/java/dev/peppy/mobile/restrictedsetup/AdbRestrictedSetupTransport.kt), runs these fixed shell commands in order, with the package name validated:
+
+```sh
+appops set dev.peppy.mobile READ_RESTRICTED_MESSAGES allow
+appops set dev.peppy.mobile WRITE_SMS allow
+settings put global adb_wifi_enabled 0
+```
+
+After the connected grant/readback flow, Peppy attempts to turn Wireless debugging off whether or not the grants verified; there is no option to skip that attempt. Cancellation, timeout, or transport failure can leave it on, so the user may need to check Developer options. Readback reports each capability as Allowed, Not allowed, Unsupported, or Unknown. Setup completes only when every supported capability is Allowed; an unsupported capability is skipped. `WRITE_SMS` is an AppOp only: the manifest never declares it. [SystemBlocklist.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/messagingapp/SystemBlocklist.kt) needs the AppOp to read blocked numbers and to unblock one. [ProviderArchiveReader.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/messagingapp/ProviderArchiveReader.kt) reads archive state with `READ_SMS` alone. [MessagingAppSync.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/messagingapp/MessagingAppSync.kt) runs both in the `MESSAGING_APP` gateway phase before upload: blocklist, then unblock requests, then archive, each isolated so one failure never skips the others or the upload. Without the AppOp the last list is kept and published as not unblockable; an interrupted unblock is reconciled with `isBlocked`, never repeated.
+
+Evidence boundary: a Pixel 7 on Android 17 with Google Messages 20261020 showed archive toggles reflected in `threads.archived` within seconds, and blocking a number added it to `com.android.blockednumber` and set the thread `archived=1`. The emulator instrumentation test proves only the AppOp path. Carrier and other-OEM behavior is unestablished.
+
 ## Build configuration
 
 `PEPPY_ANDROID_NATIVE_PROFILE` selects `debug` (default) or `release` for Rust-native bindings. Artifact workflows select `release`; local developer and smoke tests default to `debug`. This does not change runtime security gates or debug-origin checks.

@@ -24,6 +24,7 @@ import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.MobileBindingsException
+import uniffi.peppy_mobile_bindings.NativeContactBookSelection
 
 /** Runtime contacts permission state, read fresh at each decision point. */
 internal data class ContactsAccess(val read: Boolean, val write: Boolean)
@@ -45,7 +46,7 @@ internal data class ContactPassReport(
     val waitingMedia: Int = 0,
     val more: Boolean = false,
 ) {
-    enum class Outcome { DISABLED, RETIRED, NO_ACCESS, COMPLETED, PARTIAL }
+    enum class Outcome { DISABLED, RETIRED, WAITING, NO_ACCESS, COMPLETED, PARTIAL }
 }
 
 internal data class ContactAccountChoice(val id: String, val name: String, val writable: Boolean)
@@ -95,9 +96,19 @@ internal class ContactSyncCoordinator(
     // ---- pass -----------------------------------------------------------------------------------
 
     fun run(charging: Boolean, forceFull: Boolean = false): ContactPassReport {
+        val selection = core.contactBookSelection()
+        if (selection is NativeContactBookSelection.Wait) {
+            return ContactPassReport(ContactPassReport.Outcome.WAITING)
+        }
         val granted = access()
-        val owned = ownedBook()
-        val bookId = owned?.id ?: UUID.randomUUID().toString()
+        val bookId = when (selection) {
+            is NativeContactBookSelection.Inherited -> selection.bookId
+            is NativeContactBookSelection.Owned -> selection.bookId
+            NativeContactBookSelection.Mint -> UUID.randomUUID().toString()
+            NativeContactBookSelection.Wait -> error("handled above")
+        }
+        val owned = ownedBook(bookId)
+        val inherited = selection as? NativeContactBookSelection.Inherited
         val book = bookBody(bookId, owned?.generation ?: "1", granted, isNew = owned == null)
         captureBatch(book, emptyList())
         if (!granted.read) {
@@ -109,13 +120,16 @@ internal class ContactSyncCoordinator(
         val defaultAccountId = defaultAccountId(bookId)
         val checkpoint = checkpoint(bookId)
         val pendingBeforeScan = hasPendingSyncScan(bookId)
-        val full = forceFull || pendingBeforeScan || fullDue(checkpoint, charging)
+        val full = inherited != null || forceFull || pendingBeforeScan || fullDue(checkpoint, charging)
         var report = if (full) {
             scanPass(book, bookId, checkpoint, defaultAccountId)
         } else {
             incrementalPass(book, bookId, checkpoint, defaultAccountId)
         }
         report = processRequests(book, bookId, defaultAccountId, report)
+        if (inherited != null && report.scanComplete) {
+            inherited.retireBookIds.forEach(::retireAfterFullScopeRemoval)
+        }
         // A request received after this scan began remains waiting for the next full scan. Keep a
         // bounded gateway pass queued, but do not replace the associated scan on every pass.
         report = report.copy(more = report.more || hasPendingSyncScan(bookId))
@@ -703,12 +717,15 @@ internal class ContactSyncCoordinator(
 
     data class OwnedBook(val id: String, val generation: String, val state: String)
 
-    fun ownedBook(): OwnedBook? {
+    fun ownedBook(): OwnedBook? = ownedBook(null)
+
+    private fun ownedBook(expectedBookId: String?): OwnedBook? {
         val books = core.listBooks().optJSONArray("books") ?: return null
         for (index in 0 until books.length()) {
             val book = books.getJSONObject(index)
             if (book.optString("owner_device_id") != deviceId || book.optString("state") == "retired") continue
             val id = book.optString("id").takeIf { it.isNotEmpty() } ?: continue
+            if (expectedBookId != null && id != expectedBookId) continue
             currentBookId = id
             return OwnedBook(id, book.optString("generation").ifEmpty { "1" }, book.optString("state"))
         }
@@ -800,9 +817,28 @@ internal class ContactSyncCoordinator(
     /** Publishes the owned book as retired and stops using it. Never deletes OS contacts. */
     fun retire(): Boolean {
         val book = ownedBook() ?: return false
+        return retireBook(book.id)
+    }
+
+    /** Retires an obsolete local book only after the inherited book's authoritative full scan. */
+    private fun retireBook(bookId: String): Boolean {
+        val book = ownedBook(bookId) ?: return false
         val body = bookBody(book.id, book.generation, ContactsAccess(read = false, write = false), isNew = false, state = "retired")
         captureBatch(body, emptyList())
         return true
+    }
+
+    /** Removes a superseded book's members under the normal authoritative full-scan policy first. */
+    private fun retireAfterFullScopeRemoval(bookId: String): Boolean {
+        val book = ownedBook(bookId) ?: return true
+        val scanId = UUID.randomUUID().toString()
+        core.beginScan(
+            JSONObject().put("schema_version", 1).put("scan_id", scanId).put("book_id", book.id)
+                .put("generation", book.generation).put("access", "full").put("authoritative", true),
+        )
+        val finished = finish(scanId, complete = true)
+        if (finished.optInt("held") > 0 || finished.optString("state") == "awaiting_approval") return false
+        return retireBook(bookId)
     }
 
     companion object {

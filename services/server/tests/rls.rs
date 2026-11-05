@@ -146,23 +146,7 @@ impl Fixture {
             .connect(&self.admin_url)
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let active_connections: i64 =
-                    sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = $1")
-                        .bind(&self.database)
-                        .fetch_one(&admin)
-                        .await
-                        .unwrap();
-                if active_connections == 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("fixture database connections did not close");
-        sqlx::query(&format!("DROP DATABASE {}", self.database))
+        sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
             .execute(&admin)
             .await
             .unwrap();

@@ -1174,8 +1174,43 @@ public actor NativeSession {
             throw ClientError.wrap(error)
         }
         status.keysUnlocked = true
+        registerDeviceHintIfContactsReady()
         refreshCount()
         return status
+    }
+
+    /// The hint is independent of the vault binding and survives reinstall. A Keychain read error
+    /// never replaces an unreadable value; the device registers without a hint so contact sync
+    /// can still start, only without succession.
+    private func registerDeviceHintIfAvailable() throws {
+        guard let client else { return }
+        let hint: Data
+        do {
+            hint = try DeviceHintStore(secure: store.secure).readOrCreate()
+        } catch ClientError.invalidResponse {
+            try client.registerNoDeviceHint()
+            return
+        } catch {
+            return
+        }
+        try client.registerDeviceHint(platform: "ios", hint: hint)
+    }
+
+    /// Hint registration is contact-only work: wait until the core has a usable compaction key,
+    /// and never let an optional hint prevent unlocking or ordinary synchronization.
+    private func registerDeviceHintIfContactsReady() {
+        guard let client,
+              let json = try? client.contactSyncReadinessJson(),
+              let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let readiness = object as? [String: Any],
+              readiness["contacts_ready"] as? Bool == true
+        else { return }
+        do {
+            try registerDeviceHintIfAvailable()
+        } catch {
+            NSLog("Peppy device hint registration failed")
+        }
     }
 
     // MARK: Sync
@@ -1192,6 +1227,7 @@ public actor NativeSession {
             var retentionMeter = RequestMeter(limit: min(8, budget.maxRequests))
             _ = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: false)
             let report = try await ForegroundSync(client: client, server: server, vaultId: identity.vaultId, budget: budget).run()
+            registerDeviceHintIfContactsReady()
             _ = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: true)
             refreshCount()
             return report
@@ -1299,6 +1335,7 @@ public actor NativeSession {
                 if wrapped == .canceled || wrapped == .unauthorized || wrapped == .forbidden { throw wrapped }
                 syncError = wrapped // Offline is not fatal: capture stays local and uploads next time.
             }
+            registerDeviceHintIfContactsReady()
             retention = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: true)
             if retention == .unresolved, contactsEnabled {
                 var deferred = ContactsSyncReport(outcome: .partial)

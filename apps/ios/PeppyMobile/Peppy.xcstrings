@@ -441,6 +441,256 @@
         }
       }
     },
+    "peppy.about_row_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "About"
+          }
+        }
+      }
+    },
+    "peppy.about_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "About Peppy"
+          }
+        }
+      }
+    },
+    "peppy.about_section_build": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Build"
+          }
+        }
+      }
+    },
+    "peppy.about_version_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Version"
+          }
+        }
+      }
+    },
+    "peppy.about_build_number_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Build number"
+          }
+        }
+      }
+    },
+    "peppy.about_source_commit_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source commit"
+          }
+        }
+      }
+    },
+    "peppy.about_source_modified": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This build was made from modified source code."
+          }
+        }
+      }
+    },
+    "peppy.about_section_links": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Legal and source"
+          }
+        }
+      }
+    },
+    "peppy.about_source_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source code"
+          }
+        }
+      }
+    },
+    "peppy.about_open_source_licenses": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open-source licenses"
+          }
+        }
+      }
+    },
+    "peppy.about_opens_in_browser": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens in your browser"
+          }
+        }
+      }
+    },
+    "peppy.about_licenses_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open-source licenses"
+          }
+        }
+      }
+    },
+    "peppy.about_notices_heading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notices"
+          }
+        }
+      }
+    },
+    "peppy.about_license_texts_heading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "License texts"
+          }
+        }
+      }
+    },
+    "peppy.about_license_lgpl_3_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GNU Lesser General Public License v3.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_lgpl_2_1": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GNU Lesser General Public License v2.1"
+          }
+        }
+      }
+    },
+    "peppy.about_license_gpl_3_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GNU General Public License v3.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_apache_2_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apache License 2.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_bsd_3_clause": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "BSD 3-Clause License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_mit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MIT License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_bouncy_castle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bouncy Castle license"
+          }
+        }
+      }
+    },
+    "peppy.about_license_conscrypt": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conscrypt notice"
+          }
+        }
+      }
+    },
+    "peppy.about_license_boringssl": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "BoringSSL, OpenSSL and ISC licenses"
+          }
+        }
+      }
+    },
+    "peppy.about_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading…"
+          }
+        }
+      }
+    },
+    "peppy.about_license_load_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This text couldn’t be loaded. Try again."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_account_devices": {
       "localizations": {
         "en": {
@@ -627,6 +877,1006 @@
           "stringUnit": {
             "state": "translated",
             "value": "Downloaded MMS available from your messaging provider."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restricted message access"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_status_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allowed"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_status_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not allowed"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_status_unsupported": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unsupported"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_status_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_help": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This can copy only messages the phone provider exposes. Peppy cannot grant this access. If it is not allowed, copy the command and run it with external Android Debug Bridge (adb). It does not add RCS sending support. Replies still use SMS or MMS. Phone and app versions can expose only some RCS content."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_unsupported_help": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Android version does not expose this restricted-message operation. That does not show whether any RCS content is readable."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_copy_command": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy access command"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_command_copied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Command copied."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recover skipped provider messages"
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan_queued": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery queued. History capacity limits still apply."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan_already_queued": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery already queued. History capacity limits still apply."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restricted message access is no longer available."
+          }
+        }
+      }
+    },
+    "peppy.mms_restricted_rescan_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not queue recovery. Try again."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Advanced features"
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Optional features that need one extra permission from Android. Peppy asks for it on this phone using Wireless debugging, without a computer."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_blocked_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Honor blocked senders"
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_restricted_desc": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recover RCS and MMS content your messaging app restricts. Peppy cannot send RCS."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_blocked_desc": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hide conversations with numbers you blocked in your messaging app, and unblock a number when you choose Not spam."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_action_setup": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set up advanced features"
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_action_finish": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish setup"
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_partial": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One of two features is on."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_all_on": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Both features are on."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_unsupported_help": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Android version does not offer one of these settings. The other can still be turned on."
+          }
+        }
+      }
+    },
+    "peppy.advanced_features_new_available": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 new feature available"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_checked_when_finished": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checked when setup finished"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_submit_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The pairing box is no longer ready. Open it again and try the new code."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow temporary shell access on this phone?"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_power": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wireless debugging lets a paired app run commands with developer-level power on this phone. You turn it on and pair in Android's settings."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_command": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy will use it for one thing: allow two of its own settings on Android. It runs these commands:"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_command_wifi_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Then it turns Wireless debugging off with this command:"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_capabilities": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restricted message access lets Peppy read RCS and MMS content your messaging app restricts. Honor blocked senders lets Peppy read the numbers you blocked in your messaging app and hide those conversations."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_write_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android has no read-only version of the blocked-senders setting. The same access could also change your blocked list and text messages. Peppy reads your blocked list, and removes a number only when you choose Unblock. It never edits, sends or deletes text messages with it."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_notification": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy shows a notification where you type the pairing code using the keyboard, which Peppy cannot control. Android may ask to allow notifications. If you say no, you can type the code in Peppy instead."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_scope": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy does not become your default messaging app. This does not add RCS sending or guarantee any message history. Replies still use SMS or MMS."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_pairing_stays": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android may keep this pairing under Paired devices in Wireless debugging, as an entry named Peppy. Peppy does not keep its key, so you do not need to remove it. Removing it does not turn the access off."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_memory": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The pairing code and Peppy's temporary key stay in memory for this attempt. Peppy does not save or send them."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_p_distribution": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This setup is part of the Peppy app you downloaded directly. The Play Store version does not include it."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_consent_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I understand, continue"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_pairing_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pair with Wireless debugging"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_step_1": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1. Open Developer options and turn on Wireless debugging. If Android asks about this network, tap Allow. Keep the screen on."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_step_2": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2. Tap Pair device with pairing code. Leave the box open."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_step_3_notification": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3. Pull down the Peppy notification and type the six-digit code there."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_step_3_inapp": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3. Type the six-digit code below."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_dev_options_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If you do not see Developer options, tap Build number in About phone seven times."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_open_developer_options": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Developer options"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_settings_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not open Developer options. Open Settings, then System, then Developer options yourself."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_developer_options_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Developer options is off. Tap Build number seven times, then come back."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_discovery_searching": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Looking for the pairing box. Keep it open."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_discovery_found_notification": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing box found. Type the code in the Peppy notification."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_discovery_found_inapp": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing box found. Type the code below."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_discovery_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy has not found the pairing box. Check that Wi-Fi and Wireless debugging are on and the box is open. You can also type the port and code here."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_hint_no_wifi": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone is not on Wi-Fi. Wireless debugging needs Wi-Fi."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_hint_network_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android did not allow Wireless debugging on this Wi-Fi. In Developer options, turn Wireless debugging off and on again, then tap Allow."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_hint_code_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That code was not accepted. Close the pairing box, open it again, and type the new code."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_hint_box_closed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The pairing box closed. Open it again."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_code_fallback_toggle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type the code here instead"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_pair_port_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing port"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_pair_port_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The number after the colon in the pairing box"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_pair_code_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing code"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_pair_code_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Six digits from the pairing box"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_pair_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pair"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_split_screen_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android closes the pairing box when you leave Settings. Use split-screen or a pop-up window to see both."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notification_resend": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show the notification again"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_status_pairing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing with this phone…"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_status_connecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing worked. Looking for Wireless debugging's connection…"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_connect_port_prompt": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy could not find the connection. Type the port number next to the IP address at the top of Wireless debugging. It is a different port from the pairing box."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_connect_port_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection port"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_connect_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_status_applying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Asking Android to allow Peppy's access…"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_status_verifying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking whether Android now allows it…"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_status_turning_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Asking Android to turn Wireless debugging off…"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_cancelled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setup cancelled."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_complete_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Advanced features are on"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_complete_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android reports the settings below as allowed. This shows the settings only. It does not promise that any particular RCS message, history or blocked number is available."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_complete_wifi_off_confirmed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wireless debugging is off."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_complete_wifi_off_requested": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy asked Android to turn Wireless debugging off. Peppy cannot confirm it. Check Developer options if you need to be sure."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_complete_wifi_still_on": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wireless debugging is still on. You can turn it off in Developer options when you are done."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_channel_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy restricted setup"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_prompt_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy setup"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_prompt_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type the six-digit code from the pairing box."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_prompt_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter code"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_prompt_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing code"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_cancel_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_working": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing…"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_code_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter exactly six digits."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_code_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That code was not accepted. Close the pairing box, open it again, and type the new code."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_done": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Access allowed."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_network_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wireless debugging is blocked here. Turn it off and on, then tap Allow."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notif_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setup stopped. Open Peppy for details."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_notifications_off_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are off, so type the code in Peppy."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_error_pairing_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy could not pair. Reopen the pairing box and try again."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_error_connect_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android did not allow the connection. Check that Wireless debugging is on, then try again."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_error_endpoint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That address is not on this phone."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_error_timeout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This took too long, so Peppy stopped."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_error_transport": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setup stopped before Android could confirm the connection."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_error_not_verified": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android still reports one or more features as not allowed."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_restart_peppy": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close and reopen Peppy to try again."
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking"
+          }
+        }
+      }
+    },
+    "peppy.restricted_setup_start_over": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start over"
           }
         }
       }
@@ -1737,6 +2987,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Opens in your browser"
+          }
+        }
+      }
+    },
+    "peppy.system_banner_opens_subscription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens subscription details"
           }
         }
       }
@@ -3021,6 +4281,16 @@
         }
       }
     },
+    "peppy.play_session_storage_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your saved sign-in session could not be read from secure storage. Try again."
+          }
+        }
+      }
+    },
     "peppy.production_no_google_account": {
       "localizations": {
         "en": {
@@ -4207,6 +5477,526 @@
           "stringUnit": {
             "state": "translated",
             "value": "Peppy apps and hosted service. Self-hosted server operators set their own privacy practices."
+          }
+        }
+      }
+    },
+    "peppy.account_delete_section": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Peppy account"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_row": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Peppy account"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete your Peppy account"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You'll finish deleting your Peppy account in your browser. You may need to sign in again there. Nothing is deleted from this app right now."
+          }
+        }
+      }
+    },
+    "peppy.account_delete_subscription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If you subscribed through Google Play, review your subscription status in Google Play, and follow the instructions on the deletion page."
+          }
+        }
+      }
+    },
+    "peppy.account_delete_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_view_subscription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View subscription"
+          }
+        }
+      }
+    },
+    "peppy.account_delete_vault_distinct": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "To delete only the vault on this phone's server, use Delete vault in Settings."
+          }
+        }
+      }
+    },
+    "peppy.play_subscription_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscription"
+          }
+        }
+      }
+    },
+    "peppy.play_account_row": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscription"
+          }
+        }
+      }
+    },
+    "peppy.play_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking Google Play…"
+          }
+        }
+      }
+    },
+    "peppy.play_provider_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billing"
+          }
+        }
+      }
+    },
+    "peppy.play_provider_google_play": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play"
+          }
+        }
+      }
+    },
+    "peppy.play_manage_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage in Google Play"
+          }
+        }
+      }
+    },
+    "peppy.play_manage_cta_description": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage in Google Play, opens Google Play"
+          }
+        }
+      }
+    },
+    "peppy.play_other_provider_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This subscription isn't billed through Google Play, so it can't be changed in this app."
+          }
+        }
+      }
+    },
+    "peppy.play_unknown_provider_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscription details can't be shown in this version of Peppy. Update the app and try again."
+          }
+        }
+      }
+    },
+    "peppy.play_not_offered_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscriptions can't be started from this app right now."
+          }
+        }
+      }
+    },
+    "peppy.play_billing_unavailable_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play purchases aren't available on this device right now. Make sure Google Play is installed and up to date, then try again."
+          }
+        }
+      }
+    },
+    "peppy.play_plan_group_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a plan"
+          }
+        }
+      }
+    },
+    "peppy.play_plan_monthly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Monthly"
+          }
+        }
+      }
+    },
+    "peppy.play_plan_annual": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Annual"
+          }
+        }
+      }
+    },
+    "peppy.play_price_per_month": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ per month"
+          }
+        }
+      }
+    },
+    "peppy.play_price_per_year": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ per year"
+          }
+        }
+      }
+    },
+    "peppy.play_billed_monthly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billed every month"
+          }
+        }
+      }
+    },
+    "peppy.play_billed_yearly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billed once a year"
+          }
+        }
+      }
+    },
+    "peppy.play_summary_monthly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Monthly: %1$@ per month"
+          }
+        }
+      }
+    },
+    "peppy.play_summary_annual": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Annual: %1$@ per year"
+          }
+        }
+      }
+    },
+    "peppy.play_terms_monthly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billed every month. The monthly price is charged at purchase and again at each monthly renewal."
+          }
+        }
+      }
+    },
+    "peppy.play_terms_annual": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Billed once a year. The full yearly price is charged at purchase and again at each yearly renewal."
+          }
+        }
+      }
+    },
+    "peppy.play_terms_renewal": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Payment is charged to your Google Play account. Your subscription renews automatically until you cancel it."
+          }
+        }
+      }
+    },
+    "peppy.play_terms_cancel": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can manage or cancel it any time in Google Play. To avoid the next charge, cancel before the renewal date."
+          }
+        }
+      }
+    },
+    "peppy.play_terms_account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your subscription is linked to the Peppy account you are signed in to."
+          }
+        }
+      }
+    },
+    "peppy.play_subscribe_description": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscribe, %1$@, %2$@"
+          }
+        }
+      }
+    },
+    "peppy.play_restore_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore purchases"
+          }
+        }
+      }
+    },
+    "peppy.play_restore_working": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking Google Play for your subscription…"
+          }
+        }
+      }
+    },
+    "peppy.play_restore_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No Peppy subscription was found on this Google Play account."
+          }
+        }
+      }
+    },
+    "peppy.play_pending_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for payment approval"
+          }
+        }
+      }
+    },
+    "peppy.play_pending_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play hasn't finished processing this payment. Peppy access starts after it completes. You can leave this screen and check again later."
+          }
+        }
+      }
+    },
+    "peppy.play_pending_check": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check again"
+          }
+        }
+      }
+    },
+    "peppy.play_active_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your subscription is active."
+          }
+        }
+      }
+    },
+    "peppy.play_link_retry_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your purchase is saved in Google Play. Try again to finish linking it to your Peppy account."
+          }
+        }
+      }
+    },
+    "peppy.play_not_active_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play didn't confirm an active subscription for this purchase. Try Restore purchases, or check the subscription in Google Play."
+          }
+        }
+      }
+    },
+    "peppy.play_other_account_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linked to a different Peppy account"
+          }
+        }
+      }
+    },
+    "peppy.play_other_account_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Google Play subscription is already linked to a different Peppy account, so it can't be used here. Sign in with that account, or manage the subscription in Google Play."
+          }
+        }
+      }
+    },
+    "peppy.play_wrong_account_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You're signed in to a different Peppy account than the one this purchase belongs to. Sign in with the original account to continue."
+          }
+        }
+      }
+    },
+    "peppy.play_vault_mismatch_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Different vault"
+          }
+        }
+      }
+    },
+    "peppy.play_vault_mismatch_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The account you're signed in to has a different vault than the one this phone is connected to. A subscription applies to the signed-in account. It doesn't change this phone's vault."
+          }
+        }
+      }
+    },
+    "peppy.play_vault_mismatch_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage signed-in account"
+          }
+        }
+      }
+    },
+    "peppy.play_switch_account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in with a different account"
+          }
+        }
+      }
+    },
+    "peppy.play_signin_required_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in to your Peppy account to subscribe or manage your subscription. Your enrolled phone and local data stay as they are."
+          }
+        }
+      }
+    },
+    "peppy.play_link_retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try again"
           }
         }
       }

@@ -14,6 +14,7 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_CIPHERTEXT_BYTES: usize = 1_048_576;
 pub const MAX_BASE64_CIPHERTEXT_CHARS: usize = MAX_CIPHERTEXT_BYTES.div_ceil(3) * 4;
 pub const COMPACTION_KEY_BYTES: usize = 32;
+pub const ORIGIN_TAG_BYTES: usize = 32;
 pub const MAX_COMPACTION_SUPERSEDES: usize = 128;
 const PROFILE_FINGERPRINT_HEX_LEN: usize = 64;
 
@@ -52,6 +53,10 @@ pub struct CompactionMetadata {
     pub checkpoint: bool,
 }
 
+/// Opaque, server-visible deduplication tag. It deliberately stays out of legacy AAD and
+/// `wire_digest`, like compaction metadata.
+pub type OriginTag = [u8; ORIGIN_TAG_BYTES];
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -77,6 +82,14 @@ pub struct Envelope {
     pub route: Option<GatewayRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionMetadata>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_origin_tag",
+        deserialize_with = "deserialize_optional_origin_tag"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub origin_tag: Option<OriginTag>,
     #[serde(
         serialize_with = "serialize_base64",
         deserialize_with = "deserialize_base64"
@@ -113,6 +126,8 @@ pub enum EnvelopeError {
     CiphertextTooLarge,
     #[error("compaction metadata is invalid")]
     InvalidCompaction,
+    #[error("origin tag is only valid on event envelopes")]
+    UnexpectedOriginTag,
     #[error("invalid pairing HTTPS origin")]
     InvalidPairingOrigin,
     #[error("invalid pairing challenge token")]
@@ -170,6 +185,9 @@ impl Envelope {
                 })
         {
             return Err(EnvelopeError::InvalidCompaction);
+        }
+        if self.origin_tag.is_some() && self.purpose != EnvelopePurpose::Event {
+            return Err(EnvelopeError::UnexpectedOriginTag);
         }
         Ok(())
     }
@@ -300,6 +318,32 @@ where
         return Err(serde::de::Error::custom("compaction key must be 32 bytes"));
     }
     Ok(key)
+}
+fn serialize_optional_origin_tag<S>(
+    value: &Option<OriginTag>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(tag) => serialize_base64(tag, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+fn deserialize_optional_origin_tag<'de, D>(deserializer: D) -> Result<Option<OriginTag>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|encoded| {
+            let decoded = STANDARD.decode(encoded).map_err(de::Error::custom)?;
+            decoded
+                .try_into()
+                .map_err(|_| de::Error::custom("origin tag must be 32 bytes"))
+        })
+        .transpose()
 }
 fn deserialize_compaction_supersedes<'de, D>(
     deserializer: D,

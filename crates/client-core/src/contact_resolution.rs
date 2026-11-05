@@ -1,6 +1,6 @@
 //! Bounded, durable address-to-contact lookup projection.
 
-use crate::Error;
+use crate::{Error, contacts};
 use phonenumber::{Mode, country, parse};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -72,13 +72,28 @@ pub(crate) fn normalized(address: &str, region: Option<&str>) -> Option<String> 
 }
 
 fn refresh(conn: &mut Connection) -> Result<bool, Error> {
-    let books: Vec<(String, String)> = {
-        let mut statement =
-            conn.prepare("SELECT id,body FROM contact_books WHERE forgotten=0 ORDER BY id")?;
+    let visible_book_ids = contacts::visible_book_ids(conn)?;
+    let book_rows: Vec<(String, String, String, String)> = {
+        let mut statement = conn.prepare(
+            "SELECT id,owner_device_id,state,body FROM contact_books WHERE forgotten=0 ORDER BY id",
+        )?;
         statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
             .collect::<Result<_, _>>()?
     };
+    let mut books = Vec::new();
+    for (id, _owner, _state, body) in book_rows {
+        if visible_book_ids.contains(&id) {
+            books.push((id, body));
+        }
+    }
     for (book_id, body) in &books {
         let current = normalization_fingerprint(body);
         let previous: Option<String> = conn
@@ -102,14 +117,30 @@ fn refresh(conn: &mut Connection) -> Result<bool, Error> {
             tx.commit()?;
         }
     }
-    // Forgotten books never participate; clean their stale projection without relying on it for safety.
-    conn.execute("DELETE FROM contact_address_index WHERE book_id IN (SELECT id FROM contact_books WHERE forgotten!=0)", [])?;
-    conn.execute("DELETE FROM contact_resolution_projection WHERE book_id IN (SELECT id FROM contact_books WHERE forgotten!=0)", [])?;
+    let visible_ids = books.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>();
+    let placeholders = std::iter::repeat_n("?", visible_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    if visible_ids.is_empty() {
+        conn.execute("DELETE FROM contact_address_index", [])?;
+        conn.execute("DELETE FROM contact_resolution_projection", [])?;
+    } else {
+        conn.execute(
+            &format!("DELETE FROM contact_address_index WHERE book_id NOT IN ({placeholders})"),
+            rusqlite::params_from_iter(&visible_ids),
+        )?;
+        conn.execute(
+            &format!(
+                "DELETE FROM contact_resolution_projection WHERE book_id NOT IN ({placeholders})"
+            ),
+            rusqlite::params_from_iter(&visible_ids),
+        )?;
+    }
 
     let rows: Vec<(String, String, i64, String, Option<i64>)> = {
         let mut statement = conn.prepare(
             "SELECT c.book_id,c.id,c.revision,c.body,c.deleted_at FROM contacts c \
-             JOIN contact_books b ON b.id=c.book_id AND b.forgotten=0 \
+               JOIN contact_books b ON b.id=c.book_id AND b.forgotten=0 \
              LEFT JOIN contact_resolution_projection p ON p.book_id=c.book_id AND p.contact_id=c.id \
              WHERE p.revision IS NULL OR p.revision!=c.revision ORDER BY c.book_id,c.id LIMIT ?"
         )?;
@@ -190,19 +221,30 @@ struct Book {
     region: Option<String>,
 }
 
-fn books(conn: &Connection) -> Result<Vec<Book>, Error> {
+fn books(conn: &Connection, visible_book_ids: &BTreeSet<String>) -> Result<Vec<Book>, Error> {
     let mut statement =
-        conn.prepare("SELECT owner_device_id,body FROM contact_books WHERE forgotten=0")?;
-    statement
+        conn.prepare("SELECT id,owner_device_id,state,body FROM contact_books WHERE forgotten=0")?;
+    let rows = statement
         .query_map([], |row| {
-            let body: String = row.get(1)?;
-            Ok(Book {
-                owner: row.get(0)?,
-                region: region(&body),
-            })
+            let body: String = row.get(3)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                body,
+            ))
         })?
-        .collect::<Result<_, _>>()
-        .map_err(Error::from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut books = Vec::new();
+    for (id, owner, _state, body) in rows {
+        if visible_book_ids.contains(&id) {
+            books.push(Book {
+                owner,
+                region: region(&body),
+            });
+        }
+    }
+    Ok(books)
 }
 
 fn candidates(
@@ -210,6 +252,7 @@ fn candidates(
     address: &str,
     source: Option<&str>,
     books: &[Book],
+    visible_book_ids: &BTreeSet<String>,
 ) -> Result<Vec<Candidate>, Error> {
     let mut keys = BTreeSet::from([(ORIGINAL, address.to_owned())]);
     if address.starts_with('+') {
@@ -269,7 +312,11 @@ fn candidates(
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        result.extend(found);
+        for candidate in found {
+            if visible_book_ids.contains(&candidate.book_id) {
+                result.push(candidate);
+            }
+        }
     }
     result.sort_by(|a, b| (&a.book_id, &a.contact_id).cmp(&(&b.book_id, &b.contact_id)));
     result.dedup_by(|a, b| a.book_id == b.book_id && a.contact_id == b.contact_id);
@@ -322,6 +369,7 @@ pub(crate) struct AddressResolution {
 pub(crate) struct DisplayResolver<'a> {
     conn: &'a Connection,
     books: Vec<Book>,
+    visible_book_ids: BTreeSet<String>,
 }
 
 impl DisplayResolver<'_> {
@@ -330,7 +378,13 @@ impl DisplayResolver<'_> {
         address: &str,
         source: Option<&str>,
     ) -> Result<AddressResolution, Error> {
-        let candidates = candidates(self.conn, address, source, &self.books)?;
+        let candidates = candidates(
+            self.conn,
+            address,
+            source,
+            &self.books,
+            &self.visible_book_ids,
+        )?;
         let mut candidate_display_names = candidates
             .iter()
             .map(|candidate| candidate.display_name.clone())
@@ -350,9 +404,11 @@ impl DisplayResolver<'_> {
 
 /// Creates a read-only resolver that shares contact-book metadata across an entire search.
 pub(crate) fn display_resolver(conn: &Connection) -> Result<DisplayResolver<'_>, Error> {
+    let visible_book_ids = contacts::visible_book_ids(conn)?;
     Ok(DisplayResolver {
         conn,
-        books: books(conn)?,
+        books: books(conn, &visible_book_ids)?,
+        visible_book_ids,
     })
 }
 
@@ -378,11 +434,15 @@ pub(crate) fn resolve(conn: &mut Connection, input: &str) -> Result<String, Erro
         })
         .collect::<Result<Vec<_>, _>>()?;
     let more_indexing = refresh(conn)?;
-    let books = books(conn)?;
+    let visible_book_ids = contacts::visible_book_ids(conn)?;
+    let books = books(conn, &visible_book_ids)?;
     let mut matches = Vec::new();
     let mut ambiguous = Vec::new();
     for address in addresses {
-        if let Some(candidate) = choose(candidates(conn, &address, source, &books)?, source) {
+        if let Some(candidate) = choose(
+            candidates(conn, &address, source, &books, &visible_book_ids)?,
+            source,
+        ) {
             let mut item = json!({"address": address, "contact_id": candidate.contact_id, "book_id": candidate.book_id, "display_name": candidate.display_name});
             if let Some(photo_attachment_id) = candidate.photo_attachment_id {
                 item["photo_attachment_id"] = json!(photo_attachment_id);

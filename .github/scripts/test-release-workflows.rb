@@ -1,7 +1,10 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require 'fileutils'
+require 'open3'
 require 'shellwords'
+require 'tmpdir'
 require 'yaml'
 
 root = File.expand_path('..', __dir__)
@@ -24,7 +27,7 @@ android_packaging_flags = android_packaging_command.reject { |token| token.start
 expected_android_packaging_flags = ['./gradlew', '--console=plain', '--dependency-verification=strict', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2']
 assert.call(android_packaging_flags == expected_android_packaging_flags, 'public CI Android packaging must use strict dependency verification, the 4 GiB JVM override, two-worker bound, and diagnostic flags')
 android_packaging_tasks = android_packaging_command.select { |token| token.start_with?(':') }
-assert.call(android_packaging_tasks == %w[:app:verifyReleaseManifestSecurity :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest], 'public CI Android packaging must verify the merged release manifest before linting and debug artifacts')
+assert.call(android_packaging_tasks == %w[:app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload], 'public CI Android packaging must verify the merged release manifest before linting and debug artifacts')
 handoff = ci_jobs.fetch('notify-hosted-production')
 assert.call(handoff.fetch('if') == "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'", 'hosted dispatch must require a successful production push gate and both publishers')
 assert.call(handoff.fetch('needs').sort == %w[gate publish-production-relay publish-production-server], 'hosted dispatch must wait for the gate and both publishers')
@@ -380,6 +383,10 @@ assert.call(android_precheck.fetch('run').include?(trusted_contexts), 'Android p
 assert.call(android_precheck.fetch('run').include?('[ "$BUILD_DESKTOP" != false ]'), 'trusted Android builds must reject requests without desktop artifacts')
 android_sign = android_steps.find { |step| step['run'] == 'bash infra/release/sign-android-artifacts.sh dist/android-release/peppy-android-unsigned.apk dist/android-release/peppy-android-unsigned.aab dist/android-release' }
 assert.call(!android_sign.nil?, 'trusted Android builds must sign release artifacts after building')
+trusted_android_build = android_steps.find { |step| step['name'] == 'Build trusted Android release artifacts' }
+assert.call(trusted_android_build.fetch('run').include?(':app:assembleSideload') && trusted_android_build.fetch('run').include?(':app:bundleRelease'), 'trusted Android builds must assemble the sideload APK and release AAB')
+assert.call(trusted_android_build.fetch('run').include?('app/build/outputs/apk/sideload/app-sideload-unsigned.apk'), 'trusted Android builds must stage the unsigned sideload APK')
+assert.call(trusted_android_build.fetch('run').include?(':app:bundleRelease :app:mergeReleaseNativeDebugMetadata -PpeppyDistribution=play'), 'trusted Android builds must produce release native debug symbols with the Play bundle')
 assert.call(!android_validation.nil? && !android_stop_gradle.nil?, 'trusted Android builds must validate inputs and stop Gradle before signing')
 assert.call(android_stop_gradle.fetch('working-directory') == 'apps/android' && android_stop_gradle.fetch('run') == './gradlew --stop', 'trusted Android builds must stop Gradle in the Android project before signing')
 assert.call(android_steps.index(android_precheck) < android_steps.index(android_checkout) && android_steps.index(android_checkout) < android_steps.index(android_guard) && android_steps.index(android_guard) < android_steps.index(android_validation) && android_steps.index(android_validation) < android_steps.index(android_stop_gradle) && android_steps.index(android_stop_gradle) < android_steps.index(android_sign), 'Android trust validation and Gradle shutdown must precede secret-scoped signing')
@@ -389,10 +396,10 @@ android_sign_env = android_sign.fetch('env')
 end
 assert.call(android_sign_env.fetch('PEPPY_ANDROID_SIGNING_CERT_SHA256') == "${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}", 'Android signer must receive the protected certificate fingerprint only for trusted builds')
 assert.call(android_steps.any? { |step| step.dig('with', 'path') == 'dist/android-release/peppy-android-debug.apk' }, 'development Android artifact must contain only the debug APK')
-assert.call(android_steps.any? { |step| step.dig('with', 'path') == "dist/android-release/peppy-android.apk\ndist/android-release/peppy-android.aab\n" }, 'release Android artifact must contain only signed assets')
+assert.call(android_steps.any? { |step| step.dig('with', 'path') == "dist/android-release/peppy-android.apk\ndist/android-release/peppy-android.aab\ndist/android-release/peppy-android-native-debug-symbols.zip\n" }, 'release Android artifact must contain only signed assets and native debug symbols')
 android_development_build = android_steps.find { |step| step['name'] == 'Build development Android debug APK' }
 assert.call(android_development_build.fetch('env').fetch('PEPPY_ANDROID_NATIVE_PROFILE') == 'release', 'development Android builds must retain release native compilation')
-assert.call(android_development_build.fetch('run').include?('--dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleRelease :app:bundleRelease'), 'development Android builds must verify release dependencies and the merged manifest before producing artifacts')
+assert.call(android_development_build.fetch('run').include?('--dependency-verification=strict :app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleSideload :app:bundleRelease'), 'development Android builds must verify release dependencies and the merged manifest before producing artifacts')
 
 stage_script = File.read(File.join(root, '..', 'infra', 'release', 'stage-assets.sh'))
 assert.call(stage_script.include?("peppy-android.apk") && stage_script.include?("peppy-android.aab"), 'staging must require signed Android artifact names')
@@ -464,5 +471,63 @@ release_tooling_sdk = release_tooling_steps.find { |step| step['name'] == 'Insta
 assert.call(!release_tooling_java.nil? && release_tooling_java.fetch('with') == { 'distribution' => 'temurin', 'java-version' => '17' }, 'release tooling must install Temurin JDK 17')
 assert.call(!release_tooling_sdk.nil? && release_tooling_sdk.fetch('run').include?('platforms;android-35') && release_tooling_sdk.fetch('run').include?('build-tools;35.0.0'), 'release tooling must install the Android signing test SDK platform and build tools')
 assert.call(release_tooling_steps.index(release_tooling_java) < release_tooling_steps.index(release_tooling_sdk) && release_tooling_steps.index(release_tooling_sdk) < release_tooling_steps.index(release_tooling_steps.find { |step| step['run'] == 'infra/release/test-android-signing.sh' }), 'release tooling must set up JDK and SDK before real Android signing tests')
+trusted_android_build_steps = android_steps.select { |step| step['name'] == 'Build trusted Android release artifacts' }
+assert.call(trusted_android_build_steps.length == 1, 'trusted Android builds must have exactly one release build step')
+Dir.mktmpdir('peppy-android-release-test') do |fixture|
+  FileUtils.mkdir_p(File.join(fixture, 'infra', 'compose'))
+  FileUtils.mkdir_p(File.join(fixture, 'apps', 'android'))
+  verifier = File.join(fixture, 'infra', 'compose', 'verify-android-native.sh')
+  gradlew = File.join(fixture, 'apps', 'android', 'gradlew')
+  capture = File.join(fixture, 'gradle-arguments.bin')
+  File.write(verifier, "#!/usr/bin/env bash\nexit 0\n")
+  File.write(gradlew, <<~'SH')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    { printf '%s\0' "$0"; for argument in "$@"; do printf '%s\0' "$argument"; done; } >> "$PEPPY_TEST_GRADLE_CAPTURE"
+    printf 'END\0' >> "$PEPPY_TEST_GRADLE_CAPTURE"
+    mkdir -p app/build/outputs/apk/sideload app/build/outputs/bundle/release app/build/outputs/native-debug-symbols/release
+    : > app/build/outputs/apk/sideload/app-sideload-unsigned.apk
+    : > app/build/outputs/bundle/release/app-release.aab
+    : > app/build/outputs/native-debug-symbols/release/native-debug-symbols.zip
+  SH
+  [verifier, gradlew].each { |path| File.chmod(0o755, path) }
+
+  step_env = ENV.to_h.merge(
+    'ANDROID_HOME' => File.join(fixture, 'sdk'),
+    'VERSION' => '1.2.3',
+    'ANDROID_VERSION_CODE' => '45',
+    'PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID' => 'test-server-client-id',
+    'PEPPY_ANDROID_NATIVE_PROFILE' => 'release',
+    'PEPPY_TEST_GRADLE_CAPTURE' => capture
+  )
+  stdout, stderr, status = Open3.capture3(
+    step_env, 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', trusted_android_build_steps.first.fetch('run'),
+    chdir: fixture
+  )
+  assert.call(status.success?, "trusted Android release step must succeed against the fake checkout: #{stdout}#{stderr}")
+
+  tokens = File.binread(capture).force_encoding(Encoding::UTF_8).split("\0")
+  invocations = [[]]
+  tokens.each { |token| token == 'END' ? invocations << [] : invocations.last << token }
+  invocations.pop
+  assert.call(invocations.length == 2, 'trusted Android release build must invoke Gradle exactly twice')
+
+  expected_options = [
+    '--console=plain', '--dependency-verification=strict', '--stacktrace',
+    '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2'
+  ].sort
+  direct_invocation, play_invocation = invocations
+  [
+    [direct_invocation, 'direct', %w[:app:verifyReleaseManifestSecurity :app:lintSideload :app:assembleSideload]],
+    [play_invocation, 'play', %w[:app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease :app:mergeReleaseNativeDebugMetadata]]
+  ].each do |arguments, distribution, expected_tasks|
+    assert.call(arguments.first == './gradlew', "trusted Android #{distribution} build must run the project gradlew")
+    options = arguments.drop(1).reject { |token| token.start_with?(':', '-P') }
+    assert.call(options.sort == expected_options, "trusted Android #{distribution} build must use strict verification, one 4 GiB UTF-8 JVM argument, two workers, and stacktraces")
+    assert.call(arguments.select { |token| token.start_with?(':') } == expected_tasks, "trusted Android #{distribution} build must run exactly its release tasks")
+    assert.call(arguments.count { |token| token.start_with?('-PpeppyDistribution=') } == 1 && arguments.include?("-PpeppyDistribution=#{distribution}"), "trusted Android #{distribution} build must select the #{distribution} distribution")
+    assert.call(arguments.include?('-PpeppyVersionName=1.2.3') && arguments.include?('-PpeppyVersionCode=45'), "trusted Android #{distribution} build must receive the release version arguments")
+  end
+end
 
 puts 'release workflow tests passed'

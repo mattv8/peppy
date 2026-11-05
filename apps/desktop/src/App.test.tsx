@@ -4048,12 +4048,40 @@ describe("draft durability", () => {
 });
 
 describe("composer window", () => {
-  it("keeps text conversation tabs outside the main window titlebar", async () => {
+  it("places icon conversation tabs in the main conversation header", async () => {
     render(<App />);
 
     const tabs = await screen.findByRole("tablist", { name: "Conversation views" });
-    expect(tabs).toHaveAttribute("data-variant", "text");
+    expect(tabs.closest("#thread-pane-header")).toBeInTheDocument();
     expect(tabs.closest("#desktop-titlebar")).not.toBeInTheDocument();
+    expect(document.querySelectorAll("#conversation-tabs")).toHaveLength(1);
+    expect(screen.getByRole("tab", { name: "Messages" })).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Media" }));
+
+    expect(screen.getByRole("tab", { name: "Media" })).toHaveAttribute("aria-selected", "true");
+    expect(document.getElementById("tabpanel-media")).toBeInTheDocument();
+  });
+
+  it("hides the main header conversation tabs in settings", async () => {
+    render(<App />);
+
+    await screen.findByRole("tablist", { name: "Conversation views" });
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(screen.queryByRole("tablist", { name: "Conversation views" })).not.toBeInTheDocument();
+  });
+
+  it("omits conversation tabs when no conversation is open", async () => {
+    vi.mocked(bridge.load_state).mockResolvedValue({
+      ...await fixtureBridge.load_state(),
+      activeConversationId: undefined,
+    });
+    render(<App />);
+
+    await waitFor(() => expect(document.getElementById("thread-pane-header")).toBeInTheDocument());
+    expect(screen.queryByRole("tablist", { name: "Conversation views" })).not.toBeInTheDocument();
+    expect(document.getElementById("tabpanel-messages")).not.toHaveAttribute("role");
   });
 
   it("places icon conversation tabs in the head panel header and supports arrow navigation", async () => {
@@ -4061,7 +4089,6 @@ describe("composer window", () => {
     render(<App />);
 
     const tabs = await screen.findByRole("tablist", { name: "Conversation views" });
-    expect(tabs).toHaveAttribute("data-variant", "icons");
     expect(tabs.closest("#head-panel-header")).toBeInTheDocument();
 
     const messagesTab = screen.getByRole("tab", { name: "Messages" });
@@ -4075,7 +4102,6 @@ describe("composer window", () => {
     render(<App />);
 
     const tabs = await screen.findByRole("tablist", { name: "Conversation views" });
-    expect(tabs).toHaveAttribute("data-variant", "icons");
     expect(tabs.closest("#desktop-titlebar")).toBeInTheDocument();
     expect(document.querySelectorAll("#conversation-tabs")).toHaveLength(1);
 

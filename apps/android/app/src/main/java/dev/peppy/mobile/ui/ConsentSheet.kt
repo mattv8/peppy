@@ -42,6 +42,8 @@ internal fun ConsentSheet(
     disclosureTag: String? = null,
     showPrivacyPolicy: Boolean = true,
     dismissLabel: String? = null,
+    secondaryActionLabel: String? = null,
+    onSecondaryAction: (() -> Unit)? = null,
 ) {
     var confirmed by remember { mutableStateOf(false) }
     val uriHandler = LocalUriHandler.current
@@ -72,6 +74,12 @@ internal fun ConsentSheet(
                 enabled = !confirmed,
                 modifier = Modifier.fillMaxWidth().padding(top = 12.dp).testTag("$tag-confirm"),
             ) { Text(confirmLabel) }
+            if (secondaryActionLabel != null && onSecondaryAction != null) {
+                TextButton(
+                    onClick = onSecondaryAction,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag("$tag-view-subscription"),
+                ) { Text(secondaryActionLabel) }
+            }
             OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag("$tag-dismiss")) {
                 Text(dismissLabel ?: stringResource(R.string.peppy_toggle_android_not_now))
             }

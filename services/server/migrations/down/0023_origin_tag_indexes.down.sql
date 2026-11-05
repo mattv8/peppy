@@ -1,0 +1,1 @@
+DROP INDEX encrypted_records_origin_tag_unique;

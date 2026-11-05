@@ -166,6 +166,17 @@ import Testing
         await paired.close()
     }
 
+    @Test func deviceHintSurvivesReinstallAndIsReused() throws {
+        let keychain = InMemorySecureStore()
+        let first = try DeviceHintStore(secure: keychain).readOrCreate()
+
+        // Reinstall: a new app container/session uses the same Keychain item.
+        let reinstalled = try DeviceHintStore(secure: keychain).readOrCreate()
+        #expect(first.count == 32)
+        #expect(reinstalled == first)
+        #expect(keychain.value(DeviceHintStore.account) == first)
+    }
+
     @Test func aDatabaseWithoutItsKeyIsNeverReplaced() async throws {
         let server = try FakeServer(passphrase: passphrase)
         let store = InMemorySecureStore()

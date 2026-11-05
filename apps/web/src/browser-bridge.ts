@@ -6,7 +6,7 @@ import type {
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
-  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult,
+  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
@@ -34,6 +34,7 @@ const MAX_OPEN_MEDIA_BYTES = 64 * 1024 * 1024;
 const MIN_ADMIN_PASSWORD_BYTES = 12;
 const MAX_ADMIN_PASSWORD_BYTES = 1024;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const CONVERSATION_FOLDERS: readonly ConversationFolder[] = ["inbox", "archived", "spam"];
 let activeSecretDialog: (() => void) | undefined;
 let capturedInviteLink = captureInviteLink();
 
@@ -486,6 +487,11 @@ export class BrowserBridge implements DesktopBridge {
     return changed.toString();
   }
   public set_conversation_pinned(conversationId: string, pinned: boolean): Promise<void> { return this.call("set_conversation_pinned", { conversationId, pinned }); }
+  public set_conversation_folder(conversationId: string, folder: ConversationFolder): Promise<void> {
+    if (!CONVERSATION_FOLDERS.includes(folder)) return Promise.reject(new BrowserBridgeError("invalid-request", "Invalid conversation folder."));
+    return this.call("set_conversation_folder", { conversationId, folder });
+  }
+  public request_sender_unblock(conversationId: string): Promise<void> { return this.call("request_sender_unblock", { conversationId }); }
   public set_conversation_tone(seed: string, paletteIndex: number | null): Promise<void> { return this.call("set_conversation_tone", { seed, paletteIndex }); }
   public dismiss_notification(target: NotificationTarget): Promise<void> { return this.call("dismiss_notification", { target }); }
   public dismiss_all_notifications(): Promise<void> { return this.call("dismiss_all_notifications"); }

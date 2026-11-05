@@ -30,19 +30,24 @@ mod contact_source;
 mod contact_state;
 mod contact_sync_requests;
 mod contacts;
+mod conversation_folders;
 mod conversation_match;
 mod conversation_pinning;
 mod conversation_tones;
 mod deferred_media;
+mod device_succession;
 mod gateway_settings;
 mod history_import;
+mod initial_replay;
 mod local_search;
 mod media;
 mod media_cache;
 mod message_history_capture;
 mod message_history_protocol;
 mod message_history_requests;
+mod message_origin;
 mod notification_preferences;
+mod sender_blocklist;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
 mod media_paging;
 mod mms;
@@ -118,7 +123,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 41;
+const SCHEMA_VERSION: i64 = 45;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -188,7 +193,7 @@ const BROWSER_LOCAL_IDENTITY_AAD_PREFIX: &[u8] = b"peppy-browser-local-identity-
 const BROWSER_LOCAL_IDENTITY_PLAINTEXT_BYTES: usize = 128;
 const MAX_BROWSER_LOCAL_IDENTITY_AAD_BYTES: usize = 64 * 1024;
 const NEXT_SOURCE_SEQUENCE_SQL: &str = "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')";
-const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND NOT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.envelope_id=outbox.envelope_id AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1)))) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachment_remote_state rs ON rs.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND rs.removed_by_storage_policy=1) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND a.state='pending_upload' AND a.remote_object_id IS NULL) AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos p LEFT JOIN contact_photo_aliases alias ON alias.old_id=p.attachment_id JOIN attachments a ON a.attachment_id=COALESCE(alias.new_id,p.attachment_id) WHERE p.outbox_sequence=outbox.seq AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos other WHERE other.outbox_sequence=p.outbox_sequence AND other.attachment_id<>p.attachment_id) AND NOT EXISTS(SELECT 1 FROM contact_photo_unavailable unavailable WHERE unavailable.outbox_sequence=p.outbox_sequence) AND a.state='pending_upload' AND a.remote_object_id IS NULL AND a.media_type='image/jpeg' AND a.plaintext_bytes<=65536 AND NOT EXISTS(SELECT 1 FROM contact_photo_reclaims reclaim WHERE reclaim.attachment_id=a.attachment_id AND reclaim.state='completed')) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
+const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction,origin_tag FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND NOT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.envelope_id=outbox.envelope_id AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1)))) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachment_remote_state rs ON rs.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND rs.removed_by_storage_policy=1) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND a.state='pending_upload' AND a.remote_object_id IS NULL) AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos p LEFT JOIN contact_photo_aliases alias ON alias.old_id=p.attachment_id JOIN attachments a ON a.attachment_id=COALESCE(alias.new_id,p.attachment_id) WHERE p.outbox_sequence=outbox.seq AND NOT EXISTS(SELECT 1 FROM outbox_contact_photos other WHERE other.outbox_sequence=p.outbox_sequence AND other.attachment_id<>p.attachment_id) AND NOT EXISTS(SELECT 1 FROM contact_photo_unavailable unavailable WHERE unavailable.outbox_sequence=p.outbox_sequence) AND a.state='pending_upload' AND a.remote_object_id IS NULL AND a.media_type='image/jpeg' AND a.plaintext_bytes<=65536 AND NOT EXISTS(SELECT 1 FROM contact_photo_reclaims reclaim WHERE reclaim.attachment_id=a.attachment_id AND reclaim.state='completed')) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
 const BATTERY_LOOKUP_INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS sms_acquisitions_reserved_sequence ON sms_acquisitions(conversation_id,source_sequence) WHERE state!='complete';
 CREATE INDEX IF NOT EXISTS outbox_unsealed_priority ON outbox(priority,seq) WHERE state='unsealed';
@@ -405,6 +410,35 @@ pub enum PrivatePayload {
         logical_revision: u64,
         writer_device_id: String,
     },
+    ConversationFolder {
+        conversation_id: ConversationId,
+        folder: ConversationFolder,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        archived_through_ms: Option<i64>,
+        logical_revision: u64,
+        writer_device_id: String,
+    },
+    SenderBlocklist {
+        numbers: Vec<String>,
+        can_unblock: bool,
+        logical_revision: u64,
+        writer_device_id: String,
+    },
+    SenderUnblockRequest {
+        request_id: uuid::Uuid,
+        conversation_id: ConversationId,
+        numbers: Vec<String>,
+        target_device_id: String,
+        writer_device_id: String,
+        /// Authenticated writer timestamp; legacy payloads default to non-actionable.
+        #[serde(default)]
+        created_at_ms: i64,
+    },
+    SenderUnblockResult {
+        request_id: uuid::Uuid,
+        outcome: SenderUnblockOutcome,
+        writer_device_id: String,
+    },
     ConversationTone {
         seed: String,
         palette_index: Option<u8>,
@@ -421,6 +455,24 @@ pub enum PrivatePayload {
         subscription_id: String,
         address: String,
         revision: u64,
+    },
+    MessageOriginAlias {
+        message_id: MessageId,
+        origin_key: String,
+    },
+    DeviceHintRegistered {
+        device_id: DeviceId,
+        platform: String,
+        hint_tag: String,
+        #[serde(default)]
+        key_epoch: u32,
+    },
+    DeviceSucceeded {
+        predecessor: DeviceId,
+        successor: DeviceId,
+        platform: String,
+        hint_tag: String,
+        key_epoch: u32,
     },
     ContactBookState {
         book: serde_json::Value,
@@ -705,6 +757,42 @@ pub struct Conversation {
     pub conversation_id: ConversationId,
     pub unread_count: u64,
     pub pinned: bool,
+    pub folder: ConversationFolder,
+    pub folder_reason: Option<ConversationFolderReason>,
+    pub unblock: Option<SenderUnblockStatus>,
+    pub can_unblock: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationFolder {
+    Inbox,
+    Archived,
+    Spam,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationFolderReason {
+    Marked,
+    Blocked,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderUnblockStatus {
+    Pending,
+    Failed,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderUnblockOutcome {
+    Unblocked,
+    NotBlocked,
+    NotAllowed,
+    Failed,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SenderUnblockWork {
+    pub request_id: String,
+    pub numbers: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Draft {
@@ -1004,6 +1092,19 @@ impl Store {
 /// Cloneable handle to the process-wide owner of one database path.
 #[derive(Clone)]
 pub struct Client(Arc<Mutex<Store>>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContactBookSelection {
+    Inherited {
+        book_id: String,
+        retire_book_ids: Vec<String>,
+    },
+    Owned {
+        book_id: String,
+    },
+    Wait,
+    Mint,
+}
 
 impl Client {
     /// Opens (or shares) the per-canonical-path owner. A second open must present the same key
@@ -1831,6 +1932,16 @@ impl Client {
     pub fn server_compaction_supported(&self) -> Result<bool, Error> {
         let s = self.lock()?;
         Ok(get_meta(&s.conn, "server_compaction_supported")?.as_deref() == Some("1"))
+    }
+
+    /// Records whether the trusted server accepts message-origin tags.
+    pub fn set_server_origin_tags_supported(&self, supported: bool) -> Result<(), Error> {
+        let s = self.lock()?;
+        set_meta(
+            &s.conn,
+            "server_origin_tags_supported",
+            if supported { "1" } else { "0" },
+        )
     }
 
     /// Records both trusted `/v1/snapshot` compaction fields: `supported` (the server stores
@@ -2786,6 +2897,80 @@ impl Client {
         Ok(Cursor(receive_cursor(&self.lock()?.conn)?))
     }
 
+    /// Records the first server replay watermark learned after pairing.
+    pub fn observe_server_high_water(&self, cursor: Cursor) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        initial_replay::observe_server_high_water(&tx, cursor.0)?;
+        device_succession::evaluate_succession(&tx, &ctx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether replay and the message-origin backfill have reached the initial server watermark.
+    pub fn initial_replay_caught_up(&self) -> Result<bool, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let caught_up = initial_replay::caught_up(&tx)?;
+        if caught_up {
+            device_succession::evaluate_succession(&tx, &ctx)?;
+        }
+        tx.commit()?;
+        Ok(caught_up)
+    }
+
+    /// Registers an opaque reinstall-stable native hint. The raw value remains local.
+    pub fn register_device_hint(&self, platform: &str, hint: &[u8]) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        device_succession::register_hint(&tx, &ctx, platform, hint)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records that the native host cannot provide a device hint for this installation.
+    pub fn register_no_device_hint(&self) -> Result<(), Error> {
+        let store = self.lock()?;
+        device_succession::register_no_hint(&store.conn)
+    }
+
+    pub fn contact_book_selection(&self) -> Result<ContactBookSelection, Error> {
+        let mut store = self.lock()?;
+        let device_id = store.config.device_id;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let caught_up = initial_replay::caught_up(&tx)?;
+        if caught_up {
+            device_succession::evaluate_succession(&tx, &ctx)?;
+        }
+        tx.commit()?;
+        if !caught_up || !device_succession::local_hint_registered(conn)? {
+            return Ok(ContactBookSelection::Wait);
+        }
+        let inherited = device_succession::inherited_books(conn, &device_id)?;
+        if let Some(book_id) = inherited.first() {
+            let retire = conn.prepare("SELECT id FROM contact_books WHERE owner_device_id=? AND forgotten=0 AND state!='retired' AND id NOT IN (SELECT book_id FROM inherited_contact_books) ORDER BY id")?
+                .query_map([device_id.to_string()], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            if retire.is_empty() && device_succession::takeover_complete(conn, book_id)? {
+                return Ok(ContactBookSelection::Owned {
+                    book_id: book_id.clone(),
+                });
+            }
+            return Ok(ContactBookSelection::Inherited {
+                book_id: book_id.clone(),
+                retire_book_ids: retire,
+            });
+        }
+        let owned: Option<String> = conn.query_row("SELECT id FROM contact_books WHERE owner_device_id=? AND forgotten=0 AND state!='retired' ORDER BY id LIMIT 1", [device_id.to_string()], |row| row.get(0)).optional()?;
+        Ok(owned.map_or(ContactBookSelection::Mint, |book_id| {
+            ContactBookSelection::Owned { book_id }
+        }))
+    }
+
     /// Reports contiguous receipt and processing frontiers without mutating durable state.
     pub fn replay_progress(&self) -> Result<ReplayProgress, Error> {
         let store = self.lock()?;
@@ -3099,7 +3284,7 @@ impl Client {
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(
-            "WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0) FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC",
+            &format!("WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0),{} FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id LEFT JOIN conversation_folders f ON f.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC", conversation_folders::effective_folder_sql("c.sort_at_ms")),
         )?;
         let rows = query
             .query_map([], |r| {
@@ -3107,15 +3292,25 @@ impl Client {
                     r.get::<_, String>(0)?,
                     r.get::<_, i64>(1)?,
                     r.get::<_, bool>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let mut folder_context = sender_blocklist::FolderContext::default();
         rows.into_iter()
-            .map(|(id, unread, pinned)| {
+            .map(|(id, unread, pinned, folder)| {
+                let conversation_id = parse(&id)?;
+                let folder = ConversationFolder::from_db(&folder)?;
+                let (folder_reason, unblock, can_unblock) =
+                    folder_context.state(&s.conn, conversation_id, folder)?;
                 Ok(Conversation {
-                    conversation_id: parse(&id)?,
+                    conversation_id,
                     unread_count: u64::try_from(unread).map_err(|_| Error::Database)?,
                     pinned,
+                    folder,
+                    folder_reason,
+                    unblock,
+                    can_unblock,
                 })
             })
             .collect()
@@ -3376,7 +3571,7 @@ impl Client {
     /// Freezes the IDs currently unread in batches that keep later writes bounded.
     pub fn unread_message_batches(&self) -> Result<Vec<Vec<MessageId>>, Error> {
         let store = self.lock()?;
-        let mut query = store.conn.prepare("SELECT id FROM messages WHERE seen=0")?;
+        let mut query = store.conn.prepare(&format!("SELECT id FROM messages WHERE seen=0 AND conversation_id NOT IN (SELECT f.conversation_id FROM conversation_folders f WHERE ({})!='inbox')", conversation_folders::effective_folder_sql("(SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.conversation_id=f.conversation_id)")))?;
         let ids = query
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -4042,6 +4237,7 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        initial_replay::observe_server_high_water(&tx, high_water.0)?;
         phone_read::retire_all_phone_read_effects(&tx)?;
         mms_backfill::record_snapshot_capacity(&tx, high_water.0, record_count)?;
         if active_generation(&tx)?.is_some_and(|g| g.published) {
@@ -5374,6 +5570,37 @@ CREATE TABLE IF NOT EXISTS phone_read_effects(message_id TEXT PRIMARY KEY, sourc
 CREATE INDEX IF NOT EXISTS phone_read_effects_created ON phone_read_effects(created_at_ms);
 CREATE TABLE IF NOT EXISTS phone_read_effect_terminals(message_id TEXT PRIMARY KEY);
 ";
+const MIGRATION_43: &str = "
+CREATE TABLE IF NOT EXISTS conversation_folders(conversation_id TEXT PRIMARY KEY,
+  folder TEXT NOT NULL CHECK(folder IN ('inbox','archived','spam')), archived_through_ms INTEGER,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
+  producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
+";
+const MIGRATION_44: &str = "
+CREATE TABLE IF NOT EXISTS sender_blocklists(producer_device_id TEXT PRIMARY KEY, numbers TEXT NOT NULL, can_unblock INTEGER NOT NULL,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sender_unblock_requests(request_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, target_device_id TEXT NOT NULL,
+  numbers TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','unblocked','not_blocked','not_allowed','failed')),
+  historical INTEGER NOT NULL DEFAULT 0, created_at_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS sender_unblock_requests_conversation ON sender_unblock_requests(conversation_id);
+CREATE TABLE IF NOT EXISTS sender_unblock_attempts(request_id TEXT PRIMARY KEY, begun_at_ms INTEGER NOT NULL, completed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS provider_archive_observed(thread_id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS provider_folder_writes(conversation_id TEXT PRIMARY KEY, folder TEXT NOT NULL,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sender_blocklist_unmapped(number TEXT PRIMARY KEY);
+CREATE INDEX IF NOT EXISTS mms_thread_conversations_thread ON mms_thread_conversations(source_device_id, provider_thread_id);
+";
+fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(
+        conn,
+        "sender_unblock_requests",
+        "key_epoch INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(conn, "outbox", "origin_tag TEXT")
+}
 
 fn apply_migration_40(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
@@ -5390,18 +5617,56 @@ fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Re
         .split_whitespace()
         .next()
         .ok_or(Error::Database)?;
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
-        params![table, column],
-        |row| row.get(0),
-    )?;
-    if !exists {
+    if !column_exists(conn, table, column)? {
         conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))?;
     }
     Ok(())
 }
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+        [table],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+        params![table, column],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn drop_column_if_exists(conn: &Connection, table: &str, column: &str) -> Result<(), Error> {
+    if column_exists(conn, table, column)? {
+        conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column}"))?;
+    }
+    Ok(())
+}
+
+/// Repairs the closed PR #114 notification-reply spike, which reused schema version 43 on one
+/// device. That device recorded production migration 43 without creating `conversation_folders`.
+fn repair_notification_reply_spike(conn: &mut Connection) -> Result<(), Error> {
+    if !table_exists(conn, "notification_reply_submissions")? {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS notification_reply_submissions_match;
+         DROP TABLE IF EXISTS notification_reply_submissions;",
+    )?;
+    drop_column_if_exists(&tx, "gateway_settings", "reply_via_google_messages_enabled")?;
+    tx.execute_batch(MIGRATION_43)?;
+    tx.commit()?;
+    Ok(())
+}
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
-const DECODER_REVISION: &str = "7";
+// Revision 8 reprojects retained control wires that older clients consumed as unknown.
+const DECODER_REVISION: &str = "11";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -5453,7 +5718,10 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     contact_state::initialize(conn)?;
     contact_media::initialize(conn)?;
     snapshot_projection::initialize(conn)?;
+    message_origin::initialize(conn)?;
+    device_succession::initialize(conn)?;
     initialize_compaction_state(conn)?;
+    repair_notification_reply_spike(conn)?;
     let version: Option<i64> = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
         .optional()?;
@@ -5497,6 +5765,10 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_38)?;
             tx.execute_batch(MIGRATION_39)?;
             apply_migration_40(&tx)?;
+            apply_migration_42(&tx)?;
+            tx.execute_batch(MIGRATION_43)?;
+            tx.execute_batch(MIGRATION_44)?;
+            apply_migration_45(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5505,7 +5777,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=40)) => {
+        Some(version @ (4..=44)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5613,6 +5885,18 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 39 {
                 apply_migration_40(&tx)?;
+            }
+            if version <= 41 {
+                apply_migration_42(&tx)?;
+            }
+            if version <= 42 {
+                tx.execute_batch(MIGRATION_43)?;
+            }
+            if version <= 43 {
+                tx.execute_batch(MIGRATION_44)?;
+            }
+            if version <= 44 {
+                apply_migration_45(&tx)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -5731,6 +6015,8 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                                     value.get("kind").and_then(|kind| kind.as_str()),
                                     Some(
                                         "conversation_pin"
+                                            | "conversation_folder"
+                                            | "sender_blocklist"
                                             | "conversation_tone"
                                             | "notification_preferences"
                                     )
@@ -5797,6 +6083,210 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         && media_matches(&message, &media) =>
                 {
                     hydrate_mms_context(conn, &message)?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::MessageOriginAlias {
+                        message_id,
+                        origin_key,
+                    },
+                ) => {
+                    message_origin::apply_alias(conn, &message_id, &origin_key)?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::DeviceHintRegistered {
+                        device_id,
+                        platform,
+                        hint_tag,
+                        key_epoch,
+                    },
+                ) if device_id == envelope.producer_device_id => {
+                    device_succession::apply_hint(
+                        conn,
+                        ctx,
+                        &device_id,
+                        &platform,
+                        &hint_tag,
+                        if key_epoch == 0 {
+                            envelope.key_epoch
+                        } else {
+                            key_epoch
+                        },
+                    )?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::DeviceSucceeded {
+                        predecessor,
+                        successor,
+                        platform,
+                        hint_tag,
+                        key_epoch,
+                    },
+                ) => {
+                    let _ = device_succession::apply_succession(
+                        conn,
+                        envelope.producer_device_id,
+                        predecessor,
+                        successor,
+                        &platform,
+                        &hint_tag,
+                        key_epoch,
+                    )?;
+                }
+                (
+                    "quarantined",
+                    PrivatePayload::ConversationFolder {
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) if conversation_folders::valid_event(
+                    conversation_id,
+                    folder,
+                    archived_through_ms,
+                    logical_revision,
+                    &writer_device_id,
+                    &envelope.producer_device_id.to_string(),
+                ) =>
+                {
+                    conn.execute("UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=? AND status='quarantined' AND reason='invalid_payload'", params![cursor])?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::ConversationFolder {
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) => {
+                    let producer = envelope.producer_device_id.to_string();
+                    if !conversation_folders::valid_event(
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                    ) {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                        continue;
+                    }
+                    conversation_folders::apply(
+                        conn,
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                        envelope.producer_sequence.0,
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("conversation-folder:{conversation_id}")),
+                        &producer,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::SenderBlocklist {
+                        numbers,
+                        can_unblock,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) => {
+                    let producer = envelope.producer_device_id.to_string();
+                    if !sender_blocklist::valid_blocklist(
+                        &numbers,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                    ) {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                        continue;
+                    }
+                    sender_blocklist::apply_blocklist(
+                        conn,
+                        &numbers,
+                        can_unblock,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                        envelope.producer_sequence.0,
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("sender-blocklist:{producer}")),
+                        &producer,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
+                }
+                // Requests an older decoder skipped are history: recorded, never actionable.
+                (
+                    "applied",
+                    PrivatePayload::SenderUnblockRequest {
+                        request_id,
+                        conversation_id,
+                        numbers,
+                        target_device_id,
+                        writer_device_id,
+                        created_at_ms,
+                    },
+                ) if sender_blocklist::valid_request(
+                    conversation_id,
+                    &numbers,
+                    &target_device_id,
+                    &writer_device_id,
+                    &envelope.producer_device_id.to_string(),
+                    created_at_ms,
+                ) =>
+                {
+                    sender_blocklist::apply_request(
+                        conn,
+                        request_id,
+                        conversation_id,
+                        &numbers,
+                        &target_device_id,
+                        sender_blocklist::RequestFreshness {
+                            historical: true,
+                            created_at_ms,
+                            key_epoch: envelope.key_epoch,
+                        },
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("sender-unblock:{request_id}")),
+                        &writer_device_id,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::SenderUnblockResult {
+                        request_id,
+                        outcome,
+                        writer_device_id,
+                    },
+                ) if writer_device_id == envelope.producer_device_id.to_string() => {
+                    sender_blocklist::apply_result(conn, request_id, outcome, &writer_device_id)?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("sender-unblock:{request_id}")),
+                        &writer_device_id,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
                 }
                 (
                     "applied",
@@ -5911,6 +6401,29 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
         }
     }
     set_meta(conn, &marker, DECODER_REVISION)
+}
+
+/// A newly accepted successor may have been rejected by this version before its ownership
+/// transfer was known. Re-apply only invalid payload records from that successor.
+pub(crate) fn requeue_successor_invalid_payload(
+    conn: &Connection,
+    successor: &DeviceId,
+) -> Result<(), Error> {
+    let mut statement = conn.prepare(
+        "SELECT cursor,wire FROM journal WHERE status='quarantined' AND reason='invalid_payload'",
+    )?;
+    let rows: Vec<(i64, Vec<u8>)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    for (cursor, wire) in rows {
+        if parse_wire(&wire).is_some_and(|envelope| envelope.producer_device_id == *successor) {
+            conn.execute(
+                "UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=?",
+                [cursor],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn hydrate_mms_context(conn: &Connection, recovered: &MessagePayload) -> Result<(), Error> {
@@ -6086,9 +6599,16 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "notification_dismiss"
             | "app_filter"
             | "conversation_pin"
+            | "conversation_folder"
+            | "sender_blocklist"
+            | "sender_unblock_request"
+            | "sender_unblock_result"
             | "conversation_tone"
             | "notification_preferences"
             | "mms_own_address"
+            | "message_origin_alias"
+            | "device_hint_registered"
+            | "device_succeeded"
             | "contact_book_state"
             | "contact_upserted"
             | "contact_removed"
@@ -6374,6 +6894,167 @@ fn apply_record(
         }
         (
             EnvelopePurpose::Event,
+            PrivatePayload::MessageOriginAlias {
+                message_id,
+                origin_key,
+            },
+        ) => {
+            message_origin::apply_alias(conn, &message_id, &origin_key)?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::DeviceHintRegistered {
+                device_id,
+                platform,
+                hint_tag,
+                key_epoch,
+            },
+        ) => {
+            if device_id != producer {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            device_succession::apply_hint(
+                conn,
+                ctx,
+                &device_id,
+                &platform,
+                &hint_tag,
+                if key_epoch == 0 {
+                    envelope.key_epoch
+                } else {
+                    key_epoch
+                },
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::DeviceSucceeded {
+                predecessor,
+                successor,
+                platform,
+                hint_tag,
+                key_epoch,
+            },
+        ) => {
+            device_succession::apply_succession(
+                conn,
+                producer,
+                predecessor,
+                successor,
+                &platform,
+                &hint_tag,
+                key_epoch,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::SenderBlocklist {
+                numbers,
+                can_unblock,
+                logical_revision,
+                writer_device_id,
+            },
+        ) => {
+            let producer = producer.to_string();
+            if !sender_blocklist::valid_blocklist(
+                &numbers,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            sender_blocklist::apply_blocklist(
+                conn,
+                &numbers,
+                can_unblock,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+                envelope.producer_sequence.0,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::SenderUnblockRequest {
+                request_id,
+                conversation_id,
+                numbers,
+                target_device_id,
+                writer_device_id,
+                created_at_ms,
+            },
+        ) => {
+            if !sender_blocklist::valid_request(
+                conversation_id,
+                &numbers,
+                &target_device_id,
+                &writer_device_id,
+                &producer.to_string(),
+                created_at_ms,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            sender_blocklist::apply_request(
+                conn,
+                request_id,
+                conversation_id,
+                &numbers,
+                &target_device_id,
+                sender_blocklist::RequestFreshness {
+                    historical,
+                    created_at_ms,
+                    key_epoch: envelope.key_epoch,
+                },
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::SenderUnblockResult {
+                request_id,
+                outcome,
+                writer_device_id,
+            },
+        ) => {
+            if writer_device_id != producer.to_string() {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            sender_blocklist::apply_result(conn, request_id, outcome, &writer_device_id)?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::ConversationFolder {
+                conversation_id,
+                folder,
+                archived_through_ms,
+                logical_revision,
+                writer_device_id,
+            },
+        ) => {
+            let producer = producer.to_string();
+            if !conversation_folders::valid_event(
+                conversation_id,
+                folder,
+                archived_through_ms,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            conversation_folders::apply(
+                conn,
+                conversation_id,
+                folder,
+                archived_through_ms,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+                envelope.producer_sequence.0,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
             PrivatePayload::ConversationPin {
                 conversation_id,
                 pinned,
@@ -6617,6 +7298,7 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
         }
         Err(error) => return Err(error.into()),
     }
+    message_origin::index_message(conn, message)?;
     if !message.record.attachments.is_empty() {
         let mut insert_attachment = conn.prepare(
             "INSERT INTO message_attachments(message_id,position,attachment_id) VALUES(?,?,?)",
@@ -6657,7 +7339,7 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
 
 fn queue_message_banner(conn: &Connection, message: &MessagePayload) -> Result<(), Error> {
     notifications::prune_banners(conn)?;
-    if message.direction != Direction::Incoming || message.imported {
+    if message.direction != Direction::Incoming || message.imported || conn.query_row("SELECT EXISTS(SELECT 1 FROM conversation_folders WHERE conversation_id=? AND folder='spam')", [message.record.conversation_id.to_string()], |row| row.get::<_, bool>(0))? {
         return Ok(());
     }
     conn.execute(
@@ -6795,6 +7477,7 @@ fn enqueue_without_sealing(
     // never inspect a row whose source sequence has already become its own sequence. Contact
     // producers fail closed here (before any row exists) unless compaction is ready.
     let plan = compaction_plan(conn, ctx, purpose, payload)?;
+    let origin_tag = origin_tag(conn, ctx, payload)?;
     let identity = compaction_identity(payload);
     let own = ctx.device_id.to_string();
     let plain = Zeroizing::new(serde_json::to_vec(payload).map_err(|_| Error::Database)?);
@@ -6818,6 +7501,7 @@ fn enqueue_without_sealing(
         route,
         plain.as_slice(),
         main.as_ref(),
+        origin_tag,
         outbox_priority(purpose, payload),
     )?;
     // Contact validation may re-prepare a reclaimed photo under a fresh alias. Do that before
@@ -6852,6 +7536,7 @@ fn enqueue_without_sealing(
                 route,
                 plain.as_slice(),
                 checkpoint.as_ref(),
+                origin_tag,
                 outbox_priority(purpose, payload),
             )?;
             record_attachment_inventory(conn, payload, &checkpoint_id.to_string())?;
@@ -6877,6 +7562,64 @@ fn enqueue_without_sealing(
         }
     }
     Ok((envelope_id, sequence))
+}
+
+fn origin_tag(
+    conn: &Connection,
+    ctx: &Ctx,
+    payload: &PrivatePayload,
+) -> Result<Option<[u8; 32]>, Error> {
+    if get_meta(conn, "server_origin_tags_supported")?.as_deref() != Some("1") {
+        return Ok(None);
+    }
+    let message = match payload {
+        PrivatePayload::Message(message) | PrivatePayload::MmsDeferredPreview { message, .. } => {
+            message
+        }
+        PrivatePayload::MmsMessage { .. }
+            if get_meta(conn, "deferred_mms_enabled")?.as_deref() == Some("1") =>
+        {
+            return Ok(None);
+        }
+        PrivatePayload::MmsMessage { message, .. } => message,
+        PrivatePayload::MessageOriginAlias { origin_key, .. } => {
+            if origin_key.len() != 80 {
+                return Ok(None);
+            }
+            let evidence = match message_origin::decode_hex(origin_key) {
+                Ok(evidence) => evidence,
+                Err(_) => return Ok(None),
+            };
+            let Some(key) = ctx
+                .active_epoch
+                .and_then(|epoch| ctx.keys.get(&epoch))
+                .and_then(|keys| keys.compaction.as_ref())
+            else {
+                return Ok(None);
+            };
+            return Ok(Some(compaction_hmac(
+                key,
+                b"message-origin-tag-v1",
+                &[&evidence],
+            )));
+        }
+        _ => return Ok(None),
+    };
+    let Some(evidence) = message_origin::exact_evidence(conn, message)? else {
+        return Ok(None);
+    };
+    let Some(key) = ctx
+        .active_epoch
+        .and_then(|epoch| ctx.keys.get(&epoch))
+        .and_then(|keys| keys.compaction.as_ref())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(compaction_hmac(
+        key,
+        b"message-origin-tag-v1",
+        &[&evidence],
+    )))
 }
 
 fn record_attachment_inventory(
@@ -6985,6 +7728,7 @@ fn payload_attachment_ids(payload: &PrivatePayload) -> Vec<AttachmentId> {
 }
 
 /// Allocates the next producer sequence and stores one unsealed outbox row.
+#[allow(clippy::too_many_arguments)]
 fn insert_outbox(
     conn: &Connection,
     purpose: EnvelopePurpose,
@@ -6992,6 +7736,7 @@ fn insert_outbox(
     route: Option<&GatewayRoute>,
     plain: &[u8],
     compaction: Option<&CompactionMetadata>,
+    origin_tag: Option<[u8; 32]>,
     priority: i64,
 ) -> Result<(EnvelopeId, u64), Error> {
     let sequence = get_meta(conn, "producer_sequence")?
@@ -7003,7 +7748,7 @@ fn insert_outbox(
     set_meta(conn, "producer_sequence", &sequence.to_string())?;
     let envelope_id = EnvelopeId::new();
     conn.execute(
-        "INSERT INTO outbox(seq,envelope_id,command_id,purpose,route,plain,compaction,priority,state) VALUES(?,?,?,?,?,?,?,?,'unsealed')",
+        "INSERT INTO outbox(seq,envelope_id,command_id,purpose,route,plain,compaction,origin_tag,priority,state) VALUES(?,?,?,?,?,?,?,?,?,'unsealed')",
         params![
             to_i64(sequence)?,
             envelope_id.to_string(),
@@ -7012,6 +7757,7 @@ fn insert_outbox(
             route.map(json).transpose()?,
             plain,
             compaction.map(json).transpose()?,
+            origin_tag.map(|tag| media::hex(&tag)),
             priority,
         ],
     )?;
@@ -7450,12 +8196,36 @@ fn compaction_group(
             ],
             false,
         ),
+        PrivatePayload::ConversationFolder {
+            conversation_id, ..
+        } => (
+            b"conversation-folder",
+            vec![conversation_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::ConversationPin {
             conversation_id, ..
         } => (
             b"conversation-pin",
             vec![conversation_id.to_string().into_bytes()],
             false,
+        ),
+        PrivatePayload::SenderBlocklist {
+            writer_device_id, ..
+        } => (
+            b"sender-blocklist",
+            vec![writer_device_id.as_bytes().to_vec()],
+            false,
+        ),
+        PrivatePayload::SenderUnblockRequest { request_id, .. } => (
+            b"sender-unblock-request",
+            vec![request_id.to_string().into_bytes()],
+            true,
+        ),
+        PrivatePayload::SenderUnblockResult { request_id, .. } => (
+            b"sender-unblock-result",
+            vec![request_id.to_string().into_bytes()],
+            true,
         ),
         PrivatePayload::ConversationTone { seed, .. } => {
             (b"conversation-tone", vec![seed.as_bytes().to_vec()], false)
@@ -7560,9 +8330,19 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             "app-filter:{}:{}",
             filter.source_device_id, filter.package_name
         )),
+        PrivatePayload::ConversationFolder {
+            conversation_id, ..
+        } => Some(format!("conversation-folder:{conversation_id}")),
         PrivatePayload::ConversationPin {
             conversation_id, ..
         } => Some(format!("conversation-pin:{conversation_id}")),
+        PrivatePayload::SenderBlocklist {
+            writer_device_id, ..
+        } => Some(format!("sender-blocklist:{writer_device_id}")),
+        PrivatePayload::SenderUnblockRequest { request_id, .. }
+        | PrivatePayload::SenderUnblockResult { request_id, .. } => {
+            Some(format!("sender-unblock:{request_id}"))
+        }
         PrivatePayload::ConversationTone { seed, .. } => Some(format!("conversation-tone:{seed}")),
         PrivatePayload::NotificationPreferences { .. } => {
             Some(notification_preferences::IDENTITY.to_owned())
@@ -7686,6 +8466,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         Option<String>,
         Vec<u8>,
         Option<String>,
+        Option<String>,
     );
     while count < limit {
         let rows: Vec<Row> = {
@@ -7701,6 +8482,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                         r.get(5)?,
                         r.get(6)?,
                         r.get(7)?,
+                        r.get(8)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -7708,7 +8490,17 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         if rows.is_empty() {
             break;
         }
-        for (priority, sequence, envelope_id, command_id, purpose, route, plain, compaction) in rows
+        for (
+            priority,
+            sequence,
+            envelope_id,
+            command_id,
+            purpose,
+            route,
+            plain,
+            compaction,
+            origin_tag,
+        ) in rows
         {
             after = (priority, sequence);
             if count >= limit {
@@ -7773,6 +8565,9 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                 purpose,
                 route: route.map(|route| decode(route.as_bytes())).transpose()?,
                 compaction: None,
+                origin_tag: origin_tag
+                    .map(|tag| message_origin::decode_hex_32(&tag))
+                    .transpose()?,
                 ciphertext: Vec::new(),
             };
             note_seal_pending_decode();
@@ -8777,6 +9572,40 @@ mod tests {
         assert!(is_known_private_payload_kind("contact_scan_request"));
         assert!(is_known_private_payload_kind("contact_scan_result"));
         assert!(!is_known_private_payload_kind("future_contact_event"));
+    }
+
+    #[test]
+    fn schema_44_upgrade_preserves_unblock_requests_with_nonactionable_epoch() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-44.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = DatabaseKey::new(&[45; 32]).unwrap();
+        let request_id = uuid::Uuid::new_v4();
+        let client = Client::open(config.clone(), key).unwrap();
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) VALUES(?,?,?,?, 'pending',0,1)",
+                params![request_id.to_string(), ConversationId::new().to_string(), DeviceId::new().to_string(), "[\"+15555550100\"]"],
+            ).unwrap();
+            store
+                .conn
+                .execute("UPDATE schema_meta SET version=44", [])
+                .unwrap();
+        }
+        drop(client);
+
+        let upgraded = Client::open(config, DatabaseKey::new(&[45; 32]).unwrap()).unwrap();
+        let store = upgraded.lock().unwrap();
+        let (version, epoch): (i64, i64) = store.conn.query_row(
+            "SELECT (SELECT version FROM schema_meta),key_epoch FROM sender_unblock_requests WHERE request_id=?",
+            [request_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((version, epoch), (SCHEMA_VERSION, 0));
     }
 
     #[test]
@@ -10203,6 +11032,7 @@ mod tests {
                 None,
                 &serde_json::to_vec(&payload).unwrap(),
                 None,
+                None,
                 1,
             )
             .unwrap();
@@ -10223,6 +11053,7 @@ mod tests {
             None,
             None,
             &serde_json::to_vec(&photo_payload).unwrap(),
+            None,
             None,
             2,
         )
@@ -10248,6 +11079,7 @@ mod tests {
                 message_id: MessageId::new(),
             })
             .unwrap(),
+            None,
             None,
             1,
         )
@@ -11144,6 +11976,7 @@ mod tests {
                 purpose: EnvelopePurpose::Event,
                 route: None,
                 compaction: None,
+                origin_tag: None,
                 ciphertext: Vec::new(),
             };
             let plain = serde_json::to_vec(&payload).unwrap();
@@ -11372,6 +12205,7 @@ mod tests {
                 purpose: EnvelopePurpose::Event,
                 route: None,
                 compaction: None,
+                origin_tag: None,
                 ciphertext: Vec::new(),
             };
             let plain = serde_json::to_vec(&payload).unwrap();
@@ -11753,6 +12587,7 @@ mod tests {
             purpose: EnvelopePurpose::Event,
             route: None,
             compaction: None,
+            origin_tag: None,
             ciphertext: Vec::new(),
         };
         let plain = serde_json::to_vec(&PrivatePayload::NotificationDismiss {

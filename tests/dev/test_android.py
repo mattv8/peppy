@@ -719,6 +719,10 @@ class AndroidHelperTests(unittest.TestCase):
                 "root=$(cd \"$(dirname \"$0\")/../..\" && pwd)\n"
                 "mkdir -p \"$root/apps/android/app/build/outputs/apk/debug\"\n"
                 "touch \"$root/apps/android/app/build/outputs/apk/debug/app-debug.apk\"\n"
+                "if printf '%s\\n' \"$*\" | grep -q assembleSideload; then\n"
+                "  mkdir -p \"$root/apps/android/app/build/outputs/apk/sideload\"\n"
+                "  touch \"$root/apps/android/app/build/outputs/apk/sideload/app-sideload.apk\"\n"
+                "fi\n"
             )
             if include_test_apk:
                 gradle_script += (
@@ -762,6 +766,102 @@ class AndroidHelperTests(unittest.TestCase):
             self.assertEqual(fixture["verify_log"].read_text(), "verify\n")
             self.assertTrue((fixture["artifacts"] / "app-debug.apk").exists())
             self.assertFalse((fixture["artifacts"] / "app-debug-androidTest.apk").exists())
+
+    def test_container_build_selects_the_explicit_sideload_variant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_android_fixture(temp)
+            result = self.run_script(
+                fixture["script"], "build",
+                env=fixture["env"] | {"PEPPY_ANDROID_BUILD_VARIANT": "sideload"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            gradle_calls = fixture["gradle_log"].read_text()
+            self.assertIn("assembleSideload", gradle_calls)
+            self.assertIn("-PpeppySideloadDebugSigning=true", gradle_calls)
+            self.assertNotIn("assembleDebug", gradle_calls)
+            self.assertTrue((fixture["artifacts"] / "app-sideload.apk").exists())
+            self.assertFalse((fixture["artifacts"] / "app-debug.apk").exists())
+
+    def test_android_compose_forwards_the_explicit_build_variant(self):
+        compose_file = ROOT / "infra/compose/compose.dev.yml"
+        self.assertIn(
+            "PEPPY_ANDROID_BUILD_VARIANT: ${PEPPY_ANDROID_BUILD_VARIANT:-debug}",
+            compose_file.read_text(),
+        )
+
+    def test_container_build_forwards_validated_variant_over_dotenv(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = pathlib.Path(temp)
+            repo = temp / "repo"
+            script = repo / "infra/dev/android.sh"
+            script.parent.mkdir(parents=True)
+            for name in ("android.sh", "dev_tls.py", "dev_port.py"):
+                shutil.copy(ROOT / "infra/dev" / name, script.parent / name)
+            (repo / ".env").write_text("PEPPY_ANDROID_BUILD_VARIANT=debug\n")
+            tools = temp / "bin"
+            tools.mkdir()
+            log = temp / "docker.log"
+            docker = tools / "docker"
+            docker.write_text("#!/bin/sh\nprintf '%s|%s\\n' \"$PEPPY_ANDROID_BUILD_VARIANT\" \"$*\" >> \"$DOCKER_LOG\"\n")
+            docker.chmod(0o755)
+
+            result = self.run_script(
+                script, "build",
+                env={
+                    "PATH": f"{tools}:{os.environ['PATH']}",
+                    "DOCKER_LOG": str(log),
+                    "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"),
+                    "PEPPY_ANDROID_BUILD_VARIANT": "sideload",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(all(line.startswith("sideload|") for line in log.read_text().splitlines()))
+
+    def test_sideload_test_rejects_before_starting_a_backend(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_android_fixture(temp)
+            result = self.run_script(
+                fixture["script"], "test",
+                env=fixture["env"] | {"PEPPY_ANDROID_BUILD_VARIANT": "sideload"},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("supports build only", result.stderr)
+            self.assertFalse(fixture["gradle_log"].exists())
+            self.assertFalse(fixture["verify_log"].exists())
+
+    def test_sideload_smoke_rejects_before_adb_access(self):
+        result = self.run_helper("smoke", env={"PEPPY_ANDROID_BUILD_VARIANT": "sideload"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("supports build only", result.stderr)
+
+    def test_run_fast_validates_default_and_sideload_build_variants(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = pathlib.Path(temp)
+            repo = temp / "repo"
+            script = repo / "infra/dev/android.sh"
+            script.parent.mkdir(parents=True)
+            for name in ("android.sh", "dev_tls.py", "dev_port.py"):
+                shutil.copy(ROOT / "infra/dev" / name, script.parent / name)
+            (repo / ".env").write_text("DEBUG=false\n")
+
+            for variant in ("debug", "sideload"):
+                with self.subTest(variant=variant):
+                    result = self.run_script(
+                        script, "run-fast",
+                        env={
+                            "ANDROID_SDK_ROOT": str(temp / "missing-sdk"),
+                            "PEPPY_ACCEPT_ANDROID_LICENSES": "1",
+                            "PEPPY_ANDROID_BUILD_VARIANT": variant,
+                        },
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Android SDK was not found", result.stderr)
+                    self.assertNotIn("command: parameter not set", result.stderr)
 
     def test_container_test_executes_all_ci_tasks(self):
         with tempfile.TemporaryDirectory() as temp:

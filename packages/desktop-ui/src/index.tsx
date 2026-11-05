@@ -1,6 +1,8 @@
 import type { KeyboardEvent, PointerEvent, ReactElement, ReactNode } from "react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
+  Archive,
+  ArchiveRestore,
   Check,
   Bell,
   Clock,
@@ -19,6 +21,8 @@ import {
   PinOff,
   SendHorizontal,
   Settings,
+  ShieldAlert,
+  ShieldCheck,
   Smartphone,
   Square,
   SquarePen,
@@ -34,6 +38,7 @@ import {
 import { conversationAvatar, seedKey, type AvatarIdentity } from "./avatar";
 import { ContactAvatar } from "./ContactAvatar";
 export { BusyIndicator } from "./BusyIndicator";
+import type { ConversationFolder } from "./bridge-contracts";
 export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
 export { ToneOverridesProvider, incomingToneSeed, toneIndex, toneStyle, useToneOverrides, useToneStyle, type ToneOverrides } from "./tone";
 export { OmniSearch, type OmniSearchProps } from "./OmniSearch";
@@ -73,6 +78,8 @@ export {
   type DateTimeInput,
 } from "./datetime";
 export {
+  Archive,
+  ArchiveRestore,
   Bell,
   Check,
   CheckCheck,
@@ -104,6 +111,7 @@ export {
   Radio,
   RotateCw,
   ShieldAlert,
+  ShieldCheck,
   Smartphone,
   SquarePen,
   Trash2,
@@ -138,6 +146,10 @@ export type Conversation = {
   recipientlessDraft?: boolean;
   draftOnly?: boolean;
   pinned?: boolean;
+  folder?: ConversationFolder;
+  folderReason?: "marked" | "blocked";
+  unblock?: "pending" | "failed";
+  canUnblock?: boolean;
 };
 export type Attachment = {
   id: string;
@@ -908,6 +920,20 @@ export function AppTitlebar({
   );
 }
 
+const FOLDER_CONFIRMATION_ID = "conversation-folder-confirmation";
+const SENDER_UNBLOCK_CONFIRMATION_ID = "sender-unblock-confirmation";
+type FolderActionKind = "archive" | "restore" | "spam" | "notSpam";
+const FOLDER_ACTIONS: Record<FolderActionKind, { to: ConversationFolder; label: string; title(name: string): string; Icon: typeof Archive; hook: string; confirms: boolean }> = {
+  archive: { to: "archived", label: "Archive conversation", title: (name) => `Archive ${name}`, Icon: Archive, hook: "data-archive-conversation-id", confirms: true },
+  restore: { to: "inbox", label: "Move conversation to Inbox", title: (name) => `Move ${name} to Inbox`, Icon: ArchiveRestore, hook: "data-folder-conversation-id", confirms: false },
+  spam: { to: "spam", label: "Mark conversation as spam", title: (name) => `Mark ${name} as spam`, Icon: ShieldAlert, hook: "data-spam-conversation-id", confirms: true },
+  notSpam: { to: "inbox", label: "Not spam", title: (name) => `Move ${name} out of Spam`, Icon: ShieldCheck, hook: "data-folder-conversation-id", confirms: false },
+};
+function folderActionsFor(folder: ConversationFolder): FolderActionKind[] {
+  if (folder === "spam") return ["notSpam"];
+  return folder === "archived" ? ["restore", "spam"] : ["archive", "spam"];
+}
+
 export function ConversationList({
   conversations,
   selectedId,
@@ -920,6 +946,12 @@ export function ConversationList({
   deletingId,
   deleteWarningId,
   pendingPinId,
+  onRequestFolderChange,
+  pendingFolderId,
+  pendingFolder,
+  confirmingFolderId,
+  confirmingFolder,
+  emptyLabel = "No conversations yet",
   loading = false,
   popoutMode = "bubble",
 }: {
@@ -935,6 +967,16 @@ export function ConversationList({
   deletingId?: string;
   deleteWarningId?: string;
   pendingPinId?: string;
+  /** Requests a folder change; the caller confirms archive and spam before writing. */
+  onRequestFolderChange?(id: string, folder: ConversationFolder, trigger: HTMLButtonElement): void;
+  pendingFolderId?: string;
+  /** Target folder of the pending change; without it every folder action on the pending row shows as pending. */
+  pendingFolder?: ConversationFolder;
+  confirmingFolderId?: string;
+  /** Target of the open confirmation on `confirmingFolderId`; without it both archive and spam read as expanded. */
+  confirmingFolder?: "archived" | "spam";
+  /** Shown when the list has no rows. */
+  emptyLabel?: string;
   loading?: boolean;
   popoutMode?: PopoutMode;
 }) {
@@ -947,7 +989,10 @@ export function ConversationList({
           conversations.map((c) => {
             const isDeleteConfirmation = deleteConfirmationId === c.id;
             const isPinPending = pendingPinId === c.id;
-            const isPinActionDisabled = pendingPinId !== undefined;
+            const isFolderPending = pendingFolderId === c.id;
+            const isOtherActionPending = pendingPinId !== undefined || pendingFolderId !== undefined;
+            const folder = c.folder ?? "inbox";
+            const canPin = !c.draftOnly && folder !== "spam";
             return <li key={c.id}>
               <div className={`conversation-row ${selectedId === c.id ? "selected" : ""}`} data-conversation-row={c.id}>
                 <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
@@ -964,14 +1009,14 @@ export function ConversationList({
                     </span>
                   )}
                 </button>
-                {((c.recipientlessDraft && c.draftOnly && onDelete) || onPopout || (onTogglePin && !c.draftOnly)) && <div data-conversation-actions data-pending-pin={isPinPending || undefined}>
-                  {onTogglePin && !c.draftOnly && <button
+                {((c.recipientlessDraft && c.draftOnly && onDelete) || onPopout || (onTogglePin && canPin) || (onRequestFolderChange && !c.draftOnly)) && <div data-conversation-actions data-pending-pin={isPinPending || undefined}>
+                  {onTogglePin && canPin && <button
                     type="button"
                     className={`conversation-pin ${isPinPending ? "pending" : ""}`}
                     data-pin-conversation-id={c.id}
                     aria-label={`${c.pinned ? "Unpin" : "Pin"} conversation`}
                     title={`${c.pinned ? "Unpin" : "Pin"} ${c.name}`}
-                    disabled={isPinActionDisabled}
+                    disabled={isOtherActionPending}
                     onClick={(event) => {
                       event.stopPropagation();
                       onTogglePin(c.id, !c.pinned);
@@ -979,6 +1024,31 @@ export function ConversationList({
                   >
                     {isPinPending ? <Loader className="busy-indicator-icon" size={15} aria-hidden /> : c.pinned ? <PinOff size={15} aria-hidden /> : <Pin size={15} aria-hidden />}
                   </button>}
+                  {onRequestFolderChange && !c.draftOnly && folderActionsFor(folder).map((kind) => {
+                    const action = FOLDER_ACTIONS[kind];
+                    const isActive = isFolderPending && (pendingFolder === undefined || pendingFolder === action.to);
+                    const blockedNotSpam = kind === "notSpam" && c.folderReason === "blocked";
+                    const confirms = action.confirms || blockedNotSpam;
+                    const isConfirming = confirms && confirmingFolderId === c.id && (confirmingFolder === undefined || confirmingFolder === action.to);
+                    return <button
+                      key={kind}
+                      type="button"
+                      className={`conversation-folder-action ${isActive ? "pending" : ""}`}
+                      {...{ [action.hook]: c.id }}
+                      aria-label={action.label}
+                      title={blockedNotSpam ? `Not spam: unblock ${c.name} on your phone` : action.title(c.name)}
+                      aria-haspopup={confirms ? "dialog" : undefined}
+                      aria-expanded={confirms ? isConfirming : undefined}
+                      aria-controls={isConfirming ? blockedNotSpam ? SENDER_UNBLOCK_CONFIRMATION_ID : FOLDER_CONFIRMATION_ID : undefined}
+                      disabled={isOtherActionPending}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onRequestFolderChange(c.id, action.to, event.currentTarget);
+                      }}
+                    >
+                      {isActive ? <Loader className="busy-indicator-icon" size={15} aria-hidden /> : <action.Icon size={15} aria-hidden />}
+                    </button>;
+                  })}
                   {c.recipientlessDraft && c.draftOnly && onDelete && <button
                     type="button"
                     className={`conversation-delete ${isDeleteConfirmation ? "confirming" : ""}`}
@@ -1007,7 +1077,7 @@ export function ConversationList({
             </li>;
           })
         ) : (
-          <li className="sidebar-empty">No conversations yet</li>
+          <li className="sidebar-empty">{emptyLabel}</li>
         )}
       </ul>
     </nav>

@@ -66,3 +66,29 @@ public struct KeychainSecureStore: SecureStore {
         guard status == errSecSuccess || status == errSecItemNotFound else { throw .secureStorage(status: status) }
     }
 }
+
+/// Reinstall-stable, device-local succession hint. It is deliberately not scoped to an enrollment:
+/// a replacement pairing needs the same opaque value to succeed the previous device.
+struct DeviceHintStore: Sendable {
+    static let account = "device-hint-v1"
+    static let byteCount = 32
+
+    let secure: any SecureStore
+
+    func readOrCreate() throws(ClientError) -> Data {
+        if let hint = try secure.read(Self.account) {
+            guard hint.count == Self.byteCount else { throw .invalidResponse("device hint") }
+            return hint
+        }
+
+        var bytes = Data(count: Self.byteCount)
+        let status = bytes.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, Self.byteCount, $0.baseAddress!) }
+        guard status == errSecSuccess else { throw .secureStorage(status: status) }
+        if try secure.addIfAbsent(Self.account, bytes) { return bytes }
+
+        guard let stored = try secure.read(Self.account), stored.count == Self.byteCount else {
+            throw .invalidResponse("device hint")
+        }
+        return stored
+    }
+}

@@ -135,7 +135,9 @@ jobs:
       - run: infra/release/test-release-scripts.sh
       - run: bash infra/release/test-release-asset-groups.sh
       - run: bash infra/release/test-release-prefixes.sh
+      - run: infra/release/test-elf-alignment.sh
       - run: infra/release/test-android-signing.sh
+      - run: infra/release/test-android-distribution.sh
       - run: infra/release/linux-repository/test-linux-repository.sh
       - run: infra/release/test-desktop-bundles.sh
       - name: Test real Linux package normalization
@@ -418,7 +420,7 @@ jobs:
         run: ./gradlew --console=plain --dependency-verification=strict :jvm-smoke:run
       - name: Compile Android unit tests and prepare Robolectric runtimes
         working-directory: apps/android
-        run: ./gradlew --console=plain --dependency-verification=strict :app:compileDebugUnitTestKotlin :app:prepareRobolectricDependencies
+        run: ./gradlew --console=plain --dependency-verification=strict :app:compileDebugUnitTestKotlin :app:compileSideloadUnitTestKotlin :app:prepareRobolectricDependencies
       # Compiled unit tests normally run in about two minutes. A stall fails the
       # step with JVM thread dumps instead of silently consuming the job budget.
       - name: Run Android debug unit tests
@@ -436,19 +438,25 @@ jobs:
           watchdog_pid=$!
           trap 'pkill -P "$watchdog_pid" 2>/dev/null || true; kill "$watchdog_pid" 2>/dev/null || true' EXIT
           timeout --signal=TERM --kill-after=30s 8m ./gradlew --console=plain --dependency-verification=strict :app:testDebugUnitTest
+      - name: Run Android sideload unit tests
+        working-directory: apps/android
+        run: timeout --signal=TERM --kill-after=30s 13m ./gradlew --console=plain --dependency-verification=strict :app:testSideloadUnitTest
+      - name: Verify Android sideload dependency boundaries
+        working-directory: apps/android
+        run: ./gradlew --console=plain --dependency-verification=strict :libadb:testDebugUnitTest :app:verifyReleaseRestrictedSetupExclusionFixtures
       - name: Preserve Android unit test failure reports
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: android-unit-test-failures-${{ github.run_attempt }}
           path: |
-            apps/android/app/build/test-results/testDebugUnitTest/*.xml
-            apps/android/app/build/reports/tests/testDebugUnitTest/
+            apps/android/app/build/test-results/test*UnitTest/*.xml
+            apps/android/app/build/reports/tests/test*UnitTest/
           if-no-files-found: warn
           retention-days: 7
       - name: Lint and assemble Android artifacts
         working-directory: apps/android
-        run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
+        run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload
       - name: Verify release SMS diagnostics policy
         working-directory: apps/android
         run: ./gradlew --console=plain --dependency-verification=strict :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest

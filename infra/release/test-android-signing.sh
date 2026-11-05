@@ -23,7 +23,7 @@ cat > "$tools/zipalign" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'zipalign %s\n' "$*" >> "$PEPPY_TEST_LOG"
-[ "${ZIPALIGN_FAIL:-}" != 1 ] || exit 1
+[ "${ZIPALIGN_FAIL:-}" != 1 ] || { printf 'zipalign failed intentionally\n' >&2; exit 1; }
 [ "$1" = -c ] && exit 0
 cp "${@: -2:1}" "${@: -1}"
 SH
@@ -42,7 +42,7 @@ case "$1" in
     ;;
   verify)
     artifact=${@: -1}
-    if grep -q wrong "$artifact"; then fingerprint=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB; else fingerprint=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; fi
+    if grep -aFq wrong "$artifact"; then fingerprint=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB; else fingerprint=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; fi
     printf 'Signer #1 certificate SHA-256 digest: %s\n' "$fingerprint"
     ;;
   *) exit 2 ;;
@@ -54,7 +54,7 @@ set -euo pipefail
 printf 'jarsigner %s\n' "$*" >> "$PEPPY_TEST_LOG"
 if [[ " $* " = *' -verify '* ]]; then
   artifact=${@: -1}
-  if grep -q unsigned "$artifact"; then
+    if grep -aFq unsigned "$artifact"; then
     if [[ " $* " = *' -strict '* ]]; then exit 1; fi
     printf 'jar is unsigned.\n'
   else
@@ -76,36 +76,59 @@ if [[ " $* " = *' -rfc '* ]]; then
   printf '%s\n' '-----BEGIN CERTIFICATE-----' 'ZmFrZQ==' '-----END CERTIFICATE-----'
   exit 0
 fi
-if grep -q mixed "$artifact"; then
-  printf 'Signer #1:\nSHA256: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\nSHA256: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n'
+if grep -aFq mixed "$artifact"; then
+  printf 'Signer #1:\nSHA256: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\nSigner #2:\nSHA256: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n'
   exit 0
 fi
-if grep -q wrong "$artifact"; then fingerprint=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB; else fingerprint=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; fi
+if grep -aFq wrong "$artifact"; then fingerprint=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB; else fingerprint=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; fi
 printf 'Signer #1:\nSHA256: %s\n' "$fingerprint"
 SH
 chmod +x "$tools/zipalign" "$tools/apksigner" "$bin/jarsigner" "$bin/keytool"
 
-expect_failure() {
-  if "$@" >/dev/null 2>&1; then
+expect_failure_reason() {
+  local expected=$1
+  shift
+  local output
+  if output=$("$@" 2>&1); then
     printf 'expected command to fail: %s\n' "$*" >&2
+    exit 1
+  fi
+  if [[ $output != *"$expected"* ]]; then
+    printf 'expected failure reason %q, got:\n%s\n' "$expected" "$output" >&2
     exit 1
   fi
 }
 
+make_aligned_archive() {
+  local artifact=$1 marker=${2:-}
+  local library="$root/libfixture.so"
+  "$script_dir/create-elf-fixture.py" "$library"
+  python3 - "$artifact" "$library" "$marker" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1], 'w') as archive:
+    archive.writestr('base/lib/arm64-v8a/libfixture.so', pathlib.Path(sys.argv[2]).read_bytes())
+    if sys.argv[3]:
+        archive.writestr(sys.argv[3], sys.argv[3])
+PY
+}
+
 unsigned_apk="$root/unsigned.apk"
 unsigned_aab="$root/unsigned.aab"
-printf valid > "$unsigned_apk"
-printf valid > "$unsigned_aab"
+make_aligned_archive "$unsigned_apk"
+make_aligned_archive "$unsigned_aab"
 export ANDROID_HOME="$sdk" PEPPY_TEST_LOG="$log" PEPPY_TEST_KEYSTORE_PATH="$root/keystore-path"
 export PATH="$bin:$PATH"
 
 mkdir -p "$root/out"
 printf stale > "$root/out/peppy-android.apk"
 printf stale > "$root/out/peppy-android.aab"
-expect_failure "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/out"
+expect_failure_reason 'PEPPY_ANDROID_KEYSTORE_BASE64 is required' "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/out"
 test ! -e "$root/out/peppy-android.apk"
 test ! -e "$root/out/peppy-android.aab"
-expect_failure env PEPPY_ANDROID_SIGNING_CERT_SHA256=bad "$script_dir/verify-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab"
+expect_failure_reason 'must contain exactly 64 hexadecimal digits' env PEPPY_ANDROID_SIGNING_CERT_SHA256=bad "$script_dir/verify-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab"
 
 export PEPPY_ANDROID_KEYSTORE_BASE64
 PEPPY_ANDROID_KEYSTORE_BASE64=$(printf test-keystore | base64 | tr -d '\n')
@@ -114,10 +137,10 @@ export PEPPY_ANDROID_KEY_ALIAS=release
 export PEPPY_ANDROID_KEY_PASSWORD=key-secret
 export PEPPY_ANDROID_SIGNING_CERT_SHA256="AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA"
 
-expect_failure env PEPPY_ANDROID_KEYSTORE_BASE64='not base64!' "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/out"
+expect_failure_reason 'is not valid base64' env PEPPY_ANDROID_KEYSTORE_BASE64='not base64!' "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/out"
 printf stale > "$root/out/peppy-android.apk"
 printf stale > "$root/out/peppy-android.aab"
-expect_failure env ZIPALIGN_FAIL=1 "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/out"
+expect_failure_reason 'zipalign failed intentionally' env ZIPALIGN_FAIL=1 "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/out"
 test ! -e "$root/out/peppy-android.apk"
 test ! -e "$root/out/peppy-android.aab"
 
@@ -133,14 +156,14 @@ if grep -Fq "$PEPPY_ANDROID_KEYSTORE_PASSWORD" "$log" || grep -Fq "$PEPPY_ANDROI
 fi
 
 "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/out/peppy-android.aab"
-printf unsigned > "$root/unsigned-signed.aab"
-expect_failure "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/unsigned-signed.aab"
-printf wrong > "$root/wrong.apk"
-expect_failure "$script_dir/verify-android-artifacts.sh" "$root/wrong.apk" "$root/out/peppy-android.aab"
-printf wrong > "$root/wrong.aab"
-expect_failure "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/wrong.aab"
-printf mixed > "$root/mixed.aab"
-expect_failure "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/mixed.aab"
+make_aligned_archive "$root/unsigned-signed.aab" unsigned
+expect_failure_reason 'AAB strict signature verification failed' "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/unsigned-signed.aab"
+make_aligned_archive "$root/wrong.apk" wrong
+expect_failure_reason 'APK signer certificate does not match' "$script_dir/verify-android-artifacts.sh" "$root/wrong.apk" "$root/out/peppy-android.aab"
+make_aligned_archive "$root/wrong.aab" wrong
+expect_failure_reason 'AAB signer certificate does not match' "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/wrong.aab"
+make_aligned_archive "$root/mixed.aab" mixed
+expect_failure_reason 'AAB must have exactly one signer' "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/mixed.aab"
 real_root="$root/real-jdk"
 mkdir -p "$real_root/payload"
 printf release > "$real_root/payload/file"
@@ -151,6 +174,16 @@ cat > "$real_root/AndroidManifest.xml" <<'XML'
 </manifest>
 XML
 "$caller_sdk_root/build-tools/35.0.0/aapt2" link -I "$caller_sdk_root/platforms/android-35/android.jar" --manifest "$real_root/AndroidManifest.xml" -o "$real_root/unsigned.apk"
+mkdir -p "$real_root/payload/lib/arm64-v8a"
+"$script_dir/create-elf-fixture.py" "$real_root/payload/lib/arm64-v8a/libfixture.so"
+python3 - "$real_root/unsigned.apk" "$real_root/payload/lib/arm64-v8a/libfixture.so" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1], 'a', compression=zipfile.ZIP_STORED) as archive:
+    archive.writestr('lib/arm64-v8a/libfixture.so', pathlib.Path(sys.argv[2]).read_bytes())
+PY
 "$caller_java_home/bin/jar" --create --file "$real_root/unsigned.aab" -C "$real_root/payload" .
 "$caller_java_home/bin/keytool" -J-Duser.language=en -J-Duser.country=US -genkeypair -alias release -keystore "$real_root/release.p12" -storetype PKCS12 -storepass changeit -keypass changeit -dname 'CN=release' -keyalg RSA -validity 365 >/dev/null
 "$caller_java_home/bin/keytool" -J-Duser.language=en -J-Duser.country=US -genkeypair -alias alternate -keystore "$real_root/alternate.p12" -storetype PKCS12 -storepass changeit -keypass changeit -dname 'CN=alternate' -keyalg RSA -validity 365 >/dev/null
@@ -163,8 +196,8 @@ export PEPPY_ANDROID_KEYSTORE_PASSWORD=changeit PEPPY_ANDROID_KEY_ALIAS=release 
 "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/out/peppy-android.aab"
 cp "$real_root/unsigned.aab" "$real_root/wrong-certificate.aab"
 "$caller_java_home/bin/jarsigner" -keystore "$real_root/alternate.p12" -storepass changeit -keypass changeit "$real_root/wrong-certificate.aab" alternate >/dev/null
-expect_failure "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/wrong-certificate.aab"
-expect_failure env PEPPY_ANDROID_SIGNING_CERT_SHA256="$alternate_fingerprint" "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/out/peppy-android.aab"
+expect_failure_reason 'AAB signer certificate does not match' "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/wrong-certificate.aab"
+expect_failure_reason 'APK signer certificate does not match' env PEPPY_ANDROID_SIGNING_CERT_SHA256="$alternate_fingerprint" "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/out/peppy-android.aab"
 python3 - "$real_root/out/peppy-android.aab" "$real_root/tampered.aab" <<'PY'
 import sys
 import zipfile
@@ -173,7 +206,7 @@ with zipfile.ZipFile(sys.argv[1]) as source, zipfile.ZipFile(sys.argv[2], "w") a
     for entry in source.infolist():
         target.writestr(entry, b"tampered" if entry.filename == "file" else source.read(entry.filename))
 PY
-expect_failure "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/tampered.aab"
+expect_failure_reason 'AAB signer certificate could not be read' "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/tampered.aab"
 cp "$real_root/out/peppy-android.aab" "$real_root/unsigned-entry.aab"
 python3 - "$real_root/unsigned-entry.aab" <<'PY'
 import sys
@@ -182,10 +215,10 @@ import zipfile
 with zipfile.ZipFile(sys.argv[1], "a") as archive:
     archive.writestr("unsigned-entry", "unsigned")
 PY
-expect_failure "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/unsigned-entry.aab"
-expect_failure "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/unsigned.aab"
+expect_failure_reason 'AAB strict signature verification failed' "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/unsigned-entry.aab"
+expect_failure_reason 'AAB must have exactly one signer' "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/unsigned.aab"
 cp "$real_root/unsigned.aab" "$real_root/multi-signer.aab"
 "$caller_java_home/bin/jarsigner" -keystore "$real_root/release.p12" -storepass changeit -keypass changeit "$real_root/multi-signer.aab" release >/dev/null
 "$caller_java_home/bin/jarsigner" -keystore "$real_root/alternate.p12" -storepass changeit -keypass changeit "$real_root/multi-signer.aab" alternate >/dev/null
-expect_failure "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/multi-signer.aab"
+expect_failure_reason 'AAB must have exactly one signer' "$script_dir/verify-android-artifacts.sh" "$real_root/out/peppy-android.apk" "$real_root/multi-signer.aab"
 printf 'android signing tests passed\n'
