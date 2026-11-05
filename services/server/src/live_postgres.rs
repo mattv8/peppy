@@ -32,6 +32,7 @@ struct Inner {
     instance_id: Uuid,
     hub: LiveHub,
     ready: AtomicBool,
+    readiness: tokio::sync::watch::Sender<bool>,
 }
 
 /// PostgreSQL `LISTEN`/`NOTIFY` relay for best-effort live frames. Notifications
@@ -43,11 +44,13 @@ pub(crate) struct PgLiveBackend {
 
 impl PgLiveBackend {
     pub(crate) fn new(pool: PgPool, hub: LiveHub) -> Self {
+        let (readiness, _) = tokio::sync::watch::channel(false);
         let inner = Arc::new(Inner {
             pool,
             instance_id: Uuid::new_v4(),
             hub,
             ready: AtomicBool::new(false),
+            readiness,
         });
         let listener_task = tokio::spawn(listener_loop(Arc::downgrade(&inner)));
         Self {
@@ -56,9 +59,15 @@ impl PgLiveBackend {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn is_ready(&self) -> bool {
         self.inner.ready.load(Ordering::Acquire)
+    }
+
+    /// A receiver changes whenever the LISTEN registration becomes available or
+    /// unavailable. Socket sessions use it to close instead of continuing to
+    /// claim cross-replica delivery after the listener is lost.
+    pub(crate) fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.readiness.subscribe()
     }
 
     async fn publish_inner(
@@ -110,9 +119,9 @@ async fn listener_loop(inner: Weak<Inner>) {
         let Some(state) = inner.upgrade() else {
             return;
         };
-        state.ready.store(false, Ordering::Release);
+        set_ready(&state, false);
         let result = listen_once(&state).await;
-        state.ready.store(false, Ordering::Release);
+        set_ready(&state, false);
         drop(state);
         if result.is_ok() {
             delay = Duration::from_secs(1);
@@ -125,7 +134,7 @@ async fn listener_loop(inner: Weak<Inner>) {
 async fn listen_once(state: &Inner) -> Result<(), sqlx::Error> {
     let mut listener = PgListener::connect_with(&state.pool).await?;
     listener.listen(LIVE_NOTIFY_CHANNEL).await?;
-    state.ready.store(true, Ordering::Release);
+    set_ready(state, true);
     loop {
         let Some(notification) = listener.try_recv().await? else {
             return Ok(());
@@ -143,6 +152,11 @@ async fn listen_once(state: &Inner) -> Result<(), sqlx::Error> {
             live_now_ms(),
         );
     }
+}
+
+fn set_ready(state: &Inner, ready: bool) {
+    state.ready.store(ready, Ordering::Release);
+    state.readiness.send_replace(ready);
 }
 
 fn live_now_ms() -> u64 {
@@ -249,7 +263,7 @@ mod tests {
         );
 
         drop(remote_backend);
-        let no_replay = remote_hub.register(vault_id, receiver_device_id);
+        let mut no_replay = remote_hub.register(vault_id, receiver_device_id);
         assert_eq!(no_replay.receiver.try_recv(), Err(TryRecvError::Empty));
     }
 }
