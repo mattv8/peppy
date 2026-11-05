@@ -2,7 +2,6 @@ package dev.peppy.mobile.googlemessages
 
 import dev.peppy.mobile.security.AesGcmSecretBox
 import java.io.File
-import java.io.FileOutputStream
 import java.nio.file.Files
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -134,6 +133,23 @@ class LinkStateStoreTest {
     }
 
     @Test
+    fun `wipe retries directory sync after prior deletion was not durable`() {
+        val directory = directory()
+        val fileSystem = RecordingFileSystem()
+        val store = LinkStateStore(directory, box(), fileSystem)
+        store.write(byteArrayOf(1))
+        fileSystem.operations.clear()
+        fileSystem.directorySyncFailuresRemaining = 1
+
+        assertWipeFailed { store.wipe() }
+        assertFalse(stateFile(directory).exists())
+
+        store.wipe()
+
+        assertEquals(listOf("sync-directory", "sync-directory"), fileSystem.operations)
+    }
+
+    @Test
     fun `state file stays under supplied directory`() {
         val directory = directory()
         store(directory).write(byteArrayOf(1))
@@ -147,6 +163,10 @@ class LinkStateStoreTest {
 
     private fun assertWriteFailed(block: () -> Unit) {
         assertEquals("link_state_write_failed", assertThrows(IllegalStateException::class.java, block).message)
+    }
+
+    private fun assertWipeFailed(block: () -> Unit) {
+        assertEquals("link_state_wipe_failed", assertThrows(IllegalStateException::class.java, block).message)
     }
 
     private fun directory(): File = Files.createTempDirectory("link-state-store").toFile().also(directories::add)
@@ -163,39 +183,41 @@ class LinkStateStoreTest {
     }
 
     private class RecordingFileSystem(
-        private val failDirectorySync: Boolean = false,
+        failDirectorySync: Boolean = false,
+        private val delegate: LinkStateFileSystem = AndroidLinkStateFileSystem,
     ) : LinkStateFileSystem {
         val operations = mutableListOf<String>()
         val temporaryFiles = mutableListOf<File>()
         var failReplacement = false
+        var directorySyncFailuresRemaining = if (failDirectorySync) 1 else 0
 
         override fun createTemporaryFile(directory: File, prefix: String, suffix: String): File {
             operations += "create-temp"
-            return File.createTempFile(prefix, suffix, directory).also(temporaryFiles::add)
+            return delegate.createTemporaryFile(directory, prefix, suffix).also(temporaryFiles::add)
         }
 
         override fun writeAndSync(file: File, value: ByteArray) {
             operations += "write-and-sync"
-            FileOutputStream(file).use { output ->
-                output.write(value)
-                output.fd.sync()
-            }
+            delegate.writeAndSync(file, value)
         }
 
         override fun replace(source: File, destination: File) {
             operations += "replace"
             if (failReplacement) throw IllegalStateException("simulated-crash")
-            check(source.renameTo(destination))
+            delegate.replace(source, destination)
         }
 
         override fun syncDirectory(directory: File) {
             operations += "sync-directory"
-            if (failDirectorySync) throw IllegalStateException("simulated-fsync-failure")
+            if (directorySyncFailuresRemaining > 0) {
+                directorySyncFailuresRemaining -= 1
+                throw IllegalStateException("simulated-fsync-failure")
+            }
         }
 
         override fun deleteTemporary(file: File) {
             operations += "delete-temp"
-            file.delete()
+            delegate.deleteTemporary(file)
         }
     }
 }

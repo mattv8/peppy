@@ -56,18 +56,15 @@ class LinkStateStore internal constructor(
     fun wipe() {
         try {
             if (!directory.exists()) return
-            var changed = false
             if (state.exists()) {
                 check(state.delete()) { WIPE_FAILED }
-                changed = true
             }
             directory.listFiles { file ->
                 file.name.startsWith("$STATE_FILE_NAME.") && file.name.endsWith(".tmp")
             }.orEmpty().forEach { temporary ->
                 check(temporary.delete()) { WIPE_FAILED }
-                changed = true
             }
-            if (changed) fileSystem.syncDirectory(directory)
+            fileSystem.syncDirectory(directory)
         } catch (_: Exception) {
             throw IllegalStateException(WIPE_FAILED)
         }
@@ -95,7 +92,7 @@ internal interface LinkStateFileSystem {
     fun deleteTemporary(file: File)
 }
 
-private object AndroidLinkStateFileSystem : LinkStateFileSystem {
+internal object AndroidLinkStateFileSystem : LinkStateFileSystem {
     override fun createTemporaryFile(directory: File, prefix: String, suffix: String): File =
         File.createTempFile(prefix, suffix, directory)
 
