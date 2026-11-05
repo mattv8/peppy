@@ -20,9 +20,55 @@ fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
         default_outgoing: true,
         selected_sim_id: "android-subscription-7".into(),
         selected_sim_own_identity: "+12025550100".into(),
-        carrier_binding: NativeCarrierRouteBinding { carrier_route_id: "android-subscription-7".into(), android_subscription_id: 7, is_current_default_sms: true, own_number_raw: "+12025550100".into(), own_number_source: NativeOwnNumberSource::SubscriptionManagerPhoneNumber, route_observed_at_ms: 1_000, route_context_revision: 1, same_handset_evidence_id: "verified-handset".into() },
-        outgoing: NativeRcsOutgoing { outgoing_id: "google-outgoing".into(), sim_participant_id: "google-outgoing".into(), own_identity_raw: "+12025550100".into(), sim_payload: NativeRcsSimPayload { two: 2, sim_number: 7 }, rcs_chats_enabled: true },
-        native_evidence: NativeRcsEvidence { lifetime: NativeRcsLifetime { runtime_id: "runtime".into(), run_generation: 1, link_generation: 1, session_generation: 1, context_revision: 1 }, lookup_id: "lookup".into(), lookup_complete: true, google_candidate_count: 1, settings_revision: 1, settings_provenance: NativeSettingsProvenance::CurrentEvent, settings_observed_at_ms: 1_000, settings_stream_epoch: 1, settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed, current_settings_sims: vec![NativeRcsOutgoing { outgoing_id: "google-outgoing".into(), sim_participant_id: "google-outgoing".into(), own_identity_raw: "+12025550100".into(), sim_payload: NativeRcsSimPayload { two: 2, sim_number: 7 }, rcs_chats_enabled: true }], settings_validated_at_ms: 1_000, conversation_observed_at_ms: 1_000 },
+        carrier_binding: NativeCarrierRouteBinding {
+            carrier_route_id: "android-subscription-7".into(),
+            android_subscription_id: 7,
+            is_current_default_sms: true,
+            own_number_raw: "+12025550100".into(),
+            own_number_source: NativeOwnNumberSource::SubscriptionManagerPhoneNumber,
+            route_observed_at_ms: 1_000,
+            route_context_revision: 1,
+            same_handset_evidence_id: "verified-handset".into(),
+        },
+        outgoing: NativeRcsOutgoing {
+            outgoing_id: "google-outgoing".into(),
+            sim_participant_id: "google-outgoing".into(),
+            own_identity_raw: "+12025550100".into(),
+            sim_payload: NativeRcsSimPayload {
+                two: 2,
+                sim_number: 7,
+            },
+            rcs_chats_enabled: true,
+        },
+        native_evidence: NativeRcsEvidence {
+            lifetime: NativeRcsLifetime {
+                runtime_id: "runtime".into(),
+                run_generation: 1,
+                link_generation: 1,
+                session_generation: 1,
+                context_revision: 1,
+            },
+            lookup_id: "lookup".into(),
+            lookup_complete: true,
+            google_candidate_count: 1,
+            settings_revision: 1,
+            settings_provenance: NativeSettingsProvenance::CurrentEvent,
+            settings_observed_at_ms: 1_000,
+            settings_stream_epoch: 1,
+            settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed,
+            current_settings_sims: vec![NativeRcsOutgoing {
+                outgoing_id: "google-outgoing".into(),
+                sim_participant_id: "google-outgoing".into(),
+                own_identity_raw: "+12025550100".into(),
+                sim_payload: NativeRcsSimPayload {
+                    two: 2,
+                    sim_number: 7,
+                },
+                rcs_chats_enabled: true,
+            }],
+            settings_validated_at_ms: 1_000,
+            conversation_observed_at_ms: 1_000,
+        },
         identity_region: "ZZ".into(),
         observed_at_ms: 1_000,
         context_revision: 1,
@@ -244,8 +290,33 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
     assert_eq!(permit.target.outgoing.sim_payload.two, 2);
     assert_eq!(permit.target.outgoing.sim_payload.sim_number, 7);
     assert_eq!(permit.target.carrier_binding.android_subscription_id, 7);
-    assert_ne!(permit.target.selected_sim_id, permit.target.outgoing.outgoing_id);
-    assert_eq!(permit.target.participants[0].google_participant_id, "google-peer");
+    assert_ne!(
+        permit.target.selected_sim_id,
+        permit.target.outgoing.outgoing_id
+    );
+    assert_eq!(
+        permit.target.participants[0].google_participant_id,
+        "google-peer"
+    );
+    assert_eq!(
+        permit.target.peppy_conversation_id,
+        captured.conversation_id.to_string()
+    );
+    assert_eq!(permit.target.conversation_type, RcsConversationType::Rcs);
+    assert_eq!(permit.target.status, "eligible");
+    assert_eq!(permit.target.send_mode, RcsSendMode::Automatic);
+    assert!(!permit.target.read_only);
+    let projection = permit.native_commit_projection();
+    assert_eq!(projection.proof_version, permit.target.proof_version);
+    let serialized = serde_json::to_value(projection).unwrap();
+    assert_eq!(
+        serialized["target"]["peppy_conversation_id"],
+        captured.conversation_id.to_string()
+    );
+    assert_eq!(serialized["target"]["conversation_type"], "Rcs");
+    assert_eq!(serialized["target"]["status"], "eligible");
+    assert_eq!(serialized["target"]["send_mode"], "Automatic");
+    assert_eq!(serialized["target"]["read_only"], false);
     assert!(uuid::Uuid::parse_str(&permit.tmp_id).is_ok());
     assert_eq!(
         gateway
@@ -534,6 +605,129 @@ fn rcs_command(
 }
 
 #[test]
+fn strict_admission_refuses_when_the_completed_lookup_is_withdrawn() {
+    let (_directory, _vault, _config, gateway, command_id, current) = rcs_command("peer-local");
+    let conversation_id = command_conversation(&gateway);
+    let mut incomplete = current;
+    incomplete.native_evidence.lookup_complete = false;
+    incomplete.native_evidence.google_candidate_count = 2;
+
+    assert!(
+        gateway
+            .begin_rcs_send_attempt(command_id, &incomplete, 1_000)
+            .is_err()
+    );
+    assert!(gateway.rcs_mapping(conversation_id).unwrap().is_some());
+}
+
+fn command_conversation(gateway: &Client) -> ConversationId {
+    gateway.pending_automatic_commands().unwrap()[0]
+        .message
+        .record
+        .conversation_id
+}
+
+#[test]
+fn strict_admission_refuses_same_revision_payload_contradictions() {
+    let (_directory, _vault, _config, gateway, command_id, mut current) = rcs_command("peer-local");
+    let conversation_id = command_conversation(&gateway);
+    current.outgoing.sim_payload.two += 1;
+
+    assert!(
+        gateway
+            .begin_rcs_send_attempt(command_id, &current, 1_000)
+            .is_err()
+    );
+    assert!(gateway.rcs_mapping(conversation_id).unwrap().is_some());
+}
+
+#[test]
+fn strict_admission_refuses_ambiguous_complete_sim_sets() {
+    for duplicate_join in [true, false] {
+        let (_directory, _vault, _config, gateway, command_id, mut current) =
+            rcs_command("peer-local");
+        let mut duplicate = current.native_evidence.current_settings_sims[0].clone();
+        if !duplicate_join {
+            duplicate.outgoing_id = "other-outgoing".into();
+            duplicate.sim_participant_id = "other-participant".into();
+            duplicate.sim_payload.sim_number = 8;
+        }
+        current
+            .native_evidence
+            .current_settings_sims
+            .push(duplicate);
+
+        assert!(
+            gateway
+                .begin_rcs_send_attempt(command_id, &current, 1_000)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn actual_google_and_os_target_mutations_all_refuse_strict_admission() {
+    for mutation in 0..6 {
+        let (_directory, _vault, _config, gateway, command_id, mut current) =
+            rcs_command("peer-local");
+        match mutation {
+            0 => current.native_evidence.current_settings_sims[0].outgoing_id = "changed".into(),
+            1 => {
+                current.native_evidence.current_settings_sims[0].sim_participant_id =
+                    "changed".into()
+            }
+            2 => current.participants[0].identifier_type += 1,
+            3 => current.participants[0].is_visible = false,
+            4 => current.participants[0].is_me = true,
+            5 => current.carrier_binding.own_number_raw = "+12025550101".into(),
+            _ => unreachable!(),
+        }
+        assert!(
+            gateway
+                .begin_rcs_send_attempt(command_id, &current, 1_000)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn legacy_retry_identity_never_silently_upgrades() {
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    drop(gateway);
+    let connection = encrypted_connection(&config);
+    let key: String = connection
+        .query_row(
+            "SELECT k FROM metadata WHERE k LIKE 'rcs_target_identity_v1/%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE metadata SET v=? WHERE k=?",
+            [
+                r#"{"version":1,"google_conversation_id":"conversation-local"}"#,
+                &key,
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let gateway = unlocked(&config, &vault);
+
+    assert!(
+        gateway
+            .retry_rcs_failed_before_submission(command_id, &current, 1_001)
+            .is_err()
+    );
+}
+
+#[test]
 fn rcs_retry_is_refused_after_restore_guard_is_recorded() {
     let (_directory, _vault, _config, gateway, command_id, current) = rcs_command("peer-local");
     gateway
@@ -706,9 +900,11 @@ fn rcs_retry_refuses_changed_sim_or_link_session() {
             gateway.verify_rcs_mapping(&changed, 1_001),
             Ok(RcsMappingOutcome::Mapped(_))
         ));
-        assert!(gateway
-            .retry_rcs_failed_before_submission(command_id, &changed, 1_001)
-            .is_err());
+        assert!(
+            gateway
+                .retry_rcs_failed_before_submission(command_id, &changed, 1_001)
+                .is_err()
+        );
     }
 }
 

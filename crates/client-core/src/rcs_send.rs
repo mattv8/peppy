@@ -1,8 +1,13 @@
 use crate::{
     CommandId, ConversationId, Error, MessagePayload,
-    rcs_mapping::{self, RCS_MAPPING_FRESHNESS_MS, RcsConversationType, RcsMapping,
-        RcsMappingClass, RcsMappingObservation, RcsSendMode},
-    rcs_native::{LocalRcsTargetSnapshot, NativeRcsCommitProjection, NativeRcsParticipant, NativeRcsTargetClass},
+    rcs_mapping::{
+        self, RCS_MAPPING_FRESHNESS_MS, RcsConversationType, RcsMapping, RcsMappingClass,
+        RcsMappingObservation, RcsSendMode,
+    },
+    rcs_native::{
+        LocalRcsTargetSnapshot, NativeRcsCommitProjection, NativeRcsParticipant,
+        NativeRcsTargetClass,
+    },
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -132,21 +137,24 @@ pub(crate) fn carrier_admission(
     if current_age < 0 {
         return Ok(CarrierAdmission::InvalidateProof);
     }
-    Ok(if proof.expires_at_ms >= now_ms
-        && (0..=RCS_MAPPING_FRESHNESS_MS).contains(&current_age)
-        && proof.subscription_id == subscription_id
-        && proof.recipients == canonical_recipients(recipients)?
-        && rcs_mapping::context_is_current(
-            conn,
-            proof.link_generation,
-            proof.session_generation,
-            proof.context_revision,
-            true,
-        )? {
-        CarrierAdmission::Permitted
-    } else {
-        CarrierAdmission::Blocked
-    })
+    Ok(
+        if proof.expires_at_ms >= now_ms
+            && (0..=RCS_MAPPING_FRESHNESS_MS).contains(&current_age)
+            && proof.subscription_id == subscription_id
+            && proof.recipients == canonical_recipients(recipients)?
+            && rcs_mapping::context_is_current(
+                conn,
+                proof.link_generation,
+                proof.session_generation,
+                proof.context_revision,
+                true,
+            )?
+        {
+            CarrierAdmission::Permitted
+        } else {
+            CarrierAdmission::Blocked
+        },
+    )
 }
 
 pub(crate) fn invalidate_carrier_only_proof(
@@ -363,7 +371,13 @@ pub(crate) fn local_target_snapshot(
     };
     Ok(LocalRcsTargetSnapshot {
         proof_version: mapping.proof_version,
+        peppy_conversation_id: mapping.conversation_id.to_string(),
         google_conversation_id: mapping.google_conversation_id.clone(),
+        conversation_type: observation.conversation_type,
+        status: observation.status.clone(),
+        send_mode: observation.send_mode,
+        read_only: observation.read_only,
+        default_outgoing: observation.default_outgoing,
         participants: observation
             .participants
             .iter()

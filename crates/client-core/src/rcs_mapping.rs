@@ -1,12 +1,13 @@
 use crate::{
     ConversationId, Error,
     rcs_native::{
-        NativeCarrierRouteBinding, NativeRcsEvidence, NativeRcsOutgoing,
-        NativeSettingsCurrentness, NativeSettingsProvenance,
+        NativeCarrierRouteBinding, NativeRcsEvidence, NativeRcsOutgoing, NativeSettingsCurrentness,
+        NativeSettingsProvenance,
     },
 };
 use phonenumber::{Mode, parse};
 use rusqlite::{Connection, OptionalExtension, params};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -19,7 +20,7 @@ pub enum RcsMappingClass {
     SelfChat,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum RcsLinkState {
     Linked,
     Unlinked,
@@ -28,19 +29,20 @@ pub enum RcsLinkState {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum RcsConversationType {
     Rcs,
     Other,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum RcsSendMode {
     Automatic,
     Other,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RcsParticipantObservation {
     pub identity: String,
     pub google_participant_id: String,
@@ -50,7 +52,8 @@ pub struct RcsParticipantObservation {
 }
 
 /// Host facts required to construct an exact, local-only mapping proof.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RcsMappingObservation {
     pub google_conversation_id: String,
     /// Number of eligible Google candidates from a completed, target- and session-scoped lookup.
@@ -233,10 +236,16 @@ fn verify(
         ));
     }
 
-    if visible.iter().filter(|participant| participant.is_me).any(|participant| {
-        canonical_identity(&participant.identity).as_deref() != Some(own_identity.as_str())
-    }) {
-        return Ok(RcsMappingOutcome::Refused(RcsMappingRefusal::SelfChatMismatch));
+    if visible
+        .iter()
+        .filter(|participant| participant.is_me)
+        .any(|participant| {
+            canonical_identity(&participant.identity).as_deref() != Some(own_identity.as_str())
+        })
+    {
+        return Ok(RcsMappingOutcome::Refused(
+            RcsMappingRefusal::SelfChatMismatch,
+        ));
     }
 
     let non_self = visible
@@ -365,16 +374,22 @@ fn native_observation_is_current(
             .is_some_and(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(&age))
     };
     !evidence.lifetime.runtime_id.is_empty()
+        && observation.link_generation > 0
+        && observation.session_generation > 0
+        && observation.context_revision > 0
         && evidence.lifetime.run_generation > 0
         && evidence.lifetime.link_generation == observation.link_generation
         && evidence.lifetime.session_generation == observation.session_generation
         && evidence.lifetime.context_revision == observation.context_revision
         && !evidence.lookup_id.is_empty()
+        && evidence.lookup_complete
+        && evidence.google_candidate_count == 1
+        && evidence.google_candidate_count == observation.google_candidate_count
         && evidence.settings_revision > 0
         && evidence.settings_stream_epoch > 0
         && evidence.settings_provenance == NativeSettingsProvenance::CurrentEvent
         && evidence.settings_currentness == NativeSettingsCurrentness::ContinuousVerifiedFeed
-        && evidence.settings_observed_at_ms >= 0
+        && evidence.settings_observed_at_ms > 0
         && evidence.settings_observed_at_ms <= evidence.settings_validated_at_ms
         && fresh(evidence.settings_validated_at_ms)
         && fresh(evidence.conversation_observed_at_ms)
@@ -387,20 +402,30 @@ fn native_observation_is_current(
         && !binding.same_handset_evidence_id.is_empty()
         && canonical_e164(&binding.own_number_raw).as_deref() == Some(own_identity)
         && canonical_e164(&outgoing.own_identity_raw).as_deref() == Some(own_identity)
-        && outgoing.outgoing_id == outgoing.sim_participant_id
         && !outgoing.outgoing_id.is_empty()
+        && !outgoing.sim_participant_id.is_empty()
         && outgoing.rcs_chats_enabled
-        && evidence.current_settings_sims.iter().filter(|sim| {
-            sim.rcs_chats_enabled
-                && sim.sim_participant_id == outgoing.outgoing_id
-                && sim.sim_payload == outgoing.sim_payload
-        }).count() == 1
-        && evidence.current_settings_sims.iter().filter(|sim| {
-            canonical_e164(&sim.own_identity_raw).as_deref() == Some(own_identity)
-        }).count() == 1
+        && evidence
+            .current_settings_sims
+            .iter()
+            .filter(|sim| {
+                sim.rcs_chats_enabled
+                    && sim.outgoing_id == outgoing.outgoing_id
+                    && sim.sim_participant_id == outgoing.sim_participant_id
+                    && sim.sim_payload == outgoing.sim_payload
+            })
+            .count()
+            == 1
+        && evidence
+            .current_settings_sims
+            .iter()
+            .filter(|sim| canonical_e164(&sim.own_identity_raw).as_deref() == Some(own_identity))
+            .count()
+            == 1
         && evidence.current_settings_sims.iter().any(|sim| {
             sim.rcs_chats_enabled
-                && sim.sim_participant_id == outgoing.outgoing_id
+                && sim.outgoing_id == outgoing.outgoing_id
+                && sim.sim_participant_id == outgoing.sim_participant_id
                 && canonical_e164(&sim.own_identity_raw).as_deref() == Some(own_identity)
                 && sim.sim_payload == outgoing.sim_payload
         })
@@ -538,8 +563,18 @@ fn proof_digest(
     digest.update(observation.context_revision.to_be_bytes());
     digest.update(observation.canonicalizer_revision.to_be_bytes());
     digest.update(observation.mapping_revision.to_be_bytes());
-    digest.update(observation.carrier_binding.android_subscription_id.to_be_bytes());
-    digest.update(observation.carrier_binding.route_context_revision.to_be_bytes());
+    digest.update(
+        observation
+            .carrier_binding
+            .android_subscription_id
+            .to_be_bytes(),
+    );
+    digest.update(
+        observation
+            .carrier_binding
+            .route_context_revision
+            .to_be_bytes(),
+    );
     digest.update([
         u8::from(observation.carrier_binding.is_current_default_sms),
         u8::from(observation.outgoing.rcs_chats_enabled),
@@ -601,9 +636,17 @@ pub(crate) fn update_context(
         let current: RcsContext = match serde_json::from_str(&current) {
             Ok(current) => current,
             Err(_) => {
-                let legacy: LegacyRcsContext = serde_json::from_str(&current).map_err(|_| Error::Database)?;
-                if (observation.link_generation, observation.session_generation, observation.context_revision)
-                    < (legacy.link_generation, legacy.session_generation, legacy.context_revision) {
+                let legacy: LegacyRcsContext =
+                    serde_json::from_str(&current).map_err(|_| Error::Database)?;
+                if (
+                    observation.link_generation,
+                    observation.session_generation,
+                    observation.context_revision,
+                ) < (
+                    legacy.link_generation,
+                    legacy.session_generation,
+                    legacy.context_revision,
+                ) {
                     return Ok(ContextUpdate::Retired);
                 }
                 invalidate_all_mappings(conn, "legacy_context")?;
@@ -633,6 +676,7 @@ pub(crate) fn update_context(
             current.context_revision,
         ) && incoming != current
         {
+            invalidate_all_mappings(conn, "context_contradiction")?;
             return Ok(ContextUpdate::Retired);
         }
         if incoming == current {
@@ -795,8 +839,7 @@ fn context_value(observation: &RcsMappingObservation) -> String {
         session_generation: observation.session_generation,
         context_revision: observation.context_revision,
         identity_region: observation.identity_region.clone(),
-        own_identity: canonical_e164(&observation.selected_sim_own_identity)
-            .unwrap_or_default(),
+        own_identity: canonical_e164(&observation.selected_sim_own_identity).unwrap_or_default(),
         sim_id: observation.selected_sim_id.clone(),
         outgoing_id: observation.outgoing.outgoing_id.clone(),
         sim_participant_id: observation.outgoing.sim_participant_id.clone(),
@@ -900,9 +943,55 @@ mod tests {
             default_outgoing: true,
             selected_sim_id: "android-subscription-7".into(),
             selected_sim_own_identity: "+12025550100".into(),
-            carrier_binding: NativeCarrierRouteBinding { carrier_route_id: "android-subscription-7".into(), android_subscription_id: 7, is_current_default_sms: true, own_number_raw: "+12025550100".into(), own_number_source: crate::NativeOwnNumberSource::SubscriptionManagerPhoneNumber, route_observed_at_ms: 1_000, route_context_revision: 1, same_handset_evidence_id: "verified-handset".into() },
-            outgoing: NativeRcsOutgoing { outgoing_id: "google-outgoing".into(), sim_participant_id: "google-outgoing".into(), own_identity_raw: "+12025550100".into(), sim_payload: crate::NativeRcsSimPayload { two: 2, sim_number: 7 }, rcs_chats_enabled: true },
-            native_evidence: NativeRcsEvidence { lifetime: crate::NativeRcsLifetime { runtime_id: "runtime".into(), run_generation: 1, link_generation: 1, session_generation: 1, context_revision: 1 }, lookup_id: "lookup".into(), lookup_complete: true, google_candidate_count: 1, settings_revision: 1, settings_provenance: NativeSettingsProvenance::CurrentEvent, settings_observed_at_ms: 1_000, settings_stream_epoch: 1, settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed, current_settings_sims: vec![NativeRcsOutgoing { outgoing_id: "google-outgoing".into(), sim_participant_id: "google-outgoing".into(), own_identity_raw: "+12025550100".into(), sim_payload: crate::NativeRcsSimPayload { two: 2, sim_number: 7 }, rcs_chats_enabled: true }], settings_validated_at_ms: 1_000, conversation_observed_at_ms: 1_000 },
+            carrier_binding: NativeCarrierRouteBinding {
+                carrier_route_id: "android-subscription-7".into(),
+                android_subscription_id: 7,
+                is_current_default_sms: true,
+                own_number_raw: "+12025550100".into(),
+                own_number_source: crate::NativeOwnNumberSource::SubscriptionManagerPhoneNumber,
+                route_observed_at_ms: 1_000,
+                route_context_revision: 1,
+                same_handset_evidence_id: "verified-handset".into(),
+            },
+            outgoing: NativeRcsOutgoing {
+                outgoing_id: "google-outgoing".into(),
+                sim_participant_id: "google-outgoing".into(),
+                own_identity_raw: "+12025550100".into(),
+                sim_payload: crate::NativeRcsSimPayload {
+                    two: 2,
+                    sim_number: 7,
+                },
+                rcs_chats_enabled: true,
+            },
+            native_evidence: NativeRcsEvidence {
+                lifetime: crate::NativeRcsLifetime {
+                    runtime_id: "runtime".into(),
+                    run_generation: 1,
+                    link_generation: 1,
+                    session_generation: 1,
+                    context_revision: 1,
+                },
+                lookup_id: "lookup".into(),
+                lookup_complete: true,
+                google_candidate_count: 1,
+                settings_revision: 1,
+                settings_provenance: NativeSettingsProvenance::CurrentEvent,
+                settings_observed_at_ms: 1_000,
+                settings_stream_epoch: 1,
+                settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed,
+                current_settings_sims: vec![NativeRcsOutgoing {
+                    outgoing_id: "google-outgoing".into(),
+                    sim_participant_id: "google-outgoing".into(),
+                    own_identity_raw: "+12025550100".into(),
+                    sim_payload: crate::NativeRcsSimPayload {
+                        two: 2,
+                        sim_number: 7,
+                    },
+                    rcs_chats_enabled: true,
+                }],
+                settings_validated_at_ms: 1_000,
+                conversation_observed_at_ms: 1_000,
+            },
             identity_region: "ZZ".into(),
             observed_at_ms: 1_000,
             link_generation: 1,
