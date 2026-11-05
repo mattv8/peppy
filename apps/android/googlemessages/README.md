@@ -6,7 +6,7 @@ This Go module builds the opt-in Android bridge for the Google Messages link.
 
 - libgm: `go.mau.fi/mautrix-gmessages v0.2610.1-0.20261103213626-d9140a5e807e`
 - gomobile and gobind: `golang.org/x/mobile v0.0.0-20261011034528-197770444867`
-- private patch SHA-256: `83aff6f356380f232cc7089c26e662ea33a094ffa1d1621fbed3d4d01f74c6d0`
+- private patch SHA-256: `04bae7b44c7e970a5e2b8f2056d70bd7e67c00ae2e1712aef22702a19a7250e7`
 
 ## Commands
 

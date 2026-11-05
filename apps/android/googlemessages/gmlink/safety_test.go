@@ -121,7 +121,7 @@ func TestPairChecksConfigAccountMatchesMobile(t *testing.T) {
 		if n := fixture.countAction("CREATE_GAIA_PAIRING_CLIENT_INIT"); n != 0 {
 			t.Fatalf("pairing init sent %d times, want 0", n)
 		}
-		expectStatus(t, link, `"state":"needs_relink"`, `"stop_code":"account_mismatch"`)
+		expectStatus(t, link, `"state":"signed_out"`, `"stop_code":"account_mismatch"`)
 	})
 
 	t.Run("run refuses a config account that differs from the paired phone", func(t *testing.T) {
@@ -462,7 +462,7 @@ func TestRotationRace(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			client := link.newClient(auth)
+			client := link.newClient(auth, link.persist)
 			defer client.Disconnect()
 			for range 8 {
 				if err := client.FetchConfig(t.Context()); err != nil {
@@ -542,8 +542,9 @@ func TestCloseAbortsBlockedPair(t *testing.T) {
 	err := awaitPairResult(t, link, result, "Pair")
 	expectErrorCode(t, err, "pair_cancelled")
 	expectStatus(t, link, `"state":"unlinked"`, `"stop_code":"pair_cancelled"`)
-	if !host.hasEvent("link", "pair_cancelled") {
-		t.Fatal("pair_cancelled was not reported to the host")
+	// Once Close returns, the link reports nothing to the host; the reason stays in Status.
+	if host.hasEvent("link", "pair_cancelled") {
+		t.Fatal("pair_cancelled reached the host after Close")
 	}
 }
 

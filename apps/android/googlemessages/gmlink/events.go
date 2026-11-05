@@ -6,7 +6,7 @@ var eventCodes = []eventCode{
 	{"link", "pair_timeout"}, {"link", "account_mismatch"}, {"link", "relink_needed"},
 	{"link", "relink_ok"}, {"link", "relink_failed"}, {"link", "signed_out"},
 	{"link", "unlinked"}, {"link", "unlink_remote_failed"}, {"link", "persist_failed"},
-	{"link", "reset_local"}, {"link", "stale_webview_wiped"}, {"link", "stale_webview_wipe_failed"},
+	{"link", "reset_local"}, {"link", "event_overflow"}, {"link", "stale_webview_wiped"}, {"link", "stale_webview_wipe_failed"},
 	{"link", "signin_cancelled"}, {"link", "signin_blocked"}, {"link", "signin_incomplete"}, {"link", "pair_declined"},
 	{"conn", "ready"}, {"conn", "temporary_error"}, {"conn", "recovered"},
 	{"conn", "phone_not_responding"}, {"conn", "phone_responding"}, {"conn", "no_data"},

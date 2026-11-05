@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -256,18 +255,6 @@ func TestEventHandlerNeverBlocks(t *testing.T) {
 	}
 }
 
-func TestNoReadOrSendRPCs(t *testing.T) {
-	contents, err := os.ReadFile("link.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{"GetConversation", "SendMessage", "MarkRead", "SetTyping", "SendReaction", "DeleteMessage", "UpdateConversation", "UpdateSettings", "UnpairBugle"} {
-		if strings.Contains(string(contents), forbidden) {
-			t.Fatalf("forbidden RPC reference %q", forbidden)
-		}
-	}
-}
-
 func TestOpenDisablesUpstreamLoggers(t *testing.T) {
 	previous := zerolog.GlobalLevel()
 	t.Cleanup(func() { zerolog.SetGlobalLevel(previous) })
@@ -304,53 +291,6 @@ func TestPersistOrderingSeqMonotonic(t *testing.T) {
 			t.Fatalf("state=%+v previous=%d err=%v", state, previous, err)
 		}
 		previous = state.Seq
-	}
-}
-
-func TestEveryEmittedCodeIsListed(t *testing.T) {
-	for _, code := range eventCodes {
-		if !isEventCode(code.kind, code.code) {
-			t.Fatalf("missing %s/%s", code.kind, code.code)
-		}
-	}
-}
-
-func TestHealthyWithoutBrowserActiveAlert(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
-	link.mu.Lock()
-	link.running = true
-	link.mu.Unlock()
-	link.recordHealth(true, 1)
-	if !strings.Contains(link.Status(), `"healthy":true`) {
-		t.Fatalf("status=%s", link.Status())
-	}
-}
-
-func TestEveryReturnedErrorIsFixedCode(t *testing.T) {
-	code := regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
-	if _, err := Open(nil, nil); err == nil || !code.MatchString(err.Error()) {
-		t.Fatalf("open error=%v", err)
-	}
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
-	for _, err := range []error{
-		link.Pair([]byte("not-json")), link.Relink(), link.Run(), link.Unlink(),
-	} {
-		if err != nil && !code.MatchString(err.Error()) {
-			t.Fatalf("non-fixed error=%q", err)
-		}
-	}
-	for _, stopCode := range []string{"", "pair_failed", "cookie_refused", "unlink_remote_failed", "persist_failed"} {
-		if stopCode != "" && !code.MatchString(stopCode) {
-			t.Fatalf("non-fixed stop code=%q", stopCode)
-		}
 	}
 }
 

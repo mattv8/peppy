@@ -10,9 +10,9 @@ import (
 )
 
 var (
-	errRedirectResponse = errors.New("redirect refused")
-	errServerResponse   = errors.New("server response refused")
-	errRequestRefused   = errors.New("request refused")
+	errRedirectResponse = errors.New("redirect_refused")
+	errServerResponse   = errors.New("server_response_refused")
+	errRequestRefused   = errors.New("request_refused")
 )
 
 type transportStatusError struct {
@@ -68,7 +68,7 @@ func (guard *transportGuard) RoundTrip(request *http.Request) (*http.Response, e
 		if err := guard.persist(); err != nil {
 			_ = response.Body.Close()
 			guard.stop("persist_failed")
-			return nil, errors.New("state persistence failed")
+			return nil, errPersistFailed
 		}
 	}
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {

@@ -4,6 +4,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -379,10 +380,11 @@ func mustMarshal(message proto.Message) []byte {
 
 // safetyHost records what the link persists and reports to the host.
 type safetyHost struct {
-	mu     sync.Mutex
-	states [][]byte
-	events []eventCode
-	emoji  chan string
+	mu          sync.Mutex
+	states      [][]byte
+	events      []eventCode
+	emoji       chan string
+	failPersist bool
 }
 
 func newSafetyHost() *safetyHost {
@@ -392,8 +394,36 @@ func newSafetyHost() *safetyHost {
 func (host *safetyHost) PersistState(state []byte) error {
 	host.mu.Lock()
 	defer host.mu.Unlock()
+	if host.failPersist {
+		return errors.New("synthetic persistence failure")
+	}
 	host.states = append(host.states, append([]byte(nil), state...))
 	return nil
+}
+
+func (host *safetyHost) setFailPersist(fail bool) {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	host.failPersist = fail
+}
+
+// stateCount is how many envelopes the host has received.
+func (host *safetyHost) stateCount() int {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	return len(host.states)
+}
+
+func (host *safetyHost) countEvent(kind, code string) int {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	count := 0
+	for _, event := range host.events {
+		if event.kind == kind && event.code == code {
+			count++
+		}
+	}
+	return count
 }
 
 func (host *safetyHost) Event(kind, code string, _ int64) {
@@ -532,10 +562,13 @@ func runningSafetyClient(t *testing.T, link *Link) *libgm.Client {
 func assertSafetyReleased(t *testing.T, link *Link, client *libgm.Client) {
 	t.Helper()
 	link.mu.Lock()
-	owned, running := link.client, link.running
+	owned, running, healthy := link.client, link.running, link.healthy
 	link.mu.Unlock()
 	if owned != nil || running {
 		t.Fatal("link still owns a running client after Run returned")
+	}
+	if healthy {
+		t.Fatal("link reports healthy after Run returned")
 	}
 	if client.IsConnected() {
 		t.Fatal("client still connected after Run returned")
