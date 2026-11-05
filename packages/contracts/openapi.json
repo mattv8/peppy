@@ -143,6 +143,54 @@
         ],
         "type": "string"
       },
+      "EphemeralSignalV1": {
+        "additionalProperties": false,
+        "properties": {
+          "ciphertext_b64": {
+            "maxLength": 7600,
+            "type": "string"
+          },
+          "expires_at_ms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "key_epoch": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "kind": {
+            "const": "typing"
+          },
+          "protocol_version": {
+            "const": 1
+          },
+          "sender_device_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "sent_at_ms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "sequence": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "kind",
+          "sender_device_id",
+          "key_epoch",
+          "sent_at_ms",
+          "expires_at_ms",
+          "sequence",
+          "ciphertext_b64"
+        ],
+        "title": "EphemeralSignalV1",
+        "type": "object"
+      },
       "GatewayRoute": {
         "oneOf": [
           {

@@ -3,6 +3,7 @@ export type CompactionMetadata = { checkpoint?: boolean; key: string; supersedes
 export type CompactionReference = { producer_device_id: string; producer_sequence: SourceSequence; };
 export type Envelope = { ciphertext: string; command_id?: string | null; compaction?: CompactionMetadata | null; crypto_suite: number; envelope_id: string; key_epoch: number; origin_tag?: string | null; producer_device_id: string; producer_sequence: SourceSequence; profile_fingerprint: string; protocol_version: number; purpose: EnvelopePurpose; route?: GatewayRoute | null; vault_id: string; };
 export type EnvelopePurpose = 'command' | 'event';
+export type EphemeralSignalV1 = { ciphertext_b64: string; expires_at_ms: string; key_epoch: number; kind: 'typing'; protocol_version: 1; sender_device_id: string; sent_at_ms: string; sequence: string; };
 export type GatewayRoute = { gateway_device_id: string; subscription_id: string; } | { gateway_device_id: string; kind: 'rcs_link'; };
 export type PairingQrRecord = { challenge_token: string; device_binding: string; expires_at_unix_seconds: number; https_origin: string; key_epoch: number; profile_fingerprint: string; protocol_version: number; vault_id: string; };
 export type SourceSequence = string;

@@ -1,4 +1,4 @@
-use crate::{Envelope, PairingQrRecord};
+use crate::{Envelope, EphemeralSignalV1, PairingQrRecord};
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, fs, io, path::Path};
@@ -13,18 +13,24 @@ pub fn generate_contracts() -> GeneratedContracts {
     let envelope = serde_json::to_value(schema_for!(Envelope)).expect("Envelope schema serializes");
     let pairing =
         serde_json::to_value(schema_for!(PairingQrRecord)).expect("Pairing schema serializes");
+    let ephemeral = serde_json::to_value(schema_for!(EphemeralSignalV1))
+        .expect("ephemeral signal schema serializes");
     let mut components = BTreeMap::new();
     components.extend(extract_components("Envelope", envelope));
     components.extend(extract_components("PairingQrRecord", pairing));
+    components.extend(extract_components("EphemeralSignalV1", ephemeral));
     let mut component_value = serde_json::to_value(&components).expect("components serialize");
     rewrite_refs(&mut component_value);
     let openapi = pretty(
         &json!({"openapi":"3.1.0","info":{"title":"Peppy protocol","version":"1"},"paths":{},"components":{"schemas":component_value}}),
     );
-    let mut event_schema =
-        serde_json::to_value(schema_for!(Envelope)).expect("event schema serializes");
-    event_schema["$schema"] = Value::String("https://json-schema.org/draft/2020-12/schema".into());
-    let event_schema = pretty(&event_schema);
+    let event_schema = pretty(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "oneOf": [
+            serde_json::to_value(schema_for!(Envelope)).expect("envelope schema serializes"),
+            serde_json::to_value(schema_for!(EphemeralSignalV1)).expect("ephemeral signal schema serializes")
+        ]
+    }));
     let typescript =
         typescript_from_components(component_value.as_object().expect("components object"));
     GeneratedContracts {
@@ -118,8 +124,13 @@ fn schema_to_ts(schema: &Value) -> String {
             .map(type_name)
             .unwrap_or_else(|| "unknown".into());
     }
-    if let Some(value) = schema.get("const").and_then(Value::as_str) {
-        return format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"));
+    if let Some(value) = schema.get("const") {
+        if let Some(value) = value.as_str() {
+            return format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"));
+        }
+        if value.is_number() || value.is_boolean() {
+            return value.to_string();
+        }
     }
     if let Some(values) = schema.get("enum").and_then(Value::as_array) {
         return values
