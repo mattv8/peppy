@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanel
@@ -40,6 +41,12 @@ class GoogleMessagesLinkPanelTest {
     @Test fun `unlinked link offers owner action`() = panel("unlinked") {
         compose.onNodeWithTag("google-messages-link-unlinked").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-start").fetchSemanticsNode()
+    }
+
+    @Test fun `link consent shows the complete disclosure`() = panel("unlinked") {
+        compose.onNodeWithTag("google-messages-link-start").performClick()
+        compose.onNodeWithTag("google-messages-link-consent-sheet").fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-consent-sheet-body").fetchSemanticsNode()
     }
 
     @Test fun `linked link presents health actions`() = panel("linked") {

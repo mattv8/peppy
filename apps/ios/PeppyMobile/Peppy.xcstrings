@@ -4241,6 +4241,56 @@
         }
       }
     },
+    "peppy.google_messages_link_consent_p_storage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy keeps the sign-in only on this phone, encrypted with a key in Android's secure storage. It is never sent to Peppy's server."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use the Google account that you use in Google Messages on this phone."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_emoji": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Then Google Messages asks you to tap a matching emoji on this phone. Peppy shows the emoji."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_notification": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy keeps the link open with an ongoing notification. Android may ask to allow notifications. If you say no, linking still works but you will not see the notification."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_browser": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking replaces any Messages for Web browser session you keep open on this account."
+          }
+        }
+      }
+    },
     "peppy.google_messages_link_consent_p_scope": {
       "localizations": {
         "en": {
@@ -4427,6 +4477,126 @@
           "stringUnit": {
             "state": "translated",
             "value": "Linking stopped. Try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_no_phone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google did not find a phone with Google Messages on this account. Make sure Google Messages is set up on this phone with the same Google account, then try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_multiple_phones": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More than one phone uses Google Messages with this account, so Peppy did not link. Stop using it on the other phone, then try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_wrong_emoji": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That was not the matching emoji, so linking stopped. Start again and tap the emoji Peppy shows."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_cancelled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking was cancelled."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_timeout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking took too long, so Peppy stopped. Start again and confirm the emoji sooner."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_account_mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You signed in with a different Google account than the one Google Messages uses on this phone. Sign in again with that account."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking did not finish. Nothing was saved. Try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_relink_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Re-linking did not finish. Try again, or remove the link from this phone and link again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_persist_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy could not save the link data on this phone, so it stopped. Close and reopen Peppy. If this keeps happening, unlink and link again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_signin_blocked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google blocked sign-in in this app. Peppy cannot get around that, so it cannot link this phone right now. Try again later."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_signin_incomplete": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign-in did not finish, so nothing was saved. Try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_unlinked_done": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlinked. Peppy deleted its link data from this phone."
           }
         }
       }
