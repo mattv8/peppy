@@ -109,6 +109,13 @@ internal fun HostedEnrollmentScreen(
     playBilling: PlayBillingCoordinator? = null,
 ) {
     val context = LocalContext.current
+    val accountMismatch = stringResource(R.string.peppy_production_account_mismatch)
+    val secureStorageFailure = stringResource(R.string.peppy_production_secure_storage_failed)
+    val networkFailure = stringResource(R.string.peppy_production_network_failed)
+    val providerUnconfigured = stringResource(R.string.peppy_production_provider_unconfigured)
+    val signInFailure = stringResource(R.string.peppy_production_signin_failed)
+    val provisionRetry = stringResource(R.string.peppy_production_provision_retry)
+    val passphraseMismatch = stringResource(R.string.peppy_passphrase_mismatch)
     val appContext = context.applicationContext
     val activity = context as ComponentActivity
     val draft = remember(activity) { ViewModelProvider(activity)[HostedEnrollmentDraft::class.java] }
@@ -199,15 +206,15 @@ internal fun HostedEnrollmentScreen(
                 }
                 HostedFailure.Kind.WRONG_ACCOUNT -> {
                     diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
-                    fail(context.getString(R.string.peppy_production_account_mismatch))
+                    fail(accountMismatch)
                 }
                 HostedFailure.Kind.STORAGE -> {
                     diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
-                    fail(context.getString(R.string.peppy_production_secure_storage_failed))
+                    fail(secureStorageFailure)
                 }
                 else -> {
                     diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
-                    fail(context.getString(R.string.peppy_production_network_failed))
+                    fail(networkFailure)
                 }
             }
         } catch (cancelled: CancellationException) {
@@ -216,7 +223,7 @@ internal fun HostedEnrollmentScreen(
         } catch (_: Exception) {
             if (isCurrent(stamp)) {
                 diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
-                fail(context.getString(R.string.peppy_production_network_failed))
+                fail(networkFailure)
             } else {
                 diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
             }
@@ -285,7 +292,7 @@ internal fun HostedEnrollmentScreen(
                 Text(stringResource(R.string.peppy_production_hosted_cta))
                 Button(onClick = {
                     if (BuildConfig.PEPPY_GOOGLE_SERVER_CLIENT_ID.isBlank()) {
-                        fail(context.getString(R.string.peppy_production_provider_unconfigured))
+                        fail(providerUnconfigured)
                         return@Button
                     }
                     startWork { stamp ->
@@ -388,7 +395,7 @@ internal fun HostedEnrollmentScreen(
                             diagnostics.record(HostedAuthStage.ATTEMPT, HostedAuthOutcome.STALE)
                             throw cancelled
                         } catch (_: Exception) {
-                            if (isCurrent(stamp)) fail(context.getString(R.string.peppy_production_signin_failed))
+                            if (isCurrent(stamp)) fail(signInFailure)
                         }
                     }
                 }, Modifier.fillMaxWidth().testTag("signin-google-button")) {
@@ -467,12 +474,12 @@ internal fun HostedEnrollmentScreen(
                                 finally { credential.fill(0) }
                             }
                             if (imported != ImportResult.IMPORTED && imported != ImportResult.UPDATED) {
-                                if (isCurrent(stamp)) fail(context.getString(R.string.peppy_production_provision_retry))
+                                if (isCurrent(stamp)) fail(provisionRetry)
                                 return@startWork
                             }
                             val unlocked = withContext(Dispatchers.IO) { NativeGateway.unlock(appContext, entered) }
                             if (unlocked != UnlockResult.UNLOCKED) {
-                                if (isCurrent(stamp)) fail(context.getString(R.string.peppy_production_provision_retry))
+                                if (isCurrent(stamp)) fail(provisionRetry)
                                 return@startWork
                             }
                             client.bindPendingSecretAndAcknowledge(view.vaultId, view.deviceId)
@@ -483,13 +490,13 @@ internal fun HostedEnrollmentScreen(
                         } catch (failure: HostedFailure) {
                             if (!isCurrent(stamp)) return@startWork
                             when (failure.kind) {
-                                HostedFailure.Kind.WRONG_ACCOUNT -> fail(context.getString(R.string.peppy_production_account_mismatch))
-                                HostedFailure.Kind.WRONG_PASSPHRASE -> fail(context.getString(R.string.peppy_passphrase_mismatch))
+                                HostedFailure.Kind.WRONG_ACCOUNT -> fail(accountMismatch)
+                                HostedFailure.Kind.WRONG_PASSPHRASE -> fail(passphraseMismatch)
                                 HostedFailure.Kind.EXISTING_VAULT -> phase = HostedPhase.ExistingVault
-                                else -> fail(context.getString(R.string.peppy_production_provision_retry))
+                                else -> fail(provisionRetry)
                             }
                         } catch (_: Exception) {
-                            if (isCurrent(stamp)) fail(context.getString(R.string.peppy_production_provision_retry))
+                            if (isCurrent(stamp)) fail(provisionRetry)
                         }
                     }
                 }, Modifier.testTag("passphrase-confirm-button")) { Text(stringResource(R.string.peppy_continue)) }
@@ -509,7 +516,7 @@ internal fun HostedEnrollmentScreen(
                         client.signOut()
                     } catch (cancelled: CancellationException) { throw cancelled }
                     catch (_: Exception) {
-                        if (isCurrent(stamp)) fail(context.getString(R.string.peppy_production_secure_storage_failed))
+                        if (isCurrent(stamp)) fail(secureStorageFailure)
                         return@startWork
                     }
                     try { CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest()) }

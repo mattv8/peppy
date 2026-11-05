@@ -109,6 +109,7 @@ internal fun GatewayAccountSettings(
     onRouteChanged: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val androidLinkUnavailable = stringResource(R.string.peppy_toggle_android_link_unavailable)
     var state by remember { mutableStateOf<GatewayAccountState?>(null) }
     var gatewayStatus by remember { mutableStateOf<GatewayStatus?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
@@ -461,7 +462,7 @@ internal fun GatewayAccountSettings(
             HostedAccountDeletionEntry(
                 tag = "account-delete-row",
                 includeVaultDistinction = account?.self?.role == "owner",
-                onOpenFailed = { failure = context.getString(R.string.peppy_toggle_android_link_unavailable) },
+                onOpenFailed = { failure = androidLinkUnavailable },
                 onViewSubscription = onOpenSubscription,
             )
         }

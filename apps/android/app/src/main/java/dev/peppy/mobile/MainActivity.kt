@@ -308,6 +308,8 @@ internal suspend fun signInSubscriptionRoute(
 @Composable
 private fun CompanionScreen(activity: ComponentActivity) {
     val context = LocalContext.current
+    val storageFailure = stringResource(R.string.peppy_play_session_storage_failed)
+    val signInFailure = stringResource(R.string.peppy_production_signin_failed)
     val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf<GatewayStatus?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -566,8 +568,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
                                 }
                             },
                             signInError = when (subscriptionRouteState.feedback) {
-                                SubscriptionRouteFeedback.STORAGE -> context.getString(R.string.peppy_play_session_storage_failed)
-                                SubscriptionRouteFeedback.SIGN_IN -> context.getString(R.string.peppy_production_signin_failed)
+                                SubscriptionRouteFeedback.STORAGE -> storageFailure
+                                SubscriptionRouteFeedback.SIGN_IN -> signInFailure
                                 null -> null
                             },
                         )

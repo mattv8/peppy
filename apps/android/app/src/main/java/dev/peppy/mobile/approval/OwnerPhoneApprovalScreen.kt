@@ -38,6 +38,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -60,7 +61,6 @@ import dev.peppy.mobile.security.RevealOutcome
 import dev.peppy.mobile.security.SecureWindow
 import dev.peppy.mobile.security.rememberActivitySecureWindow
 import dev.peppy.mobile.ui.InfoButton
-import java.util.Locale
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -113,6 +113,7 @@ internal fun OwnerPhoneApprovalScreen(
 ) {
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
+    val locale = LocalLocale.current.platformLocale
     val prompt = remember { ApprovalPromptBridge() }
     val operations = remember { EnrollmentOperationState() }
     val revealVisibility = remember { RevealVisibilityState() }
@@ -307,7 +308,7 @@ internal fun OwnerPhoneApprovalScreen(
                 }
                 Text(stringResource(R.string.peppy_owner_phone_waiting_body))
                 QrCode(view?.qr.orEmpty(), Modifier.fillMaxWidth().weight(1f).testTag("owner-phone-qr"))
-                val expiresInSeconds = MeasureFormat.getInstance(Locale.getDefault(), MeasureFormat.FormatWidth.WIDE)
+                val expiresInSeconds = MeasureFormat.getInstance(locale, MeasureFormat.FormatWidth.WIDE)
                     .format(Measure(view?.status?.expiresInSeconds ?: 0, MeasureUnit.SECOND))
                 Text(
                     "${stringResource(R.string.peppy_owner_phone_countdown_label)} $expiresInSeconds",
