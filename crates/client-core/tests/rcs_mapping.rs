@@ -327,3 +327,58 @@ fn structured_context_distinguishes_delimiter_collisions() {
     };
     assert_ne!(first.proof.digest, second.proof.digest);
 }
+
+#[test]
+fn malformed_or_multiple_google_observation_revokes_a_stored_mapping() {
+    let (_directory, _config, client, conversation_id) = client_with_participant("raw-peer");
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&observation("raw-peer", 1), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let mut malformed = observation("raw-peer", 2);
+    malformed.participants.push(RcsParticipantObservation {
+        identity: "+not-an-identity".into(),
+        is_visible: true,
+        is_me: false,
+    });
+    assert_eq!(
+        client.verify_rcs_mapping(&malformed, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::InvalidIdentity)
+    );
+    assert!(client.rcs_mapping(conversation_id).unwrap().is_none());
+
+    let fresh = observation("raw-peer", 3);
+    assert!(matches!(
+        client.verify_rcs_mapping(&fresh, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let mut multiple = observation("raw-peer", 4);
+    multiple.google_candidate_count = 2;
+    assert_eq!(
+        client.verify_rcs_mapping(&multiple, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::GoogleConversationAmbiguous)
+    );
+    assert!(client.rcs_mapping(conversation_id).unwrap().is_none());
+}
+
+#[test]
+fn self_chat_conflict_invalidates_the_original_mapping() {
+    let (_directory, _config, client, conversation_id) = client_with_participant("local-identity");
+    let mut original = observation("local-identity", 1);
+    original.google_conversation_id = "google-a".into();
+    original.participants[0].is_me = true;
+    assert!(matches!(
+        client.verify_rcs_mapping(&original, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let mut conflicting = original.clone();
+    conflicting.google_conversation_id = "google-b".into();
+    conflicting.mapping_revision = 2;
+    assert_eq!(
+        client.verify_rcs_mapping(&conflicting, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::MappingConflict)
+    );
+    assert!(client.rcs_mapping(conversation_id).unwrap().is_none());
+}
