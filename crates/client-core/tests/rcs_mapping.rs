@@ -131,6 +131,7 @@ fn mapping_binds_region_identity_and_live_conversation_facts() {
     let mut changed = observation("raw-peer", 2);
     changed.identity_region = "XY".into();
     changed.selected_sim_own_identity = "other-local-identity".into();
+    changed.context_revision = 2;
     changed.read_only = true;
     assert_eq!(
         client.verify_rcs_mapping(&changed, 1_000).unwrap(),
@@ -141,6 +142,7 @@ fn mapping_binds_region_identity_and_live_conversation_facts() {
     let mut refreshed = observation("raw-peer", 3);
     refreshed.identity_region = "XY".into();
     refreshed.selected_sim_own_identity = "other-local-identity".into();
+    refreshed.context_revision = 2;
     let RcsMappingOutcome::Mapped(refreshed) =
         client.verify_rcs_mapping(&refreshed, 1_000).unwrap()
     else {
@@ -236,11 +238,12 @@ fn context_and_conflict_invalidate_all_affected_mappings() {
         RcsMappingOutcome::Refused(RcsMappingRefusal::MappingConflict)
     );
     assert!(client.rcs_mapping(conversation_a).unwrap().is_none());
-    assert!(client.rcs_mapping(conversation_b).unwrap().is_some());
+    assert!(client.rcs_mapping(conversation_b).unwrap().is_none());
 
     let mut refreshed = mapping_a.clone();
     refreshed.mapping_revision = 3;
     refreshed.session_generation = 8;
+    refreshed.context_revision = 2;
     assert!(matches!(
         client.verify_rcs_mapping(&refreshed, 1_000).unwrap(),
         RcsMappingOutcome::Mapped(_)
@@ -293,4 +296,34 @@ fn empty_participants_do_not_create_or_change_a_mapping_candidate() {
         client.verify_rcs_mapping(&empty, 1_000).unwrap(),
         RcsMappingOutcome::Refused(RcsMappingRefusal::ParticipantAmbiguous)
     );
+    let mut malformed = observation("raw-peer", 3);
+    malformed.participants.push(RcsParticipantObservation {
+        identity: "+not-an-identity".into(),
+        is_visible: true,
+        is_me: false,
+    });
+    assert_eq!(
+        client.verify_rcs_mapping(&malformed, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::InvalidIdentity)
+    );
+}
+
+#[test]
+fn structured_context_distinguishes_delimiter_collisions() {
+    let (_directory, _config, client, _conversation_id) = client_with_participant("raw-peer");
+    let mut first = observation("raw-peer", 1);
+    first.selected_sim_own_identity = "a".into();
+    first.selected_sim_id = "b:sim".into();
+    let RcsMappingOutcome::Mapped(first) = client.verify_rcs_mapping(&first, 1_000).unwrap() else {
+        panic!("expected mapping");
+    };
+    let mut second = observation("raw-peer", 2);
+    second.selected_sim_own_identity = "a:b".into();
+    second.selected_sim_id = "sim".into();
+    second.context_revision = 2;
+    let RcsMappingOutcome::Mapped(second) = client.verify_rcs_mapping(&second, 1_000).unwrap()
+    else {
+        panic!("expected mapping");
+    };
+    assert_ne!(first.proof.digest, second.proof.digest);
 }

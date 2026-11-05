@@ -624,7 +624,6 @@ fn invalidate_for_refusal(
                     params![code, conversation_id.to_string()],
                 )?;
             }
-            return Ok(());
         }
     }
     conn.execute(
