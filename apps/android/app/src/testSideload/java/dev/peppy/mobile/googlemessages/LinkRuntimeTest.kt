@@ -10,6 +10,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -27,6 +28,7 @@ class LinkRuntimeTest {
         LinkRuntimeTestHooks.engine = null
         LinkRuntimeTestHooks.storeFactory = null
         LinkRuntimeTestHooks.eventRecorder = null
+        LinkRuntimeTestHooks.callbackExecutor = null
     }
 
     @Test
@@ -119,29 +121,76 @@ class LinkRuntimeTest {
         val first = CountDownLatch(1)
         LinkRuntimeTestHooks.eventRecorder = { _, _, _ -> first.countDown() }
 
-        assertTrue(LinkRuntime.beginPairing())
+        val firstAttempt = LinkRuntime.tryBeginPairing()!!
         host.showEmoji("first")
         host.event("link", "pair_ok", 0)
         assertTrue(first.await(1, TimeUnit.SECONDS))
+        assertTrue(LinkRuntime.pairingInProgress.get())
+        assertTrue(LinkRuntime.endPairing(firstAttempt))
 
-        assertTrue(LinkRuntime.beginPairing())
+        val secondAttempt = LinkRuntime.tryBeginPairing()!!
 
         assertEquals(null, LinkRuntime.emoji.value)
         assertTrue(LinkRuntime.pairingInProgress.get())
-        LinkRuntime.endPairing()
+        assertTrue(LinkRuntime.endPairing(secondAttempt))
         assertEquals(null, LinkRuntime.emoji.value)
         assertFalse(LinkRuntime.pairingInProgress.get())
     }
 
     @Test
     fun `second owner cannot clear an active pairing`() {
-        assertTrue(LinkRuntime.beginPairing())
+        val attempt = LinkRuntime.tryBeginPairing()!!
         LinkRuntime.emoji.value = "first"
 
-        assertFalse(LinkRuntime.beginPairing())
+        assertEquals(null, LinkRuntime.tryBeginPairing())
 
         assertEquals("first", LinkRuntime.emoji.value)
         assertTrue(LinkRuntime.pairingInProgress.get())
+        assertTrue(LinkRuntime.endPairing(attempt))
+    }
+
+    @Test
+    fun `queued old emoji and late finally cannot affect a new attempt`() {
+        lateinit var host: LinkHost
+        val queued = QueueExecutor()
+        LinkRuntimeTestHooks.callbackExecutor = queued
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, callback: LinkHost): LinkHandle = FakeHandle().also { host = callback }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntime.handle(context)
+        val oldAttempt = LinkRuntime.tryBeginPairing()!!
+        host.showEmoji("old")
+        assertTrue(LinkRuntime.endPairing(oldAttempt))
+        val newAttempt = LinkRuntime.tryBeginPairing()!!
+
+        assertFalse(LinkRuntime.endPairing(oldAttempt))
+        queued.runAll()
+
+        assertEquals(null, LinkRuntime.emoji.value)
+        assertTrue(LinkRuntime.pairingInProgress.get())
+        assertTrue(LinkRuntime.endPairing(newAttempt))
+    }
+
+    @Test
+    fun `terminal callback never releases pairing ownership`() {
+        lateinit var host: LinkHost
+        val callbackRan = CountDownLatch(1)
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, callback: LinkHost): LinkHandle = FakeHandle().also { host = callback }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntimeTestHooks.eventRecorder = { _, _, _ -> callbackRan.countDown() }
+        LinkRuntime.handle(context)
+        val attempt = LinkRuntime.tryBeginPairing()!!
+
+        host.event("link", "pair_ok", 0)
+        assertTrue(callbackRan.await(1, TimeUnit.SECONDS))
+
+        assertTrue(LinkRuntime.pairingInProgress.get())
+        assertTrue(LinkRuntime.endPairing(attempt))
     }
 
     @Test
@@ -166,6 +215,12 @@ class LinkRuntimeTest {
         assertTrue(records.single().contains("event=27"))
         assertTrue(records.single().contains("29=17"))
         SyncDiagnostics.configureRuntime(enabled = false) {}
+    }
+
+    private class QueueExecutor : Executor {
+        private val tasks = ArrayDeque<Runnable>()
+        override fun execute(command: Runnable) { tasks += command }
+        fun runAll() { while (tasks.isNotEmpty()) tasks.removeFirst().run() }
     }
 
     private fun availableEngine(handle: LinkHandle) = object : LinkEngine {

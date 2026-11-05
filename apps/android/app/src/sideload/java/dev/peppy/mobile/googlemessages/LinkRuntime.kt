@@ -2,11 +2,14 @@ package dev.peppy.mobile.googlemessages
 
 import android.content.Context
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
+import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+
+internal data class LinkHandleLease(val handle: LinkHandle, val generation: Long)
 
 object LinkRuntime {
     private val callbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -59,11 +62,20 @@ object LinkRuntime {
         cachedHandle?.stop()
     }
 
-    /** Fences a cancelled service from entering Go Run without deleting sealed state. */
-    internal fun closeHandleForServiceStop() = synchronized(this) {
-        cachedHandle?.close()
-        cachedHandle = null
-        handleGeneration += 1
+    internal fun handleLease(context: Context): LinkHandleLease? {
+        val opened = (handle(context) as? LinkOpenResult.Open)?.handle ?: return null
+        return synchronized(this) {
+            opened.takeIf { it === cachedHandle }?.let { LinkHandleLease(it, handleGeneration) }
+        }
+    }
+
+    /** Closes the captured handle, but invalidates the global cache only while the lease still owns it. */
+    internal fun closeHandleForServiceStop(lease: LinkHandleLease) = synchronized(this) {
+        lease.handle.close()
+        if (lease.generation == handleGeneration && lease.handle === cachedHandle) {
+            cachedHandle = null
+            handleGeneration += 1
+        }
     }
 
     /** Claims one owner-requested Pair or Relink attempt, returning its opaque generation token. */
@@ -74,9 +86,6 @@ object LinkRuntime {
         signalChange()
         pairingGeneration
     }
-
-    /** Compatibility admission helper. New callers must retain [tryBeginPairing]'s token. */
-    fun beginPairing(): Boolean = tryBeginPairing() != null
 
     /** Completes exactly the attempt that acquired [attempt]; stale finally blocks are inert. */
     fun endPairing(attempt: Long): Boolean = synchronized(this) {
@@ -89,15 +98,9 @@ object LinkRuntime {
     }
 
     /** Compatibility helper for callers that cannot yet retain an attempt token. */
-    fun endPairing(): Boolean = synchronized(this) {
+    internal fun endPairing(): Boolean = synchronized(this) {
         if (!pairingInProgress.get()) return false
         endPairing(pairingGeneration)
-    }
-
-    private fun clearCurrentPairing() {
-        pairingGeneration += 1
-        emoji.value = null
-        signalChange()
     }
 
     internal fun resetForTest() = synchronized(this) {
@@ -119,10 +122,8 @@ object LinkRuntime {
 
         override fun event(kind: String, code: String, value: Long) {
             val safeCode = filterReasonCode(code)
-            val callbackPairingGeneration = synchronized(this@LinkRuntime) { pairingGeneration }
-            callbackExecutor.execute {
+            callbackExecutor().execute {
                 if (!acceptsCallback(generation)) return@execute
-                if (kind == "link" && safeCode in PAIRING_TERMINAL_CODES) endPairingIfCurrent(callbackPairingGeneration)
                 recordEvent(kind, safeCode, value)
                 GoogleMessagesLinkService.onLinkEvent(kind, safeCode)
                 signalChange()
@@ -130,11 +131,10 @@ object LinkRuntime {
         }
 
         override fun showEmoji(value: String) {
+            // Go calls ShowEmoji synchronously before FinishGaiaPairing, while Pair/Relink still owns this token.
             val callbackPairingGeneration = synchronized(this@LinkRuntime) { pairingGeneration }
-            callbackExecutor.execute {
-                if (!acceptsCallback(generation) || !acceptsPairingCallback(callbackPairingGeneration)) return@execute
-                emoji.value = value
-                signalChange()
+            callbackExecutor().execute {
+                assignEmojiIfCurrent(generation, callbackPairingGeneration, value)
             }
         }
     }
@@ -149,14 +149,14 @@ object LinkRuntime {
 
     private fun acceptsCallback(generation: Long): Boolean = synchronized(this) { generation == handleGeneration && cachedHandle != null }
 
-    private fun acceptsPairingCallback(generation: Long): Boolean = synchronized(this) { pairingInProgress.get() && generation == pairingGeneration }
-
-    private fun endPairingIfCurrent(generation: Long) = synchronized(this) {
-        if (!pairingInProgress.get() || generation != pairingGeneration) return@synchronized
-        pairingInProgress.set(false)
-        pairingGeneration += 1
-        clearCurrentPairing()
+    private fun assignEmojiIfCurrent(handle: Long, attempt: Long, value: String) = synchronized(this) {
+        if (handle != handleGeneration || cachedHandle == null) return@synchronized
+        if (!pairingInProgress.get() || attempt != pairingGeneration) return@synchronized
+        emoji.value = value
+        signalChange()
     }
+
+    private fun callbackExecutor(): Executor = LinkRuntimeTestHooks.callbackExecutor ?: callbackExecutor
 }
 
 internal interface LinkStateStorage {
@@ -175,12 +175,12 @@ internal fun filterReasonCode(code: String?): String =
     code?.takeIf { REASON_CODE.matches(it) } ?: "unknown"
 
 private val REASON_CODE = Regex("[a-z][a-z0-9_]{0,39}")
-private val PAIRING_TERMINAL_CODES = setOf("pair_ok", "pair_failed", "pair_no_phone", "pair_multiple_phones", "pair_wrong_emoji", "pair_cancelled", "pair_timeout", "account_mismatch", "relink_ok", "relink_failed", "signed_out", "unlinked")
 
 internal object LinkRuntimeTestHooks {
     @Volatile var engine: LinkEngine? = null
     @Volatile var storeFactory: ((Context) -> LinkStateStorage)? = null
     @Volatile var eventRecorder: ((String, String, Long) -> Unit)? = null
+    @Volatile var callbackExecutor: Executor? = null
 }
 
 internal object LinkRuntimeEventSink {
