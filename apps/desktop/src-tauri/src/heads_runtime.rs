@@ -1836,8 +1836,7 @@ pub(crate) async fn dismiss_generation(
                 crate::lifecycle::request_window(app, &label, crate::lifecycle::Action::Close)
             {
                 if let Some(window) = app.get_webview_window(&label) {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                    let _ = crate::window_chrome::recover_window(&window);
                 }
                 return Err(error);
             }

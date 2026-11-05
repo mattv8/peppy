@@ -5810,8 +5810,16 @@ pub fn run() {
                                 window.label(),
                                 action,
                             ) {
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                                if tray::composer_conversation(window.label()).is_some() {
+                                    if let Some(webview_window) =
+                                        window.app_handle().get_webview_window(window.label())
+                                    {
+                                        let _ = window_chrome::recover_window(&webview_window);
+                                    }
+                                } else {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
                                 dialogs::inform(
                                     window.app_handle(),
                                     "Could not close window",
