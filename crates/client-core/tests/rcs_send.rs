@@ -629,7 +629,7 @@ fn command_conversation(gateway: &Client) -> ConversationId {
 
 #[test]
 fn strict_admission_refuses_same_revision_payload_contradictions() {
-    let (_directory, _vault, _config, gateway, command_id, mut current) = rcs_command("peer-local");
+    let (_directory, vault, config, gateway, command_id, mut current) = rcs_command("peer-local");
     let conversation_id = command_conversation(&gateway);
     current.outgoing.sim_payload.two += 1;
 
@@ -638,7 +638,69 @@ fn strict_admission_refuses_same_revision_payload_contradictions() {
             .begin_rcs_send_attempt(command_id, &current, 1_000)
             .is_err()
     );
-    assert!(gateway.rcs_mapping(conversation_id).unwrap().is_some());
+    assert!(gateway.rcs_mapping(conversation_id).unwrap().is_none());
+    assert_eq!(attempt_count(&config, command_id), 0);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(reopened.rcs_mapping(conversation_id).unwrap().is_none());
+    assert_eq!(attempt_count(&config, command_id), 0);
+}
+
+#[test]
+fn contradictory_admission_revokes_mapping_durably_without_creating_permits() {
+    let (_directory, vault, config, gateway, command_id, mut current) = rcs_command("peer-local");
+    let conversation_id = command_conversation(&gateway);
+    current.outgoing.sim_payload.two += 1;
+    assert!(gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .is_err());
+    assert_eq!(attempt_count(&config, command_id), 0);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(reopened.rcs_mapping(conversation_id).unwrap().is_none());
+    assert_eq!(attempt_count(&config, command_id), 0);
+
+    let (_directory, vault, config, gateway, command_id, mut current) = rcs_command("peer-local");
+    let conversation_id = command_conversation(&gateway);
+    current.outgoing.sim_payload.two += 1;
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&current), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(reopened.rcs_mapping(conversation_id).unwrap().is_none());
+    assert_eq!(attempt_count(&config, command_id), 0);
+
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let conversation_id = command_conversation(&gateway);
+    let initial = gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    let mut contradictory = current;
+    contradictory.outgoing.sim_payload.two += 1;
+    assert!(gateway
+        .retry_rcs_failed_before_submission(command_id, &contradictory, 1_001)
+        .is_err());
+    assert_eq!(attempt_count(&config, command_id), 1);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(reopened.rcs_mapping(conversation_id).unwrap().is_none());
+    let persisted_tmp_id: String = encrypted_connection(&config)
+        .query_row(
+            "SELECT tmp_id FROM rcs_send_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted_tmp_id, initial.tmp_id);
+    assert_eq!(attempt_count(&config, command_id), 1);
 }
 
 #[test]

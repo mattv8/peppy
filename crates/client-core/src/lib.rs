@@ -122,6 +122,7 @@ pub use rcs_mapping::{
 pub use rcs_native::{
     LocalRcsTargetSnapshot, NativeCarrierRouteBinding, NativeOwnNumberSource,
     NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing, NativeRcsParticipant,
+    NativeRcsPrepareRequest,
     NativeRcsSimPayload, NativeRcsTargetClass, NativeSettingsCurrentness,
     NativeSettingsProvenance, NativeRcsCommitProjection, restricted_native_rcs_handoff_schema,
 };
@@ -3561,7 +3562,10 @@ impl Client {
         if send_retention_blocked(&tx, command_id)? {
             return Err(Error::InvalidRequest("RCS media unavailable"));
         }
-        let mapping = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?;
+        let Some(mapping) = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)? else {
+            commit_mapping_refusal(tx)?;
+            return Err(Error::InvalidRequest("mapping unproven"));
+        };
         require_exact_rcs_recipient(&message, &mapping)?;
         let existing_tmp_id: Option<String> = tx
             .query_row(
@@ -3828,7 +3832,10 @@ impl Client {
         {
             return Err(Error::InvalidRequest("RCS text required"));
         }
-        let mapping = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?;
+        let Some(mapping) = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)? else {
+            commit_mapping_refusal(tx)?;
+            return Err(Error::InvalidRequest("mapping unproven"));
+        };
         require_exact_rcs_recipient(&message, &mapping)?;
         if !rcs_send::has_same_rcs_target_identity(&tx, command_id, &mapping, observation)? {
             return Err(Error::InvalidRequest("mapping changed"));
@@ -9552,17 +9559,23 @@ fn exact_rcs_mapping(
     conversation_id: ConversationId,
     observation: &RcsMappingObservation,
     now_ms: i64,
-) -> Result<RcsMapping, Error> {
+) -> Result<Option<RcsMapping>, Error> {
     if rcs_mapping::update_context(conn, observation)? != rcs_mapping::ContextUpdate::Unchanged {
-        return Err(Error::InvalidRequest("mapping unproven"));
+        return Ok(None);
     }
-    let mapping = rcs_mapping::get(conn, conversation_id)?
-        .ok_or(Error::InvalidRequest("mapping unproven"))?;
+    let Some(mapping) = rcs_mapping::get(conn, conversation_id)? else {
+        return Ok(None);
+    };
     if rcs_mapping::mapping_matches_observation(conn, &mapping, observation, now_ms)? {
-        Ok(mapping)
+        Ok(Some(mapping))
     } else {
-        Err(Error::InvalidRequest("mapping unproven"))
+        Ok(None)
     }
+}
+
+fn commit_mapping_refusal(tx: rusqlite::Transaction<'_>) -> Result<(), Error> {
+    tx.commit()?;
+    Ok(())
 }
 
 fn record_finalized_attempt(
@@ -9606,9 +9619,8 @@ fn invalidate_automatic_carrier_proof_if_contradicted(
         return Ok(());
     }
     let mapping_is_exact = subscription_id == observation.selected_sim_id
-        && exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)
-            .and_then(|mapping| require_exact_rcs_recipient(message, &mapping))
-            .is_ok();
+        && exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)?
+            .is_some_and(|mapping| require_exact_rcs_recipient(message, &mapping).is_ok());
     if !mapping_is_exact {
         rcs_send::invalidate_carrier_only_proof(tx, message.record.conversation_id)?;
     }
@@ -9625,7 +9637,8 @@ fn automatic_rcs_permit(
     if message.transport != Transport::Sms || !message.record.attachments.is_empty() {
         return Err(Error::InvalidRequest("RCS text required"));
     }
-    let mapping = exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)?;
+    let mapping = exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)?
+        .ok_or(Error::InvalidRequest("mapping unproven"))?;
     require_exact_rcs_recipient(&message, &mapping)?;
     let existing_tmp_id: Option<String> = tx
         .query_row(
