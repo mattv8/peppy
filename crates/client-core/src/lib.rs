@@ -55,6 +55,7 @@ mod mms_backfill;
 mod mms_identity;
 mod notifications;
 mod phone_read;
+mod rcs_capability;
 mod rcs_mapping;
 mod rcs_send;
 mod sms_acquisition;
@@ -117,6 +118,7 @@ pub use rcs_mapping::{
     RcsMapping, RcsMappingClass, RcsMappingObservation, RcsMappingOutcome, RcsMappingProof,
     RcsMappingRefusal, RcsParticipantObservation, RcsSendMode,
 };
+pub use rcs_capability::{RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent};
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -131,7 +133,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 47;
+const SCHEMA_VERSION: i64 = 48;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -353,6 +355,8 @@ pub enum Direction {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrivatePayload {
+    RcsLinkStatus { status: RcsLinkStatusEvent },
+    RcsLinkEligibility { eligibility: RcsEligibilityProjection },
     MmsDeferredPreview {
         message: MessagePayload,
         originals: Vec<DeferredOriginal>,
@@ -1211,6 +1215,65 @@ impl Client {
         conversation_id: ConversationId,
     ) -> Result<Option<RcsMapping>, Error> {
         rcs_mapping::get(&self.lock()?.conn, conversation_id)
+    }
+
+    /// Publishes at most one gateway status and 100 content-free conversation projections.
+    /// Google identifiers and mapping proof material are deliberately not accepted here.
+    pub fn publish_rcs_capability(
+        &self,
+        status: &RcsLinkStatusEvent,
+        eligibility: &[RcsEligibilityProjection],
+        now_ms: i64,
+    ) -> Result<usize, Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        if status.gateway_device_id != ctx.device_id || !rcs_capability::valid_status(status) {
+            return Err(Error::InvalidRequest("invalid RCS capability status"));
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut published = 0;
+        if publish_rcs_capability_payload(
+            &tx,
+            &ctx,
+            &PrivatePayload::RcsLinkStatus { status: status.clone() },
+            format!("status:{}", status.gateway_device_id),
+            status.capability_revision,
+            now_ms,
+        )? {
+            published += 1;
+        }
+        for projection in eligibility.iter().take(RCS_CAPABILITY_PUBLISH_BATCH) {
+            if projection.gateway_device_id != ctx.device_id || !rcs_capability::valid_eligibility(projection) {
+                return Err(Error::InvalidRequest("invalid RCS eligibility projection"));
+            }
+            if publish_rcs_capability_payload(
+                &tx,
+                &ctx,
+                &PrivatePayload::RcsLinkEligibility { eligibility: projection.clone() },
+                format!("eligibility:{}:{}", projection.gateway_device_id, projection.conversation_id),
+                projection.mapping_revision,
+                now_ms,
+            )? {
+                published += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(published)
+    }
+
+    /// Returns the current content-free capability gate for automatic RCS dispatch.
+    pub fn rcs_gateway_supported(&self, gateway_device_id: DeviceId, now_ms: i64) -> Result<bool, Error> {
+        rcs_capability::current_gateway(&self.lock()?.conn, gateway_device_id, now_ms)
+    }
+
+    /// A stale peer projection is intentionally returned as `Unknown`, never as send authority.
+    pub fn rcs_eligibility_projection(
+        &self,
+        conversation_id: ConversationId,
+        gateway_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<Option<RcsEligibilityProjection>, Error> {
+        rcs_capability::projection(&self.lock()?.conn, conversation_id, gateway_device_id, now_ms)
     }
 
     /// Stores a completed local carrier-only lookup bound to the current linked context.
@@ -6206,6 +6269,23 @@ UPDATE attempts SET finalized_transport=CASE
   ELSE 'carrier'
 END;
 ";
+/// Version 47 -> 48: content-free RCS capability projections and publication cadence.
+const MIGRATION_48: &str = "
+CREATE TABLE IF NOT EXISTS rcs_link_status_projection(
+  gateway_device_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('linked','unlinked','needs_relink','signed_out','unavailable')),
+  availability INTEGER NOT NULL, health INTEGER NOT NULL, phone_responsive INTEGER NOT NULL,
+  observed_at_ms INTEGER NOT NULL, capability_revision INTEGER NOT NULL, feature_bits INTEGER NOT NULL, producer_sequence INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rcs_link_eligibility_projection(
+  gateway_device_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+  eligibility TEXT NOT NULL CHECK(eligibility IN ('eligible','not_eligible','unknown')), feature_bits INTEGER NOT NULL,
+  mapping_revision INTEGER NOT NULL, observed_at_ms INTEGER NOT NULL, producer_sequence INTEGER NOT NULL,
+  PRIMARY KEY(gateway_device_id,conversation_id)
+);
+CREATE TABLE IF NOT EXISTS rcs_capability_published(
+  identity TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL, published_at_ms INTEGER NOT NULL
+);
+";
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "outbox", "origin_tag TEXT")
@@ -6380,6 +6460,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_migration_45(&tx)?;
             tx.execute_batch(MIGRATION_46)?;
             tx.execute_batch(MIGRATION_47)?;
+            tx.execute_batch(MIGRATION_48)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -6388,7 +6469,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=46)) => {
+        Some(version @ (4..=47)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -6514,6 +6595,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 46 {
                 tx.execute_batch(MIGRATION_47)?;
+            }
+            if version <= 47 {
+                tx.execute_batch(MIGRATION_48)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -7201,7 +7285,9 @@ fn open_payload(ctx: &Ctx, envelope: &Envelope) -> Result<Opened, QuarantineReas
 fn is_known_private_payload_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "message"
+        "rcs_link_status"
+            | "rcs_link_eligibility"
+            | "message"
             | "send_command"
             | "mms_message"
             | "mms_deferred_preview"
@@ -7284,6 +7370,16 @@ fn apply_record(
         other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
+        (EnvelopePurpose::Event, PrivatePayload::RcsLinkStatus { status }) => {
+            if !rcs_capability::apply_status(conn, &status, producer, envelope.producer_sequence.0)? {
+                return Ok(Some(Q::InvalidPayload));
+            }
+        }
+        (EnvelopePurpose::Event, PrivatePayload::RcsLinkEligibility { eligibility }) => {
+            if !rcs_capability::apply_eligibility(conn, &eligibility, producer, envelope.producer_sequence.0)? {
+                return Ok(Some(Q::InvalidPayload));
+            }
+        }
         (
             EnvelopePurpose::Event,
             PrivatePayload::MmsMediaFailure {
@@ -8074,6 +8170,45 @@ fn emit_status(
     )
 }
 
+fn publish_rcs_capability_payload(
+    conn: &Connection,
+    ctx: &Ctx,
+    payload: &PrivatePayload,
+    identity: String,
+    revision: u64,
+    now_ms: i64,
+) -> Result<bool, Error> {
+    let body = serde_json::to_string(payload).map_err(|_| Error::Database)?;
+    let previous: Option<(u64, String, i64)> = conn.query_row(
+        "SELECT revision,body,published_at_ms FROM rcs_capability_published WHERE identity=?",
+        [&identity],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    if let Some((previous_revision, previous_body, published_at_ms)) = previous {
+        if revision < previous_revision || (revision == previous_revision && previous_body != body) {
+            return Err(Error::InvalidRequest("nonmonotonic RCS capability revision"));
+        }
+        if revision == previous_revision && now_ms.saturating_sub(published_at_ms) < RCS_CAPABILITY_KEEPALIVE_MS {
+            return Ok(false);
+        }
+    }
+    let (_, sequence) = enqueue(conn, ctx, EnvelopePurpose::Event, None, None, payload)?;
+    match payload {
+        PrivatePayload::RcsLinkStatus { status } => {
+            rcs_capability::apply_status(conn, status, ctx.device_id, sequence)?;
+        }
+        PrivatePayload::RcsLinkEligibility { eligibility } => {
+            rcs_capability::apply_eligibility(conn, eligibility, ctx.device_id, sequence)?;
+        }
+        _ => return Err(Error::Database),
+    }
+    conn.execute(
+        "INSERT INTO rcs_capability_published(identity,revision,body,published_at_ms) VALUES(?,?,?,?) ON CONFLICT(identity) DO UPDATE SET revision=excluded.revision,body=excluded.body,published_at_ms=excluded.published_at_ms",
+        params![identity, revision, body, now_ms],
+    )?;
+    Ok(true)
+}
+
 /// Allocates the durable producer sequence and envelope ID, stores the private payload, and seals
 /// immediately when the active epoch is unlocked.
 fn enqueue(
@@ -8859,6 +8994,19 @@ fn compaction_group(
         PrivatePayload::NotificationPreferences { .. } => {
             (b"notification-preferences", vec![b"vault".to_vec()], false)
         }
+        PrivatePayload::RcsLinkStatus { status } => (
+            b"rcs-link-status",
+            vec![status.gateway_device_id.to_string().into_bytes()],
+            false,
+        ),
+        PrivatePayload::RcsLinkEligibility { eligibility } => (
+            b"rcs-link-eligibility",
+            vec![
+                eligibility.gateway_device_id.to_string().into_bytes(),
+                eligibility.conversation_id.to_string().into_bytes(),
+            ],
+            false,
+        ),
         PrivatePayload::ContactBookState { book } => {
             (b"contact-book", vec![text(book, "id")?], false)
         }
@@ -8973,6 +9121,8 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
         PrivatePayload::NotificationPreferences { .. } => {
             Some(notification_preferences::IDENTITY.to_owned())
         }
+        PrivatePayload::RcsLinkStatus { status } => Some(format!("rcs-link-status:{}", status.gateway_device_id)),
+        PrivatePayload::RcsLinkEligibility { eligibility } => Some(format!("rcs-link-eligibility:{}:{}", eligibility.gateway_device_id, eligibility.conversation_id)),
         PrivatePayload::ContactBookState { book } => book
             .get("id")
             .and_then(serde_json::Value::as_str)
