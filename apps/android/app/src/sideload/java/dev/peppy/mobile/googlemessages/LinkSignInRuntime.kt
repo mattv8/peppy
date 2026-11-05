@@ -18,7 +18,23 @@ internal object LinkSignInRuntime {
     fun ownsLease(candidate: Lease?): Boolean = synchronized(lock) { candidate != null && lease === candidate }
 
     fun releaseLease(candidate: Lease) = synchronized(lock) {
-        if (lease === candidate) lease = null
+        if (lease === candidate && !candidate.webAccessed) lease = null
+    }
+
+    fun markWebAccess(candidate: Lease): Boolean = synchronized(lock) {
+        if (lease !== candidate || candidate.cleanupStarted) return false
+        candidate.webAccessed = true
+        true
+    }
+
+    fun beginCleanup(candidate: Lease): Boolean = synchronized(lock) {
+        if (lease !== candidate || !candidate.webAccessed || candidate.cleanupStarted) return false
+        candidate.cleanupStarted = true
+        true
+    }
+
+    fun mayRunCleanup(candidate: Lease): Boolean = synchronized(lock) {
+        lease === candidate && candidate.cleanupStarted
     }
 
     fun beginPairing(): PairingAttempt? = LinkRuntime.tryBeginPairing()?.let(::PairingAttempt)
@@ -59,7 +75,10 @@ internal object LinkSignInRuntime {
         LinkRuntime.endPairing()
     }
 
-    class Lease internal constructor(val generation: Long)
+    class Lease internal constructor(val generation: Long) {
+        internal var webAccessed = false
+        internal var cleanupStarted = false
+    }
     class PairingAttempt internal constructor(val token: Long)
 
     private var nextGeneration = 0L

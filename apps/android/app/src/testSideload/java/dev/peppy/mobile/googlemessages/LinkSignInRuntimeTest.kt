@@ -54,6 +54,20 @@ class LinkSignInRuntimeTest {
         assertNull(LinkSignInRuntime.acquireLease())
     }
 
+    @Test fun `cleanup callback retains WebView ownership until it completes`() {
+        val first = requireNotNull(LinkSignInRuntime.acquireLease())
+        assertTrue(LinkSignInRuntime.markWebAccess(first))
+        assertTrue(LinkSignInRuntime.beginCleanup(first))
+
+        assertNull(LinkSignInRuntime.acquireLease())
+        assertTrue(LinkSignInRuntime.mayRunCleanup(first))
+        assertTrue(LinkSignInRuntime.completeCleanup(first, success = true))
+
+        val second = requireNotNull(LinkSignInRuntime.acquireLease())
+        assertFalse(LinkSignInRuntime.mayRunCleanup(first))
+        LinkSignInRuntime.releaseLease(second)
+    }
+
     private fun waitForPairingToFinish(): Boolean {
         repeat(100) {
             if (!LinkSignInRuntime.pairingInProgress()) return true

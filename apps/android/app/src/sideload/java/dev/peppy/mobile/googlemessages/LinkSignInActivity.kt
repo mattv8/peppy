@@ -83,6 +83,8 @@ class LinkSignInActivity : AppCompatActivity() {
 
     private fun initializeWebView() {
         if (!ownsReadyLease() || LinkSignInRuntime.isSignInBlocked()) return
+        val owner = signInLease ?: return
+        if (!LinkSignInRuntime.markWebAccess(owner)) return
         val cookies = CookieManager.getInstance()
         if (cookies.hasCookies()) {
             wipe { finishWith(OUTCOME_ERROR) }
@@ -105,7 +107,6 @@ class LinkSignInActivity : AppCompatActivity() {
         host = TextView(this@LinkSignInActivity).apply {
             text = "accounts.google.com"
             id = R.id.google_messages_link_signin_host
-            contentDescription = text
         }
         addView(host)
         addView(webView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -227,9 +228,10 @@ class LinkSignInActivity : AppCompatActivity() {
 
     private fun wipe(after: () -> Unit) {
         val owner = signInLease ?: return finishWith(OUTCOME_CANCELLED)
-        if (!startupReady || !LinkSignInRuntime.ownsLease(owner)) return finishWith(OUTCOME_CANCELLED)
+        if (!startupReady || !LinkSignInRuntime.beginCleanup(owner)) return
         if (!teardownStarted.compareAndSet(false, true)) return
         CookieManager.getInstance().removeAllCookies {
+            if (!LinkSignInRuntime.mayRunCleanup(owner)) return@removeAllCookies
             CookieManager.getInstance().flush()
             WebStorage.getInstance().deleteAllData()
             val cleared = WebViewDataFiles.deleteStaleData(File(applicationInfo.dataDir), cacheDir)
@@ -246,7 +248,7 @@ class LinkSignInActivity : AppCompatActivity() {
     override fun onDestroy() {
         pendingCookies = null
         synchronized(lifecycleLock) { destroyed = true }
-        if (::webView.isInitialized && !isFinishing && ownsLease()) wipe {}
+        if (::webView.isInitialized && ownsLease()) wipe {}
         else releaseLease()
         super.onDestroy()
     }
