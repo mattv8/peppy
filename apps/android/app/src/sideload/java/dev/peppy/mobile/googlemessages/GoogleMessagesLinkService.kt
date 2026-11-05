@@ -1,5 +1,6 @@
 package dev.peppy.mobile.googlemessages
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -138,7 +140,7 @@ class GoogleMessagesLinkService : Service() {
     private fun showAttentionIfNeeded(status: LinkStatus) {
         if (status.state !in ATTENTION_STATES) return
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
-        NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification(status, attention = true))
+        postAttentionNotification(status)
     }
 
     private fun notification(status: LinkStatus, attention: Boolean = false): Notification {
@@ -157,6 +159,15 @@ class GoogleMessagesLinkService : Service() {
     }
 
     private fun foregroundServiceType(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING else 0
+
+    private fun postAttentionNotification(status: LinkStatus) {
+        if (!canPostNotifications(this)) return
+        try {
+            NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification(status, attention = true))
+        } catch (_: SecurityException) {
+            // The owner can revoke notification permission after the check.
+        }
+    }
 
     companion object {
         internal const val CHANNEL_ID = "google_messages_link"
@@ -189,5 +200,8 @@ class GoogleMessagesLinkService : Service() {
         }
         private fun replaceActive(service: GoogleMessagesLinkService) { active?.cancelWorker(); active = service }
         private fun clearActive(service: GoogleMessagesLinkService) { if (active === service) active = null }
+        private fun canPostNotifications(context: Context): Boolean =
+            (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) &&
+                NotificationManagerCompat.from(context).areNotificationsEnabled()
     }
 }
