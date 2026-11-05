@@ -663,3 +663,108 @@ pub(crate) fn get(
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, u32>(2)?, digest, r.get::<_, u64>(4)?, r.get::<_, i64>(5)?, r.get::<_, String>(6)?, r.get::<_, String>(7)?, r.get::<_, String>(8)?))
     }).optional()?.map(|(google, class, version, digest, revision, verified, participant, region, own)| Ok(RcsMapping { conversation_id, google_conversation_id: google, class: match class.as_str() { "one_to_one" => RcsMappingClass::OneToOne, "self_chat" => RcsMappingClass::SelfChat, _ => return Err(Error::Database) }, proof_version: version, proof: RcsMappingProof { canonical_participant: participant, identity_region: region, own_identity: own, digest }, mapping_revision: revision, verified_at_ms: verified })).transpose()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        DeviceId, Direction, MessageId, MessagePayload, MessageRecord, SourceSequence, Transport,
+    };
+
+    fn observation() -> RcsMappingObservation {
+        RcsMappingObservation {
+            google_conversation_id: "google".into(),
+            google_candidate_count: 1,
+            participants: vec![RcsParticipantObservation {
+                identity: "raw-peer".into(),
+                is_visible: true,
+                is_me: false,
+            }],
+            conversation_type: RcsConversationType::Rcs,
+            status: "eligible".into(),
+            send_mode: RcsSendMode::Automatic,
+            read_only: false,
+            default_outgoing: true,
+            selected_sim_id: "sim".into(),
+            selected_sim_own_identity: "local".into(),
+            identity_region: "ZZ".into(),
+            observed_at_ms: 1_000,
+            link_generation: 1,
+            session_generation: 1,
+            context_revision: 1,
+            canonicalizer_revision: 1,
+            mapping_revision: 1,
+            link_state: RcsLinkState::Linked,
+        }
+    }
+
+    #[test]
+    fn revalidation_rejects_a_visible_malformed_participant_without_mutating_storage() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE metadata(k TEXT PRIMARY KEY,v TEXT NOT NULL); CREATE TABLE messages(conversation_id TEXT NOT NULL,payload TEXT NOT NULL); CREATE TABLE rcs_conversation_mappings(peppy_conversation_id TEXT PRIMARY KEY,google_conversation_id TEXT NOT NULL,class TEXT NOT NULL,proof_version INTEGER NOT NULL,proof_hash BLOB NOT NULL,mapping_revision INTEGER NOT NULL,verified_at_ms INTEGER NOT NULL,invalidated_at_ms INTEGER,invalidation_code TEXT); CREATE TABLE rcs_mapping_proofs(peppy_conversation_id TEXT NOT NULL,mapping_revision INTEGER NOT NULL,canonical_participant TEXT NOT NULL,identity_region TEXT NOT NULL,own_identity TEXT NOT NULL,PRIMARY KEY(peppy_conversation_id,mapping_revision));").unwrap();
+        let observation = observation();
+        let conversation_id = ConversationId::new();
+        let payload = MessagePayload {
+            record: MessageRecord {
+                message_id: MessageId::new(),
+                conversation_id,
+                source_sequence: SourceSequence(1),
+                attachments: Vec::new(),
+            },
+            source_device_id: DeviceId::new(),
+            provider_message_id: None,
+            sender_address: Some("raw-peer".into()),
+            recipients: Vec::new(),
+            subject: None,
+            body: String::new(),
+            transport: Transport::Sms,
+            direction: Direction::Incoming,
+            imported: true,
+            sent_at_ms: None,
+            ordered_at_ms: None,
+            mms_context: None,
+        };
+        conn.execute(
+            "INSERT INTO messages(conversation_id,payload) VALUES(?,?)",
+            params![
+                conversation_id.to_string(),
+                serde_json::to_string(&payload).unwrap()
+            ],
+        )
+        .unwrap();
+        let visible = validated_visible_participants(&observation).unwrap();
+        let mapping = RcsMapping {
+            conversation_id,
+            google_conversation_id: observation.google_conversation_id.clone(),
+            class: RcsMappingClass::OneToOne,
+            proof_version: RCS_MAPPING_PROOF_VERSION,
+            proof: RcsMappingProof {
+                canonical_participant: "raw:raw-peer".into(),
+                identity_region: observation.identity_region.clone(),
+                own_identity: "raw:local".into(),
+                digest: proof_digest(
+                    &observation,
+                    RcsMappingClass::OneToOne,
+                    "raw:local",
+                    &visible,
+                ),
+            },
+            mapping_revision: 1,
+            verified_at_ms: 1_000,
+        };
+        put(&conn, &mapping).unwrap();
+        assert!(matches!(
+            update_context(&conn, &observation).unwrap(),
+            ContextUpdate::Changed
+        ));
+        assert!(mapping_matches_observation(&conn, &mapping, &observation, 1_000).unwrap());
+        let mut malformed = observation;
+        malformed.participants.push(RcsParticipantObservation {
+            identity: "+not-an-identity".into(),
+            is_visible: true,
+            is_me: false,
+        });
+        assert!(!mapping_matches_observation(&conn, &mapping, &malformed, 1_000).unwrap());
+        assert_eq!(get(&conn, conversation_id).unwrap(), Some(mapping));
+    }
+}
