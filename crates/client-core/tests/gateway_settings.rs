@@ -342,6 +342,31 @@ fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
 }
 
 #[test]
+fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-v47-upgrade", &vault);
+    let client = open(&config);
+    let settings = GatewaySettings { mirroring_enabled: true, ..GatewaySettings::default() };
+    client.set_gateway_settings(settings.clone()).unwrap();
+    drop(client);
+    let conn = encrypted_connection(&config);
+    conn.execute_batch(
+        "DROP TABLE rcs_capability_published;
+         DROP TABLE rcs_link_eligibility_projection;
+         DROP TABLE rcs_link_status_projection;
+         UPDATE schema_meta SET version=47;",
+    ).unwrap();
+    drop(conn);
+    let upgraded = open(&config);
+    assert_eq!(upgraded.gateway_settings().unwrap(), settings);
+    drop(upgraded);
+    let conn = encrypted_connection(&config);
+    assert_eq!(conn.query_row("SELECT version FROM schema_meta", [], |row| row.get::<_, i64>(0)).unwrap(), 48);
+    assert_rcs_mapping_schema(&conn);
+}
+
+#[test]
 fn version_49_database_is_rejected_without_resetting_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::new();

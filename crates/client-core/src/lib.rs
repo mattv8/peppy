@@ -125,7 +125,7 @@ pub use rcs_native::{
     NativeRcsSimPayload, NativeRcsTargetClass, NativeSettingsCurrentness,
     NativeSettingsProvenance, NativeRcsCommitProjection, restricted_native_rcs_handoff_schema,
 };
-pub use rcs_capability::{RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent, RcsLinkStatusProjection};
+pub use rcs_capability::{RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkEligibilityPayload, RcsLinkStatusEvent, RcsLinkStatusPayload, RcsLinkStatusProjection};
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -362,8 +362,8 @@ pub enum Direction {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrivatePayload {
-    RcsLinkStatus { status: RcsLinkStatusEvent },
-    RcsLinkEligibility { eligibility: RcsEligibilityProjection },
+    RcsLinkStatus(RcsLinkStatusPayload),
+    RcsLinkEligibility(RcsLinkEligibilityPayload),
     MmsDeferredPreview {
         message: MessagePayload,
         originals: Vec<DeferredOriginal>,
@@ -1251,7 +1251,7 @@ impl Client {
         if publish_rcs_capability_payload(
             &tx,
             &ctx,
-            &PrivatePayload::RcsLinkStatus { status: status.clone() },
+            &PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status: status.clone() }),
             format!("status:{}", status.gateway_device_id),
             status.capability_revision,
             now_ms,
@@ -1265,7 +1265,7 @@ impl Client {
             if publish_rcs_capability_payload(
                 &tx,
                 &ctx,
-                &PrivatePayload::RcsLinkEligibility { eligibility: projection.clone() },
+                &PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload { eligibility: projection.clone() }),
                 format!("eligibility:{}:{}", projection.gateway_device_id, projection.conversation_id),
                 projection.mapping_revision,
                 now_ms,
@@ -7380,13 +7380,13 @@ fn apply_record(
         other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
-        (EnvelopePurpose::Event, PrivatePayload::RcsLinkStatus { status }) => {
-            if !rcs_capability::apply_status(conn, &status, producer, envelope.producer_sequence.0)? {
+        (EnvelopePurpose::Event, PrivatePayload::RcsLinkStatus(status)) => {
+            if !rcs_capability::apply_status(conn, &status.status, producer, envelope.producer_sequence.0)? {
                 return Ok(Some(Q::InvalidPayload));
             }
         }
-        (EnvelopePurpose::Event, PrivatePayload::RcsLinkEligibility { eligibility }) => {
-            if !rcs_capability::apply_eligibility(conn, &eligibility, producer, envelope.producer_sequence.0)? {
+        (EnvelopePurpose::Event, PrivatePayload::RcsLinkEligibility(eligibility)) => {
+            if !rcs_capability::apply_eligibility(conn, &eligibility.eligibility, producer, envelope.producer_sequence.0)? {
                 return Ok(Some(Q::InvalidPayload));
             }
         }
@@ -8204,11 +8204,11 @@ fn publish_rcs_capability_payload(
     }
     let (_, sequence) = enqueue(conn, ctx, EnvelopePurpose::Event, None, None, payload)?;
     match payload {
-        PrivatePayload::RcsLinkStatus { status } => {
-            rcs_capability::apply_status(conn, status, ctx.device_id, sequence)?;
+        PrivatePayload::RcsLinkStatus(status) => {
+            rcs_capability::apply_status(conn, &status.status, ctx.device_id, sequence)?;
         }
-        PrivatePayload::RcsLinkEligibility { eligibility } => {
-            rcs_capability::apply_eligibility(conn, eligibility, ctx.device_id, sequence)?;
+        PrivatePayload::RcsLinkEligibility(eligibility) => {
+            rcs_capability::apply_eligibility(conn, &eligibility.eligibility, ctx.device_id, sequence)?;
         }
         _ => return Err(Error::Database),
     }
@@ -9004,16 +9004,16 @@ fn compaction_group(
         PrivatePayload::NotificationPreferences { .. } => {
             (b"notification-preferences", vec![b"vault".to_vec()], false)
         }
-        PrivatePayload::RcsLinkStatus { status } => (
+        PrivatePayload::RcsLinkStatus(status) => (
             b"rcs-link-status",
-            vec![status.gateway_device_id.to_string().into_bytes()],
+            vec![status.status.gateway_device_id.to_string().into_bytes()],
             false,
         ),
-        PrivatePayload::RcsLinkEligibility { eligibility } => (
+        PrivatePayload::RcsLinkEligibility(eligibility) => (
             b"rcs-link-eligibility",
             vec![
-                eligibility.gateway_device_id.to_string().into_bytes(),
-                eligibility.conversation_id.to_string().into_bytes(),
+                eligibility.eligibility.gateway_device_id.to_string().into_bytes(),
+                eligibility.eligibility.conversation_id.to_string().into_bytes(),
             ],
             false,
         ),
@@ -9131,8 +9131,8 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
         PrivatePayload::NotificationPreferences { .. } => {
             Some(notification_preferences::IDENTITY.to_owned())
         }
-        PrivatePayload::RcsLinkStatus { status } => Some(format!("rcs-link-status:{}", status.gateway_device_id)),
-        PrivatePayload::RcsLinkEligibility { eligibility } => Some(format!("rcs-link-eligibility:{}:{}", eligibility.gateway_device_id, eligibility.conversation_id)),
+        PrivatePayload::RcsLinkStatus(status) => Some(format!("rcs-link-status:{}", status.status.gateway_device_id)),
+        PrivatePayload::RcsLinkEligibility(eligibility) => Some(format!("rcs-link-eligibility:{}:{}", eligibility.eligibility.gateway_device_id, eligibility.eligibility.conversation_id)),
         PrivatePayload::ContactBookState { book } => book
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -9201,30 +9201,13 @@ fn serialize_authenticated_payload(
 fn parse_authenticated_payload(
     plain: &[u8],
 ) -> Result<(PrivatePayload, Option<CompactionMetadata>), serde_json::Error> {
-    let value: serde_json::Value = serde_json::from_slice(plain)?;
+    let mut value: serde_json::Value = serde_json::from_slice(plain)?;
     let compaction = value
-        .get("compaction")
-        .cloned()
+        .as_object_mut()
+        .and_then(|object| object.remove("compaction"))
         .map(serde_json::from_value)
         .transpose()?;
-    strict_rcs_capability_payload(&value)?;
     Ok((serde_json::from_value(value)?, compaction))
-}
-
-/// Legacy payload variants remain forward-compatible. Only the new content-free RCS variants
-/// reject unexpected top-level fields before their typed nested payload is decoded.
-fn strict_rcs_capability_payload(value: &serde_json::Value) -> Result<(), serde_json::Error> {
-    let Some(object) = value.as_object() else { return Ok(()); };
-    let Some(kind) = object.get("kind").and_then(serde_json::Value::as_str) else { return Ok(()); };
-    let allowed: &[&str] = match kind {
-        "rcs_link_status" => &["kind", "status", "compaction"],
-        "rcs_link_eligibility" => &["kind", "eligibility", "compaction"],
-        _ => return Ok(()),
-    };
-    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
-        return Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, "unknown RCS capability field")));
-    }
-    Ok(())
 }
 
 fn seal_with_store(store: &mut Store) -> Result<(), Error> {

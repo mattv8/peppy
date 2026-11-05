@@ -48,6 +48,18 @@ pub struct RcsEligibilityProjection {
     pub gateway_device_id: DeviceId,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RcsLinkStatusPayload {
+    pub status: RcsLinkStatusEvent,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RcsLinkEligibilityPayload {
+    pub eligibility: RcsEligibilityProjection,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RcsLinkStatusProjection {
     pub status: RcsLinkStatusEvent,
@@ -157,7 +169,7 @@ pub(crate) fn status_projection(
         .optional()?;
     row.map(|(state, availability, health, phone_responsive, observed_at_ms, capability_revision, feature_bits)| {
         Ok(RcsLinkStatusProjection {
-            current: current_gateway(conn, gateway, now_ms)?,
+            current: fresh_at(now_ms, observed_at_ms),
             status: RcsLinkStatusEvent {
                 gateway_device_id: gateway,
                 state: parse_state(&state)?,
@@ -209,21 +221,5 @@ fn parse_state(value: &str) -> Result<RcsCapabilityState, Error> {
         "signed_out" => Ok(RcsCapabilityState::SignedOut),
         "unavailable" => Ok(RcsCapabilityState::Unavailable),
         _ => Err(Error::Database),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    #[test]
-    fn strict_top_level_capability_fields_allow_authenticated_compaction_only() {
-        let valid = json!({"kind":"rcs_link_status", "status": {}, "compaction": {}});
-        assert!(crate::strict_rcs_capability_payload(&valid).is_ok());
-        for forbidden in ["google_id", "phone", "name", "token", "stop_code"] {
-            let mut value = valid.clone();
-            value.as_object_mut().unwrap().insert(forbidden.into(), json!("x"));
-            assert!(crate::strict_rcs_capability_payload(&value).is_err());
-        }
     }
 }
