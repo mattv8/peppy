@@ -372,6 +372,28 @@ jobs:
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml --config deny.toml check licenses bans sources advisories
 
+  google-messages-go:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/android/googlemessages
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - run: ./prepare-libgm.sh
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l .)"
+
   android:
     needs: changes
     if: needs.changes.outputs.android == 'true'
@@ -573,13 +595,22 @@ jobs:
 
   gate:
     if: always()
-    needs: [changes, source-audit, workflow-security, version, release-tooling, development-tools, rust, integration, desktop, android, swift-bindings, container-image, development-artifacts]
+    needs: [changes, source-audit, workflow-security, version, release-tooling, development-tools, rust, integration, desktop, android, google-messages-go, swift-bindings, container-image, development-artifacts]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Evaluate Google Messages Go gate
+        env:
+          GOOGLE_MESSAGES_GO_RESULT: ${{ needs.google-messages-go.result }}
+          GOOGLE_MESSAGES_GO_REQUIRED: ${{ needs.changes.outputs.android }}
+        run: |
+          case "$GOOGLE_MESSAGES_GO_RESULT:$GOOGLE_MESSAGES_GO_REQUIRED" in
+            success:true|success:false|skipped:false) ;;
+            *) echo "Google Messages Go returned $GOOGLE_MESSAGES_GO_RESULT with required=$GOOGLE_MESSAGES_GO_REQUIRED" >&2; exit 1 ;;
+          esac
       - name: Evaluate CI gate
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}

@@ -13,6 +13,22 @@ assert = ->(condition, message) { abort(message) unless condition }
 
 ci = load_workflow.call('ci.yml')
 ci_jobs = ci.fetch('jobs')
+assert.call(ci_jobs.key?('google-messages-go'), 'public CI must test the Google Messages Go module')
+google_messages_go = ci_jobs.fetch('google-messages-go')
+assert.call(google_messages_go.fetch('needs') == 'changes' && google_messages_go.fetch('if') == "needs.changes.outputs.android == 'true'", 'Google Messages Go checks must follow the Android path scope')
+assert.call(google_messages_go.dig('defaults', 'run', 'working-directory') == 'apps/android/googlemessages', 'Google Messages Go commands must run in the module')
+google_messages_steps = google_messages_go.fetch('steps')
+google_messages_setup = google_messages_steps.find { |step| step['uses']&.start_with?('actions/setup-go@') }
+assert.call(google_messages_setup && google_messages_setup.fetch('uses').match?(/@\h{40}\z/) && google_messages_setup.dig('with', 'go-version') == '1.27.3' && google_messages_setup.dig('with', 'cache') == false, 'Google Messages CI must pin setup-go and the Go toolchain without saving shared caches')
+assert.call(google_messages_steps.map { |step| step['run'] }.compact == ['./prepare-libgm.sh', 'go test -race ./...', 'go vet ./...', 'test -z "$(gofmt -l .)"'], 'Google Messages CI must prepare patched libgm, run race tests and vet, and fail on unformatted Go without building an AAR')
+assert.call(ci_jobs.fetch('gate').fetch('needs').include?('google-messages-go'), 'the CI gate must wait for Google Messages Go checks')
+google_messages_gate = ci_jobs.fetch('gate').fetch('steps').find { |step| step['name'] == 'Evaluate Google Messages Go gate' }
+assert.call(google_messages_gate && google_messages_gate.fetch('env') == { 'GOOGLE_MESSAGES_GO_RESULT' => '${{ needs.google-messages-go.result }}', 'GOOGLE_MESSAGES_GO_REQUIRED' => '${{ needs.changes.outputs.android }}' }, 'the Go gate must evaluate the scoped job result')
+%w[success failure cancelled skipped].product(%w[true false]).each do |result, required|
+  _, _, status = Open3.capture3({ 'GOOGLE_MESSAGES_GO_RESULT' => result, 'GOOGLE_MESSAGES_GO_REQUIRED' => required }, 'bash', '-euo', 'pipefail', '-c', google_messages_gate.fetch('run'))
+  expected = result == 'success' || (result == 'skipped' && required == 'false')
+  assert.call(status.success? == expected, "Google Messages Go gate mishandled #{result} with required=#{required}")
+end
 assert.call(ci_jobs.fetch('desktop').fetch('timeout-minutes') == 60, 'public CI desktop must allow 60 minutes uniformly for native cold-cache builds')
 ci_text = File.read(File.join(root, 'workflows', 'ci.yml'))
 assert.call(ci_jobs.key?('notify-hosted-production'), 'public CI must dispatch verified hosted production evidence')
@@ -456,6 +472,7 @@ assert.call(!release_publish_android_allows.call(staging_context.merge(implicit_
 end
 
 workflow_text = Dir[File.join(root, 'workflows', '*.{yml,yaml}')].sort.map { |path| File.read(path) }.join("\n")
+assert.call(!workflow_text.include?('peppyGoogleMessagesLink'), 'M1 workflows must not opt into the Google Messages link before the M9 licensing and launch gate')
 assert.call(!workflow_text.match?(/PEPPY_ANDROID_SKIP|skip_unchanged|SKIP_UNCHANGED/i), 'workflows must not expose an Android skip override')
 workflow_documents = Dir[File.join(root, 'workflows', '*.{yml,yaml}')].map { |path| YAML.load_file(path) }
 workflow_documents.each do |workflow|
