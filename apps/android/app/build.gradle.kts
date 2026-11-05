@@ -11,7 +11,6 @@ import groovy.json.JsonSlurper
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -128,10 +127,11 @@ val sourceDiffSha256 = validatedMetadata(providers.gradleProperty("peppySourceDi
 // fails the test immediately. Each needs its own configuration, or Gradle keeps only the newest.
 val robolectricDependencyDirectory = layout.buildDirectory.dir("robolectric-dependencies")
 val robolectricDependencies = listOf(
-    "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
-    "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
-    "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
-    "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
+    "org.robolectric:android-all-instrumented:8.0.0_r4-robolectric-r1-i7",
+    "org.robolectric:android-all-instrumented:11-robolectric-6757853-i7",
+    "org.robolectric:android-all-instrumented:12-robolectric-7732740-i7",
+    "org.robolectric:android-all-instrumented:14-robolectric-10818077-i7",
+    "org.robolectric:android-all-instrumented:15-robolectric-13954326-i7",
     "org.robolectric:android-all-instrumented:16-robolectric-13921718-i7",
 ).mapIndexed { index, coordinate ->
     configurations.create("robolectricDependency$index").also { configuration ->
@@ -198,7 +198,7 @@ if (file("google-services.json").isFile) {
 
 android {
     namespace = "dev.peppy.mobile"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
@@ -261,11 +261,9 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
-
     sourceSets {
         getByName("main").jniLibs.srcDir("src/main/jniLibs")
-        getByName("debug").res.srcDir(developmentTlsResources)
+        getByName("debug").res.srcDir(developmentTlsResources.get().asFile)
         getByName("sideload").manifest.srcFile("src/sideload/AndroidManifest.xml")
     }
 
@@ -306,7 +304,7 @@ dependencies {
     implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
     implementation("com.google.android.libraries.identity.googleid:googleid:1.2.1")
     implementation("com.google.zxing:core:3.5.4")
-    // Offline, on-device QR decoding. CameraX 1.4.2 supports minSdk 21/compileSdk 36;
+    // Offline, on-device QR decoding. CameraX 1.4.2 supports minSdk 21;
     // ML Kit barcode-scanning 17.3.0 bundles the decoder and makes no cloud request.
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")

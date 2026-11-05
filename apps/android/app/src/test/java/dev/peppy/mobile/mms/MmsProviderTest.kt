@@ -196,12 +196,12 @@ class MmsProviderTest {
                         if (sortOrder?.contains("DESC") == true) rows.sortedByDescending { it.id } else rows.sortedBy { it.id }
                     }.forEach { c.addRow(arrayOf(it.id)) }
                 }
-                segments.size == 2 && segments[1] == "addr" -> if (nullAddressCursor) null else MatrixCursor(arrayOf("address", "type")).also { c -> addresses[segments[0].toLong()].orEmpty().forEach { c.addRow(arrayOf(it.first, it.second)) } }
+                segments.size == 2 && segments[1] == "addr" -> if (nullAddressCursor) null else MatrixCursor(arrayOf("address", "type")).also { c -> addresses[segments[0].toLong()].orEmpty().forEach { c.addRow(arrayOf<Any?>(it.first, it.second)) } }
                 segments.firstOrNull() == "part" -> if (nullPartsCursor) null else MatrixCursor(arrayOf("_id", "seq", "ct", "name", "fn", "chset", "text")).also { c ->
-                    parts[selectionArgs!!.single().toLong()].orEmpty().forEachIndexed { i, p -> c.addRow(arrayOf(p.id, i, "text/plain", null, null, 106, null)) }
+                    parts[selectionArgs!!.single().toLong()].orEmpty().forEachIndexed { i, p -> c.addRow(arrayOf<Any?>(p.id, i, "text/plain", null, null, 106, null)) }
                 }
                 else -> if (nullMessageCursor) null else MatrixCursor(arrayOf("_id", "thread_id", "sub_id", "msg_box", "date", "tr_id", "sub", "m_type", "exp")).also { c ->
-                    messages.find { it.id == segments.single().toLong() }?.let { m -> c.addRow(arrayOf(m.id, 1, m.sub, m.box, m.dateSeconds, null, m.subject, m.type, m.expirySeconds)) }
+                    messages.find { it.id == segments.single().toLong() }?.let { m -> c.addRow(arrayOf<Any?>(m.id, 1, m.sub, m.box, m.dateSeconds, null, m.subject, m.type, m.expirySeconds)) }
                 }
             }
         }
