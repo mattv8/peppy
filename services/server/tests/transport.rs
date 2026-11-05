@@ -10,6 +10,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{SinkExt, StreamExt};
 use peppy_crypto::{KeyProfile, derive_root_key, enrollment::derive_admission_keypair};
 use peppy_hosted_api::PresenceState;
+use peppy_protocol::Envelope;
 use peppy_server::api::{
     TransportOptions, compact_records, create_owner, prune_replay_log, router_with_options,
     router_with_options_and_relay,
@@ -401,6 +402,44 @@ fn command(
         "route": {"gateway_device_id": gateway, "subscription_id": "sim:test"},
         "ciphertext": base64::engine::general_purpose::STANDARD.encode([9, 8, 7]),
     })
+}
+
+fn rcs_link_command(
+    vault: Uuid,
+    producer: Uuid,
+    sequence: u64,
+    envelope: Uuid,
+    command_id: Uuid,
+    gateway: Uuid,
+) -> Value {
+    let mut envelope = command(vault, producer, sequence, envelope, command_id, gateway);
+    envelope["route"] = json!({"kind": "rcs_link", "gateway_device_id": gateway});
+    envelope
+}
+
+#[test]
+fn recorded_carrier_envelope_round_trips_at_server_boundary() {
+    let recorded = json!({
+        "protocol_version": 1,
+        "envelope_id": "00000000-0000-0000-0000-000000000001",
+        "command_id": "00000000-0000-0000-0000-000000000002",
+        "vault_id": "00000000-0000-0000-0000-000000000003",
+        "producer_device_id": "00000000-0000-0000-0000-000000000004",
+        "producer_sequence": "9",
+        "key_epoch": 2,
+        "crypto_suite": 3,
+        "profile_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "purpose": "command",
+        "route": {
+            "gateway_device_id": "00000000-0000-0000-0000-000000000005",
+            "subscription_id": "sim:fixture"
+        },
+        "ciphertext": "AQID"
+    });
+
+    let envelope: Envelope = serde_json::from_value(recorded.clone()).unwrap();
+
+    assert_eq!(serde_json::to_value(envelope).unwrap(), recorded);
 }
 
 fn set_fingerprint(mut envelope: Value, fingerprint: &str) -> Value {
@@ -3142,6 +3181,82 @@ async fn pending_command_references_never_retarget_a_gateway() {
         page["records"][0]["envelope"]["route"]["gateway_device_id"],
         json!(first.id)
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn ingest_accepts_carrier_and_rcs_link_routes() {
+    let server = TestServer::start().await;
+    let gateway = server.provision_device("gateway").await;
+    let carrier = set_fingerprint(
+        command(
+            server.vault,
+            server.owner_device,
+            1,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            gateway.id,
+        ),
+        &server.fingerprint,
+    );
+    let rcs_link = set_fingerprint(
+        rcs_link_command(
+            server.vault,
+            server.owner_device,
+            2,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            gateway.id,
+        ),
+        &server.fingerprint,
+    );
+
+    assert_eq!(
+        server
+            .post(&server.owner_token, "/v1/commands", &carrier)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .post(&server.owner_token, "/v1/commands", &rcs_link)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn rcs_link_commands_are_delivered_only_to_the_addressed_gateway() {
+    let server = TestServer::start().await;
+    let addressed = server.provision_device("gateway").await;
+    let other = server.provision_device("gateway").await;
+    let command_id = Uuid::new_v4();
+    let envelope = set_fingerprint(
+        rcs_link_command(
+            server.vault,
+            server.owner_device,
+            1,
+            Uuid::new_v4(),
+            command_id,
+            addressed.id,
+        ),
+        &server.fingerprint,
+    );
+
+    assert_eq!(
+        server
+            .post(&server.owner_token, "/v1/commands", &envelope)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (_, delivered) = server.get(&addressed.token, "/v1/commands/pending").await;
+    assert_eq!(delivered["commands"][0]["command_id"], json!(command_id));
+    let (_, not_delivered) = server.get(&other.token, "/v1/commands/pending").await;
+    assert_eq!(not_delivered["commands"], json!([]));
     server.shutdown().await;
 }
 

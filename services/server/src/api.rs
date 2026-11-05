@@ -2417,7 +2417,13 @@ async fn ingest(
         }
     }
     if let Some(route) = &e.route {
-        let gateway:Option<i32>=sqlx::query_scalar("SELECT 1 FROM devices d WHERE d.vault_id=$1 AND d.device_id=$2 AND d.revoked_at IS NULL AND (d.role='gateway' OR (d.role='owner' AND EXISTS (SELECT 1 FROM device_capabilities c WHERE c.vault_id=d.vault_id AND c.device_id=d.device_id)))").bind(p.vault).bind(route.gateway_device_id.0).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "ingest_route_lookup"))?;
+        let gateway_device_id = match route {
+            peppy_protocol::GatewayRoute::Carrier {
+                gateway_device_id, ..
+            }
+            | peppy_protocol::GatewayRoute::RcsLink { gateway_device_id } => gateway_device_id.0,
+        };
+        let gateway:Option<i32>=sqlx::query_scalar("SELECT 1 FROM devices d WHERE d.vault_id=$1 AND d.device_id=$2 AND d.revoked_at IS NULL AND (d.role='gateway' OR (d.role='owner' AND EXISTS (SELECT 1 FROM device_capabilities c WHERE c.vault_id=d.vault_id AND c.device_id=d.device_id)))").bind(p.vault).bind(gateway_device_id).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "ingest_route_lookup"))?;
         if gateway.is_none() {
             return Err(ApiError(StatusCode::FORBIDDEN, "gateway_not_authorized"));
         }
@@ -2484,12 +2490,12 @@ async fn ingest(
         }
     }
     if let Some(id) = e.command_id {
-        let gateway = e
-            .route
-            .as_ref()
-            .expect("validated route")
-            .gateway_device_id
-            .0;
+        let gateway = match e.route.as_ref().expect("validated route") {
+            peppy_protocol::GatewayRoute::Carrier {
+                gateway_device_id, ..
+            }
+            | peppy_protocol::GatewayRoute::RcsLink { gateway_device_id } => gateway_device_id.0,
+        };
         sqlx::query("INSERT INTO commands(vault_id,producer_device_id,command_id,gateway_device_id,cipher_digest,cursor) VALUES($1,$2,$3,$4,$5,$6)").bind(p.vault).bind(p.device).bind(id.0).bind(gateway).bind(digest.as_slice()).bind(c).execute(&mut *tx).await.map_err(|error| insert_error(error, "ingest_command_insert"))?;
     }
     // A lightweight reference only; the envelope stays in the log/records.
