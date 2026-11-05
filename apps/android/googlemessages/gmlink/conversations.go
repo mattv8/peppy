@@ -53,9 +53,23 @@ func (link *Link) getConversation(ctx context.Context, client *libgm.Client, id 
 	return conversation, ""
 }
 
+func (link *Link) indexConversationsFor(generation uint64, conversations []*gmproto.Conversation) bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if link.closed || generation != link.generation || link.runGeneration != generation {
+		return false
+	}
+	link.indexConversationsLocked(conversations)
+	return true
+}
+
 func (link *Link) indexConversations(conversations []*gmproto.Conversation) {
 	link.mu.Lock()
 	defer link.mu.Unlock()
+	link.indexConversationsLocked(conversations)
+}
+
+func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation) {
 	for _, conversation := range conversations {
 		if conversation == nil || conversation.GetConversationID() == "" {
 			continue
@@ -79,6 +93,22 @@ func visibleOtherParticipants(conversation *gmproto.Conversation) []*gmproto.Par
 	return participants
 }
 
+func (link *Link) recordConversationEventFor(generation uint64, conversation *gmproto.Conversation) {
+	if conversation == nil || conversation.GetConversationID() == "" {
+		return
+	}
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if link.closed || generation != link.generation {
+		return
+	}
+	link.indexConversationsLocked([]*gmproto.Conversation{conversation})
+	if !link.hasOwnerVerificationLocked() {
+		return
+	}
+	link.conversationEvents = append(link.conversationEvents, conversationEvent{Code: "conversation_updated", GoogleConversationID: conversation.GetConversationID()})
+}
+
 func (link *Link) recordConversationEvent(conversation *gmproto.Conversation) {
 	if conversation == nil || conversation.GetConversationID() == "" {
 		return
@@ -92,15 +122,25 @@ func (link *Link) recordConversationEvent(conversation *gmproto.Conversation) {
 	link.conversationEvents = append(link.conversationEvents, conversationEvent{Code: "conversation_updated", GoogleConversationID: conversation.GetConversationID()})
 }
 
-func (link *Link) recordSettings(event *libgm.WrappedSettings) {
+func (link *Link) recordSettingsFor(generation, streamEpoch uint64, receivedAt time.Time, event *libgm.WrappedSettings) {
 	link.mu.Lock()
 	defer link.mu.Unlock()
+	if link.closed || generation != link.generation || streamEpoch != link.streamEpoch {
+		return
+	}
 	if event == nil || event.IsOld || event.Settings == nil || event.Settings.GetSIMCards() == nil {
 		link.invalidateSettingsLocked()
 		return
 	}
-	link.settings, link.settingsAt = event.Settings, time.Now()
+	link.settings, link.settingsAt = event.Settings, receivedAt
 	link.settingsVersion++
+}
+
+func (link *Link) recordSettings(event *libgm.WrappedSettings) {
+	link.mu.Lock()
+	generation, streamEpoch := link.generation, link.streamEpoch
+	link.mu.Unlock()
+	link.recordSettingsFor(generation, streamEpoch, time.Now(), event)
 }
 
 func (link *Link) invalidateSettingsLocked() {

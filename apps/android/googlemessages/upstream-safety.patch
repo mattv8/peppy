@@ -256,3 +256,125 @@ diff -ruN a/pkg/libgm/event_handler_test.go b/pkg/libgm/event_handler_test.go
 +		t.Fatalf("settings provenance = %+v", wrapped)
 +	}
 +}
+diff -U0 -rN pkg/libgm/client.go pkg/libgm/client.go
+--- pkg/libgm/client.go	2026-11-05 16:06:29
++++ pkg/libgm/client.go	2026-11-05 16:05:57
+@@ -153,0 +154 @@
++	listenLock      sync.Mutex
+diff -U0 -rN pkg/libgm/longpoll.go pkg/libgm/longpoll.go
+--- pkg/libgm/longpoll.go	2026-11-05 16:06:29
++++ pkg/libgm/longpoll.go	2026-11-05 16:05:57
+@@ -605 +605 @@
+-		if loggedIn && c.listenID.Load() == listenID {
++		if loggedIn {
+@@ -607 +607 @@
+-			c.triggerEvent(&events.StreamGap{})
++			c.emitStreamGapFor(listenID)
+@@ -733,0 +734,14 @@
++func (c *Client) emitStreamGapFor(listenID int64) bool {
++	c.listenLock.Lock()
++	defer c.listenLock.Unlock()
++	return c.emitStreamGapForLocked(listenID)
++}
++
++func (c *Client) emitStreamGapForLocked(listenID int64) bool {
++	if c.listenID.Load() != listenID {
++		return false
++	}
++	c.triggerEvent(&events.StreamGap{})
++	return true
++}
++
+@@ -738,0 +753,2 @@
++	c.listenLock.Lock()
++	listenID := c.listenID.Load()
+@@ -740 +756 @@
+-		Int64("current_listen_id", c.listenID.Load()).
++		Int64("current_listen_id", listenID).
+@@ -742,0 +759 @@
++	c.emitStreamGapForLocked(listenID)
+@@ -744,0 +762 @@
++	c.listenLock.Unlock()
+diff -U0 -rN pkg/libgm/stream_gap_test.go pkg/libgm/stream_gap_test.go
+--- pkg/libgm/stream_gap_test.go	1969-12-31 17:00:00
++++ pkg/libgm/stream_gap_test.go	2026-11-05 16:09:13
+@@ -0,0 +1,79 @@
++package libgm
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/rs/zerolog"
++	"go.mau.fi/util/exhttp"
++
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
++)
++
++func TestReconnectEmitsStreamGapBeforeAdvancingListenID(t *testing.T) {
++	client := NewClient(NewAuthData(), nil, zerolog.Nop(), exhttp.ClientSettings{})
++	client.listenID.Store(41)
++	var gapListenID int64
++	client.SetEventHandler(func(event any) {
++		if _, ok := event.(*events.StreamGap); ok {
++			gapListenID = client.listenID.Load()
++		}
++	})
++
++	if err := client.Reconnect(context.Background()); err == nil {
++		t.Fatal("Reconnect unexpectedly accepted unlinked auth")
++	}
++	if gapListenID != 41 {
++		t.Fatalf("gap observed at listen ID %d, want 41 before teardown advances it", gapListenID)
++	}
++}
++
++func TestCleanReadReturnEmitsStreamGap(t *testing.T) {
++	client := NewClient(NewAuthData(), nil, zerolog.Nop(), exhttp.ClientSettings{})
++	client.listenID.Store(7)
++	if !client.emitStreamGapFor(7) {
++		t.Fatal("current stream did not emit a gap")
++	}
++	client.listenID.Store(8)
++	if client.emitStreamGapFor(7) {
++		t.Fatal("retired stream emitted a gap for its replacement")
++	}
++}
++
++type streamGapRoundTripper func(*http.Request) (*http.Response, error)
++
++func (roundTrip streamGapRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
++	return roundTrip(request)
++}
++
++func TestCleanLongPollEOFEmitsStreamGap(t *testing.T) {
++	auth := NewAuthData()
++	auth.TachyonAuthToken = []byte("synthetic-token")
++	auth.TachyonExpiry = time.Now().Add(time.Hour)
++	settings := exhttp.ClientSettings{TransportOverride: func(exhttp.ClientSettings) http.RoundTripper {
++		return streamGapRoundTripper(func(request *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: http.StatusOK,
++				Header:     make(http.Header),
++				Body:       io.NopCloser(strings.NewReader("[[]]")),
++				Request:    request,
++			}, nil
++		})
++	}}
++	client := NewClient(auth, nil, zerolog.Nop(), settings)
++	var gaps int
++	client.SetEventHandler(func(event any) {
++		if _, ok := event.(*events.StreamGap); ok {
++			gaps++
++		}
++	})
++
++	client.doLongPoll(context.Background(), true, true, nil)
++	if gaps != 1 {
++		t.Fatalf("clean EOF emitted %d gaps, want 1", gaps)
++	}
++}

@@ -53,6 +53,7 @@ func setTestOwnerVerification(link *Link) {
 type fixtureKnobs struct {
 	configEmail    string
 	configRedirect bool
+	gateConfig     bool
 	rotateCookie   bool
 	hangConfig     bool
 	hangSignIn     bool
@@ -180,6 +181,13 @@ func (fixture *phoneFixture) serve(writer http.ResponseWriter, request *http.Req
 		if knobs.hangConfig {
 			fixture.hold(request)
 			return
+		}
+		if knobs.gateConfig {
+			select {
+			case <-fixture.gate:
+			case <-fixture.stop:
+				return
+			}
 		}
 		if knobs.configRedirect {
 			writer.Header().Set("Location", fixtureLoginURL)
