@@ -32,11 +32,13 @@ import Testing
         #expect(GoogleMessagesLinkPresentation.presentation(for: status(.unavailable)) == nil)
         #expect(GoogleMessagesLinkPresentation.presentation(for: status(.unlinked, current: false)) == nil)
         #expect(GoogleMessagesLinkPresentation.presentation(for: status(.unavailable, current: false)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked, expiresAtMs: nil))?.status == .unconfirmed)
     }
 
     @Test func mapsCurrentStatusesAndAttentionHelp() {
         #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked))?.status == .connected)
         #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked, phoneResponsive: false))?.status == .phoneNotResponding)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked, availability: false, health: false, phoneResponsive: false))?.status == .phoneNotResponding)
         #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked, availability: false))?.status == .unconfirmed)
         #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked, health: false))?.status == .unconfirmed)
         #expect(GoogleMessagesLinkPresentation.presentation(for: status(.needsRelink))?.status == .needsRelink)
@@ -79,6 +81,26 @@ import Testing
         #expect(!request.accepts(identityKey: "next-origin|vault|device", rosterRevision: 2, generation: 4, keysUnlocked: true))
         #expect(!request.accepts(identityKey: "origin|vault|device", rosterRevision: 3, generation: 4, keysUnlocked: true))
         #expect(!request.accepts(identityKey: "origin|vault|device", rosterRevision: 2, generation: 5, keysUnlocked: true))
+    }
+
+    @Test func newerRosterCompletionRejectsOlderSuccessErrorAndLoadedWritebacks() {
+        let first = DeviceRosterRefreshRequest(identityKey: "origin|vault|device", generation: 1, keysUnlocked: true)
+        let second = DeviceRosterRefreshRequest(identityKey: "origin|vault|device", generation: 2, keysUnlocked: true)
+
+        #expect(second.accepts(identityKey: "origin|vault|device", generation: 2, keysUnlocked: true))
+        #expect(!first.accepts(identityKey: "origin|vault|device", generation: 2, keysUnlocked: true))
+        #expect(!first.accepts(identityKey: "origin|vault|device", generation: 2, keysUnlocked: false))
+        #expect(!first.accepts(identityKey: "next|vault|device", generation: 2, keysUnlocked: true))
+    }
+
+    @Test func deadlineWakeRearmsAfterClockRollbackAndExpiresAtCanonicalDeadline() {
+        #expect(GoogleMessagesLinkDeadlineWake.next(deadlineMs: 1_000, nowMs: 900) == .wait(milliseconds: 100))
+        #expect(GoogleMessagesLinkDeadlineWake.next(deadlineMs: 1_000, nowMs: 800) == .wait(milliseconds: 200))
+        #expect(GoogleMessagesLinkDeadlineWake.next(deadlineMs: 1_000, nowMs: 1_000) == .expire)
+        #expect(GoogleMessagesLinkDeadlineWake.next(deadlineMs: nil, nowMs: 900) == .expire)
+        #expect(GoogleMessagesLinkDeadlineWake.next(deadlineMs: 1_000, nowMs: -1) == .expire)
+        #expect(GoogleMessagesLinkDeadlineWake.taskKey(deadlineMs: 1_000, isForeground: true) != GoogleMessagesLinkDeadlineWake.taskKey(deadlineMs: 1_000, isForeground: false))
+        #expect(GoogleMessagesLinkDeadlineWake.taskKey(deadlineMs: 1_000, isForeground: true) != GoogleMessagesLinkDeadlineWake.taskKey(deadlineMs: nil, isForeground: true))
     }
 
     @Test func readOnlyLinkStatusDoesNotCreateCarrierWork() async throws {

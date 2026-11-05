@@ -71,15 +71,18 @@ public struct GoogleMessagesLinkPresentation: Equatable, Sendable {
     static func presentation(for status: NativeRcsLinkStatus?) -> Self? {
         guard let status else { return nil }
         guard status.state != .unlinked, status.state != .unavailable else { return nil }
-        guard status.current, let expiresAtMs = status.expiresAtMs else {
+        guard status.current,
+              let expiresAtMs = status.expiresAtMs,
+              expiresAtMs > 0
+        else {
             return Self(status: .unconfirmed, expiresAtMs: nil)
         }
 
         switch status.state {
         case .linked:
             let presentation: GoogleMessagesLinkStatus
-            if !status.availability || !status.health { presentation = .unconfirmed }
-            else if !status.phoneResponsive { presentation = .phoneNotResponding }
+            if !status.phoneResponsive { presentation = .phoneNotResponding }
+            else if !status.availability || !status.health { presentation = .unconfirmed }
             else { presentation = .connected }
             return Self(status: presentation, expiresAtMs: expiresAtMs)
         case .needsRelink: return Self(status: .needsRelink, expiresAtMs: expiresAtMs)
@@ -98,6 +101,21 @@ public struct GoogleMessagesLinkPresentation: Equatable, Sendable {
     }
 }
 
+public enum GoogleMessagesLinkDeadlineWake: Equatable, Sendable {
+    case wait(milliseconds: Int64)
+    case expire
+
+    static func next(deadlineMs: Int64?, nowMs: Int64) -> Self {
+        guard let deadlineMs, deadlineMs > 0, nowMs >= 0 else { return .expire }
+        guard nowMs < deadlineMs else { return .expire }
+        return .wait(milliseconds: deadlineMs - nowMs)
+    }
+
+    static func taskKey(deadlineMs: Int64?, isForeground: Bool) -> String {
+        "\(isForeground)-\(deadlineMs.map(String.init) ?? "none")"
+    }
+}
+
 public struct GoogleMessagesLinkStatusRequest: Equatable, Sendable {
     let identityKey: String?
     let rosterRevision: Int
@@ -112,6 +130,18 @@ public struct GoogleMessagesLinkStatusRequest: Equatable, Sendable {
     ) -> Bool {
         self.identityKey == identityKey
             && self.rosterRevision == rosterRevision
+            && self.generation == generation
+            && self.keysUnlocked == keysUnlocked
+    }
+}
+
+public struct DeviceRosterRefreshRequest: Equatable, Sendable {
+    let identityKey: String?
+    let generation: Int
+    let keysUnlocked: Bool
+
+    func accepts(identityKey: String?, generation: Int, keysUnlocked: Bool) -> Bool {
+        self.identityKey == identityKey
             && self.generation == generation
             && self.keysUnlocked == keysUnlocked
     }

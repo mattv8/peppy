@@ -40,6 +40,7 @@ final class AppModel {
     private(set) var devices: [DeviceRosterItem] = []
     private(set) var googleMessagesLinkStatuses: [String: GoogleMessagesLinkPresentation] = [:]
     private var deviceRosterRevision = 0
+    private var deviceRefreshGeneration = 0
     private var linkStatusRequestGeneration = 0
     private(set) var devicesLoaded = false
     private(set) var relay: RelayWakeClient?
@@ -423,22 +424,39 @@ final class AppModel {
     }
 
     func refreshDevices() async {
-        let identity = status.identity
-        let keysUnlocked = status.keysUnlocked
+        let requestGeneration = deviceRefreshGeneration &+ 1
+        deviceRefreshGeneration = requestGeneration
+        let request = DeviceRosterRefreshRequest(
+            identityKey: googleMessagesLinkIdentityKey,
+            generation: requestGeneration,
+            keysUnlocked: status.keysUnlocked
+        )
         defer {
-            if status.identity == identity, status.keysUnlocked == keysUnlocked {
+            if request.accepts(
+                identityKey: googleMessagesLinkIdentityKey,
+                generation: deviceRefreshGeneration,
+                keysUnlocked: status.keysUnlocked
+            ) {
                 devicesLoaded = true
             }
         }
         do {
             let nextDevices = try await session.devices()
-            guard status.identity == identity, status.keysUnlocked == keysUnlocked else { return }
+            guard request.accepts(
+                identityKey: googleMessagesLinkIdentityKey,
+                generation: deviceRefreshGeneration,
+                keysUnlocked: status.keysUnlocked
+            ) else { return }
             devices = nextDevices
             deviceRosterRevision &+= 1
             await refreshGoogleMessagesLinkStatuses()
         }
         catch {
-            guard status.identity == identity, status.keysUnlocked == keysUnlocked else { return }
+            guard request.accepts(
+                identityKey: googleMessagesLinkIdentityKey,
+                generation: deviceRefreshGeneration,
+                keysUnlocked: status.keysUnlocked
+            ) else { return }
             lastError = (error as? ClientError)?.userMessage ?? "Could not load devices."
         }
     }
@@ -452,6 +470,12 @@ final class AppModel {
     }
 
     func expireGoogleMessagesLinkStatuses(at nowMs: Int64) {
+        guard nowMs >= 0 else {
+            googleMessagesLinkStatuses = googleMessagesLinkStatuses.mapValues { _ in
+                GoogleMessagesLinkPresentation(status: .unconfirmed, expiresAtMs: nil)
+            }
+            return
+        }
         googleMessagesLinkStatuses = googleMessagesLinkStatuses.mapValues { $0.expired(at: nowMs) }
     }
 
@@ -488,6 +512,7 @@ final class AppModel {
     }
 
     private func invalidateGoogleMessagesLinkStatuses() {
+        deviceRefreshGeneration &+= 1
         linkStatusRequestGeneration &+= 1
         deviceRosterRevision &+= 1
         googleMessagesLinkStatuses = [:]

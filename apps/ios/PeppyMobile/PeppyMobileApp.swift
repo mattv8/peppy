@@ -507,12 +507,22 @@ struct DeviceView: View {
         }
         .accessibilityIdentifier("devices-section")
         .task { await model.refreshDevices() }
-        .task(id: model.googleMessagesLinkStatusDeadline) {
+        .task(id: GoogleMessagesLinkDeadlineWake.taskKey(
+            deadlineMs: model.googleMessagesLinkStatusDeadline,
+            isForeground: scenePhase == .active
+        )) {
+            guard scenePhase == .active else { return }
             guard let deadline = model.googleMessagesLinkStatusDeadline else { return }
-            let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
-            try? await Task.sleep(for: .milliseconds(max(1, deadline - nowMs)))
-            guard !Task.isCancelled else { return }
-            model.expireGoogleMessagesLinkStatuses(at: Int64(Date().timeIntervalSince1970 * 1_000))
+            while !Task.isCancelled {
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
+                switch GoogleMessagesLinkDeadlineWake.next(deadlineMs: deadline, nowMs: nowMs) {
+                case .expire:
+                    model.expireGoogleMessagesLinkStatuses(at: nowMs)
+                    return
+                case .wait(let milliseconds):
+                    try? await Task.sleep(for: .milliseconds(milliseconds))
+                }
+            }
         }
     }
 
