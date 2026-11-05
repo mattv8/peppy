@@ -1,4 +1,7 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use peppy_domain::{DeviceId, VaultId};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -8,10 +11,211 @@ pub const EPHEMERAL_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_EPHEMERAL_TTL_MS: u64 = 15_000;
 pub const POSTGRES_NOTIFY_PAYLOAD_BYTES: usize = 8_000;
 pub const MAX_EPHEMERAL_CIPHERTEXT_BYTES: usize = 5_700;
+pub const EPHEMERAL_V2_PROTOCOL_VERSION: u16 = 2;
+pub const MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES: usize = 5_400;
+pub const MAX_EPHEMERAL_V2_CONTROL_CIPHERTEXT_BYTES: usize = 512;
 const AAD_DOMAIN_SEPARATOR: &[u8] = b"peppy-ephemeral-typing-v1\0";
+const AAD_V2_DOMAIN_SEPARATOR: &[u8] = b"peppy-ephemeral-typing-v2\0";
 
 /// Live application frames use the existing signal JSON and AAD unchanged.
 pub type LiveFrameV1 = EphemeralSignalV1;
+pub type LiveFrameV2 = EphemeralSignalV2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EphemeralSignalV2Kind {
+    Typing,
+    Challenge,
+    SessionAck,
+}
+
+impl EphemeralSignalV2Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Typing => "typing",
+            Self::Challenge => "challenge",
+            Self::SessionAck => "session_ack",
+        }
+    }
+
+    fn ciphertext_limit(self) -> usize {
+        match self {
+            Self::Typing => MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES,
+            Self::Challenge | Self::SessionAck => MAX_EPHEMERAL_V2_CONTROL_CIPHERTEXT_BYTES,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "LiveHelloV2Wire")]
+pub struct LiveHelloV2 {
+    pub r#type: String,
+    pub protocol_version: u16,
+    pub max_ttl_ms: u64,
+    pub max_ciphertext_bytes: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveHelloV2Wire {
+    r#type: String,
+    protocol_version: u16,
+    max_ttl_ms: u64,
+    max_ciphertext_bytes: usize,
+}
+
+impl TryFrom<LiveHelloV2Wire> for LiveHelloV2 {
+    type Error = &'static str;
+
+    fn try_from(wire: LiveHelloV2Wire) -> Result<Self, Self::Error> {
+        if wire.r#type != "hello"
+            || wire.protocol_version != EPHEMERAL_V2_PROTOCOL_VERSION
+            || wire.max_ttl_ms != MAX_EPHEMERAL_TTL_MS
+            || wire.max_ciphertext_bytes != MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES
+        {
+            return Err("unsupported live hello v2");
+        }
+        Ok(Self {
+            r#type: wire.r#type,
+            protocol_version: wire.protocol_version,
+            max_ttl_ms: wire.max_ttl_ms,
+            max_ciphertext_bytes: wire.max_ciphertext_bytes,
+        })
+    }
+}
+
+impl LiveHelloV2 {
+    pub fn new() -> Self {
+        Self {
+            r#type: "hello".into(),
+            protocol_version: EPHEMERAL_V2_PROTOCOL_VERSION,
+            max_ttl_ms: MAX_EPHEMERAL_TTL_MS,
+            max_ciphertext_bytes: MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES,
+        }
+    }
+}
+
+impl Default for LiveHelloV2 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl JsonSchema for LiveHelloV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LiveHelloV2".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"object","additionalProperties":false,"properties":{"type":{"const":"hello"},"protocol_version":{"const":2},"max_ttl_ms":{"const":15000},"max_ciphertext_bytes":{"const":5400}},"required":["type","protocol_version","max_ttl_ms","max_ciphertext_bytes"]})
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct EphemeralSignalV2 {
+    pub protocol_version: u16,
+    pub kind: EphemeralSignalV2Kind,
+    pub sender_device_id: DeviceId,
+    pub key_epoch: u32,
+    pub session_id: String,
+    pub sent_at_ms: String,
+    pub expires_at_ms: String,
+    pub sequence: String,
+    pub ciphertext_b64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EphemeralSignalV2Wire {
+    protocol_version: u16,
+    kind: EphemeralSignalV2Kind,
+    sender_device_id: DeviceId,
+    key_epoch: u32,
+    session_id: String,
+    sent_at_ms: String,
+    expires_at_ms: String,
+    sequence: String,
+    ciphertext_b64: String,
+}
+
+impl<'de> Deserialize<'de> for EphemeralSignalV2 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = EphemeralSignalV2Wire::deserialize(deserializer)?;
+        let signal = Self {
+            protocol_version: wire.protocol_version,
+            kind: wire.kind,
+            sender_device_id: wire.sender_device_id,
+            key_epoch: wire.key_epoch,
+            session_id: wire.session_id,
+            sent_at_ms: wire.sent_at_ms,
+            expires_at_ms: wire.expires_at_ms,
+            sequence: wire.sequence,
+            ciphertext_b64: wire.ciphertext_b64,
+        };
+        signal.validate().map_err(de::Error::custom)?;
+        Ok(signal)
+    }
+}
+
+impl EphemeralSignalV2 {
+    pub fn validate(&self) -> Result<(), EphemeralSignalError> {
+        if self.protocol_version != EPHEMERAL_V2_PROTOCOL_VERSION {
+            return Err(EphemeralSignalError::UnsupportedVersion);
+        }
+        if self.key_epoch == 0 {
+            return Err(EphemeralSignalError::InvalidKeyEpoch);
+        }
+        parse_session_id(&self.session_id)?;
+        let sent = parse_decimal(&self.sent_at_ms)?;
+        let expires = parse_decimal(&self.expires_at_ms)?;
+        if parse_decimal(&self.sequence)? == 0 {
+            return Err(EphemeralSignalError::InvalidSequence);
+        }
+        if expires <= sent || !(1..=MAX_EPHEMERAL_TTL_MS).contains(&(expires - sent)) {
+            return Err(EphemeralSignalError::InvalidTtl);
+        }
+        let ciphertext = decode_standard(&self.ciphertext_b64)?;
+        if ciphertext.is_empty() || ciphertext.len() > self.kind.ciphertext_limit() {
+            return Err(EphemeralSignalError::CiphertextTooLarge);
+        }
+        Ok(())
+    }
+
+    pub fn aad_bytes(&self, vault_id: VaultId) -> Result<Vec<u8>, EphemeralSignalError> {
+        self.validate()?;
+        let mut aad = Vec::with_capacity(
+            AAD_V2_DOMAIN_SEPARATOR.len()
+                + 16
+                + 2
+                + 1
+                + self.kind.as_str().len()
+                + 16
+                + 4
+                + 16
+                + 24,
+        );
+        aad.extend_from_slice(AAD_V2_DOMAIN_SEPARATOR);
+        aad.extend_from_slice(vault_id.0.as_bytes());
+        aad.extend_from_slice(&self.protocol_version.to_be_bytes());
+        aad.push(self.kind.as_str().len() as u8);
+        aad.extend_from_slice(self.kind.as_str().as_bytes());
+        aad.extend_from_slice(self.sender_device_id.0.as_bytes());
+        aad.extend_from_slice(&self.key_epoch.to_be_bytes());
+        aad.extend_from_slice(&parse_session_id(&self.session_id)?);
+        aad.extend_from_slice(&parse_decimal(&self.sent_at_ms)?.to_be_bytes());
+        aad.extend_from_slice(&parse_decimal(&self.expires_at_ms)?.to_be_bytes());
+        aad.extend_from_slice(&parse_decimal(&self.sequence)?.to_be_bytes());
+        Ok(aad)
+    }
+}
+
+impl JsonSchema for EphemeralSignalV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "EphemeralSignalV2".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"object","additionalProperties":false,"properties":{"protocol_version":{"const":2},"kind":{"enum":["typing","challenge","session_ack"]},"sender_device_id":{"type":"string","format":"uuid"},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"sent_at_ms":{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},"expires_at_ms":{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},"sequence":{"type":"string","pattern":"^[1-9][0-9]*$"},"ciphertext_b64":{"type":"string","maxLength":7200}},"required":["protocol_version","kind","sender_device_id","key_epoch","session_id","sent_at_ms","expires_at_ms","sequence","ciphertext_b64"]})
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "LiveHelloWire")]
@@ -169,10 +373,234 @@ pub enum EphemeralSignalError {
     InvalidKeyEpoch,
     #[error("timestamp or sequence is not a canonical unsigned decimal string")]
     InvalidDecimal,
+    #[error("session identifier or nonce is not canonically encoded")]
+    InvalidCanonicalEncoding,
+    #[error("sequence must start at one")]
+    InvalidSequence,
     #[error("ephemeral signal TTL must be between one and 15,000 milliseconds")]
     InvalidTtl,
     #[error("ephemeral ciphertext is empty, malformed, or too large")]
     CiphertextTooLarge,
+}
+
+fn decode_standard(value: &str) -> Result<Vec<u8>, EphemeralSignalError> {
+    let decoded = STANDARD
+        .decode(value)
+        .map_err(|_| EphemeralSignalError::CiphertextTooLarge)?;
+    if STANDARD.encode(&decoded) != value {
+        return Err(EphemeralSignalError::CiphertextTooLarge);
+    }
+    Ok(decoded)
+}
+
+fn parse_session_id(value: &str) -> Result<[u8; 16], EphemeralSignalError> {
+    if value.len() != 22 {
+        return Err(EphemeralSignalError::InvalidCanonicalEncoding);
+    }
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| EphemeralSignalError::InvalidCanonicalEncoding)?;
+    if decoded.len() != 16 || URL_SAFE_NO_PAD.encode(&decoded) != value {
+        return Err(EphemeralSignalError::InvalidCanonicalEncoding);
+    }
+    decoded
+        .try_into()
+        .map_err(|_| EphemeralSignalError::InvalidCanonicalEncoding)
+}
+
+fn validate_nonce(value: &str) -> Result<(), EphemeralSignalError> {
+    let decoded = decode_standard(value)?;
+    if decoded.len() != 16 {
+        return Err(EphemeralSignalError::InvalidCanonicalEncoding);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TypingOriginV2 {
+    VaultDevice,
+    GoogleContact,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TypingStateV2 {
+    Started,
+    Stopped,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TypingPlaintextV2 {
+    pub version: u16,
+    pub origin: TypingOriginV2,
+    pub conversation_id: uuid::Uuid,
+    pub state: TypingStateV2,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_device_id: Option<DeviceId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TypingPlaintextV2Wire {
+    version: u16,
+    origin: TypingOriginV2,
+    conversation_id: uuid::Uuid,
+    state: TypingStateV2,
+    gateway_device_id: Option<DeviceId>,
+}
+
+impl<'de> Deserialize<'de> for TypingPlaintextV2 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = TypingPlaintextV2Wire::deserialize(deserializer)?;
+        let value = Self {
+            version: wire.version,
+            origin: wire.origin,
+            conversation_id: wire.conversation_id,
+            state: wire.state,
+            gateway_device_id: wire.gateway_device_id,
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl TypingPlaintextV2 {
+    pub fn validate(&self) -> Result<(), EphemeralSignalError> {
+        if self.version != EPHEMERAL_V2_PROTOCOL_VERSION
+            || matches!(self.origin, TypingOriginV2::VaultDevice)
+                != self.gateway_device_id.is_some()
+        {
+            return Err(EphemeralSignalError::InvalidCanonicalEncoding);
+        }
+        Ok(())
+    }
+}
+
+impl JsonSchema for TypingPlaintextV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "TypingPlaintextV2".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"origin":{"enum":["vault_device","google_contact"]},"conversation_id":{"type":"string","format":"uuid"},"state":{"enum":["started","stopped"]},"gateway_device_id":{"type":"string","format":"uuid"}},"required":["version","origin","conversation_id","state"],"allOf":[{"if":{"properties":{"origin":{"const":"vault_device"}}},"then":{"required":["gateway_device_id"]}},{"if":{"properties":{"origin":{"const":"google_contact"}}},"then":{"not":{"required":["gateway_device_id"]}}}]})
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChallengePlaintextV2 {
+    pub version: u16,
+    pub challenger_device_id: DeviceId,
+    pub challenger_session_id: String,
+    pub responder_device_id: DeviceId,
+    pub nonce_b64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChallengePlaintextV2Wire {
+    version: u16,
+    challenger_device_id: DeviceId,
+    challenger_session_id: String,
+    responder_device_id: DeviceId,
+    nonce_b64: String,
+}
+
+impl<'de> Deserialize<'de> for ChallengePlaintextV2 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ChallengePlaintextV2Wire::deserialize(deserializer)?;
+        let value = Self {
+            version: wire.version,
+            challenger_device_id: wire.challenger_device_id,
+            challenger_session_id: wire.challenger_session_id,
+            responder_device_id: wire.responder_device_id,
+            nonce_b64: wire.nonce_b64,
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl ChallengePlaintextV2 {
+    pub fn validate(&self) -> Result<(), EphemeralSignalError> {
+        if self.version != EPHEMERAL_V2_PROTOCOL_VERSION {
+            return Err(EphemeralSignalError::UnsupportedVersion);
+        }
+        parse_session_id(&self.challenger_session_id)?;
+        validate_nonce(&self.nonce_b64)
+    }
+}
+
+impl JsonSchema for ChallengePlaintextV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ChallengePlaintextV2".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"challenger_device_id":{"type":"string","format":"uuid"},"challenger_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"responder_device_id":{"type":"string","format":"uuid"},"nonce_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{22}==$"}},"required":["version","challenger_device_id","challenger_session_id","responder_device_id","nonce_b64"]})
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SessionAckPlaintextV2 {
+    pub version: u16,
+    pub responder_device_id: DeviceId,
+    pub responder_session_id: String,
+    pub challenger_device_id: DeviceId,
+    pub challenger_session_id: String,
+    pub echoed_nonce_b64: String,
+    pub sequence_floor: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionAckPlaintextV2Wire {
+    version: u16,
+    responder_device_id: DeviceId,
+    responder_session_id: String,
+    challenger_device_id: DeviceId,
+    challenger_session_id: String,
+    echoed_nonce_b64: String,
+    sequence_floor: String,
+}
+
+impl<'de> Deserialize<'de> for SessionAckPlaintextV2 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = SessionAckPlaintextV2Wire::deserialize(deserializer)?;
+        let value = Self {
+            version: wire.version,
+            responder_device_id: wire.responder_device_id,
+            responder_session_id: wire.responder_session_id,
+            challenger_device_id: wire.challenger_device_id,
+            challenger_session_id: wire.challenger_session_id,
+            echoed_nonce_b64: wire.echoed_nonce_b64,
+            sequence_floor: wire.sequence_floor,
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl SessionAckPlaintextV2 {
+    pub fn validate(&self) -> Result<(), EphemeralSignalError> {
+        if self.version != EPHEMERAL_V2_PROTOCOL_VERSION {
+            return Err(EphemeralSignalError::UnsupportedVersion);
+        }
+        parse_session_id(&self.responder_session_id)?;
+        parse_session_id(&self.challenger_session_id)?;
+        validate_nonce(&self.echoed_nonce_b64)?;
+        if parse_decimal(&self.sequence_floor)? == 0 {
+            return Err(EphemeralSignalError::InvalidSequence);
+        }
+        Ok(())
+    }
+}
+
+impl JsonSchema for SessionAckPlaintextV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SessionAckPlaintextV2".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"responder_device_id":{"type":"string","format":"uuid"},"responder_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"challenger_device_id":{"type":"string","format":"uuid"},"challenger_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"echoed_nonce_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{22}==$"},"sequence_floor":{"type":"string","pattern":"^[1-9][0-9]*$"}},"required":["version","responder_device_id","responder_session_id","challenger_device_id","challenger_session_id","echoed_nonce_b64","sequence_floor"]})
+    }
 }
 
 impl EphemeralSignalV1 {

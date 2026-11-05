@@ -1,6 +1,39 @@
 {
   "components": {
     "schemas": {
+      "ChallengePlaintextV2": {
+        "additionalProperties": false,
+        "properties": {
+          "challenger_device_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "challenger_session_id": {
+            "pattern": "^[A-Za-z0-9_-]{22}$",
+            "type": "string"
+          },
+          "nonce_b64": {
+            "pattern": "^[A-Za-z0-9+/]{22}==$",
+            "type": "string"
+          },
+          "responder_device_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "version": {
+            "const": 2
+          }
+        },
+        "required": [
+          "version",
+          "challenger_device_id",
+          "challenger_session_id",
+          "responder_device_id",
+          "nonce_b64"
+        ],
+        "title": "ChallengePlaintextV2",
+        "type": "object"
+      },
       "CompactionMetadata": {
         "description": "Opaque, unauthenticated-to-the-server compaction bookkeeping. Its exact\nauthenticated copy is carried in the encrypted event payload by clients.\nIt deliberately stays out of legacy AAD and `wire_digest`.",
         "properties": {
@@ -191,6 +224,63 @@
         "title": "EphemeralSignalV1",
         "type": "object"
       },
+      "EphemeralSignalV2": {
+        "additionalProperties": false,
+        "properties": {
+          "ciphertext_b64": {
+            "maxLength": 7200,
+            "type": "string"
+          },
+          "expires_at_ms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "key_epoch": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "typing",
+              "challenge",
+              "session_ack"
+            ]
+          },
+          "protocol_version": {
+            "const": 2
+          },
+          "sender_device_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "sent_at_ms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "sequence": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "session_id": {
+            "pattern": "^[A-Za-z0-9_-]{22}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "kind",
+          "sender_device_id",
+          "key_epoch",
+          "session_id",
+          "sent_at_ms",
+          "expires_at_ms",
+          "sequence",
+          "ciphertext_b64"
+        ],
+        "title": "EphemeralSignalV2",
+        "type": "object"
+      },
       "GatewayRoute": {
         "oneOf": [
           {
@@ -232,6 +322,9 @@
       "LiveFrameV1": {
         "$ref": "#/components/schemas/EphemeralSignalV1"
       },
+      "LiveFrameV2": {
+        "$ref": "#/components/schemas/EphemeralSignalV2"
+      },
       "LiveHelloV1": {
         "additionalProperties": false,
         "properties": {
@@ -259,6 +352,31 @@
           "max_ciphertext_bytes"
         ],
         "title": "LiveHelloV1",
+        "type": "object"
+      },
+      "LiveHelloV2": {
+        "additionalProperties": false,
+        "properties": {
+          "max_ciphertext_bytes": {
+            "const": 5400
+          },
+          "max_ttl_ms": {
+            "const": 15000
+          },
+          "protocol_version": {
+            "const": 2
+          },
+          "type": {
+            "const": "hello"
+          }
+        },
+        "required": [
+          "type",
+          "protocol_version",
+          "max_ttl_ms",
+          "max_ciphertext_bytes"
+        ],
+        "title": "LiveHelloV2",
         "type": "object"
       },
       "PairingQrRecord": {
@@ -310,8 +428,119 @@
         "title": "PairingQrRecord",
         "type": "object"
       },
+      "SessionAckPlaintextV2": {
+        "additionalProperties": false,
+        "properties": {
+          "challenger_device_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "challenger_session_id": {
+            "pattern": "^[A-Za-z0-9_-]{22}$",
+            "type": "string"
+          },
+          "echoed_nonce_b64": {
+            "pattern": "^[A-Za-z0-9+/]{22}==$",
+            "type": "string"
+          },
+          "responder_device_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "responder_session_id": {
+            "pattern": "^[A-Za-z0-9_-]{22}$",
+            "type": "string"
+          },
+          "sequence_floor": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "version": {
+            "const": 2
+          }
+        },
+        "required": [
+          "version",
+          "responder_device_id",
+          "responder_session_id",
+          "challenger_device_id",
+          "challenger_session_id",
+          "echoed_nonce_b64",
+          "sequence_floor"
+        ],
+        "title": "SessionAckPlaintextV2",
+        "type": "object"
+      },
       "SourceSequence": {
         "type": "string"
+      },
+      "TypingPlaintextV2": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "origin": {
+                  "const": "vault_device"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "gateway_device_id"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "origin": {
+                  "const": "google_contact"
+                }
+              }
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "gateway_device_id"
+                ]
+              }
+            }
+          }
+        ],
+        "properties": {
+          "conversation_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "gateway_device_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "origin": {
+            "enum": [
+              "vault_device",
+              "google_contact"
+            ]
+          },
+          "state": {
+            "enum": [
+              "started",
+              "stopped"
+            ]
+          },
+          "version": {
+            "const": 2
+          }
+        },
+        "required": [
+          "version",
+          "origin",
+          "conversation_id",
+          "state"
+        ],
+        "title": "TypingPlaintextV2",
+        "type": "object"
       }
     }
   },

@@ -1,4 +1,7 @@
-use crate::{Envelope, EphemeralSignalV1, LiveHelloV1, PairingQrRecord};
+use crate::{
+    ChallengePlaintextV2, Envelope, EphemeralSignalV1, EphemeralSignalV2, LiveHelloV1, LiveHelloV2,
+    PairingQrRecord, SessionAckPlaintextV2, TypingPlaintextV2,
+};
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, fs, io, path::Path};
@@ -15,16 +18,41 @@ pub fn generate_contracts() -> GeneratedContracts {
         serde_json::to_value(schema_for!(PairingQrRecord)).expect("Pairing schema serializes");
     let ephemeral = serde_json::to_value(schema_for!(EphemeralSignalV1))
         .expect("ephemeral signal schema serializes");
+    let ephemeral_v2 = serde_json::to_value(schema_for!(EphemeralSignalV2))
+        .expect("ephemeral v2 signal schema serializes");
+    let hello_v2 =
+        serde_json::to_value(schema_for!(LiveHelloV2)).expect("live hello v2 schema serializes");
+    let typing_plaintext_v2 = serde_json::to_value(schema_for!(TypingPlaintextV2))
+        .expect("typing plaintext v2 schema serializes");
+    let challenge_plaintext_v2 = serde_json::to_value(schema_for!(ChallengePlaintextV2))
+        .expect("challenge plaintext v2 schema serializes");
+    let session_ack_plaintext_v2 = serde_json::to_value(schema_for!(SessionAckPlaintextV2))
+        .expect("session ack plaintext v2 schema serializes");
     let mut components = BTreeMap::new();
     components.extend(extract_components("Envelope", envelope));
     components.extend(extract_components("PairingQrRecord", pairing));
     components.extend(extract_components("EphemeralSignalV1", ephemeral));
+    components.extend(extract_components("EphemeralSignalV2", ephemeral_v2));
     let hello =
         serde_json::to_value(schema_for!(LiveHelloV1)).expect("live hello schema serializes");
     components.extend(extract_components("LiveHelloV1", hello));
+    components.extend(extract_components("LiveHelloV2", hello_v2));
+    components.extend(extract_components("TypingPlaintextV2", typing_plaintext_v2));
+    components.extend(extract_components(
+        "ChallengePlaintextV2",
+        challenge_plaintext_v2,
+    ));
+    components.extend(extract_components(
+        "SessionAckPlaintextV2",
+        session_ack_plaintext_v2,
+    ));
     components.insert(
         "LiveFrameV1".into(),
         json!({"$ref": "#/components/schemas/EphemeralSignalV1"}),
+    );
+    components.insert(
+        "LiveFrameV2".into(),
+        json!({"$ref": "#/components/schemas/EphemeralSignalV2"}),
     );
     let mut component_value = serde_json::to_value(&components).expect("components serialize");
     rewrite_refs(&mut component_value);
