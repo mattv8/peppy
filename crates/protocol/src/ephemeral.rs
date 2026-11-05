@@ -10,6 +10,85 @@ pub const POSTGRES_NOTIFY_PAYLOAD_BYTES: usize = 8_000;
 pub const MAX_EPHEMERAL_CIPHERTEXT_BYTES: usize = 5_700;
 const AAD_DOMAIN_SEPARATOR: &[u8] = b"peppy-ephemeral-typing-v1\0";
 
+/// Live application frames use the existing signal JSON and AAD unchanged.
+pub type LiveFrameV1 = EphemeralSignalV1;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "LiveHelloWire")]
+pub struct LiveHelloV1 {
+    pub r#type: String,
+    pub protocol_version: u16,
+    pub max_ttl_ms: u64,
+    pub max_ciphertext_bytes: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveHelloWire {
+    r#type: String,
+    protocol_version: u16,
+    max_ttl_ms: u64,
+    max_ciphertext_bytes: usize,
+}
+
+impl TryFrom<LiveHelloWire> for LiveHelloV1 {
+    type Error = &'static str;
+
+    fn try_from(wire: LiveHelloWire) -> Result<Self, Self::Error> {
+        if wire.r#type != "hello" || wire.protocol_version != EPHEMERAL_PROTOCOL_VERSION {
+            return Err("unsupported live hello type or protocol version");
+        }
+        if !(1..=MAX_EPHEMERAL_TTL_MS).contains(&wire.max_ttl_ms)
+            || !(1..=MAX_EPHEMERAL_CIPHERTEXT_BYTES).contains(&wire.max_ciphertext_bytes)
+        {
+            return Err("invalid live hello limits");
+        }
+        Ok(Self {
+            r#type: wire.r#type,
+            protocol_version: wire.protocol_version,
+            max_ttl_ms: wire.max_ttl_ms,
+            max_ciphertext_bytes: wire.max_ciphertext_bytes,
+        })
+    }
+}
+
+impl LiveHelloV1 {
+    pub fn new() -> Self {
+        Self {
+            r#type: "hello".into(),
+            protocol_version: EPHEMERAL_PROTOCOL_VERSION,
+            max_ttl_ms: MAX_EPHEMERAL_TTL_MS,
+            max_ciphertext_bytes: MAX_EPHEMERAL_CIPHERTEXT_BYTES,
+        }
+    }
+}
+
+impl Default for LiveHelloV1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl JsonSchema for LiveHelloV1 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LiveHelloV1".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "type": { "const": "hello" },
+                "protocol_version": { "const": EPHEMERAL_PROTOCOL_VERSION },
+                "max_ttl_ms": { "type": "integer", "minimum": 1, "maximum": MAX_EPHEMERAL_TTL_MS },
+                "max_ciphertext_bytes": { "type": "integer", "minimum": 1, "maximum": MAX_EPHEMERAL_CIPHERTEXT_BYTES }
+            },
+            "required": ["type", "protocol_version", "max_ttl_ms", "max_ciphertext_bytes"]
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EphemeralSignalV1 {
     pub protocol_version: u16,

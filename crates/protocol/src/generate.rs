@@ -1,4 +1,4 @@
-use crate::{Envelope, EphemeralSignalV1, PairingQrRecord};
+use crate::{Envelope, EphemeralSignalV1, LiveHelloV1, PairingQrRecord};
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, fs, io, path::Path};
@@ -19,6 +19,13 @@ pub fn generate_contracts() -> GeneratedContracts {
     components.extend(extract_components("Envelope", envelope));
     components.extend(extract_components("PairingQrRecord", pairing));
     components.extend(extract_components("EphemeralSignalV1", ephemeral));
+    let hello =
+        serde_json::to_value(schema_for!(LiveHelloV1)).expect("live hello schema serializes");
+    components.extend(extract_components("LiveHelloV1", hello));
+    components.insert(
+        "LiveFrameV1".into(),
+        json!({"$ref": "#/components/schemas/EphemeralSignalV1"}),
+    );
     let mut component_value = serde_json::to_value(&components).expect("components serialize");
     rewrite_refs(&mut component_value);
     let openapi = pretty(

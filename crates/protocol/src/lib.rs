@@ -9,7 +9,7 @@ pub use envelope::{
     MAX_COMPACTION_SUPERSEDES, ORIGIN_TAG_BYTES, OriginTag, PROTOCOL_VERSION, PairingQrRecord,
 };
 pub use ephemeral::{
-    EPHEMERAL_PROTOCOL_VERSION, EphemeralSignalError, EphemeralSignalV1,
+    EPHEMERAL_PROTOCOL_VERSION, EphemeralSignalError, EphemeralSignalV1, LiveFrameV1, LiveHelloV1,
     MAX_EPHEMERAL_CIPHERTEXT_BYTES, MAX_EPHEMERAL_TTL_MS, POSTGRES_NOTIFY_PAYLOAD_BYTES,
 };
 pub use generate::{

@@ -229,6 +229,38 @@
           }
         ]
       },
+      "LiveFrameV1": {
+        "$ref": "#/components/schemas/EphemeralSignalV1"
+      },
+      "LiveHelloV1": {
+        "additionalProperties": false,
+        "properties": {
+          "max_ciphertext_bytes": {
+            "maximum": 5700,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_ttl_ms": {
+            "maximum": 15000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "protocol_version": {
+            "const": 1
+          },
+          "type": {
+            "const": "hello"
+          }
+        },
+        "required": [
+          "type",
+          "protocol_version",
+          "max_ttl_ms",
+          "max_ciphertext_bytes"
+        ],
+        "title": "LiveHelloV1",
+        "type": "object"
+      },
       "PairingQrRecord": {
         "properties": {
           "challenge_token": {

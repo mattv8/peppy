@@ -5,5 +5,7 @@ export type Envelope = { ciphertext: string; command_id?: string | null; compact
 export type EnvelopePurpose = 'command' | 'event';
 export type EphemeralSignalV1 = { ciphertext_b64: string; expires_at_ms: string; key_epoch: number; kind: 'typing'; protocol_version: 1; sender_device_id: string; sent_at_ms: string; sequence: string; };
 export type GatewayRoute = { gateway_device_id: string; subscription_id: string; } | { gateway_device_id: string; kind: 'rcs_link'; };
+export type LiveFrameV1 = EphemeralSignalV1;
+export type LiveHelloV1 = { max_ciphertext_bytes: number; max_ttl_ms: number; protocol_version: 1; type: 'hello'; };
 export type PairingQrRecord = { challenge_token: string; device_binding: string; expires_at_unix_seconds: number; https_origin: string; key_epoch: number; profile_fingerprint: string; protocol_version: number; vault_id: string; };
 export type SourceSequence = string;
