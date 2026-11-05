@@ -41,6 +41,12 @@ struct StoredCarrierOnlyProof {
     context_revision: u64,
 }
 
+pub(crate) enum CarrierAdmission {
+    Permitted,
+    Blocked,
+    InvalidateProof,
+}
+
 pub(crate) fn record_carrier_only_proof(
     conn: &Connection,
     proof: &CarrierOnlyProof,
@@ -91,15 +97,19 @@ pub(crate) fn carrier_admission(
     recipients: &[String],
     subscription_id: &str,
     now_ms: i64,
-) -> Result<bool, Error> {
+) -> Result<CarrierAdmission, Error> {
     if rcs_mapping::has_proven_mapping(conn, conversation_id)? {
-        return Ok(false);
+        return Ok(CarrierAdmission::Blocked);
     }
     let Some(linked) = rcs_mapping::current_link_state(conn)? else {
-        return Ok(true);
+        return Ok(CarrierAdmission::Permitted);
     };
     if !linked {
-        return recorded_link_state_is_unlinked(conn);
+        return Ok(if recorded_link_state_is_unlinked(conn)? {
+            CarrierAdmission::Permitted
+        } else {
+            CarrierAdmission::Blocked
+        });
     }
     let Some(value) = conn
         .query_row(
@@ -109,13 +119,18 @@ pub(crate) fn carrier_admission(
         )
         .optional()?
     else {
-        return Ok(false);
+        return Ok(CarrierAdmission::Blocked);
     };
     let proof: StoredCarrierOnlyProof =
         serde_json::from_str(&value).map_err(|_| Error::Database)?;
-    let current_age = now_ms.checked_sub(proof.observed_at_ms);
-    Ok(proof.expires_at_ms >= now_ms
-        && current_age.is_some_and(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(&age))
+    let Some(current_age) = now_ms.checked_sub(proof.observed_at_ms) else {
+        return Ok(CarrierAdmission::InvalidateProof);
+    };
+    if current_age < 0 {
+        return Ok(CarrierAdmission::InvalidateProof);
+    }
+    Ok(if proof.expires_at_ms >= now_ms
+        && (0..=RCS_MAPPING_FRESHNESS_MS).contains(&current_age)
         && proof.subscription_id == subscription_id
         && proof.recipients == canonical_recipients(recipients)?
         && rcs_mapping::context_is_current(
@@ -124,7 +139,22 @@ pub(crate) fn carrier_admission(
             proof.session_generation,
             proof.context_revision,
             true,
-        )?)
+        )? {
+        CarrierAdmission::Permitted
+    } else {
+        CarrierAdmission::Blocked
+    })
+}
+
+pub(crate) fn invalidate_carrier_only_proof(
+    conn: &Connection,
+    conversation_id: ConversationId,
+) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM metadata WHERE k=?",
+        [proof_key(conversation_id)],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn record_intentional_unlink(

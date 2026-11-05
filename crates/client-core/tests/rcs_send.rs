@@ -458,7 +458,7 @@ fn carrier_proof_rejects_future_extreme_overflow_and_expired_times() {
 
 #[test]
 fn clock_rollback_invalidates_carrier_proof_until_a_new_lookup_is_recorded() {
-    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
@@ -467,6 +467,17 @@ fn clock_rollback_invalidates_carrier_proof_until_a_new_lookup_is_recorded() {
     gateway.record_carrier_only_proof(&proof, 1_000).unwrap();
     assert_eq!(
         gateway.begin_send_attempt_at(command_id, 999).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+    assert_eq!(
+        gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+
+    drop(gateway);
+    let gateway = unlocked(&config, &vault);
+    assert_eq!(
+        gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
         PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
     );
 
@@ -543,6 +554,24 @@ fn terminal_link_states_do_not_fall_back_to_carrier() {
         unavailable.google_candidate_count = 0;
         unavailable.link_state = link_state;
         gateway.verify_rcs_mapping(&unavailable, 1_000).unwrap();
+        assert_eq!(
+            gateway.begin_send_attempt_at(command_id, 1_000).unwrap(),
+            PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+        );
+    }
+}
+
+#[test]
+fn terminal_context_cannot_be_relabelled_as_an_explicit_unlink() {
+    for link_state in [RcsLinkState::NeedsRelink, RcsLinkState::SignedOut] {
+        let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+        let mut terminal = observation("peer-local", 1);
+        terminal.google_candidate_count = 0;
+        terminal.link_state = link_state;
+        gateway.verify_rcs_mapping(&terminal, 1_000).unwrap();
+        let mut unlinked = terminal;
+        unlinked.link_state = RcsLinkState::Unlinked;
+        assert!(gateway.update_rcs_context(&unlinked, 1_000).is_err());
         assert_eq!(
             gateway.begin_send_attempt_at(command_id, 1_000).unwrap(),
             PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)

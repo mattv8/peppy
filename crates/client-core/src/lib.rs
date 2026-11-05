@@ -1159,7 +1159,10 @@ impl Client {
         let transaction = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        rcs_mapping::verify_and_store(&transaction, observation, now_ms)?;
+        let outcome = rcs_mapping::verify_and_store(&transaction, observation, now_ms)?;
+        if outcome != RcsMappingOutcome::Refused(RcsMappingRefusal::LinkUnavailable) {
+            return Err(Error::InvalidRequest("unlink context is not current"));
+        }
         if !rcs_mapping::context_is_current(
             &transaction,
             observation.link_generation,
@@ -3345,13 +3348,21 @@ impl Client {
         if !media_ready {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
-        if !rcs_send::carrier_admission(
+        let carrier_admission = rcs_send::carrier_admission(
             &tx,
             message.record.conversation_id,
             &message.recipients,
             &subscription_id,
             now_ms,
-        )? {
+        )?;
+        if matches!(carrier_admission, rcs_send::CarrierAdmission::InvalidateProof) {
+            rcs_send::invalidate_carrier_only_proof(&tx, message.record.conversation_id)?;
+            tx.commit()?;
+            return Ok(PermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
+        }
+        if !matches!(carrier_admission, rcs_send::CarrierAdmission::Permitted) {
             return Ok(PermitDecision::Blocked(
                 PermitBlock::CarrierOnlyProofUnavailable,
             ));
