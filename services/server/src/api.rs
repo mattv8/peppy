@@ -288,6 +288,8 @@ pub(super) struct ApiState {
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
     live_hub: crate::live::LiveHub,
     live_backend: Arc<crate::live_postgres::PgLiveBackend>,
+    #[cfg(test)]
+    live_backend_override: Option<Arc<dyn crate::live::LiveBackend>>,
     live_readiness: tokio::sync::watch::Receiver<bool>,
     live_rate_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
 }
@@ -518,6 +520,32 @@ pub(crate) fn build_router(
     push_advertisement: PushConfigAdvertisement,
     authorization: RouterAuthorization,
 ) -> Result<(Router, Maintenance), &'static str> {
+    build_router_with_live_backend(
+        db,
+        config,
+        initialized_storage,
+        options,
+        explicit_relay_url,
+        push_advertisement,
+        authorization,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn build_router_with_live_backend(
+    db: PgPool,
+    config: Option<Config>,
+    initialized_storage: Option<Storage>,
+    options: TransportOptions,
+    explicit_relay_url: Option<url::Url>,
+    push_advertisement: PushConfigAdvertisement,
+    authorization: RouterAuthorization,
+    #[cfg(test)] live_override: Option<(
+        Arc<dyn crate::live::LiveBackend>,
+        tokio::sync::watch::Receiver<bool>,
+    )>,
+) -> Result<(Router, Maintenance), &'static str> {
     let RouterAuthorization {
         policy,
         enrollment: enrollment_authorization,
@@ -551,6 +579,11 @@ pub(crate) fn build_router(
         live_hub.clone(),
     ));
     let live_readiness = live_backend.subscribe_readiness();
+    #[cfg(test)]
+    let (live_backend_override, live_readiness) = match live_override {
+        Some((backend, readiness)) => (Some(backend), readiness),
+        None => (None, live_readiness),
+    };
     let router = Router::new()
         .route("/v1/vault", get(vault_header))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
@@ -672,6 +705,8 @@ pub(crate) fn build_router(
         trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs.clone()),
         live_hub,
         live_backend,
+        #[cfg(test)]
+        live_backend_override,
         live_readiness,
         live_rate_limiter: Arc::new(std::sync::Mutex::new(
             crate::live::LiveRateLimiter::default(),
@@ -2689,13 +2724,24 @@ async fn live_websocket(
     // Authenticate before deciding whether the relay is available, so failed
     // credentials never receive an upgrade or register a hub sink.
     let principal = authenticated(&state, &headers, Operation::Sync).await?;
-    if !state.live_backend.is_ready() {
+    #[cfg(test)]
+    let backend = state
+        .live_backend_override
+        .clone()
+        .unwrap_or_else(|| state.live_backend.clone());
+    #[cfg(not(test))]
+    let backend: Arc<dyn crate::live::LiveBackend> = state.live_backend.clone();
+    let ready = if cfg!(test) {
+        *state.live_readiness.borrow()
+    } else {
+        state.live_backend.is_ready()
+    };
+    if !ready {
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "live_unavailable",
         ));
     }
-    let backend: Arc<dyn crate::live::LiveBackend> = state.live_backend.clone();
     let readiness = state.live_readiness.clone();
     Ok(upgrade
         .max_message_size(8_192)
@@ -3397,6 +3443,10 @@ async fn send_replay(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/live_socket.rs"]
+mod live_socket_tests;
 
 #[cfg(test)]
 mod tests {
