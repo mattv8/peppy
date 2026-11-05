@@ -81,7 +81,6 @@ pub enum RcsMappingRefusal {
     MappingConflict,
     NonMonotonicRevision,
     RetiredContext,
-    ContextMismatch,
     PeppyConversationUncertain,
 }
 
@@ -100,7 +99,6 @@ impl RcsMappingRefusal {
             Self::MappingConflict => "mapping_conflict",
             Self::NonMonotonicRevision => "nonmonotonic_revision",
             Self::RetiredContext => "retired_context",
-            Self::ContextMismatch => "context_mismatch",
             Self::PeppyConversationUncertain => "peppy_conversation_uncertain",
         }
     }
@@ -208,33 +206,10 @@ fn verify(
             ));
         }
     };
-    let visible = observation
-        .participants
-        .iter()
-        .filter(|participant| participant.is_visible)
-        .collect::<Vec<_>>();
-    if visible.is_empty() {
-        return Ok(RcsMappingOutcome::Refused(
-            RcsMappingRefusal::ParticipantAmbiguous,
-        ));
-    }
-    if visible.iter().any(|participant| {
-        !participant.identity.trim().is_empty()
-            && canonical_identity(&participant.identity).is_none()
-    }) {
-        return Ok(RcsMappingOutcome::Refused(
-            RcsMappingRefusal::InvalidIdentity,
-        ));
-    }
-    let visible = visible
-        .into_iter()
-        .filter(|participant| !participant.identity.trim().is_empty())
-        .collect::<Vec<_>>();
-    if visible.is_empty() {
-        return Ok(RcsMappingOutcome::Refused(
-            RcsMappingRefusal::ParticipantAmbiguous,
-        ));
-    }
+    let visible = match validated_visible_participants(observation) {
+        Ok(visible) => visible,
+        Err(reason) => return Ok(RcsMappingOutcome::Refused(reason)),
+    };
 
     let non_self = visible
         .iter()
@@ -305,7 +280,7 @@ fn verify(
         ));
     }
 
-    let digest = proof_digest(observation, class, &own_identity);
+    let digest = proof_digest(observation, class, &own_identity, &visible);
     let proof = RcsMappingProof {
         canonical_participant: participant,
         identity_region: observation.identity_region.clone(),
@@ -335,6 +310,29 @@ fn canonical_identity(identity: &str) -> Option<String> {
             .map(|number| number.format().mode(Mode::E164).to_string());
     }
     Some(format!("raw:{normalized}"))
+}
+
+fn validated_visible_participants(
+    observation: &RcsMappingObservation,
+) -> Result<Vec<&RcsParticipantObservation>, RcsMappingRefusal> {
+    let visible = observation
+        .participants
+        .iter()
+        .filter(|participant| participant.is_visible)
+        .collect::<Vec<_>>();
+    if visible.iter().any(|participant| {
+        !participant.identity.trim().is_empty()
+            && canonical_identity(&participant.identity).is_none()
+    }) {
+        return Err(RcsMappingRefusal::InvalidIdentity);
+    }
+    let visible = visible
+        .into_iter()
+        .filter(|participant| !participant.identity.trim().is_empty())
+        .collect::<Vec<_>>();
+    (!visible.is_empty())
+        .then_some(visible)
+        .ok_or(RcsMappingRefusal::ParticipantAmbiguous)
 }
 
 fn peppy_conversations_for_identity(
@@ -408,6 +406,7 @@ fn proof_digest(
     observation: &RcsMappingObservation,
     class: RcsMappingClass,
     own_identity: &str,
+    participants: &[&RcsParticipantObservation],
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"peppy/rcs-mapping-proof/v1\0");
@@ -435,10 +434,8 @@ fn proof_digest(
     digest.update(observation.session_generation.to_be_bytes());
     digest.update(observation.canonicalizer_revision.to_be_bytes());
     digest.update(observation.mapping_revision.to_be_bytes());
-    let mut participants = observation
-        .participants
+    let mut participants = participants
         .iter()
-        .filter(|participant| participant.is_visible)
         .filter_map(|participant| {
             canonical_identity(&participant.identity).map(|identity| (participant.is_me, identity))
         })
@@ -555,11 +552,15 @@ pub(crate) fn mapping_matches_observation(
     {
         return Ok(false);
     }
+    let visible = match validated_visible_participants(observation) {
+        Ok(visible) => visible,
+        Err(_) => return Ok(false),
+    };
     let own_identity = match canonical_identity(&observation.selected_sim_own_identity) {
         Some(identity) => identity,
         None => return Ok(false),
     };
-    if mapping.proof.digest != proof_digest(observation, mapping.class, &own_identity) {
+    if mapping.proof.digest != proof_digest(observation, mapping.class, &own_identity, &visible) {
         return Ok(false);
     }
     let (conversations, uncertain) =
@@ -616,7 +617,8 @@ fn invalidate_for_refusal(
             .iter()
             .filter(|participant| participant.is_visible && !participant.is_me)
             .filter_map(|participant| canonical_identity(&participant.identity))
-            .find(|identity| own_identity.as_deref() != Some(identity.as_str()));
+            .find(|identity| own_identity.as_deref() != Some(identity.as_str()))
+            .or(own_identity);
         if let Some(participant) = participant {
             for conversation_id in peppy_conversations_for_identity(conn, &participant)?.0 {
                 conn.execute(
