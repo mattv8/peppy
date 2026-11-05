@@ -13,6 +13,8 @@ class LinkRestartReceiver : BroadcastReceiver() {
                 val opened = LinkRuntime.handle(context.applicationContext) as? LinkOpenResult.Open ?: return@Thread
                 val status = LinkStatus.parse(opened.handle.status())
                 if (status.state == "linked") GoogleMessagesLinkService.start(context.applicationContext)
+            } catch (_: Exception) {
+                // A sealed-state or gomobile failure must not leave the broadcast pending.
             } finally {
                 pendingResult.finish()
             }

@@ -23,30 +23,36 @@ object LinkRuntime {
         val store = store(context)
         val state = try {
             store.read()
-        } catch (error: IllegalStateException) {
+        } catch (error: Exception) {
             return LinkOpenResult.Unreadable(filterReasonCode(error.message))
         }
         return try {
             engine.open(state, host(store)).also { cachedHandle = it }.let(LinkOpenResult::Open)
-        } catch (error: IllegalStateException) {
+        } catch (error: Exception) {
             if (error.message == "link_unavailable") LinkOpenResult.Unavailable
             else LinkOpenResult.Unreadable(filterReasonCode(error.message))
         }
     }
 
     fun resetLocalState(context: Context) {
-        GoogleMessagesLinkService.stop(context)
+        GoogleMessagesLinkService.stopAndAwait(context)
         synchronized(this) {
             cachedHandle?.close()
             cachedHandle = null
             store(context).wipe()
             emoji.value = null
+            pairingInProgress.set(false)
         }
         recordEvent("link", "reset_local", 0)
         signalChange()
     }
 
+    internal fun stopRunningHandle() = synchronized(this) {
+        cachedHandle?.stop()
+    }
+
     internal fun resetForTest() = synchronized(this) {
+        GoogleMessagesLinkService.stopActiveWorker()
         cachedHandle?.close()
         cachedHandle = null
         emoji.value = null
@@ -65,7 +71,7 @@ object LinkRuntime {
             val safeCode = filterReasonCode(code)
             callbackExecutor.execute {
                 recordEvent(kind, safeCode, value)
-                if (kind == "conn" && safeCode == "ready") GoogleMessagesLinkService.resetBackoff()
+                GoogleMessagesLinkService.onLinkEvent(kind, safeCode)
                 signalChange()
             }
         }
@@ -79,7 +85,7 @@ object LinkRuntime {
     }
 
     private fun recordEvent(kind: String, code: String, value: Long) {
-        LinkRuntimeTestHooks.eventRecorder?.invoke(kind, code, value)
+        LinkRuntimeEventSink.record(kind, code, value)
     }
 
     private fun signalChange() {
@@ -108,4 +114,14 @@ internal object LinkRuntimeTestHooks {
     @Volatile var engine: LinkEngine? = null
     @Volatile var storeFactory: ((Context) -> LinkStateStorage)? = null
     @Volatile var eventRecorder: ((String, String, Long) -> Unit)? = null
+}
+
+/** Task 9 installs the production diagnostics sink; the default intentionally records nothing. */
+internal object LinkRuntimeEventSink {
+    @Volatile var productionRecorder: ((String, String, Long) -> Unit)? = null
+
+    fun record(kind: String, code: String, value: Long) {
+        productionRecorder?.invoke(kind, code, value)
+        LinkRuntimeTestHooks.eventRecorder?.invoke(kind, code, value)
+    }
 }

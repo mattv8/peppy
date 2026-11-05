@@ -16,42 +16,64 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import dev.peppy.mobile.MainActivity
 import dev.peppy.mobile.R
-import java.util.concurrent.atomic.AtomicBoolean
 
 class GoogleMessagesLinkService : Service() {
-    private val runStarted = AtomicBoolean(false)
-    private val lifecycleLock = Any()
+    private val lock = Any()
     private val backoff = RunBackoff()
+    private var worker: Thread? = null
+    private var requestedGeneration = 0L
     private var lastStartId = 0
+    @Volatile private var cancelled = false
+    private var lastNotification: String? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        replaceActive(this)
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundFor(LinkStatus(0, "pairing", false, false, true, 0, ""))
-        synchronized(lifecycleLock) {
+        synchronized(lock) {
             lastStartId = startId
-            if (runStarted.compareAndSet(false, true)) startRunThread()
+            requestedGeneration += 1
+            if (worker == null || worker?.isAlive != true) startWorkerLocked(requestedGeneration)
         }
         return START_NOT_STICKY
     }
 
+    override fun onDestroy() {
+        cancelWorker()
+        clearActive(this)
+        super.onDestroy()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startRunThread() {
-        Thread {
-            try {
-                waitForLinkedRun()
-            } finally {
-                synchronized(lifecycleLock) {
-                    runStarted.set(false)
-                    stopSelf(lastStartId)
+    private fun startWorkerLocked(generation: Long) {
+        cancelled = false
+        worker = Thread { runWorker(generation) }.also { it.start() }
+    }
+
+    private fun runWorker(generation: Long) {
+        try {
+            waitForLinkedRun()
+        } finally {
+            synchronized(lock) {
+                if (cancelled || active !== this) return@synchronized
+                if (generation != requestedGeneration) {
+                    startWorkerLocked(requestedGeneration)
+                    return@synchronized
                 }
+                worker = null
+                stopSelf(lastStartId)
             }
-        }.start()
+        }
     }
 
     private fun waitForLinkedRun() {
-        while (true) {
-            val opened = LinkRuntime.handle(this)
-            val handle = (opened as? LinkOpenResult.Open)?.handle ?: return
+        val waitStartedAt = nowMillis()
+        while (!cancelled && active === this) {
+            val handle = (LinkRuntime.handle(this) as? LinkOpenResult.Open)?.handle ?: return
             val status = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
             startForegroundFor(status)
             when (nextServiceAction(status, LinkRuntime.pairingInProgress.get(), status.running)) {
@@ -60,8 +82,8 @@ class GoogleMessagesLinkService : Service() {
                     return
                 }
                 ServiceAction.WAIT -> {
-                    Thread.sleep(PAIRING_WAIT_MS)
-                    continue
+                    if (nowMillis() - waitStartedAt >= MAX_PAIRING_WAIT_MS) return
+                    if (!sleepInterruptibly(PAIRING_WAIT_MS)) return
                 }
                 ServiceAction.RUN -> runWithRetry(handle)
             }
@@ -69,23 +91,47 @@ class GoogleMessagesLinkService : Service() {
     }
 
     private fun runWithRetry(handle: LinkHandle) {
-        while (true) {
+        while (!cancelled && active === this) {
             val beforeRun = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
             if (beforeRun.state != "linked") return
             startForegroundFor(beforeRun)
             val failure = runCatching { handle.run() }.exceptionOrNull()
+            if (cancelled || active !== this || filterReasonCode(failure?.message) in STOP_CODES) return
             val afterRun = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
             startForegroundFor(afterRun)
             if (afterRun.state != "linked") {
                 showAttentionIfNeeded(afterRun)
                 return
             }
-            if (failure == null) return
-            Thread.sleep(backoff.nextDelayMillis())
+            if (failure == null || !sleepInterruptibly(backoff.nextDelayMillis())) return
         }
     }
 
+    private fun sleepInterruptibly(delayMs: Long): Boolean = try {
+        sleeper(delayMs)
+        !cancelled
+    } catch (_: InterruptedException) {
+        false
+    }
+
+    private fun cancelWorker() {
+        cancelled = true
+        LinkRuntime.stopRunningHandle()
+        synchronized(lock) { worker?.interrupt() }
+    }
+
+    private fun refreshNotificationAfterEvent() {
+        Thread {
+            if (cancelled || active !== this) return@Thread
+            val handle = (LinkRuntime.handle(this) as? LinkOpenResult.Open)?.handle ?: return@Thread
+            runCatching { LinkStatus.parse(handle.status()) }.getOrNull()?.let(::startForegroundFor)
+        }.start()
+    }
+
     private fun startForegroundFor(status: LinkStatus) {
+        val key = "${status.state}:${status.running}:${status.phoneResponding}"
+        if (lastNotification == key) return
+        lastNotification = key
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(status), foregroundServiceType())
     }
 
@@ -103,68 +149,45 @@ class GoogleMessagesLinkService : Service() {
             status.running -> getString(R.string.peppy_google_messages_link_notif_text_phone_not_responding)
             else -> getString(R.string.peppy_google_messages_link_notif_text_reconnecting)
         }
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.peppy_logo)
-            .setContentTitle(getString(R.string.peppy_google_messages_link_notif_title))
-            .setContentText(text)
+        return NotificationCompat.Builder(this, CHANNEL_ID).setSmallIcon(R.drawable.peppy_logo)
+            .setContentTitle(getString(R.string.peppy_google_messages_link_notif_title)).setContentText(text)
             .setContentIntent(PendingIntent.getActivity(this, NOTIFICATION_ID, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-            .setOngoing(!attention)
-            .setAutoCancel(attention)
-            .build()
+            .setCategory(NotificationCompat.CATEGORY_SERVICE).setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .setOnlyAlertOnce(true).setShowWhen(false).setOngoing(!attention).setAutoCancel(attention).build()
     }
 
-    private fun foregroundServiceType(): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING else 0
+    private fun foregroundServiceType(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING else 0
 
     companion object {
         internal const val CHANNEL_ID = "google_messages_link"
         internal const val NOTIFICATION_ID = 4110
         private const val PAIRING_WAIT_MS = 200L
+        private const val MAX_PAIRING_WAIT_MS = 5 * 60_000L + 30_000L
+        private val STOP_CODES = setOf("link_closed", "unlink_in_progress", "pair_cancelled", "run_refused")
         private val ATTENTION_STATES = setOf("needs_relink", "signed_out")
         @Volatile private var active: GoogleMessagesLinkService? = null
+        internal var sleeper: (Long) -> Unit = Thread::sleep
+        internal var nowMillis: () -> Long = System::currentTimeMillis
 
         fun createNotificationChannel(context: Context) {
-            val manager = context.getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, context.getString(R.string.peppy_google_messages_link_notif_channel_name), NotificationManager.IMPORTANCE_LOW).apply {
+            context.getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL_ID, context.getString(R.string.peppy_google_messages_link_notif_channel_name), NotificationManager.IMPORTANCE_LOW).apply {
                 description = context.getString(R.string.peppy_google_messages_link_notif_channel_desc)
                 setShowBadge(false)
                 lockscreenVisibility = Notification.VISIBILITY_SECRET
             })
         }
-
-        fun start(context: Context) {
-            try {
-                ContextCompat.startForegroundService(context, Intent(context, GoogleMessagesLinkService::class.java))
-            } catch (_: IllegalStateException) {
-            } catch (_: SecurityException) {
+        fun start(context: Context) { try { ContextCompat.startForegroundService(context, Intent(context, GoogleMessagesLinkService::class.java)) } catch (_: IllegalStateException) {} catch (_: SecurityException) {} }
+        fun stop(context: Context) { stopAndAwait(context); cancelAttention(context) }
+        fun stopAndAwait(context: Context) { active?.cancelWorker(); context.stopService(Intent(context, GoogleMessagesLinkService::class.java)) }
+        internal fun stopActiveWorker() { active?.cancelWorker() }
+        fun cancelAttention(context: Context) { NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID) }
+        internal fun onLinkEvent(kind: String, code: String) {
+            active?.let { service ->
+                if (kind == "conn" && code == "ready") service.backoff.reset()
+                service.refreshNotificationAfterEvent()
             }
         }
-
-        fun stop(context: Context) {
-            context.stopService(Intent(context, GoogleMessagesLinkService::class.java))
-            cancelAttention(context)
-        }
-
-        fun cancelAttention(context: Context) {
-            NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
-        }
-
-        internal fun resetBackoff() {
-            active?.backoff?.reset()
-        }
-    }
-
-    override fun onCreate() {
-        super.onCreate()
-        active = this
-    }
-
-    override fun onDestroy() {
-        if (active === this) active = null
-        super.onDestroy()
+        private fun replaceActive(service: GoogleMessagesLinkService) { active?.cancelWorker(); active = service }
+        private fun clearActive(service: GoogleMessagesLinkService) { if (active === service) active = null }
     }
 }

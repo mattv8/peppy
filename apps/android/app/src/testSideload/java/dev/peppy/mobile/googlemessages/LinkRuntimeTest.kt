@@ -66,6 +66,19 @@ class LinkRuntimeTest {
     }
 
     @Test
+    fun `gomobile open exception becomes filtered unreadable state`() {
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = throw Exception("not safe to show")
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+
+        val result = LinkRuntime.handle(context)
+
+        assertEquals(LinkOpenResult.Unreadable("unknown"), result)
+    }
+
+    @Test
     fun `reset stops closes wipes and records a fixed event`() {
         val handle = FakeHandle()
         val events = mutableListOf<String>()
@@ -80,6 +93,7 @@ class LinkRuntimeTest {
         assertTrue(handle.closed)
         assertTrue(store.wiped)
         assertEquals(listOf("link/reset_local"), events)
+        assertFalse(LinkRuntime.pairingInProgress.get())
     }
 
     @Test
