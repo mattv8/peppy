@@ -2661,7 +2661,13 @@ fn validate_outgoing_mms(
     require_subscription(route)
 }
 fn require_subscription(route: &GatewayRoute) -> Result<(), Error> {
-    if route.subscription_id.is_empty() || route.subscription_id.len() > MAX_SUBSCRIPTION_BYTES {
+    let GatewayRoute::Carrier {
+        subscription_id, ..
+    } = route
+    else {
+        return Err(Error::InvalidRequest("carrier route required"));
+    };
+    if subscription_id.is_empty() || subscription_id.len() > MAX_SUBSCRIPTION_BYTES {
         return Err(Error::InvalidRequest("subscription id"));
     }
     Ok(())
@@ -2722,8 +2728,14 @@ fn queue_message(
     };
     let message_id = payload.record.message_id;
     let command_id = CommandId::new();
+    let gateway_device_id = match route {
+        GatewayRoute::Carrier {
+            gateway_device_id, ..
+        }
+        | GatewayRoute::RcsLink { gateway_device_id } => *gateway_device_id,
+    };
     if insert_message(tx, &payload)? != Inserted::New
-        || !record_command(tx, command_id, message_id, route.gateway_device_id)?
+        || !record_command(tx, command_id, message_id, gateway_device_id)?
     {
         return Err(Error::Database);
     }
@@ -6789,18 +6801,25 @@ fn apply_record(
                     new_attachment_ids.push(descriptor.attachment_id);
                 }
             }
+            let GatewayRoute::Carrier {
+                gateway_device_id,
+                subscription_id,
+            } = route
+            else {
+                return Ok(Some(Q::InvalidPayload));
+            };
             if !store_remote_media(conn, &media)?
                 || insert_message(conn, &message)? == Inserted::Conflict
                 || !record_command(
                     conn,
                     command_id,
                     message.record.message_id,
-                    route.gateway_device_id,
+                    *gateway_device_id,
                 )?
             {
                 return Ok(Some(Q::PayloadConflict));
             }
-            if route.gateway_device_id == ctx.device_id {
+            if *gateway_device_id == ctx.device_id {
                 let attachment_ids = media
                     .iter()
                     .map(|descriptor| descriptor.attachment_id)
@@ -6825,7 +6844,7 @@ fn apply_record(
                 }
                 let inserted = conn.execute(
                     "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,retired,historical) VALUES(?,?,?,?,?,?) ON CONFLICT(command_id) DO NOTHING",
-                    params![command_id.to_string(), envelope.key_epoch, route.subscription_id, encoded, retired, historical],
+                    params![command_id.to_string(), envelope.key_epoch, subscription_id, encoded, retired, historical],
                 )?;
                 if !historical && !retired {
                     for attachment_id in attachment_ids {
@@ -12560,7 +12579,7 @@ mod tests {
                     attachment_ids: vec![],
                     subject: None,
                 },
-                GatewayRoute {
+                GatewayRoute::Carrier {
                     gateway_device_id: target_cfg.device_id,
                     subscription_id: "sim-1".into(),
                 },

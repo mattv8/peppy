@@ -96,7 +96,7 @@ fn invalid_initial_input_leaves_no_draft_row() {
 
     assert!(matches!(
         client.save_new_compose_draft(ComposeDraftUpdate {
-            route: Some(GatewayRoute {
+            route: Some(GatewayRoute::Carrier {
                 gateway_device_id: DeviceId::new(),
                 subscription_id: "x".repeat(513),
             }),
