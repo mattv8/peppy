@@ -343,6 +343,75 @@ fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
 
 #[test]
 fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
+    let rcs_command = CommandId(uuid::Uuid::from_u128(0x4701)).to_string();
+    let carrier_command = CommandId(uuid::Uuid::from_u128(0x4702)).to_string();
+    let conversation = ConversationId(uuid::Uuid::from_u128(0x4703)).to_string();
+    let tmp_id = uuid::Uuid::from_u128(0x4704).to_string();
+    let proof_hash = [0x47_u8; 32];
+    let proof_digest = [0x48_u8; 32];
+    // Explicit column lists include every durable v47 field, including nullable outcomes.
+    let state_rows = |conn: &rusqlite::Connection| {
+        let mappings = conn
+            .prepare("SELECT peppy_conversation_id,google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms,invalidated_at_ms,invalidation_code FROM rcs_conversation_mappings ORDER BY peppy_conversation_id")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?, row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?, row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let proofs = conn
+            .prepare("SELECT peppy_conversation_id,mapping_revision,canonical_participant,identity_region,own_identity FROM rcs_mapping_proofs ORDER BY peppy_conversation_id,mapping_revision")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let commands = conn
+            .prepare("SELECT local_order,command_id,key_epoch,subscription_id,payload,retired,historical FROM command_ledger ORDER BY local_order")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, i64>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?, row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?, row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let attempts = conn
+            .prepare("SELECT command_id,state,attempted_at_ms,finalized_transport FROM attempts ORDER BY command_id")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?, row.get::<_, Option<String>>(3)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let sends = conn
+            .prepare("SELECT command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms,transport_ack_at_ms,transport_ack_code,retry_of_command_id FROM rcs_send_ledger ORDER BY command_id")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?, row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(4)?, row.get::<_, i64>(5)?,
+                row.get::<_, Option<i64>>(6)?, row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        (mappings, proofs, commands, attempts, sends)
+    };
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&dir, "gateway-v47-upgrade", &vault);
@@ -354,6 +423,56 @@ fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
     client.set_gateway_settings(settings.clone()).unwrap();
     drop(client);
     let conn = encrypted_connection(&config);
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    conn.execute(
+        "INSERT INTO rcs_conversation_mappings(peppy_conversation_id,google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms) VALUES(?,?,?,?,?,?,?)",
+        rusqlite::params![conversation, "fixture-google", "one_to_one", 2, &proof_hash[..], 7, 1000],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO rcs_mapping_proofs(peppy_conversation_id,mapping_revision,canonical_participant,identity_region,own_identity) VALUES(?,?,?,?,?)",
+        rusqlite::params![conversation, 7, "raw:fixture-peer", "ZZ", "raw:fixture-own"],
+    )
+    .unwrap();
+    for (command, subscription, state, transport, attempted_at_ms) in [
+        (&rcs_command, "", "delivered", "rcs", 1100_i64),
+        (
+            &carrier_command,
+            "android-subscription-1",
+            "sent",
+            "carrier",
+            1200_i64,
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload) VALUES(?,?,?,?)",
+            rusqlite::params![command, 1, subscription, "{}"],
+        )
+        .unwrap();
+        // Terminal states prevent open-time recovery from converting these to outcome_unknown.
+        conn.execute(
+            "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?,?,?,?)",
+            rusqlite::params![command, state, attempted_at_ms, transport],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms,transport_ack_at_ms,transport_ack_code) VALUES(?,?,?,?,?,?,?,?)",
+        rusqlite::params![rcs_command, tmp_id, 7, &proof_digest[..], "fixture-google", 1100, 1150, "fixture-ack-delivered"],
+    )
+    .unwrap();
+    let before = state_rows(&conn);
+    assert_eq!(
+        (
+            before.0.len(),
+            before.1.len(),
+            before.2.len(),
+            before.3.len(),
+            before.4.len()
+        ),
+        (1, 1, 2, 2, 1),
+        "the v47 preservation fixture must contain existing RCS and carrier state"
+    );
     conn.execute_batch(
         "DROP TABLE rcs_capability_published;
          DROP TABLE rcs_link_eligibility_projection;
@@ -373,6 +492,22 @@ fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
         48
     );
     assert_rcs_mapping_schema(&conn);
+    let after = state_rows(&conn);
+    assert_eq!(
+        (
+            after.0.len(),
+            after.1.len(),
+            after.2.len(),
+            after.3.len(),
+            after.4.len()
+        ),
+        (1, 1, 2, 2, 1),
+        "migration must not delete or create existing v47 state"
+    );
+    assert_eq!(
+        after, before,
+        "migration must preserve every v47 field exactly"
+    );
 }
 
 #[test]
