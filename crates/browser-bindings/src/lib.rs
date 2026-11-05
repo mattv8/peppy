@@ -1493,7 +1493,7 @@ mod tests {
                         recipients: vec!["+15555550100".into()],
                         body: format!("queued {index}"),
                     },
-                    GatewayRoute {
+                    GatewayRoute::Carrier {
                         gateway_device_id: device,
                         subscription_id: "sim-1".into(),
                     },
