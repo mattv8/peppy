@@ -1,5 +1,7 @@
 use super::common::*;
 use peppy_crypto::{KeyPurpose, derive_purpose_key, derive_root_key, encrypt};
+use rusqlite::Connection;
+use std::collections::HashSet;
 
 fn sealed(vault: &Vault, producer: DeviceId, sequence: u64, payload: PrivatePayload) -> Envelope {
     let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
@@ -294,6 +296,38 @@ fn status_accessor_preserves_state_but_marks_stale_status_unknown_to_consumers()
     );
 }
 
+fn journal_outcomes(config: &ClientConfig) -> Vec<(u64, String, Option<String>)> {
+    let connection = Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+        .prepare("SELECT cursor,status,reason FROM journal ORDER BY cursor")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn settle(client: &Client) -> ApplyReport {
+    let mut total = ApplyReport::default();
+    loop {
+        let step = client.apply_pending(100).unwrap();
+        total.applied += step.applied;
+        total.quarantined += step.quarantined;
+        total.drained += step.drained;
+        total.superseded += step.superseded;
+        if step.applied + step.quarantined + step.drained + step.superseded == 0
+            && step.snapshot_remaining == 0
+        {
+            return total;
+        }
+    }
+}
+
 #[test]
 fn invalid_authenticated_capability_events_quarantine_without_wedging_following_updates() {
     let directory = tempfile::tempdir().unwrap();
@@ -301,47 +335,160 @@ fn invalid_authenticated_capability_events_quarantine_without_wedging_following_
     let target_config = config(&directory, "rcs-capability-replay-target", &vault);
     let target = unlocked(&target_config, &vault);
     let producer = DeviceId::new();
-    let mut oversized = status(producer, u64::MAX, 1_000);
-    target
-        .ingest(
-            &sealed(
-                &vault,
-                producer,
-                1,
-                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
-                    status: oversized.clone(),
-                }),
-            ),
-            Cursor(1),
-        )
-        .unwrap();
-    oversized.capability_revision = 1;
-    target
-        .ingest(
-            &sealed(
-                &vault,
-                producer,
-                u64::MAX,
-                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
-                    status: oversized.clone(),
-                }),
-            ),
-            Cursor(2),
-        )
-        .unwrap();
-    target
-        .ingest(
-            &sealed(
-                &vault,
-                producer,
-                3,
-                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status: oversized }),
-            ),
-            Cursor(3),
-        )
-        .unwrap();
+    let conversation = ConversationId::new();
+
+    let invalid = [
+        sealed(
+            &vault,
+            producer,
+            1,
+            PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                eligibility: eligibility(producer, conversation, u64::MAX, 1_000),
+            }),
+        ),
+        sealed(
+            &vault,
+            producer,
+            2,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: status(producer, u64::MAX, 1_000),
+            }),
+        ),
+        sealed(
+            &vault,
+            producer,
+            i64::MAX as u64 + 1,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: status(producer, 1, 1_000),
+            }),
+        ),
+    ];
+    let valid = [
+        sealed(
+            &vault,
+            producer,
+            4,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: status(producer, 2, 1_004),
+            }),
+        ),
+        sealed(
+            &vault,
+            producer,
+            5,
+            PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                eligibility: eligibility(producer, conversation, 2, 1_004),
+            }),
+        ),
+    ];
+    for (index, envelope) in invalid.iter().chain(&valid).enumerate() {
+        assert_eq!(
+            target.ingest(envelope, Cursor(index as u64 + 1)).unwrap(),
+            IngestResult::Journaled
+        );
+    }
+
     let report = target.apply_pending(10).unwrap();
-    assert_eq!((report.applied, report.quarantined), (1, 2));
+    assert_eq!((report.applied, report.quarantined), (2, 3));
+    assert_eq!(
+        target.replay_progress().unwrap(),
+        ReplayProgress {
+            received_through: Cursor(5),
+            processed_through: Cursor(5),
+            waiting_for_keys: 0,
+        }
+    );
+    assert!(target.rcs_gateway_supported(producer, 1_005).unwrap());
+    assert_eq!(
+        target
+            .rcs_eligibility_projection(conversation, producer, 1_005)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible
+    );
+    drop(target);
+
+    assert_eq!(
+        journal_outcomes(&target_config),
+        vec![
+            (1, "quarantined".into(), Some("invalid_payload".into())),
+            (2, "quarantined".into(), Some("invalid_payload".into())),
+            (3, "quarantined".into(), Some("invalid_payload".into())),
+            (4, "applied".into(), None),
+            (5, "applied".into(), None),
+        ]
+    );
+    let reopened = unlocked(&target_config, &vault);
+    assert_eq!(reopened.quarantine_count().unwrap(), 3);
+    assert_eq!(
+        reopened.replay_progress().unwrap().processed_through,
+        Cursor(5)
+    );
+    assert_eq!(reopened.apply_pending(10).unwrap(), ApplyReport::default());
+    assert!(reopened.rcs_gateway_supported(producer, 1_005).unwrap());
+    assert_eq!(
+        reopened
+            .rcs_eligibility_projection(conversation, producer, 1_005)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible
+    );
+}
+
+#[test]
+fn mismatched_authenticated_producer_cannot_claim_a_gateway_or_wedge_valid_updates() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let target_config = config(&directory, "rcs-capability-source", &vault);
+    let target = unlocked(&target_config, &vault);
+    let producer = DeviceId::new();
+    let claimed_gateway = DeviceId::new();
+    let conversation = ConversationId::new();
+    let envelopes = [
+        sealed(
+            &vault,
+            producer,
+            1,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: status(claimed_gateway, 1, 1_000),
+            }),
+        ),
+        sealed(
+            &vault,
+            producer,
+            2,
+            PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                eligibility: eligibility(claimed_gateway, conversation, 1, 1_000),
+            }),
+        ),
+        sealed(
+            &vault,
+            producer,
+            3,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: status(producer, 2, 1_002),
+            }),
+        ),
+        sealed(
+            &vault,
+            producer,
+            4,
+            PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                eligibility: eligibility(producer, conversation, 2, 1_002),
+            }),
+        ),
+    ];
+    for (index, envelope) in envelopes.iter().enumerate() {
+        assert_eq!(
+            target.ingest(envelope, Cursor(index as u64 + 1)).unwrap(),
+            IngestResult::Journaled
+        );
+    }
+
+    let report = target.apply_pending(10).unwrap();
+    assert_eq!((report.applied, report.quarantined), (2, 2));
     assert_eq!(
         target
             .quarantined()
@@ -349,96 +496,319 @@ fn invalid_authenticated_capability_events_quarantine_without_wedging_following_
             .into_iter()
             .map(|record| record.reason)
             .collect::<Vec<_>>(),
-        vec![QuarantineReason::InvalidPayload, QuarantineReason::InvalidPayload]
+        vec![
+            QuarantineReason::InvalidPayload,
+            QuarantineReason::InvalidPayload,
+        ]
     );
-    assert!(target.rcs_gateway_supported(producer, 1_001).unwrap());
-    drop(target);
-    let reopened = unlocked(&target_config, &vault);
-    assert_eq!(reopened.quarantine_count().unwrap(), 2);
-    assert!(reopened.rcs_gateway_supported(producer, 1_001).unwrap());
-}
-
-#[test]
-fn mismatched_authenticated_producer_cannot_claim_a_gateway() {
-    let directory = tempfile::tempdir().unwrap();
-    let vault = Vault::new();
-    let target = unlocked(&config(&directory, "rcs-capability-source", &vault), &vault);
-    let producer = DeviceId::new();
-    let claimed_gateway = DeviceId::new();
-    target
-        .ingest(
-            &sealed(
-                &vault,
-                producer,
-                1,
-                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
-                    status: status(claimed_gateway, 1, 1_000),
-                }),
-            ),
-            Cursor(1),
-        )
-        .unwrap();
-    target
-        .ingest(
-            &sealed(
-                &vault,
-                producer,
-                2,
-                PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
-                    eligibility: eligibility(claimed_gateway, ConversationId::new(), 1, 1_000),
-                }),
-            ),
-            Cursor(2),
-        )
-        .unwrap();
-    let report = target.apply_pending(10).unwrap();
-    assert_eq!((report.applied, report.quarantined), (0, 2));
-    assert_eq!(target.quarantine_count().unwrap(), 2);
     assert!(
         target
-            .rcs_link_status(claimed_gateway, 1_001)
+            .rcs_link_status(claimed_gateway, 1_003)
             .unwrap()
             .is_none()
     );
+    assert!(
+        target
+            .rcs_eligibility_projection(conversation, claimed_gateway, 1_003)
+            .unwrap()
+            .is_none()
+    );
+    assert!(target.rcs_gateway_supported(producer, 1_003).unwrap());
+    assert_eq!(
+        target
+            .rcs_eligibility_projection(conversation, producer, 1_003)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible
+    );
+    assert_eq!(
+        target.replay_progress().unwrap().processed_through,
+        Cursor(4)
+    );
+    drop(target);
+
+    assert_eq!(
+        journal_outcomes(&target_config),
+        vec![
+            (1, "quarantined".into(), Some("invalid_payload".into())),
+            (2, "quarantined".into(), Some("invalid_payload".into())),
+            (3, "applied".into(), None),
+            (4, "applied".into(), None),
+        ]
+    );
+    let reopened = unlocked(&target_config, &vault);
+    assert_eq!(reopened.apply_pending(10).unwrap(), ApplyReport::default());
+    assert!(reopened.rcs_gateway_supported(producer, 1_003).unwrap());
+    assert_eq!(
+        reopened
+            .rcs_eligibility_projection(conversation, producer, 1_003)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible
+    );
 }
 
 #[test]
-fn out_of_order_revisions_cannot_restore_an_older_eligible_status() {
+fn equal_revisions_use_producer_sequence_without_allowing_revision_rollback() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let target = unlocked(&config(&directory, "rcs-capability-order", &vault), &vault);
     let gateway = DeviceId::new();
-    let mut unavailable = status(gateway, 2, 1_002);
+    let conversation = ConversationId::new();
+
+    let mut unavailable = status(gateway, 5, 1_000);
     unavailable.state = RcsCapabilityState::Unavailable;
     unavailable.availability = false;
-    target
-        .ingest(
-            &sealed(
-                &vault,
-                gateway,
-                20,
-                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
-                    status: unavailable,
-                }),
-            ),
-            Cursor(1),
+    let mut not_eligible = eligibility(gateway, conversation, 5, 1_000);
+    not_eligible.eligibility = RcsEligibility::NotEligible;
+    let initial = [
+        sealed(
+            &vault,
+            gateway,
+            20,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: unavailable.clone(),
+            }),
+        ),
+        sealed(
+            &vault,
+            gateway,
+            20,
+            PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                eligibility: not_eligible.clone(),
+            }),
+        ),
+    ];
+    let lower_sequence = [
+        sealed(
+            &vault,
+            gateway,
+            19,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: status(gateway, 5, 1_001),
+            }),
+        ),
+        sealed(
+            &vault,
+            gateway,
+            19,
+            PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                eligibility: eligibility(gateway, conversation, 5, 1_001),
+            }),
+        ),
+    ];
+    let higher_sequence = [
+        sealed(
+            &vault,
+            gateway,
+            21,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: status(gateway, 5, 1_002),
+            }),
+        ),
+        sealed(
+            &vault,
+            gateway,
+            21,
+            PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                eligibility: eligibility(gateway, conversation, 5, 1_002),
+            }),
+        ),
+    ];
+    let mut older_unavailable = status(gateway, 4, 1_003);
+    older_unavailable.state = RcsCapabilityState::Unavailable;
+    older_unavailable.availability = false;
+    let mut older_not_eligible = eligibility(gateway, conversation, 4, 1_003);
+    older_not_eligible.eligibility = RcsEligibility::NotEligible;
+    let older_revision = [
+        sealed(
+            &vault,
+            gateway,
+            22,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: older_unavailable,
+            }),
+        ),
+        sealed(
+            &vault,
+            gateway,
+            22,
+            PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                eligibility: older_not_eligible,
+            }),
+        ),
+    ];
+
+    for (index, envelope) in initial
+        .iter()
+        .chain(&lower_sequence)
+        .chain(&higher_sequence)
+        .chain(&older_revision)
+        .enumerate()
+    {
+        assert_eq!(
+            target.ingest(envelope, Cursor(index as u64 + 1)).unwrap(),
+            IngestResult::Journaled
+        );
+    }
+    let report = target.apply_pending(20).unwrap();
+    assert_eq!((report.applied, report.quarantined), (8, 0));
+    let status = target.rcs_link_status(gateway, 1_004).unwrap().unwrap();
+    assert_eq!(status.status.capability_revision, 5);
+    assert_eq!(status.status.state, RcsCapabilityState::Linked);
+    assert_eq!(status.status.observed_at_ms, 1_002);
+    let projection = target
+        .rcs_eligibility_projection(conversation, gateway, 1_004)
+        .unwrap()
+        .unwrap();
+    assert_eq!(projection.mapping_revision, 5);
+    assert_eq!(projection.observed_at_ms, 1_002);
+    assert_eq!(projection.eligibility, RcsEligibility::Eligible);
+}
+
+#[test]
+fn compacted_capability_snapshot_and_historical_replay_do_not_resurrect_linkage() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let source_config = config(&directory, "rcs-capability-snapshot-source", &vault);
+    let source = unlocked(&source_config, &vault);
+    let gateway = source_config.device_id;
+    let conversation = ConversationId::new();
+    let mut server = Server::default();
+
+    source
+        .publish_rcs_capability(
+            &status(gateway, 1, 1_000),
+            &[eligibility(gateway, conversation, 1, 1_000)],
+            1_000,
         )
         .unwrap();
-    target
-        .ingest(
-            &sealed(
-                &vault,
-                gateway,
-                21,
-                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
-                    status: status(gateway, 1, 1_001),
-                }),
-            ),
-            Cursor(2),
+    assert_eq!(server.upload(&source), 2);
+    let historical_linked = server.log[0].clone();
+    let mut unlinked = status(gateway, 2, 1_001);
+    unlinked.state = RcsCapabilityState::Unlinked;
+    unlinked.availability = false;
+    source
+        .publish_rcs_capability(&unlinked, &[], 1_001)
+        .unwrap();
+    assert_eq!(server.upload(&source), 1);
+    assert_eq!(server.log.len(), 3);
+
+    let superseded = server
+        .log
+        .iter()
+        .filter_map(|envelope| envelope.compaction.as_ref())
+        .flat_map(|metadata| metadata.supersedes.iter())
+        .map(|reference| (reference.producer_device_id, reference.producer_sequence.0))
+        .collect::<HashSet<_>>();
+    let snapshot = server
+        .log
+        .iter()
+        .enumerate()
+        .filter(|(_, envelope)| {
+            !superseded.contains(&(envelope.producer_device_id, envelope.producer_sequence.0))
+        })
+        .map(|(index, envelope)| SnapshotRecord {
+            cursor: Cursor(index as u64 + 1),
+            envelope: envelope.clone(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        snapshot.len(),
+        2,
+        "latest status plus old eligibility retained"
+    );
+
+    let target_config = config(&directory, "rcs-capability-snapshot-target", &vault);
+    let target = unlocked(&target_config, &vault);
+    let session = target
+        .begin_snapshot_with_compaction(
+            Cursor(server.log.len() as u64),
+            snapshot.len() as u64,
+            SnapshotPurpose::Resync,
+            Some(1),
         )
         .unwrap();
-    target.apply_pending(10).unwrap();
-    let view = target.rcs_link_status(gateway, 1_003).unwrap().unwrap();
-    assert_eq!(view.status.state, RcsCapabilityState::Unavailable);
-    assert!(!target.rcs_gateway_supported(gateway, 1_003).unwrap());
+    assert_eq!(session.received_records, 0);
+    let appended = target
+        .append_snapshot_page(session.generation, &snapshot)
+        .unwrap();
+    assert_eq!(appended.received_records, 2);
+    let published = target.finish_snapshot(session.generation).unwrap();
+    assert_eq!(
+        (
+            published.journaled,
+            published.duplicate,
+            published.receive_cursor
+        ),
+        (2, 0, 3)
+    );
+    let applied = settle(&target);
+    assert_eq!((applied.applied, applied.quarantined), (2, 0));
+    assert_eq!(target.receive_cursor().unwrap(), Cursor(3));
+    assert!(!target.rcs_gateway_supported(gateway, 1_002).unwrap());
+    assert_eq!(
+        target
+            .rcs_link_status(gateway, 1_002)
+            .unwrap()
+            .unwrap()
+            .status
+            .state,
+        RcsCapabilityState::Unlinked
+    );
+    assert_eq!(
+        target
+            .rcs_eligibility_projection(conversation, gateway, 1_002)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Unknown
+    );
+
+    assert_eq!(
+        target.ingest(&historical_linked, Cursor(4)).unwrap(),
+        IngestResult::Journaled
+    );
+    let replay = target.apply_pending(10).unwrap();
+    assert_eq!((replay.applied, replay.quarantined), (1, 0));
+    assert_eq!(
+        target.replay_progress().unwrap().processed_through,
+        Cursor(4)
+    );
+    assert!(!target.rcs_gateway_supported(gateway, 1_002).unwrap());
+    assert_eq!(
+        target
+            .rcs_link_status(gateway, 1_002)
+            .unwrap()
+            .unwrap()
+            .status
+            .state,
+        RcsCapabilityState::Unlinked
+    );
+    assert_eq!(
+        target
+            .rcs_eligibility_projection(conversation, gateway, 1_002)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Unknown
+    );
+    drop(target);
+
+    let reopened = unlocked(&target_config, &vault);
+    assert!(!reopened.rcs_gateway_supported(gateway, 1_002).unwrap());
+    assert_eq!(
+        reopened
+            .rcs_eligibility_projection(conversation, gateway, 1_002)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Unknown
+    );
+    assert_eq!(
+        reopened.replay_progress().unwrap().processed_through,
+        Cursor(4)
+    );
 }
