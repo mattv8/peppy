@@ -1,0 +1,155 @@
+:is(.theme-system, .theme-dark) {
+  --peppy-accent-default: #ff8a73;
+  --peppy-accent-preset-61: var(--peppy-avatar-61);
+  --peppy-accent-preset-7: var(--peppy-accent-default);
+  --peppy-accent-preset-60: var(--peppy-avatar-60);
+  --peppy-accent-preset-15: var(--peppy-avatar-15);
+  --peppy-accent-preset-19: var(--peppy-avatar-19);
+  --peppy-accent-preset-78: var(--peppy-avatar-78);
+  --peppy-accent-preset-9: var(--peppy-avatar-9);
+  --peppy-accent-preset-31: var(--peppy-avatar-31);
+  --peppy-accent-preset-12: var(--peppy-avatar-12);
+  --peppy-accent-preset-32: var(--peppy-avatar-32);
+  --peppy-accent-preset-37: var(--peppy-avatar-37);
+  --peppy-accent-preset-27: var(--peppy-avatar-27);
+  --peppy-accent-preset-4: var(--peppy-avatar-4);
+  --peppy-accent-preset-71: var(--peppy-avatar-71);
+  --peppy-accent-preset-99: var(--peppy-avatar-99);
+  --peppy-accent-preset-43: var(--peppy-avatar-43);
+  --peppy-accent-preset-115: var(--peppy-avatar-115);
+  --peppy-accent-preset-47: var(--peppy-avatar-47);
+  --peppy-accent-preset-55: var(--peppy-avatar-55);
+  --peppy-accent-preset-3: var(--peppy-avatar-3);
+  --peppy-accent-preset-111: var(--peppy-avatar-111);
+  --peppy-accent-preset-26: var(--peppy-avatar-26);
+  --peppy-accent-preset-0: var(--peppy-avatar-0);
+  --peppy-accent-preset-89: var(--peppy-avatar-89);
+}
+
+.theme-light {
+  --peppy-accent-default: #c9422d;
+  --peppy-accent-preset-61: color-mix(in srgb, var(--peppy-avatar-61) 88%, #000);
+  --peppy-accent-preset-7: var(--peppy-accent-default);
+  --peppy-accent-preset-60: color-mix(in srgb, var(--peppy-avatar-60) 88%, #000);
+  --peppy-accent-preset-15: color-mix(in srgb, var(--peppy-avatar-15) 88%, #000);
+  --peppy-accent-preset-19: color-mix(in srgb, var(--peppy-avatar-19) 88%, #000);
+  --peppy-accent-preset-78: color-mix(in srgb, var(--peppy-avatar-78) 88%, #000);
+  --peppy-accent-preset-9: color-mix(in srgb, var(--peppy-avatar-9) 88%, #000);
+  --peppy-accent-preset-31: color-mix(in srgb, var(--peppy-avatar-31) 88%, #000);
+  --peppy-accent-preset-12: color-mix(in srgb, var(--peppy-avatar-12) 88%, #000);
+  --peppy-accent-preset-32: color-mix(in srgb, var(--peppy-avatar-32) 88%, #000);
+  --peppy-accent-preset-37: color-mix(in srgb, var(--peppy-avatar-37) 88%, #000);
+  --peppy-accent-preset-27: color-mix(in srgb, var(--peppy-avatar-27) 88%, #000);
+  --peppy-accent-preset-4: color-mix(in srgb, var(--peppy-avatar-4) 88%, #000);
+  --peppy-accent-preset-71: color-mix(in srgb, var(--peppy-avatar-71) 88%, #000);
+  --peppy-accent-preset-99: color-mix(in srgb, var(--peppy-avatar-99) 88%, #000);
+  --peppy-accent-preset-43: color-mix(in srgb, var(--peppy-avatar-43) 88%, #000);
+  --peppy-accent-preset-115: color-mix(in srgb, var(--peppy-avatar-115) 88%, #000);
+  --peppy-accent-preset-47: color-mix(in srgb, var(--peppy-avatar-47) 88%, #000);
+  --peppy-accent-preset-55: color-mix(in srgb, var(--peppy-avatar-55) 88%, #000);
+  --peppy-accent-preset-3: color-mix(in srgb, var(--peppy-avatar-3) 88%, #000);
+  --peppy-accent-preset-111: color-mix(in srgb, var(--peppy-avatar-111) 88%, #000);
+  --peppy-accent-preset-26: color-mix(in srgb, var(--peppy-avatar-26) 88%, #000);
+  --peppy-accent-preset-0: color-mix(in srgb, var(--peppy-avatar-0) 88%, #000);
+  --peppy-accent-preset-89: color-mix(in srgb, var(--peppy-avatar-89) 88%, #000);
+}
+
+@media (prefers-color-scheme: light) {
+  .theme-system {
+    --peppy-accent-default: #c9422d;
+    --peppy-accent-preset-61: color-mix(in srgb, var(--peppy-avatar-61) 88%, #000);
+    --peppy-accent-preset-7: var(--peppy-accent-default);
+    --peppy-accent-preset-60: color-mix(in srgb, var(--peppy-avatar-60) 88%, #000);
+    --peppy-accent-preset-15: color-mix(in srgb, var(--peppy-avatar-15) 88%, #000);
+    --peppy-accent-preset-19: color-mix(in srgb, var(--peppy-avatar-19) 88%, #000);
+    --peppy-accent-preset-78: color-mix(in srgb, var(--peppy-avatar-78) 88%, #000);
+    --peppy-accent-preset-9: color-mix(in srgb, var(--peppy-avatar-9) 88%, #000);
+    --peppy-accent-preset-31: color-mix(in srgb, var(--peppy-avatar-31) 88%, #000);
+    --peppy-accent-preset-12: color-mix(in srgb, var(--peppy-avatar-12) 88%, #000);
+    --peppy-accent-preset-32: color-mix(in srgb, var(--peppy-avatar-32) 88%, #000);
+    --peppy-accent-preset-37: color-mix(in srgb, var(--peppy-avatar-37) 88%, #000);
+    --peppy-accent-preset-27: color-mix(in srgb, var(--peppy-avatar-27) 88%, #000);
+    --peppy-accent-preset-4: color-mix(in srgb, var(--peppy-avatar-4) 88%, #000);
+    --peppy-accent-preset-71: color-mix(in srgb, var(--peppy-avatar-71) 88%, #000);
+    --peppy-accent-preset-99: color-mix(in srgb, var(--peppy-avatar-99) 88%, #000);
+    --peppy-accent-preset-43: color-mix(in srgb, var(--peppy-avatar-43) 88%, #000);
+    --peppy-accent-preset-115: color-mix(in srgb, var(--peppy-avatar-115) 88%, #000);
+    --peppy-accent-preset-47: color-mix(in srgb, var(--peppy-avatar-47) 88%, #000);
+    --peppy-accent-preset-55: color-mix(in srgb, var(--peppy-avatar-55) 88%, #000);
+    --peppy-accent-preset-3: color-mix(in srgb, var(--peppy-avatar-3) 88%, #000);
+    --peppy-accent-preset-111: color-mix(in srgb, var(--peppy-avatar-111) 88%, #000);
+    --peppy-accent-preset-26: color-mix(in srgb, var(--peppy-avatar-26) 88%, #000);
+    --peppy-accent-preset-0: color-mix(in srgb, var(--peppy-avatar-0) 88%, #000);
+    --peppy-accent-preset-89: color-mix(in srgb, var(--peppy-avatar-89) 88%, #000);
+  }
+}
+
+@media (forced-colors: none) {
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="61"] { --peppy-accent-selected: var(--peppy-accent-preset-61); --peppy-accent-base: var(--peppy-avatar-61); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="60"] { --peppy-accent-selected: var(--peppy-accent-preset-60); --peppy-accent-base: var(--peppy-avatar-60); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="15"] { --peppy-accent-selected: var(--peppy-accent-preset-15); --peppy-accent-base: var(--peppy-avatar-15); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="19"] { --peppy-accent-selected: var(--peppy-accent-preset-19); --peppy-accent-base: var(--peppy-avatar-19); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="78"] { --peppy-accent-selected: var(--peppy-accent-preset-78); --peppy-accent-base: var(--peppy-avatar-78); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="9"] { --peppy-accent-selected: var(--peppy-accent-preset-9); --peppy-accent-base: var(--peppy-avatar-9); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="31"] { --peppy-accent-selected: var(--peppy-accent-preset-31); --peppy-accent-base: var(--peppy-avatar-31); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="12"] { --peppy-accent-selected: var(--peppy-accent-preset-12); --peppy-accent-base: var(--peppy-avatar-12); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="32"] { --peppy-accent-selected: var(--peppy-accent-preset-32); --peppy-accent-base: var(--peppy-avatar-32); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="37"] { --peppy-accent-selected: var(--peppy-accent-preset-37); --peppy-accent-base: var(--peppy-avatar-37); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="27"] { --peppy-accent-selected: var(--peppy-accent-preset-27); --peppy-accent-base: var(--peppy-avatar-27); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="4"] { --peppy-accent-selected: var(--peppy-accent-preset-4); --peppy-accent-base: var(--peppy-avatar-4); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="71"] { --peppy-accent-selected: var(--peppy-accent-preset-71); --peppy-accent-base: var(--peppy-avatar-71); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="99"] { --peppy-accent-selected: var(--peppy-accent-preset-99); --peppy-accent-base: var(--peppy-avatar-99); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="43"] { --peppy-accent-selected: var(--peppy-accent-preset-43); --peppy-accent-base: var(--peppy-avatar-43); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="115"] { --peppy-accent-selected: var(--peppy-accent-preset-115); --peppy-accent-base: var(--peppy-avatar-115); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="47"] { --peppy-accent-selected: var(--peppy-accent-preset-47); --peppy-accent-base: var(--peppy-avatar-47); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="55"] { --peppy-accent-selected: var(--peppy-accent-preset-55); --peppy-accent-base: var(--peppy-avatar-55); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="3"] { --peppy-accent-selected: var(--peppy-accent-preset-3); --peppy-accent-base: var(--peppy-avatar-3); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="111"] { --peppy-accent-selected: var(--peppy-accent-preset-111); --peppy-accent-base: var(--peppy-avatar-111); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="26"] { --peppy-accent-selected: var(--peppy-accent-preset-26); --peppy-accent-base: var(--peppy-avatar-26); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="0"] { --peppy-accent-selected: var(--peppy-accent-preset-0); --peppy-accent-base: var(--peppy-avatar-0); }
+  :is(.theme-system, .theme-light, .theme-dark)[data-accent="89"] { --peppy-accent-selected: var(--peppy-accent-preset-89); --peppy-accent-base: var(--peppy-avatar-89); }
+
+  :is(.theme-system, .theme-dark):is([data-accent="61"], [data-accent="60"], [data-accent="15"], [data-accent="19"], [data-accent="78"], [data-accent="9"], [data-accent="31"], [data-accent="12"], [data-accent="32"], [data-accent="37"], [data-accent="27"], [data-accent="4"], [data-accent="71"], [data-accent="99"], [data-accent="43"], [data-accent="115"], [data-accent="47"], [data-accent="55"], [data-accent="3"], [data-accent="111"], [data-accent="26"], [data-accent="0"], [data-accent="89"]) {
+    --peppy-accent: var(--peppy-accent-selected);
+    --peppy-accent-hover: color-mix(in srgb, var(--peppy-accent-selected) 88%, #fff);
+    --peppy-accent-text: #1a1a1a;
+    --peppy-focus: var(--peppy-accent-selected);
+    --peppy-focus-ring: var(--peppy-accent-selected);
+    --peppy-focus-ring-alpha: color-mix(in srgb, var(--peppy-accent-selected) 32%, transparent);
+    --peppy-primary: var(--peppy-accent-selected);
+    --peppy-primary-text: #1a1a1a;
+    --peppy-bubble-self-surface: var(--peppy-accent-selected);
+    --peppy-bubble-self-text: #1a1a1a;
+    --peppy-bubble-self-border: var(--peppy-accent-selected);
+  }
+
+  .theme-light:is([data-accent="61"], [data-accent="60"], [data-accent="15"], [data-accent="19"], [data-accent="78"], [data-accent="9"], [data-accent="31"], [data-accent="12"], [data-accent="32"], [data-accent="37"], [data-accent="27"], [data-accent="4"], [data-accent="71"], [data-accent="99"], [data-accent="43"], [data-accent="115"], [data-accent="47"], [data-accent="55"], [data-accent="3"], [data-accent="111"], [data-accent="26"], [data-accent="0"], [data-accent="89"]) {
+    --peppy-accent: var(--peppy-accent-selected);
+    --peppy-accent-hover: color-mix(in srgb, var(--peppy-accent-base) 76%, #000);
+    --peppy-accent-text: #fff;
+    --peppy-focus: var(--peppy-accent-selected);
+    --peppy-focus-ring: var(--peppy-accent-selected);
+    --peppy-focus-ring-alpha: color-mix(in srgb, var(--peppy-accent-selected) 28%, transparent);
+    --peppy-primary: var(--peppy-accent-selected);
+    --peppy-primary-text: #fff;
+    --peppy-bubble-self-surface: var(--peppy-accent-selected);
+    --peppy-bubble-self-text: #fff;
+    --peppy-bubble-self-border: var(--peppy-accent-selected);
+  }
+
+  @media (prefers-color-scheme: light) {
+    .theme-system:is([data-accent="61"], [data-accent="60"], [data-accent="15"], [data-accent="19"], [data-accent="78"], [data-accent="9"], [data-accent="31"], [data-accent="12"], [data-accent="32"], [data-accent="37"], [data-accent="27"], [data-accent="4"], [data-accent="71"], [data-accent="99"], [data-accent="43"], [data-accent="115"], [data-accent="47"], [data-accent="55"], [data-accent="3"], [data-accent="111"], [data-accent="26"], [data-accent="0"], [data-accent="89"]) {
+      --peppy-accent: var(--peppy-accent-selected);
+      --peppy-accent-hover: color-mix(in srgb, var(--peppy-accent-base) 76%, #000);
+      --peppy-accent-text: #fff;
+      --peppy-focus: var(--peppy-accent-selected);
+      --peppy-focus-ring: var(--peppy-accent-selected);
+      --peppy-focus-ring-alpha: color-mix(in srgb, var(--peppy-accent-selected) 28%, transparent);
+      --peppy-primary: var(--peppy-accent-selected);
+      --peppy-primary-text: #fff;
+      --peppy-bubble-self-surface: var(--peppy-accent-selected);
+      --peppy-bubble-self-text: #fff;
+      --peppy-bubble-self-border: var(--peppy-accent-selected);
+    }
+  }
+}
