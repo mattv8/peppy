@@ -59,18 +59,22 @@ object LinkRuntime {
     }
 
     /** Begins one owner-requested Pair or Relink attempt and fences the prior emoji. */
-    fun beginPairing() = synchronized(this) {
+    fun beginPairing(): Boolean = synchronized(this) {
+        if (!pairingInProgress.compareAndSet(false, true)) return false
         pairingGeneration += 1
         emoji.value = null
-        pairingInProgress.set(true)
         signalChange()
+        true
     }
 
     /** Completes an owner-requested attempt; callers must invoke this in `finally`. */
-    fun endPairing() = synchronized(this) {
+    fun endPairing(): Boolean = synchronized(this) {
+        if (!pairingInProgress.compareAndSet(true, false)) return false
+        pairingGeneration += 1
         pairingInProgress.set(false)
         emoji.value = null
         signalChange()
+        true
     }
 
     internal fun resetForTest() = synchronized(this) {
@@ -92,18 +96,20 @@ object LinkRuntime {
 
         override fun event(kind: String, code: String, value: Long) {
             val safeCode = filterReasonCode(code)
+            val callbackPairingGeneration = synchronized(this@LinkRuntime) { pairingGeneration }
             callbackExecutor.execute {
                 if (!acceptsCallback(generation)) return@execute
                 recordEvent(kind, safeCode, value)
                 GoogleMessagesLinkService.onLinkEvent(kind, safeCode)
-                if (kind == "link" && safeCode in PAIRING_TERMINAL_CODES) endPairing()
+                if (kind == "link" && safeCode in PAIRING_TERMINAL_CODES) endPairingIfCurrent(callbackPairingGeneration)
                 signalChange()
             }
         }
 
         override fun showEmoji(value: String) {
+            val callbackPairingGeneration = synchronized(this@LinkRuntime) { pairingGeneration }
             callbackExecutor.execute {
-                if (!acceptsCallback(generation) || !pairingInProgress.get()) return@execute
+                if (!acceptsCallback(generation) || !acceptsPairingCallback(callbackPairingGeneration)) return@execute
                 emoji.value = value
                 signalChange()
             }
@@ -119,6 +125,16 @@ object LinkRuntime {
     }
 
     private fun acceptsCallback(generation: Long): Boolean = synchronized(this) { generation == handleGeneration && cachedHandle != null }
+
+    private fun acceptsPairingCallback(generation: Long): Boolean = synchronized(this) { pairingInProgress.get() && generation == pairingGeneration }
+
+    private fun endPairingIfCurrent(generation: Long) = synchronized(this) {
+        if (!pairingInProgress.get() || generation != pairingGeneration) return@synchronized
+        pairingInProgress.set(false)
+        pairingGeneration += 1
+        emoji.value = null
+        signalChange()
+    }
 }
 
 internal interface LinkStateStorage {

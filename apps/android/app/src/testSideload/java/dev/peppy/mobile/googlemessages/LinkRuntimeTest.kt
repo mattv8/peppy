@@ -119,18 +119,29 @@ class LinkRuntimeTest {
         val first = CountDownLatch(1)
         LinkRuntimeTestHooks.eventRecorder = { _, _, _ -> first.countDown() }
 
-        LinkRuntime.beginPairing()
+        assertTrue(LinkRuntime.beginPairing())
         host.showEmoji("first")
         host.event("link", "pair_ok", 0)
         assertTrue(first.await(1, TimeUnit.SECONDS))
 
-        LinkRuntime.beginPairing()
+        assertTrue(LinkRuntime.beginPairing())
 
         assertEquals(null, LinkRuntime.emoji.value)
         assertTrue(LinkRuntime.pairingInProgress.get())
         LinkRuntime.endPairing()
         assertEquals(null, LinkRuntime.emoji.value)
         assertFalse(LinkRuntime.pairingInProgress.get())
+    }
+
+    @Test
+    fun `second owner cannot clear an active pairing`() {
+        assertTrue(LinkRuntime.beginPairing())
+        LinkRuntime.emoji.value = "first"
+
+        assertFalse(LinkRuntime.beginPairing())
+
+        assertEquals("first", LinkRuntime.emoji.value)
+        assertTrue(LinkRuntime.pairingInProgress.get())
     }
 
     @Test
