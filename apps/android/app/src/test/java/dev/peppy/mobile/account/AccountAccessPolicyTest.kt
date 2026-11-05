@@ -80,6 +80,25 @@ class AccountAccessPolicyTest {
         assertEquals(AccountEpisode(true, NativeAccountNoticeKind.READ_ONLY_CANCELED), next)
     }
 
+    @Test fun immediateCancellationPostsAfterAScheduledEndingAndReadWriteClearsIt() {
+        val ending = notice(
+            kind = NativeAccountNoticeKind.ENDING_SCHEDULED,
+            severity = NativeNoticeSeverity.WARNING,
+            dismissible = true,
+            deadline = now / 1000 + 60,
+        )
+        val canceled = notice(NativeAccountNoticeKind.READ_ONLY_CANCELED)
+        val (afterEnding, endingAction) = accountNotificationStep(AccountEpisode(), ending)
+        assertEquals(AccountNotificationAction.None, endingAction)
+
+        val (afterCanceled, canceledAction) = accountNotificationStep(afterEnding, canceled)
+        assertEquals(AccountNotificationAction.Post(NativeAccountNoticeKind.READ_ONLY_CANCELED), canceledAction)
+
+        val (cleared, clearAction) = accountNotificationStep(afterCanceled, null)
+        assertEquals(AccountNotificationAction.Clear, clearAction)
+        assertEquals(AccountEpisode(), cleared)
+    }
+
     @Test fun readWriteClearsOnlyAnActiveEpisode() {
         val (active, _) = accountNotificationStep(AccountEpisode(), notice())
         val (cleared, action) = accountNotificationStep(active, null)

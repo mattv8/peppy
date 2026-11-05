@@ -279,6 +279,31 @@ describe("useAccountNotice", () => {
     expect(result.current.notice).toEqual(notice());
     expect(isAccountNoticeSnoozed(notice().snoozeKey)).toBe(false);
   });
+
+  it("replaces a snoozed scheduled ending with a non-dismissible cancellation notice", async () => {
+    const ending = notice({
+      kind: "ending_scheduled",
+      severity: "warning",
+      deadline: NOW / 1000 + 5 * DAY_SECONDS,
+      dismissible: true,
+      snoozeKey: "ending_scheduled:future",
+    });
+    const canceled = notice({ kind: "read_only_canceled", snoozeKey: "read_only_canceled:none" });
+    vi.mocked(bridge.account_access!)
+      .mockResolvedValueOnce({ kind: "notice", notice: ending })
+      .mockResolvedValueOnce({ kind: "notice", notice: canceled });
+    const { result } = renderHook(() => useAccountNotice("device-a"));
+    await act(async () => undefined);
+    act(() => result.current.dismiss());
+    expect(isAccountNoticeSnoozed(ending.snoozeKey, NOW)).toBe(true);
+
+    vi.setSystemTime(NOW + MINUTE_MS);
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(result.current.notice).toEqual(canceled);
+    expect(accountRibbonModel(result.current.notice!, NOW).severity).toBe("error");
+    expect(accountRibbonModel(result.current.notice!, NOW).title).toBe(peppyCopy.account_read_only_canceled_title);
+    expect(accountRibbonModel(result.current.notice!, NOW).dismissible).toBe(false);
+  });
 });
 
 describe("openAccountManageUrl", () => {
