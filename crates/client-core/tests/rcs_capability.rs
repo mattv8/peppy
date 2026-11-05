@@ -76,7 +76,10 @@ fn payloads_are_strict_and_content_free() {
         assert!(serde_json::from_value::<PrivatePayload>(valid.clone()).is_ok());
         for forbidden in ["google_id", "phone", "name", "token", "stop_code"] {
             let mut invalid = valid.clone();
-            invalid.as_object_mut().unwrap().insert(forbidden.into(), serde_json::json!("x"));
+            invalid
+                .as_object_mut()
+                .unwrap()
+                .insert(forbidden.into(), serde_json::json!("x"));
             assert!(serde_json::from_value::<PrivatePayload>(invalid).is_err());
         }
     }
@@ -98,9 +101,11 @@ fn publisher_is_bounded_current_and_expires_stale_projections() {
             .unwrap(),
         2
     );
-    assert!(client
-        .rcs_gateway_supported(config.device_id, 1_001)
-        .unwrap());
+    assert!(
+        client
+            .rcs_gateway_supported(config.device_id, 1_001)
+            .unwrap()
+    );
     assert_eq!(
         client
             .publish_rcs_capability(&status, std::slice::from_ref(&projection), 1_001)
@@ -154,13 +159,14 @@ fn replacement_events_self_supersede_per_gateway_and_conversation() {
     client
         .publish_rcs_capability(&status(config.device_id, 2, 2_000), &[second], 2_000)
         .unwrap();
-    assert!(client.pending_outbox().unwrap().iter().any(|event| event
-        .compaction
-        .as_ref()
-        .is_some_and(|metadata| metadata
-            .supersedes
-            .iter()
-            .any(|reference| reference.producer_sequence == first.producer_sequence))));
+    assert!(client.pending_outbox().unwrap().iter().any(|event| {
+        event.compaction.as_ref().is_some_and(|metadata| {
+            metadata
+                .supersedes
+                .iter()
+                .any(|reference| reference.producer_sequence == first.producer_sequence)
+        })
+    }));
 }
 
 #[test]
@@ -179,18 +185,22 @@ fn invalid_sql_revisions_and_future_observations_never_grant_capability() {
 
     oversized.capability_revision = 1;
     oversized.observed_at_ms = i64::MAX;
-    assert!(client
-        .publish_rcs_capability(&oversized, &[], 1_000)
-        .is_err());
+    assert!(
+        client
+            .publish_rcs_capability(&oversized, &[], 1_000)
+            .is_err()
+    );
 
     let status = status(config.device_id, 2, 1_000);
     let projection = eligibility(config.device_id, conversation, 2, 1_000);
     client
         .publish_rcs_capability(&status, &[projection], 1_000)
         .unwrap();
-    assert!(!client
-        .rcs_gateway_supported(config.device_id, i64::MAX)
-        .unwrap());
+    assert!(
+        !client
+            .rcs_gateway_supported(config.device_id, i64::MAX)
+            .unwrap()
+    );
     assert_eq!(
         client
             .rcs_eligibility_projection(conversation, config.device_id, i64::MAX)
@@ -261,16 +271,27 @@ fn status_accessor_preserves_state_but_marks_stale_status_unknown_to_consumers()
     let mut unavailable = status(config.device_id, 1, 1_000);
     unavailable.state = RcsCapabilityState::Unavailable;
     unavailable.availability = false;
-    client.publish_rcs_capability(&unavailable, &[], 1_000).unwrap();
-    let view = client.rcs_link_status(config.device_id, 1_001).unwrap().unwrap();
+    client
+        .publish_rcs_capability(&unavailable, &[], 1_000)
+        .unwrap();
+    let view = client
+        .rcs_link_status(config.device_id, 1_001)
+        .unwrap()
+        .unwrap();
     assert_eq!(view.status.state, RcsCapabilityState::Unavailable);
     assert!(view.current);
-    assert!(!client.rcs_gateway_supported(config.device_id, 1_001).unwrap());
-    assert!(!client
-        .rcs_link_status(config.device_id, 1_000 + RCS_CAPABILITY_STALE_MS + 1)
-        .unwrap()
-        .unwrap()
-        .current);
+    assert!(
+        !client
+            .rcs_gateway_supported(config.device_id, 1_001)
+            .unwrap()
+    );
+    assert!(
+        !client
+            .rcs_link_status(config.device_id, 1_000 + RCS_CAPABILITY_STALE_MS + 1)
+            .unwrap()
+            .unwrap()
+            .current
+    );
 }
 
 #[test]
@@ -287,7 +308,9 @@ fn invalid_authenticated_capability_events_quarantine_without_wedging_following_
                 &vault,
                 producer,
                 1,
-                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status: oversized.clone() }),
+                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                    status: oversized.clone(),
+                }),
             ),
             Cursor(1),
         )
@@ -299,7 +322,9 @@ fn invalid_authenticated_capability_events_quarantine_without_wedging_following_
                 &vault,
                 producer,
                 u64::MAX,
-                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status: oversized.clone() }),
+                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                    status: oversized.clone(),
+                }),
             ),
             Cursor(2),
         )
@@ -315,8 +340,22 @@ fn invalid_authenticated_capability_events_quarantine_without_wedging_following_
             Cursor(3),
         )
         .unwrap();
-    target.apply_pending(10).unwrap();
+    let report = target.apply_pending(10).unwrap();
+    assert_eq!((report.applied, report.quarantined), (1, 2));
+    assert_eq!(
+        target
+            .quarantined()
+            .unwrap()
+            .into_iter()
+            .map(|record| record.reason)
+            .collect::<Vec<_>>(),
+        vec![QuarantineReason::InvalidPayload, QuarantineReason::InvalidPayload]
+    );
     assert!(target.rcs_gateway_supported(producer, 1_001).unwrap());
+    drop(target);
+    let reopened = unlocked(&target_config, &vault);
+    assert_eq!(reopened.quarantine_count().unwrap(), 2);
+    assert!(reopened.rcs_gateway_supported(producer, 1_001).unwrap());
 }
 
 #[test]
@@ -339,11 +378,28 @@ fn mismatched_authenticated_producer_cannot_claim_a_gateway() {
             Cursor(1),
         )
         .unwrap();
-    target.apply_pending(10).unwrap();
-    assert!(target
-        .rcs_link_status(claimed_gateway, 1_001)
-        .unwrap()
-        .is_none());
+    target
+        .ingest(
+            &sealed(
+                &vault,
+                producer,
+                2,
+                PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                    eligibility: eligibility(claimed_gateway, ConversationId::new(), 1, 1_000),
+                }),
+            ),
+            Cursor(2),
+        )
+        .unwrap();
+    let report = target.apply_pending(10).unwrap();
+    assert_eq!((report.applied, report.quarantined), (0, 2));
+    assert_eq!(target.quarantine_count().unwrap(), 2);
+    assert!(
+        target
+            .rcs_link_status(claimed_gateway, 1_001)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -355,8 +411,32 @@ fn out_of_order_revisions_cannot_restore_an_older_eligible_status() {
     let mut unavailable = status(gateway, 2, 1_002);
     unavailable.state = RcsCapabilityState::Unavailable;
     unavailable.availability = false;
-    target.ingest(&sealed(&vault, gateway, 20, PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status: unavailable })), Cursor(1)).unwrap();
-    target.ingest(&sealed(&vault, gateway, 21, PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status: status(gateway, 1, 1_001) })), Cursor(2)).unwrap();
+    target
+        .ingest(
+            &sealed(
+                &vault,
+                gateway,
+                20,
+                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                    status: unavailable,
+                }),
+            ),
+            Cursor(1),
+        )
+        .unwrap();
+    target
+        .ingest(
+            &sealed(
+                &vault,
+                gateway,
+                21,
+                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                    status: status(gateway, 1, 1_001),
+                }),
+            ),
+            Cursor(2),
+        )
+        .unwrap();
     target.apply_pending(10).unwrap();
     let view = target.rcs_link_status(gateway, 1_003).unwrap().unwrap();
     assert_eq!(view.status.state, RcsCapabilityState::Unavailable);
