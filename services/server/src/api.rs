@@ -2718,14 +2718,16 @@ async fn live_session(
     let generation = registration.generation;
     live_session_inner(
         socket,
-        &state,
-        &principal,
-        peer,
-        backend,
-        generation,
-        registration.receiver,
-        registration.cancellation,
-        readiness,
+        LiveSession {
+            state: state.clone(),
+            principal: principal.clone(),
+            peer,
+            backend,
+            generation,
+            outgoing: registration.receiver,
+            cancellation: registration.cancellation,
+            readiness,
+        },
     )
     .await;
     state.live_hub.unregister(
@@ -2735,17 +2737,17 @@ async fn live_session(
     );
 }
 
-async fn live_session_inner(
-    mut socket: WebSocket,
-    state: &ApiState,
-    principal: &Principal,
-    peer: Option<IpAddr>,
-    backend: Arc<dyn crate::live::LiveBackend>,
-    generation: u64,
-    mut outgoing: tokio::sync::mpsc::Receiver<LiveFrameV1>,
-    mut cancellation: tokio::sync::watch::Receiver<bool>,
-    mut readiness: tokio::sync::watch::Receiver<bool>,
-) {
+async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
+    let LiveSession {
+        state,
+        principal,
+        peer,
+        backend,
+        generation,
+        mut outgoing,
+        mut cancellation,
+        mut readiness,
+    } = session;
     let hello = match serde_json::to_string(&LiveHelloV1::new()) {
         Ok(hello) => hello,
         Err(_) => return live_close(&mut socket, 1011, "live_unavailable").await,
@@ -2776,7 +2778,7 @@ async fn live_session_inner(
                     return live_close(&mut socket, 1011, "live_unavailable").await;
                 }
             }
-            _ = recheck.tick() => match live_revalidate(state, principal, &mut cancellation, &mut readiness).await {
+            _ = recheck.tick() => match live_revalidate(&state, &principal, &mut cancellation, &mut readiness).await {
                 LiveRevalidation::Authorized => {
                     if challenge.is_some() {
                         return;
@@ -2860,6 +2862,17 @@ async fn live_session_inner(
             },
         }
     }
+}
+
+struct LiveSession {
+    state: ApiState,
+    principal: Principal,
+    peer: Option<IpAddr>,
+    backend: Arc<dyn crate::live::LiveBackend>,
+    generation: u64,
+    outgoing: tokio::sync::mpsc::Receiver<LiveFrameV1>,
+    cancellation: tokio::sync::watch::Receiver<bool>,
+    readiness: tokio::sync::watch::Receiver<bool>,
 }
 
 fn live_now_ms() -> u64 {

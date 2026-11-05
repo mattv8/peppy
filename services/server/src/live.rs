@@ -454,7 +454,11 @@ mod tests {
             assert!(limiter.allow(device(1), Some(address)));
         }
         assert!(!limiter.allow(device(2), Some(address)));
-        assert!(limiter.allow(device(2), Some("127.0.0.2".parse().unwrap())));
+        let alternate = "127.0.0.2".parse().unwrap();
+        for _ in 0..LIVE_RATE_LIMIT {
+            assert!(limiter.allow(device(2), Some(alternate)));
+        }
+        assert!(!limiter.allow(device(2), Some(alternate)));
     }
 
     #[test]
