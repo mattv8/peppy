@@ -298,7 +298,7 @@ fn verify(
     }))
 }
 
-fn canonical_identity(identity: &str) -> Option<String> {
+pub(crate) fn canonical_recipient(identity: &str) -> Option<String> {
     let normalized = identity.trim();
     if normalized.is_empty() {
         return None;
@@ -310,6 +310,10 @@ fn canonical_identity(identity: &str) -> Option<String> {
             .map(|number| number.format().mode(Mode::E164).to_string());
     }
     Some(format!("raw:{normalized}"))
+}
+
+fn canonical_identity(identity: &str) -> Option<String> {
+    canonical_recipient(identity)
 }
 
 fn validated_visible_participants(
@@ -566,6 +570,60 @@ pub(crate) fn mapping_matches_observation(
     let (conversations, uncertain) =
         peppy_conversations_for_identity(conn, &mapping.proof.canonical_participant)?;
     Ok(!uncertain && conversations.as_slice() == [mapping.conversation_id])
+}
+
+pub(crate) fn context_is_current(
+    conn: &Connection,
+    link_generation: u64,
+    session_generation: u64,
+    context_revision: u64,
+    require_linked: bool,
+) -> Result<bool, Error> {
+    let Some(value) = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let context: RcsContext = serde_json::from_str(&value).map_err(|_| Error::Database)?;
+    Ok((
+        context.link_generation,
+        context.session_generation,
+        context.context_revision,
+    ) == (link_generation, session_generation, context_revision)
+        && (!require_linked || context.link_state == RcsLinkState::Linked as u8))
+}
+
+pub(crate) fn current_link_state(conn: &Connection) -> Result<Option<bool>, Error> {
+    let value = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    value
+        .map(|value| {
+            let context: RcsContext = serde_json::from_str(&value).map_err(|_| Error::Database)?;
+            Ok(context.link_state == RcsLinkState::Linked as u8)
+        })
+        .transpose()
+}
+
+pub(crate) fn has_proven_mapping(
+    conn: &Connection,
+    conversation_id: ConversationId,
+) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_mapping_proofs WHERE peppy_conversation_id=?)",
+        [conversation_id.to_string()],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

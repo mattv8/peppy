@@ -56,6 +56,7 @@ mod mms_identity;
 mod notifications;
 mod phone_read;
 mod rcs_mapping;
+mod rcs_send;
 mod sms_acquisition;
 mod sms_reconciliation;
 mod snapshot_projection;
@@ -116,6 +117,7 @@ pub use rcs_mapping::{
     RcsMapping, RcsMappingClass, RcsMappingObservation, RcsMappingOutcome, RcsMappingProof,
     RcsMappingRefusal, RcsParticipantObservation, RcsSendMode,
 };
+pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -274,6 +276,8 @@ pub enum Error {
     DraftMergeOverflow,
     #[error("no send attempt was recorded for this command")]
     NoAttempt,
+    #[error("a send attempt was already recorded with state {0:?}")]
+    AlreadyAttempted(SendState),
     #[error("illegal send-state transition {from:?} -> {to:?}")]
     IllegalTransition { from: SendState, to: SendState },
     #[error("native key cache is malformed, altered, or was not recorded by this device")]
@@ -842,6 +846,14 @@ pub enum PermitBlock {
     Historical,
     /// This gateway was restored from backup/import; no new carrier work may start.
     RestoreGuarded,
+    /// The command belongs to a linked transport and cannot reach the carrier executor.
+    RouteUnavailable,
+    /// A route was not present or could not be finalized locally.
+    UnknownRoute,
+    /// The local mapping proof is missing, stale, or no longer exact.
+    MappingUnproven,
+    /// Linked gateways need a fresh local carrier-only result before carrier work.
+    CarrierOnlyProofUnavailable,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendResult {
@@ -1135,6 +1147,21 @@ impl Client {
         conversation_id: ConversationId,
     ) -> Result<Option<RcsMapping>, Error> {
         rcs_mapping::get(&self.lock()?.conn, conversation_id)
+    }
+
+    /// Stores a completed local carrier-only lookup bound to the current linked context.
+    pub fn record_carrier_only_proof(
+        &self,
+        proof: &CarrierOnlyProof,
+        now_ms: i64,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        rcs_send::record_carrier_only_proof(&transaction, proof, now_ms)?;
+        transaction.commit()?;
+        Ok(())
     }
     /// Opens (or shares) the per-canonical-path owner. A second open must present the same key
     /// and identity. A wrong key is reported, never treated as a new database.
@@ -2665,7 +2692,10 @@ fn validate_outgoing(sms: &OutgoingSms, route: &GatewayRoute) -> Result<(), Erro
     };
     require_address(recipient)?;
     require_body(&sms.body, false)?;
-    require_subscription(route)
+    match route {
+        GatewayRoute::Carrier { .. } => require_subscription(route),
+        GatewayRoute::RcsLink { .. } => Ok(()),
+    }
 }
 fn validate_outgoing_mms(
     recipients: &[String],
@@ -3205,7 +3235,7 @@ impl Client {
             return Ok(Vec::new());
         }
         let mut query = s.conn.prepare(
-            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.key_epoch=? ORDER BY l.local_order",
+            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.subscription_id<>'' AND l.key_epoch=? ORDER BY l.local_order",
         )?;
         let rows = query
             .query_map(params![active], |r| {
@@ -3229,6 +3259,15 @@ impl Client {
 
     /// Durably records an attempt before the native host touches the carrier API.
     pub fn begin_send_attempt(&self, command_id: CommandId) -> Result<PermitDecision, Error> {
+        self.begin_send_attempt_at(command_id, notifications::now_ms())
+    }
+
+    /// Route-aware carrier admission with caller-supplied wall time for deterministic hosts/tests.
+    pub fn begin_send_attempt_at(
+        &self,
+        command_id: CommandId,
+        now_ms: i64,
+    ) -> Result<PermitDecision, Error> {
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
         let tx = guard
@@ -3244,6 +3283,9 @@ impl Client {
         let Some((epoch, subscription_id, payload, historical)) = ledger else {
             return Ok(PermitDecision::Blocked(PermitBlock::NotReceived));
         };
+        if subscription_id.is_empty() {
+            return Ok(PermitDecision::Blocked(PermitBlock::RouteUnavailable));
+        }
         // Known attempts keep reporting their recorded (or unknown) outcome.
         if let Some(state) = attempt_state(&tx, command_id)? {
             return Ok(PermitDecision::AlreadyAttempted(state));
@@ -3264,6 +3306,17 @@ impl Client {
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
         if !media_ready {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
+        }
+        if !rcs_send::carrier_admission(
+            &tx,
+            message.record.conversation_id,
+            &message.recipients,
+            &subscription_id,
+            now_ms,
+        )? {
+            return Ok(PermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
         }
         let retention_blocked: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.command_id=?1 AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1))))",
@@ -3289,6 +3342,197 @@ impl Client {
             subscription_id,
             message,
         }))
+    }
+
+    /// Durably records a linked-transport attempt and returns its local-only permit.
+    pub fn begin_rcs_send_attempt(
+        &self,
+        command_id: CommandId,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<RcsPermit, Error> {
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ledger: Option<(u32, String, String, bool)> = tx
+            .query_row(
+                "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+                [command_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((epoch, subscription_id, payload, historical)) = ledger else {
+            return Err(Error::NotFound);
+        };
+        if !subscription_id.is_empty() {
+            return Err(Error::InvalidRequest("RCS route required"));
+        }
+        if let Some(state) = attempt_state(&tx, command_id)? {
+            return Err(Error::AlreadyAttempted(state));
+        }
+        if restore_guarded(&tx)? {
+            return Err(Error::InvalidRequest("restore guarded"));
+        }
+        if historical {
+            return Err(Error::InvalidRequest("historical command"));
+        }
+        match active {
+            Some(active) if epoch == active => {}
+            Some(active) if epoch < active => return Err(Error::InvalidRequest("stale epoch")),
+            _ => return Err(Error::InvalidRequest("epoch not active")),
+        }
+        let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
+        if !media_ready
+            || message.transport != Transport::Sms
+            || !message.record.attachments.is_empty()
+        {
+            return Err(Error::InvalidRequest("RCS text required"));
+        }
+        let mapping = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?;
+        let tmp_id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO attempts(command_id,state,attempted_at_ms) VALUES(?,?,?)",
+            params![
+                command_id.to_string(),
+                state_code(SendState::AttemptRecorded),
+                now_ms
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,?,?,?,?)",
+            params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
+        )?;
+        let permit = RcsPermit {
+            command_id,
+            conversation_id: message.record.conversation_id,
+            tmp_id,
+            mapping_revision: mapping.mapping_revision,
+            proof_digest: mapping.proof.digest,
+            google_conversation_id: mapping.google_conversation_id,
+            message,
+        };
+        tx.commit()?;
+        Ok(permit)
+    }
+
+    /// Records an upstream acknowledgement as local ledger metadata, never as delivery state.
+    pub fn record_rcs_transport_ack(
+        &self,
+        command_id: CommandId,
+        ack_at_ms: i64,
+        code: &str,
+    ) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if tx.execute(
+            "UPDATE rcs_send_ledger SET transport_ack_at_ms=?,transport_ack_code=? WHERE command_id=?",
+            params![ack_at_ms, code, command_id.to_string()],
+        )? == 0 {
+            return Err(Error::NoAttempt);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records only the successful hand-off to the linked transport.
+    pub fn record_rcs_submitted(&self, command_id: CommandId) -> Result<SendState, Error> {
+        self.require_rcs_attempt(command_id)?;
+        self.record_send_result(command_id, SendResult::Submitted)
+    }
+
+    /// Reopens only an RCS attempt proven not to have reached the transport, with the same route.
+    pub fn retry_rcs_failed_before_submission(
+        &self,
+        command_id: CommandId,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<RcsPermit, Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if attempt_state(&tx, command_id)? != Some(SendState::FailedBeforeSubmission) {
+            return Err(Error::AlreadyAttempted(
+                attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?,
+            ));
+        }
+        let (payload, revision, digest, google_id, tmp_id): (String, u64, Vec<u8>, String, String) = tx.query_row(
+            "SELECT l.payload,r.mapping_revision,r.proof_digest,r.google_conversation_id,r.tmp_id FROM command_ledger l JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND l.subscription_id=''",
+            [command_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )?;
+        let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
+        if !media_ready
+            || message.transport != Transport::Sms
+            || !message.record.attachments.is_empty()
+        {
+            return Err(Error::InvalidRequest("RCS text required"));
+        }
+        let mapping = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?;
+        if mapping.mapping_revision != revision
+            || mapping.proof.digest.as_slice() != digest.as_slice()
+            || mapping.google_conversation_id != google_id
+        {
+            return Err(Error::InvalidRequest("mapping changed"));
+        }
+        tx.execute(
+            "UPDATE attempts SET state=?,attempted_at_ms=? WHERE command_id=?",
+            params![
+                state_code(SendState::AttemptRecorded),
+                now_ms,
+                command_id.to_string()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(RcsPermit {
+            command_id,
+            conversation_id: message.record.conversation_id,
+            tmp_id,
+            mapping_revision: revision,
+            proof_digest: mapping.proof.digest,
+            google_conversation_id: google_id,
+            message,
+        })
+    }
+
+    /// Applies evidence only when both local identifiers match; an absent result changes nothing.
+    pub fn reconcile_rcs_tmp_id(
+        &self,
+        tmp_id: &str,
+        google_conversation_id: &str,
+        evidence: Option<SendResult>,
+    ) -> Result<Option<SendState>, Error> {
+        let command_id: Option<String> = self.lock()?.conn.query_row(
+            "SELECT command_id FROM rcs_send_ledger WHERE tmp_id=? AND google_conversation_id=?",
+            params![tmp_id, google_conversation_id],
+            |row| row.get(0),
+        ).optional()?;
+        let Some(command_id) = command_id else {
+            return Ok(None);
+        };
+        let Some(evidence) = evidence else {
+            let command_id = parse(&command_id)?;
+            return attempt_state(&self.lock()?.conn, command_id);
+        };
+        self.record_send_result(parse(&command_id)?, evidence)
+            .map(Some)
+    }
+
+    fn require_rcs_attempt(&self, command_id: CommandId) -> Result<(), Error> {
+        let exists: bool = self.lock()?.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM rcs_send_ledger WHERE command_id=?)",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if exists {
+            Ok(())
+        } else {
+            Err(Error::NoAttempt)
+        }
     }
 
     /// Records native carrier evidence and queues an encrypted `SendStatus`. Repeating the
@@ -6867,12 +7111,14 @@ fn apply_record(
                     new_attachment_ids.push(descriptor.attachment_id);
                 }
             }
-            let GatewayRoute::Carrier {
-                gateway_device_id,
-                subscription_id,
-            } = route
-            else {
-                return Ok(Some(Q::InvalidPayload));
+            let (gateway_device_id, subscription_id) = match route {
+                GatewayRoute::Carrier {
+                    gateway_device_id,
+                    subscription_id,
+                } => (*gateway_device_id, subscription_id.as_str()),
+                // `command_ledger` predates tagged routes. An empty subscription is an internal,
+                // durable RCS marker; no carrier permit accepts it.
+                GatewayRoute::RcsLink { gateway_device_id } => (*gateway_device_id, ""),
             };
             if !store_remote_media(conn, &media)?
                 || insert_message(conn, &message)? == Inserted::Conflict
@@ -6880,12 +7126,12 @@ fn apply_record(
                     conn,
                     command_id,
                     message.record.message_id,
-                    *gateway_device_id,
+                    gateway_device_id,
                 )?
             {
                 return Ok(Some(Q::PayloadConflict));
             }
-            if *gateway_device_id == ctx.device_id {
+            if gateway_device_id == ctx.device_id {
                 let attachment_ids = media
                     .iter()
                     .map(|descriptor| descriptor.attachment_id)
@@ -8812,6 +9058,24 @@ fn attempt_state(conn: &Connection, command_id: CommandId) -> Result<Option<Send
     .transpose()
 }
 
+fn exact_rcs_mapping(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<RcsMapping, Error> {
+    if rcs_mapping::update_context(conn, observation)? != rcs_mapping::ContextUpdate::Unchanged {
+        return Err(Error::InvalidRequest("mapping unproven"));
+    }
+    let mapping = rcs_mapping::get(conn, conversation_id)?
+        .ok_or(Error::InvalidRequest("mapping unproven"))?;
+    if rcs_mapping::mapping_matches_observation(conn, &mapping, observation, now_ms)? {
+        Ok(mapping)
+    } else {
+        Err(Error::InvalidRequest("mapping unproven"))
+    }
+}
+
 fn pinned_profile(conn: &Connection, epoch: u32) -> Result<Option<KeyProfile>, Error> {
     conn.query_row(
         "SELECT profile FROM key_epoch_profiles WHERE epoch=?",
@@ -9652,6 +9916,15 @@ mod tests {
     use std::time::Instant;
     use uuid::Uuid;
 
+    fn drop_v46_objects(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TABLE rcs_mapping_proofs;
+             DROP TABLE rcs_conversation_mappings;
+             DROP TABLE rcs_send_ledger;",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn malformed_scan_payload_kinds_remain_strict_known_events() {
         assert!(is_known_private_payload_kind("contact_scan_request"));
@@ -9676,6 +9949,7 @@ mod tests {
                 "INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) VALUES(?,?,?,?, 'pending',0,1)",
                 params![request_id.to_string(), ConversationId::new().to_string(), DeviceId::new().to_string(), "[\"+15555550100\"]"],
             ).unwrap();
+            drop_v46_objects(&store.conn);
             store
                 .conn
                 .execute("UPDATE schema_meta SET version=44", [])
@@ -9959,6 +10233,7 @@ mod tests {
                 "INSERT INTO projection_notifications(generation,source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![8_i64, source, "staged", uuid::Uuid::new_v4().to_string(), "instance", "com.example.mail", "Mail", "old-icon", "Staged title", "Staged text", "mail", 43_i64, 1_i64, 0_i64, 8_i64],
             ).unwrap();
+            drop_v46_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -10394,6 +10669,7 @@ mod tests {
             .unwrap();
         {
             let store = client.lock().unwrap();
+            drop_v46_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -10921,6 +11197,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(actual, definition);
             }
+            drop_v46_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -11386,6 +11663,7 @@ mod tests {
             let client = Client::open(config.clone(), key()).unwrap();
             let mut store = client.lock().unwrap();
             // Recreate the baseline-35 shape: no priority column and no history seed column.
+            drop_v46_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -11585,6 +11863,7 @@ mod tests {
                 .unwrap();
             // This mirrors the existing version-33 fixture: the schema is current except for
             // artifacts introduced by the simulated upgrade.
+            drop_v46_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
