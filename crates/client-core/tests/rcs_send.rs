@@ -214,6 +214,10 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
     server.sync(&gateway);
     let command_id = queued.command_id;
     assert!(gateway.pending_commands().unwrap().is_empty());
+    let pending = gateway.pending_automatic_commands().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].command_id, command_id);
+    assert_eq!(pending[0].original_subscription_id, None);
 
     let permit = gateway
         .begin_rcs_send_attempt(command_id, &current_observation, 1_000)
@@ -252,6 +256,58 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
             .reconcile_rcs_tmp_id(&permit.tmp_id, &permit.google_conversation_id, None)
             .unwrap(),
         Some(SendState::OutcomeUnknown)
+    );
+}
+
+#[test]
+fn automatic_admission_upgrades_a_legacy_carrier_command_only_with_an_exact_mapping() {
+    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let current = observation("peer-local", 1);
+    assert!(matches!(
+        gateway.verify_rcs_mapping(&current, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+
+    let AutomaticPermitDecision::Rcs(permit) = gateway
+        .begin_automatic_send_attempt(command_id, Some(&current), 1_000)
+        .unwrap()
+    else {
+        panic!("expected an RCS permit");
+    };
+    assert!(uuid::Uuid::parse_str(&permit.tmp_id).is_ok());
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&current), 1_001)
+            .unwrap(),
+        AutomaticPermitDecision::AlreadyAttempted(SendState::AttemptRecorded)
+    );
+}
+
+#[test]
+fn automatic_admission_never_falls_back_from_a_contradictory_mapping_observation() {
+    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let mut unknown = observation("peer-local", 1);
+    unknown.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
+    let command = gateway.pending_commands().unwrap().pop().unwrap();
+    gateway
+        .record_carrier_only_proof(&carrier_proof(&command), 1_000)
+        .unwrap();
+    let mut contradictory = observation("different-peer-local", 2);
+    contradictory.context_revision = 2;
+    contradictory.observed_at_ms = 1_001;
+
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&contradictory), 1_001)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+    );
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, None, 1_001)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
     );
 }
 

@@ -68,9 +68,13 @@ fn roll_back_migrations_after_version_25(conn: &rusqlite::Connection) {
          ALTER TABLE mms_acquisition_parts DROP COLUMN width;
          DROP TABLE attachment_demand;
          DROP TABLE message_media_meta;
-         ALTER TABLE send_status DROP COLUMN status_at_ms;",
+          ALTER TABLE send_status DROP COLUMN status_at_ms;",
     )
     .unwrap();
+    if column_exists(conn, "attempts", "finalized_transport") {
+        conn.execute_batch("ALTER TABLE attempts DROP COLUMN finalized_transport;")
+            .unwrap();
+    }
 }
 
 const NOTIFICATION_REPLY_SPIKE_DDL: &str = "
@@ -129,7 +133,8 @@ fn remove_rcs_mapping_schema(conn: &rusqlite::Connection) {
     conn.execute_batch(
         "DROP TABLE rcs_send_ledger;
          DROP TABLE rcs_mapping_proofs;
-         DROP TABLE rcs_conversation_mappings;",
+         DROP TABLE rcs_conversation_mappings;
+         ALTER TABLE attempts DROP COLUMN finalized_transport;",
     )
     .unwrap();
 }
@@ -215,7 +220,7 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        46
+        47
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert!(table_exists(&conn, "sender_blocklists"));
@@ -244,7 +249,7 @@ fn notification_reply_spike_repairs_already_upgraded_database() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        46
+        47
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert_notification_reply_spike_removed(&conn);
@@ -314,7 +319,7 @@ fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        46
+        47
     );
     assert_eq!(
         conn.query_row("SELECT v FROM metadata WHERE k='device_id'", [], |row| {
@@ -327,10 +332,10 @@ fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
 }
 
 #[test]
-fn version_47_database_is_rejected_without_resetting_preferences() {
+fn version_48_database_is_rejected_without_resetting_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::new();
-    let config = config(&dir, "gateway-v47-rejected", &vault);
+    let config = config(&dir, "gateway-v48-rejected", &vault);
     let client = open(&config);
     let settings = GatewaySettings {
         mirroring_enabled: true,
@@ -340,7 +345,7 @@ fn version_47_database_is_rejected_without_resetting_preferences() {
     drop(client);
 
     let conn = encrypted_connection(&config);
-    conn.execute("UPDATE schema_meta SET version=47", [])
+    conn.execute("UPDATE schema_meta SET version=48", [])
         .unwrap();
     drop(conn);
 
@@ -354,7 +359,7 @@ fn version_47_database_is_rejected_without_resetting_preferences() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        47
+        48
     );
     assert_eq!(
         conn.query_row(
@@ -615,7 +620,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 46);
+    assert_eq!(version, 47);
     assert_eq!(status, (42, "sent".into(), None));
 }
 

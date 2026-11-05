@@ -131,7 +131,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 46;
+const SCHEMA_VERSION: i64 = 47;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -822,6 +822,14 @@ pub struct ReceivedCommand {
     pub subscription_id: String,
     pub message: MessagePayload,
 }
+/// A received send command awaiting route-neutral automatic admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAutomaticCommand {
+    pub command_id: CommandId,
+    /// The original legacy SIM route when present; this is a hint, not carrier authority.
+    pub original_subscription_id: Option<String>,
+    pub message: MessagePayload,
+}
 // Returned once per carrier send; a flat record keeps the future UniFFI enum simple.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -831,6 +839,16 @@ pub enum PermitDecision {
     /// An attempt already exists. `OutcomeUnknown` requires reconciliation, never a resend.
     AlreadyAttempted(SendState),
     Blocked(PermitBlock),
+}
+/// Route-neutral automatic admission for upgraded gateways. Legacy carrier wire data remains
+/// unchanged; the final local transport is frozen with the attempt.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AutomaticPermitDecision {
+    Carrier(ReceivedCommand),
+    Rcs(RcsPermit),
+    Blocked(PermitBlock),
+    AlreadyAttempted(SendState),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermitBlock {
@@ -3303,6 +3321,36 @@ impl Client {
             .collect()
     }
 
+    /// Lists unattempted received commands for automatic routing without granting a transport
+    /// permit. Callers must use `begin_automatic_send_attempt` before any host effect.
+    pub fn pending_automatic_commands(&self) -> Result<Vec<PendingAutomaticCommand>, Error> {
+        let s = self.lock()?;
+        let Some(active) = s.active_epoch else {
+            return Ok(Vec::new());
+        };
+        let mut query = s.conn.prepare(
+            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.key_epoch=? ORDER BY l.local_order",
+        )?;
+        let rows = query
+            .query_map(params![active], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(id, subscription_id, payload)| {
+                Ok(PendingAutomaticCommand {
+                    command_id: parse(&id)?,
+                    original_subscription_id: (!subscription_id.is_empty()).then_some(subscription_id),
+                    message: localize(&s.conn, decode(payload.as_bytes())?)?.0,
+                })
+            })
+            .collect()
+    }
+
     /// Durably records an attempt before the native host touches the carrier API.
     pub fn begin_send_attempt(&self, command_id: CommandId) -> Result<PermitDecision, Error> {
         self.begin_send_attempt_at(command_id, notifications::now_ms())
@@ -3382,14 +3430,7 @@ impl Client {
         }
         // The attempt time is the gateway's best evidence for the provider row the platform
         // writes when it submits this text; queue time on another device is not.
-        tx.execute(
-            "INSERT INTO attempts(command_id,state,attempted_at_ms) VALUES(?,?,?)",
-            params![
-                command_id.to_string(),
-                state_code(SendState::AttemptRecorded),
-                notifications::now_ms()
-            ],
-        )?;
+        record_finalized_attempt(&tx, command_id, "carrier", now_ms)?;
         tx.commit()?;
         Ok(PermitDecision::Permit(ReceivedCommand {
             command_id,
@@ -3447,14 +3488,7 @@ impl Client {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         rcs_send::record_rcs_target_identity(&tx, command_id, &mapping, observation)?;
-        tx.execute(
-            "INSERT INTO attempts(command_id,state,attempted_at_ms) VALUES(?,?,?)",
-            params![
-                command_id.to_string(),
-                state_code(SendState::AttemptRecorded),
-                now_ms
-            ],
-        )?;
+        record_finalized_attempt(&tx, command_id, "rcs", now_ms)?;
         if existing_tmp_id.is_some() {
             tx.execute(
                 "UPDATE rcs_send_ledger SET mapping_revision=?,proof_digest=?,google_conversation_id=?,attempted_at_ms=? WHERE command_id=?",
@@ -3477,6 +3511,104 @@ impl Client {
         };
         tx.commit()?;
         Ok(permit)
+    }
+
+    /// Atomically selects and freezes the only executable transport for an upgraded gateway.
+    /// A supplied mapping observation is strict: a contradictory or incomplete observation never
+    /// falls back to carrier authority.
+    pub fn begin_automatic_send_attempt(
+        &self,
+        command_id: CommandId,
+        observation: Option<&RcsMappingObservation>,
+        now_ms: i64,
+    ) -> Result<AutomaticPermitDecision, Error> {
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let tx = guard.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ledger: Option<(u32, String, String, bool)> = tx
+            .query_row(
+                "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+                [command_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((epoch, subscription_id, payload, historical)) = ledger else {
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::NotReceived));
+        };
+        if let Some(state) = attempt_state(&tx, command_id)? {
+            return Ok(AutomaticPermitDecision::AlreadyAttempted(state));
+        }
+        if restore_guarded(&tx)? {
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::RestoreGuarded));
+        }
+        if historical {
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::Historical));
+        }
+        match active {
+            Some(active) if epoch == active => {}
+            Some(active) if epoch < active => {
+                return Ok(AutomaticPermitDecision::Blocked(PermitBlock::StaleEpoch));
+            }
+            _ => return Ok(AutomaticPermitDecision::Blocked(PermitBlock::EpochNotActive)),
+        }
+        let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
+        if !media_ready {
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MediaUnavailable));
+        }
+        if subscription_id.is_empty() {
+            let Some(observation) = observation else {
+                return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven));
+            };
+            let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms) {
+                Ok(permit) => AutomaticPermitDecision::Rcs(permit),
+                Err(Error::InvalidRequest(_)) => {
+                    AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+                }
+                Err(error) => return Err(error),
+            };
+            tx.commit()?;
+            return Ok(decision);
+        }
+        if let Some(observation) = observation {
+            let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms) {
+                Ok(permit) => AutomaticPermitDecision::Rcs(permit),
+                Err(Error::InvalidRequest(_)) => {
+                    AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+                }
+                Err(error) => return Err(error),
+            };
+            tx.commit()?;
+            return Ok(decision);
+        }
+        if rcs_mapping::current_link_state(&tx)?.is_none() {
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven));
+        }
+        let admission = rcs_send::carrier_admission(
+            &tx,
+            message.record.conversation_id,
+            &message.recipients,
+            &subscription_id,
+            now_ms,
+        )?;
+        if matches!(admission, rcs_send::CarrierAdmission::InvalidateProof) {
+            rcs_send::invalidate_carrier_only_proof(&tx, message.record.conversation_id)?;
+            tx.commit()?;
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
+        }
+        if !matches!(admission, rcs_send::CarrierAdmission::Permitted) {
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
+        }
+        record_finalized_attempt(&tx, command_id, "carrier", now_ms)?;
+        tx.commit()?;
+        Ok(AutomaticPermitDecision::Carrier(ReceivedCommand {
+            command_id,
+            subscription_id,
+            message,
+        }))
     }
 
     /// Records an upstream acknowledgement as local ledger metadata, never as delivery state.
@@ -3523,7 +3655,7 @@ impl Client {
         }
         let (payload, revision, digest, google_conversation_id): (String, u64, Vec<u8>, String) =
             tx.query_row(
-                "SELECT l.payload,r.mapping_revision,r.proof_digest,r.google_conversation_id FROM command_ledger l JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND l.subscription_id=''",
+                "SELECT l.payload,r.mapping_revision,r.proof_digest,r.google_conversation_id FROM command_ledger l JOIN attempts a ON a.command_id=l.command_id JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND a.finalized_transport='rcs'",
                 [command_id.to_string()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
@@ -3573,7 +3705,7 @@ impl Client {
             ));
         }
         let (epoch, historical, payload, tmp_id): (u32, bool, String, String) = tx.query_row(
-            "SELECT l.key_epoch,l.historical,l.payload,r.tmp_id FROM command_ledger l JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND l.subscription_id=''",
+            "SELECT l.key_epoch,l.historical,l.payload,r.tmp_id FROM command_ledger l JOIN attempts a ON a.command_id=l.command_id JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND a.finalized_transport='rcs'",
             [command_id.to_string()],
             |row| {
                 Ok((
@@ -3651,7 +3783,7 @@ impl Client {
 
     fn require_rcs_attempt(&self, command_id: CommandId) -> Result<(), Error> {
         let exists: bool = self.lock()?.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM rcs_send_ledger WHERE command_id=?)",
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE command_id=? AND finalized_transport='rcs')",
             [command_id.to_string()],
             |row| row.get(0),
         )?;
@@ -6042,6 +6174,14 @@ CREATE TABLE rcs_send_ledger(
   retry_of_command_id TEXT
 );
 ";
+/// Version 46 -> 47: freeze the executed transport independently from legacy wire routing.
+const MIGRATION_47: &str = "
+ALTER TABLE attempts ADD COLUMN finalized_transport TEXT CHECK(finalized_transport IN ('carrier','rcs'));
+UPDATE attempts SET finalized_transport=CASE
+  WHEN EXISTS(SELECT 1 FROM rcs_send_ledger r WHERE r.command_id=attempts.command_id) THEN 'rcs'
+  ELSE 'carrier'
+END;
+";
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "outbox", "origin_tag TEXT")
@@ -6215,6 +6355,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_44)?;
             apply_migration_45(&tx)?;
             tx.execute_batch(MIGRATION_46)?;
+            tx.execute_batch(MIGRATION_47)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -6223,7 +6364,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=45)) => {
+        Some(version @ (4..=46)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -6346,6 +6487,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 45 {
                 tx.execute_batch(MIGRATION_46)?;
+            }
+            if version <= 46 {
+                tx.execute_batch(MIGRATION_47)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -9237,6 +9381,70 @@ fn exact_rcs_mapping(
     }
 }
 
+fn record_finalized_attempt(
+    conn: &Connection,
+    command_id: CommandId,
+    transport: &str,
+    now_ms: i64,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?,?,?,?)",
+        params![
+            command_id.to_string(),
+            state_code(SendState::AttemptRecorded),
+            now_ms,
+            transport
+        ],
+    )?;
+    Ok(())
+}
+
+fn automatic_rcs_permit(
+    tx: &Connection,
+    command_id: CommandId,
+    message: MessagePayload,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<RcsPermit, Error> {
+    if message.transport != Transport::Sms || !message.record.attachments.is_empty() {
+        return Err(Error::InvalidRequest("RCS text required"));
+    }
+    let mapping = exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)?;
+    require_exact_rcs_recipient(&message, &mapping)?;
+    let existing_tmp_id: Option<String> = tx
+        .query_row(
+            "SELECT tmp_id FROM rcs_send_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let tmp_id = existing_tmp_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    rcs_send::record_rcs_target_identity(tx, command_id, &mapping, observation)?;
+    record_finalized_attempt(tx, command_id, "rcs", now_ms)?;
+    if existing_tmp_id.is_some() {
+        tx.execute(
+            "UPDATE rcs_send_ledger SET mapping_revision=?,proof_digest=?,google_conversation_id=?,attempted_at_ms=? WHERE command_id=?",
+            params![mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms, command_id.to_string()],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,?,?,?,?)",
+            params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
+        )?;
+    }
+    Ok(RcsPermit {
+        command_id,
+        conversation_id: message.record.conversation_id,
+        tmp_id,
+        mapping_revision: mapping.mapping_revision,
+        proof_digest: mapping.proof.digest,
+        google_conversation_id: mapping.google_conversation_id,
+        message,
+    })
+}
+
 fn pinned_profile(conn: &Connection, epoch: u32) -> Result<Option<KeyProfile>, Error> {
     conn.query_row(
         "SELECT profile FROM key_epoch_profiles WHERE epoch=?",
@@ -10080,8 +10288,9 @@ mod tests {
     fn drop_v46_objects(conn: &Connection) {
         conn.execute_batch(
             "DROP TABLE rcs_mapping_proofs;
-             DROP TABLE rcs_conversation_mappings;
-             DROP TABLE rcs_send_ledger;",
+              DROP TABLE rcs_conversation_mappings;
+              DROP TABLE rcs_send_ledger;
+              ALTER TABLE attempts DROP COLUMN finalized_transport;",
         )
         .unwrap();
     }
