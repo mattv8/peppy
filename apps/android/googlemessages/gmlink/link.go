@@ -645,15 +645,23 @@ func (link *Link) queueEvent(event any) {
 }
 
 func cloneQueuedEvent(event any) any {
-	settings, ok := event.(*libgm.WrappedSettings)
-	if !ok || settings == nil || settings.Settings == nil {
-		return event
+	switch settings := event.(type) {
+	case *libgm.WrappedSettings:
+		if settings == nil || settings.Settings == nil {
+			return event
+		}
+		cloned, ok := proto.Clone(settings.Settings).(*gmproto.Settings)
+		if !ok {
+			return &libgm.WrappedSettings{IsOld: settings.IsOld}
+		}
+		return &libgm.WrappedSettings{Settings: cloned, IsOld: settings.IsOld}
+	case *gmproto.Settings:
+		cloned, ok := proto.Clone(settings).(*gmproto.Settings)
+		if ok {
+			return cloned
+		}
 	}
-	cloned, ok := proto.Clone(settings.Settings).(*gmproto.Settings)
-	if !ok {
-		return &libgm.WrappedSettings{IsOld: settings.IsOld}
-	}
-	return &libgm.WrappedSettings{Settings: cloned, IsOld: settings.IsOld}
+	return event
 }
 
 // relevantEvent reports whether projectEvent handles the event.
@@ -662,7 +670,7 @@ func relevantEvent(event any) bool {
 	case *events.AuthTokenRefreshed, *events.GaiaLoggedOut, *events.ListenFatalError, *events.AccountChange,
 		*events.ListenTemporaryError, *events.ListenRecovered, *events.PhoneNotResponding,
 		*events.PhoneRespondingAgain, *events.NoDataReceived, *events.ActiveSessionSet, *gmproto.UserAlertEvent,
-		*gmproto.Conversation, *libgm.WrappedSettings:
+		*gmproto.Conversation, *libgm.WrappedSettings, *gmproto.Settings:
 		return true
 	}
 	return false

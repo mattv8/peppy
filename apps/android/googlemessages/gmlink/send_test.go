@@ -116,14 +116,47 @@ func TestOldSettingsCannotReplaceCurrentSendAuthority(t *testing.T) {
 }
 
 func TestBareSettingsCannotEnableSendAuthority(t *testing.T) {
+	auth := linkedSafetyAuth()
+	fixture := newPhoneFixture(t, auth)
+	fixture.configure(func(knobs *fixtureKnobs) { knobs.configEmail = fixtureSourceID })
+	fixture.mu.Lock()
+	fixture.conversations = []*gmproto.Conversation{{
+		ConversationID: "synthetic-conversation", Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE,
+		SendMode: gmproto.ConversationSendMode_SEND_MODE_AUTO, DefaultOutgoingID: "current-outgoing",
+		Participants: []*gmproto.Participant{{IsMe: true, IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "current-outgoing"}}, {IsVisible: true, ID: &gmproto.SmallInfo{Number: "synthetic-target"}}},
+	}}
+	fixture.mu.Unlock()
 	link, _ := openSafetyLink(t, nil)
-	link.projectEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "current-outgoing"}}}}})
-	if _, code := link.currentSettings(); code != "" {
-		t.Fatalf("current wrapper code = %q", code)
+	setSafetyState(link, stateLinked, auth)
+	done := startSafetyRun(t, link)
+	link.mu.Lock()
+	link.m2VerificationPassed = true
+	link.mu.Unlock()
+	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{
+		SIMParticipant: &gmproto.SIMParticipant{ID: "current-outgoing"},
+		SIMData:        &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}},
+		RCSChats:       &gmproto.RCSChats{Enabled: true},
+	}}}})
+	awaitSafety(t, "queued current settings", func() bool {
+		_, code := link.currentSettings()
+		return code == ""
+	})
+	link.queueEvent(&gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "unknown-outgoing"}}}})
+	awaitSafety(t, "queued bare settings to invalidate authority", func() bool {
+		_, code := link.currentSettings()
+		return code == "settings_unavailable"
+	})
+
+	result := link.SendRcs(`{"command_id":"synthetic-command","tmp_id":"00000000-0000-4000-8000-000000000000","google_conversation_id":"synthetic-conversation","mapping_revision":1,"proof_digest":"synthetic-proof","content":"synthetic-content"}`)
+	if got := decodeSendCode(t, result); got != "settings_unavailable" {
+		t.Fatalf("code = %s result=%s", got, result)
 	}
-	link.projectEvent(&gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "unknown-outgoing"}}}})
-	if _, code := link.currentSettings(); code != "settings_unavailable" {
-		t.Fatalf("bare settings code = %q", code)
+	if got := fixture.countAction(gmproto.ActionType_SEND_MESSAGE.String()); got != 0 {
+		t.Fatalf("bare settings allowed %d sends", got)
+	}
+	link.Stop()
+	if err := awaitSafetyResult(t, done, "Run"); err != nil {
+		t.Fatalf("Run error = %v", err)
 	}
 }
 
