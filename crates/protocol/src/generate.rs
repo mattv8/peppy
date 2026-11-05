@@ -24,13 +24,10 @@ pub fn generate_contracts() -> GeneratedContracts {
     let openapi = pretty(
         &json!({"openapi":"3.1.0","info":{"title":"Peppy protocol","version":"1"},"paths":{},"components":{"schemas":component_value}}),
     );
-    let event_schema = pretty(&json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "oneOf": [
-            serde_json::to_value(schema_for!(Envelope)).expect("envelope schema serializes"),
-            serde_json::to_value(schema_for!(EphemeralSignalV1)).expect("ephemeral signal schema serializes")
-        ]
-    }));
+    let mut event_schema =
+        serde_json::to_value(schema_for!(Envelope)).expect("event schema serializes");
+    event_schema["$schema"] = Value::String("https://json-schema.org/draft/2020-12/schema".into());
+    let event_schema = pretty(&event_schema);
     let typescript =
         typescript_from_components(component_value.as_object().expect("components object"));
     GeneratedContracts {

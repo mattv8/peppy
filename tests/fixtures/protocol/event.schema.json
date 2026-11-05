@@ -1,240 +1,186 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "oneOf": [
-    {
-      "$defs": {
-        "CompactionMetadata": {
-          "description": "Opaque, unauthenticated-to-the-server compaction bookkeeping. Its exact\nauthenticated copy is carried in the encrypted event payload by clients.\nIt deliberately stays out of legacy AAD and `wire_digest`.",
-          "properties": {
-            "checkpoint": {
-              "description": "Authenticated maintenance marker: this record repeats its producer's current state\nonly to fold a large unsuperseded frontier. Readers apply it as history (no OS,\nbanner or unread effects). Omitted when false, so legacy encodings are unchanged.",
-              "type": "boolean"
-            },
-            "key": {
-              "type": "string"
-            },
-            "supersedes": {
-              "default": [],
-              "items": {
-                "$ref": "#/$defs/CompactionReference"
-              },
-              "type": "array"
-            },
-            "terminal": {
-              "default": false,
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "key"
-          ],
-          "type": "object"
+  "$defs": {
+    "CompactionMetadata": {
+      "description": "Opaque, unauthenticated-to-the-server compaction bookkeeping. Its exact\nauthenticated copy is carried in the encrypted event payload by clients.\nIt deliberately stays out of legacy AAD and `wire_digest`.",
+      "properties": {
+        "checkpoint": {
+          "description": "Authenticated maintenance marker: this record repeats its producer's current state\nonly to fold a large unsuperseded frontier. Readers apply it as history (no OS,\nbanner or unread effects). Omitted when false, so legacy encodings are unchanged.",
+          "type": "boolean"
         },
-        "CompactionReference": {
-          "properties": {
-            "producer_device_id": {
-              "format": "uuid",
-              "type": "string"
-            },
-            "producer_sequence": {
-              "$ref": "#/$defs/SourceSequence"
-            }
-          },
-          "required": [
-            "producer_device_id",
-            "producer_sequence"
-          ],
-          "type": "object"
-        },
-        "EnvelopePurpose": {
-          "enum": [
-            "command",
-            "event"
-          ],
+        "key": {
           "type": "string"
         },
-        "GatewayRoute": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "gateway_device_id": {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                "subscription_id": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "gateway_device_id",
-                "subscription_id"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "gateway_device_id": {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                "kind": {
-                  "const": "rcs_link"
-                }
-              },
-              "required": [
-                "kind",
-                "gateway_device_id"
-              ],
-              "type": "object"
-            }
-          ]
+        "supersedes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CompactionReference"
+          },
+          "type": "array"
         },
-        "SourceSequence": {
-          "type": "string"
+        "terminal": {
+          "default": false,
+          "type": "boolean"
         }
       },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "CompactionReference": {
       "properties": {
-        "ciphertext": {
-          "type": "string"
-        },
-        "command_id": {
-          "format": "uuid",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "compaction": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CompactionMetadata"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "crypto_suite": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "envelope_id": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "key_epoch": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "origin_tag": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "producer_device_id": {
           "format": "uuid",
           "type": "string"
         },
         "producer_sequence": {
           "$ref": "#/$defs/SourceSequence"
-        },
-        "profile_fingerprint": {
-          "type": "string"
-        },
-        "protocol_version": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "purpose": {
-          "$ref": "#/$defs/EnvelopePurpose"
-        },
-        "route": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/GatewayRoute"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "vault_id": {
-          "format": "uuid",
-          "type": "string"
         }
       },
       "required": [
-        "protocol_version",
-        "envelope_id",
-        "vault_id",
         "producer_device_id",
-        "producer_sequence",
-        "key_epoch",
-        "crypto_suite",
-        "profile_fingerprint",
-        "purpose",
-        "ciphertext"
+        "producer_sequence"
       ],
-      "title": "Envelope",
       "type": "object"
     },
-    {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "ciphertext_b64": {
-          "maxLength": 7600,
-          "type": "string"
-        },
-        "expires_at_ms": {
-          "pattern": "^(0|[1-9][0-9]*)$",
-          "type": "string"
-        },
-        "key_epoch": {
-          "format": "uint32",
-          "minimum": 1,
-          "type": "integer"
-        },
-        "kind": {
-          "const": "typing"
-        },
-        "protocol_version": {
-          "const": 1
-        },
-        "sender_device_id": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "sent_at_ms": {
-          "pattern": "^(0|[1-9][0-9]*)$",
-          "type": "string"
-        },
-        "sequence": {
-          "pattern": "^(0|[1-9][0-9]*)$",
-          "type": "string"
-        }
-      },
-      "required": [
-        "protocol_version",
-        "kind",
-        "sender_device_id",
-        "key_epoch",
-        "sent_at_ms",
-        "expires_at_ms",
-        "sequence",
-        "ciphertext_b64"
+    "EnvelopePurpose": {
+      "enum": [
+        "command",
+        "event"
       ],
-      "title": "EphemeralSignalV1",
-      "type": "object"
+      "type": "string"
+    },
+    "GatewayRoute": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "gateway_device_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "subscription_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "gateway_device_id",
+            "subscription_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "gateway_device_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "rcs_link"
+            }
+          },
+          "required": [
+            "kind",
+            "gateway_device_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SourceSequence": {
+      "type": "string"
     }
-  ]
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "ciphertext": {
+      "type": "string"
+    },
+    "command_id": {
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "compaction": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CompactionMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "crypto_suite": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "envelope_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "key_epoch": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "origin_tag": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "producer_device_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "producer_sequence": {
+      "$ref": "#/$defs/SourceSequence"
+    },
+    "profile_fingerprint": {
+      "type": "string"
+    },
+    "protocol_version": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "purpose": {
+      "$ref": "#/$defs/EnvelopePurpose"
+    },
+    "route": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GatewayRoute"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "vault_id": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "envelope_id",
+    "vault_id",
+    "producer_device_id",
+    "producer_sequence",
+    "key_epoch",
+    "crypto_suite",
+    "profile_fingerprint",
+    "purpose",
+    "ciphertext"
+  ],
+  "title": "Envelope",
+  "type": "object"
 }

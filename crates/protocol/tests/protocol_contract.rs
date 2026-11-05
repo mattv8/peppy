@@ -508,6 +508,48 @@ fn generated_schemas_have_resolvable_references_and_derived_ts() {
     assert!(contracts.typescript.contains("kind: 'rcs_link';"));
 }
 
+fn assert_local_refs_resolve(root: &serde_json::Value, node: &serde_json::Value) {
+    match node {
+        serde_json::Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str) {
+                let pointer = reference.strip_prefix('#').expect("local schema reference");
+                assert!(
+                    root.pointer(pointer).is_some(),
+                    "unresolved reference {reference}"
+                );
+            }
+            for child in object.values() {
+                assert_local_refs_resolve(root, child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                assert_local_refs_resolve(root, child);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn generated_json_schema_references_resolve() {
+    let contracts = peppy_protocol::generate_contracts();
+    for text in [&contracts.openapi, &contracts.event_schema] {
+        let root: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_local_refs_resolve(&root, &root);
+    }
+}
+
+#[test]
+fn durable_event_schema_remains_envelope_rooted() {
+    let contracts = peppy_protocol::generate_contracts();
+    let schema: serde_json::Value = serde_json::from_str(&contracts.event_schema).unwrap();
+    assert_eq!(schema["title"], "Envelope");
+    assert!(schema.get("oneOf").is_none());
+    assert!(schema["properties"].get("envelope_id").is_some());
+    assert!(schema["properties"].get("kind").is_none());
+}
+
 #[test]
 fn event_envelope_conflict_is_scoped_to_vault_producer_and_envelope_id() {
     let mut first = envelope();

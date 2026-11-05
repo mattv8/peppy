@@ -142,8 +142,13 @@ impl EphemeralSignalV1 {
 }
 
 fn parse_decimal(value: &str) -> Result<u64, EphemeralSignalError> {
-    if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
         return Err(EphemeralSignalError::InvalidDecimal);
     }
-    value.parse().map_err(|_| EphemeralSignalError::InvalidDecimal)
+    value
+        .parse()
+        .map_err(|_| EphemeralSignalError::InvalidDecimal)
 }
