@@ -122,9 +122,9 @@ object LinkRuntime {
             val callbackPairingGeneration = synchronized(this@LinkRuntime) { pairingGeneration }
             callbackExecutor.execute {
                 if (!acceptsCallback(generation)) return@execute
+                if (kind == "link" && safeCode in PAIRING_TERMINAL_CODES) endPairingIfCurrent(callbackPairingGeneration)
                 recordEvent(kind, safeCode, value)
                 GoogleMessagesLinkService.onLinkEvent(kind, safeCode)
-                if (kind == "link" && safeCode in PAIRING_TERMINAL_CODES) endPairingIfCurrent(callbackPairingGeneration)
                 signalChange()
             }
         }
