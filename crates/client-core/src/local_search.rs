@@ -1039,10 +1039,11 @@ mod tests {
                  DROP TRIGGER addresses_search_delete;
                   DROP INDEX messages_search_metadata;
                   DROP TABLE local_search_fts;
-                  DROP TABLE rcs_mapping_proofs;
-                  DROP TABLE rcs_conversation_mappings;
-                  DROP TABLE rcs_send_ledger;
-                  DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark');
+                   DROP TABLE rcs_mapping_proofs;
+                   DROP TABLE rcs_conversation_mappings;
+                   DROP TABLE rcs_send_ledger;
+                   ALTER TABLE attempts DROP COLUMN finalized_transport;
+                   DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark');
                  UPDATE schema_meta SET version=34;",
             ).unwrap();
             let mut insert = store.conn.prepare(

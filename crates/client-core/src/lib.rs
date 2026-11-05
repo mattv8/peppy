@@ -3420,12 +3420,7 @@ impl Client {
                 PermitBlock::CarrierOnlyProofUnavailable,
             ));
         }
-        let retention_blocked: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.command_id=?1 AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1))))",
-            [command_id.to_string()],
-            |row| row.get(0),
-        )?;
-        if retention_blocked {
+        if send_retention_blocked(&tx, command_id)? {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
         // The attempt time is the gateway's best evidence for the provider row the platform
@@ -3474,6 +3469,9 @@ impl Client {
             || !message.record.attachments.is_empty()
         {
             return Err(Error::InvalidRequest("RCS text required"));
+        }
+        if send_retention_blocked(&tx, command_id)? {
+            return Err(Error::InvalidRequest("RCS media unavailable"));
         }
         let mapping = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?;
         require_exact_rcs_recipient(&message, &mapping)?;
@@ -3555,6 +3553,9 @@ impl Client {
         if !media_ready {
             return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
+        if send_retention_blocked(&tx, command_id)? {
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MediaUnavailable));
+        }
         if subscription_id.is_empty() {
             let Some(observation) = observation else {
                 return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven));
@@ -3570,9 +3571,16 @@ impl Client {
             return Ok(decision);
         }
         if let Some(observation) = observation {
+            let conversation_id = message.record.conversation_id;
+            if subscription_id != observation.selected_sim_id {
+                rcs_send::invalidate_carrier_only_proof(&tx, conversation_id)?;
+                tx.commit()?;
+                return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven));
+            }
             let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms) {
                 Ok(permit) => AutomaticPermitDecision::Rcs(permit),
                 Err(Error::InvalidRequest(_)) => {
+                    rcs_send::invalidate_carrier_only_proof(&tx, conversation_id)?;
                     AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
                 }
                 Err(error) => return Err(error),
@@ -9399,6 +9407,15 @@ fn record_finalized_attempt(
     Ok(())
 }
 
+fn send_retention_blocked(conn: &Connection, command_id: CommandId) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.command_id=?1 AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1))))",
+        [command_id.to_string()],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 fn automatic_rcs_permit(
     tx: &Connection,
     command_id: CommandId,
@@ -10335,6 +10352,63 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
         assert_eq!((version, epoch), (SCHEMA_VERSION, 0));
+    }
+
+    #[test]
+    fn migration_47_backfills_only_real_attempts_from_the_rcs_ledger() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-46.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = DatabaseKey::new(&[46; 32]).unwrap();
+        let client = Client::open(config.clone(), key).unwrap();
+        let carrier = CommandId::new();
+        let rcs = CommandId::new();
+        let preallocated = CommandId::new();
+        {
+            let store = client.lock().unwrap();
+            for command_id in [carrier, rcs] {
+                store.conn.execute(
+                    "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,historical) VALUES(?,0,'sim','{}',0)",
+                    [command_id.to_string()],
+                ).unwrap();
+                store.conn.execute(
+                    "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?,'attempt_recorded',0,'carrier')",
+                    [command_id.to_string()],
+                ).unwrap();
+            }
+            for command_id in [rcs, preallocated] {
+                store.conn.execute(
+                    "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,1,?,'google',0)",
+                    params![command_id.to_string(), uuid::Uuid::new_v4().to_string(), vec![0_u8; 32]],
+                ).unwrap();
+            }
+            store.conn.execute_batch(
+                "ALTER TABLE attempts DROP COLUMN finalized_transport;
+                 UPDATE schema_meta SET version=46;",
+            ).unwrap();
+        }
+        drop(client);
+
+        let reopened = Client::open(config.clone(), DatabaseKey::new(&[46; 32]).unwrap()).unwrap();
+        drop(reopened);
+        let conn = Connection::open(&config.database_path).unwrap();
+        apply_database_key(&conn, &DatabaseKey::new(&[46; 32]).unwrap()).unwrap();
+        let transport = |command_id: CommandId| conn.query_row(
+            "SELECT finalized_transport FROM attempts WHERE command_id=?",
+            [command_id.to_string()],
+            |row| row.get::<_, String>(0),
+        ).unwrap();
+        assert_eq!(transport(carrier), "carrier");
+        assert_eq!(transport(rcs), "rcs");
+        let preallocated_attempts: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM attempts WHERE command_id=?",
+            [preallocated.to_string()],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(preallocated_attempts, 0);
     }
 
     #[test]

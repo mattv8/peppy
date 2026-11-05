@@ -284,8 +284,8 @@ fn automatic_admission_upgrades_a_legacy_carrier_command_only_with_an_exact_mapp
 }
 
 #[test]
-fn automatic_admission_never_falls_back_from_a_contradictory_mapping_observation() {
-    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+fn automatic_admission_invalidates_carrier_proof_for_same_context_contradictions() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
@@ -293,21 +293,39 @@ fn automatic_admission_never_falls_back_from_a_contradictory_mapping_observation
     gateway
         .record_carrier_only_proof(&carrier_proof(&command), 1_000)
         .unwrap();
-    let mut contradictory = observation("different-peer-local", 2);
-    contradictory.context_revision = 2;
-    contradictory.observed_at_ms = 1_001;
+    let contradictory = observation("different-peer-local", 1);
 
     assert_eq!(
         gateway
-            .begin_automatic_send_attempt(command_id, Some(&contradictory), 1_001)
+            .begin_automatic_send_attempt(command_id, Some(&contradictory), 1_000)
             .unwrap(),
         AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
     );
     assert_eq!(
         gateway
-            .begin_automatic_send_attempt(command_id, None, 1_001)
+            .begin_automatic_send_attempt(command_id, None, 1_000)
             .unwrap(),
         AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+    drop(gateway);
+    assert_eq!(
+        unlocked(&config, &vault)
+            .begin_automatic_send_attempt(command_id, None, 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+}
+
+#[test]
+fn automatic_admission_rejects_a_mapping_on_a_different_sim() {
+    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let mut current = observation("peer-local", 1);
+    current.selected_sim_id = "other-sim".into();
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&current), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
     );
 }
 
