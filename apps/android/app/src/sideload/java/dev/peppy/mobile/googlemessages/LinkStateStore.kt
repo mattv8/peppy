@@ -7,7 +7,16 @@ import dev.peppy.mobile.security.SecretBox
 import java.io.File
 import java.io.FileOutputStream
 
-class LinkStateStore(private val directory: File, private val box: SecretBox = KeystoreSecretBox) {
+class LinkStateStore internal constructor(
+    private val directory: File,
+    private val box: SecretBox,
+    private val fileSystem: LinkStateFileSystem,
+) {
+    constructor(
+        directory: File,
+        box: SecretBox = KeystoreSecretBox,
+    ) : this(directory, box, AndroidLinkStateFileSystem)
+
     private val state = File(directory, STATE_FILE_NAME)
 
     fun read(): ByteArray {
@@ -29,17 +38,14 @@ class LinkStateStore(private val directory: File, private val box: SecretBox = K
     fun write(value: ByteArray) {
         try {
             check(directory.exists() || directory.mkdirs()) { DIRECTORY_UNAVAILABLE }
-            val temporary = File.createTempFile("$STATE_FILE_NAME.", ".tmp", directory)
+            val temporary = fileSystem.createTemporaryFile(directory, "$STATE_FILE_NAME.", ".tmp")
             try {
-                FileOutputStream(temporary).use { output ->
-                    output.write(box.seal(PURPOSE, value).toByteArray(Charsets.UTF_8))
-                    output.fd.sync()
-                }
-                LinkStateStoreTestHooks.beforeRename?.invoke()
-                check(temporary.renameTo(state)) { REPLACE_FAILED }
-                syncDirectory()
+                val sealed = box.seal(PURPOSE, value).toByteArray(Charsets.UTF_8)
+                fileSystem.writeAndSync(temporary, sealed)
+                fileSystem.replace(temporary, state)
+                fileSystem.syncDirectory(directory)
             } finally {
-                temporary.delete()
+                fileSystem.deleteTemporary(temporary)
             }
         } catch (_: Exception) {
             throw IllegalStateException(WRITE_FAILED)
@@ -61,13 +67,50 @@ class LinkStateStore(private val directory: File, private val box: SecretBox = K
                 check(temporary.delete()) { WIPE_FAILED }
                 changed = true
             }
-            if (changed) syncDirectory()
+            if (changed) fileSystem.syncDirectory(directory)
         } catch (_: Exception) {
             throw IllegalStateException(WIPE_FAILED)
         }
     }
 
-    private fun syncDirectory() {
+    private companion object {
+        const val PURPOSE = "google-messages-link-v1"
+        const val STATE_FILE_NAME = "google-messages-link-state.bin"
+        const val DIRECTORY_UNAVAILABLE = "link_state_directory_unavailable"
+        const val UNREADABLE = "link_state_unreadable"
+        const val WRITE_FAILED = "link_state_write_failed"
+        const val WIPE_FAILED = "link_state_wipe_failed"
+    }
+}
+
+internal interface LinkStateFileSystem {
+    fun createTemporaryFile(directory: File, prefix: String, suffix: String): File
+
+    fun writeAndSync(file: File, value: ByteArray)
+
+    fun replace(source: File, destination: File)
+
+    fun syncDirectory(directory: File)
+
+    fun deleteTemporary(file: File)
+}
+
+private object AndroidLinkStateFileSystem : LinkStateFileSystem {
+    override fun createTemporaryFile(directory: File, prefix: String, suffix: String): File =
+        File.createTempFile(prefix, suffix, directory)
+
+    override fun writeAndSync(file: File, value: ByteArray) {
+        FileOutputStream(file).use { output ->
+            output.write(value)
+            output.fd.sync()
+        }
+    }
+
+    override fun replace(source: File, destination: File) {
+        check(source.renameTo(destination)) { "link_state_replace_failed" }
+    }
+
+    override fun syncDirectory(directory: File) {
         val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY, 0)
         try {
             Os.fsync(descriptor)
@@ -76,17 +119,7 @@ class LinkStateStore(private val directory: File, private val box: SecretBox = K
         }
     }
 
-    private companion object {
-        const val PURPOSE = "google-messages-link-v1"
-        const val STATE_FILE_NAME = "google-messages-link-state.bin"
-        const val DIRECTORY_UNAVAILABLE = "link_state_directory_unavailable"
-        const val REPLACE_FAILED = "link_state_replace_failed"
-        const val UNREADABLE = "link_state_unreadable"
-        const val WRITE_FAILED = "link_state_write_failed"
-        const val WIPE_FAILED = "link_state_wipe_failed"
+    override fun deleteTemporary(file: File) {
+        file.delete()
     }
-}
-
-internal object LinkStateStoreTestHooks {
-    @Volatile var beforeRename: (() -> Unit)? = null
 }
