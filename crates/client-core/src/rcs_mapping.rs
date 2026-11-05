@@ -360,7 +360,7 @@ fn canonical_e164(identity: &str) -> Option<String> {
     identity.starts_with('+').then_some(identity)
 }
 
-fn native_observation_is_current(
+fn native_attestation_is_current(
     observation: &RcsMappingObservation,
     now_ms: i64,
     own_identity: &str,
@@ -382,13 +382,9 @@ fn native_observation_is_current(
         && evidence.lifetime.session_generation == observation.session_generation
         && evidence.lifetime.context_revision == observation.context_revision
         && !evidence.lookup_id.is_empty()
-        && evidence.lookup_complete
-        && evidence.google_candidate_count == 1
-        && evidence.google_candidate_count == observation.google_candidate_count
         && evidence.settings_revision > 0
         && evidence.settings_stream_epoch > 0
         && evidence.settings_provenance == NativeSettingsProvenance::CurrentEvent
-        && evidence.settings_currentness == NativeSettingsCurrentness::ContinuousVerifiedFeed
         && evidence.settings_observed_at_ms > 0
         && evidence.settings_observed_at_ms <= evidence.settings_validated_at_ms
         && fresh(evidence.settings_validated_at_ms)
@@ -401,34 +397,43 @@ fn native_observation_is_current(
         && fresh(binding.route_observed_at_ms)
         && !binding.same_handset_evidence_id.is_empty()
         && canonical_e164(&binding.own_number_raw).as_deref() == Some(own_identity)
-        && canonical_e164(&outgoing.own_identity_raw).as_deref() == Some(own_identity)
         && !outgoing.outgoing_id.is_empty()
         && !outgoing.sim_participant_id.is_empty()
+}
+
+fn native_observation_is_current(
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+    own_identity: &str,
+) -> bool {
+    let evidence = &observation.native_evidence;
+    let outgoing = &observation.outgoing;
+    let joined_cards = evidence
+        .current_settings_sims
+        .iter()
+        .filter(|sim| sim.sim_participant_id == outgoing.outgoing_id)
+        .collect::<Vec<_>>();
+    let [selected_card] = joined_cards.as_slice() else {
+        return false;
+    };
+    native_attestation_is_current(observation, now_ms, own_identity)
+        && evidence.lookup_complete
+        && evidence.google_candidate_count == 1
+        && evidence.google_candidate_count == observation.google_candidate_count
+        && evidence.settings_currentness == NativeSettingsCurrentness::ContinuousVerifiedFeed
+        && outgoing.sim_participant_id == outgoing.outgoing_id
+        && canonical_e164(&outgoing.own_identity_raw).as_deref() == Some(own_identity)
         && outgoing.rcs_chats_enabled
-        && evidence
-            .current_settings_sims
-            .iter()
-            .filter(|sim| {
-                sim.rcs_chats_enabled
-                    && sim.outgoing_id == outgoing.outgoing_id
-                    && sim.sim_participant_id == outgoing.sim_participant_id
-                    && sim.sim_payload == outgoing.sim_payload
-            })
-            .count()
-            == 1
+        && selected_card.outgoing_id == outgoing.outgoing_id
+        && selected_card.rcs_chats_enabled
+        && selected_card.sim_payload == outgoing.sim_payload
+        && canonical_e164(&selected_card.own_identity_raw).as_deref() == Some(own_identity)
         && evidence
             .current_settings_sims
             .iter()
             .filter(|sim| canonical_e164(&sim.own_identity_raw).as_deref() == Some(own_identity))
             .count()
             == 1
-        && evidence.current_settings_sims.iter().any(|sim| {
-            sim.rcs_chats_enabled
-                && sim.outgoing_id == outgoing.outgoing_id
-                && sim.sim_participant_id == outgoing.sim_participant_id
-                && canonical_e164(&sim.own_identity_raw).as_deref() == Some(own_identity)
-                && sim.sim_payload == outgoing.sim_payload
-        })
 }
 
 fn is_fresh(now_ms: i64, observed_at_ms: i64) -> bool {
@@ -697,15 +702,21 @@ pub(crate) fn update_context(
     Ok(ContextUpdate::Changed)
 }
 
-#[allow(dead_code)] // R2 consumes this validator while its public permit wrapper is being integrated.
-pub(crate) fn mapping_matches_observation(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MappingObservationStatus {
+    Exact,
+    CurrentWithdrawal,
+    Mismatch,
+}
+
+pub(crate) fn mapping_observation_status(
     conn: &Connection,
     mapping: &RcsMapping,
     observation: &RcsMappingObservation,
     now_ms: i64,
-) -> Result<bool, Error> {
+) -> Result<MappingObservationStatus, Error> {
     if !is_fresh(now_ms, mapping.verified_at_ms) {
-        return Ok(false);
+        return Ok(MappingObservationStatus::Mismatch);
     }
     let Some(context) = conn
         .query_row(
@@ -715,36 +726,45 @@ pub(crate) fn mapping_matches_observation(
         )
         .optional()?
     else {
-        return Ok(false);
+        return Ok(MappingObservationStatus::Mismatch);
     };
-    if observation.google_candidate_count != 1
-        || observation.google_conversation_id != mapping.google_conversation_id
-        || observation.conversation_type != RcsConversationType::Rcs
-        || observation.status != "eligible"
-        || observation.send_mode != RcsSendMode::Automatic
-        || observation.read_only
-        || !observation.default_outgoing
+    if observation.google_conversation_id != mapping.google_conversation_id
         || context != context_value(observation)
         || observation.link_state != RcsLinkState::Linked
         || mapping.mapping_revision != observation.mapping_revision
         || mapping.verified_at_ms != observation.observed_at_ms
     {
-        return Ok(false);
+        return Ok(MappingObservationStatus::Mismatch);
     }
     let own_identity = match canonical_e164(&observation.selected_sim_own_identity) {
-        Some(identity) if native_observation_is_current(observation, now_ms, &identity) => identity,
-        _ => return Ok(false),
+        Some(identity) if identity == mapping.proof.own_identity => identity,
+        _ => return Ok(MappingObservationStatus::Mismatch),
     };
-    let visible = match validated_visible_participants(observation) {
-        Ok(visible) => visible,
-        Err(_) => return Ok(false),
-    };
-    if mapping.proof.digest != proof_digest(observation, mapping.class, &own_identity, &visible) {
-        return Ok(false);
+    if !native_attestation_is_current(observation, now_ms, &own_identity) {
+        return Ok(MappingObservationStatus::Mismatch);
     }
+
+    let visible = validated_visible_participants(observation).ok();
+    let proof_matches = visible.as_ref().is_some_and(|visible| {
+        mapping.proof.digest == proof_digest(observation, mapping.class, &own_identity, visible)
+    });
     let (conversations, uncertain) =
         peppy_conversations_for_identity(conn, &mapping.proof.canonical_participant)?;
-    Ok(!uncertain && conversations.as_slice() == [mapping.conversation_id])
+    let exact = observation.google_candidate_count == 1
+        && observation.conversation_type == RcsConversationType::Rcs
+        && observation.status == "eligible"
+        && observation.send_mode == RcsSendMode::Automatic
+        && !observation.read_only
+        && observation.default_outgoing
+        && native_observation_is_current(observation, now_ms, &own_identity)
+        && proof_matches
+        && !uncertain
+        && conversations.as_slice() == [mapping.conversation_id];
+    Ok(if exact {
+        MappingObservationStatus::Exact
+    } else {
+        MappingObservationStatus::CurrentWithdrawal
+    })
 }
 
 pub(crate) fn context_is_current(
@@ -885,6 +905,18 @@ fn invalidate_for_refusal(
     conn.execute(
         "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE google_conversation_id=? AND invalidated_at_ms IS NULL",
         params![code, observation.google_conversation_id],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn invalidate_mapping(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    code: &str,
+) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE peppy_conversation_id=? AND invalidated_at_ms IS NULL",
+        params![code, conversation_id.to_string()],
     )?;
     Ok(())
 }
@@ -1046,11 +1078,11 @@ mod tests {
             proof: RcsMappingProof {
                 canonical_participant: "raw:raw-peer".into(),
                 identity_region: observation.identity_region.clone(),
-                own_identity: "raw:local".into(),
+                own_identity: "+12025550100".into(),
                 digest: proof_digest(
                     &observation,
                     RcsMappingClass::OneToOne,
-                    "raw:local",
+                    "+12025550100",
                     &visible,
                 ),
             },
@@ -1062,7 +1094,10 @@ mod tests {
             update_context(&conn, &observation).unwrap(),
             ContextUpdate::Changed
         ));
-        assert!(mapping_matches_observation(&conn, &mapping, &observation, 1_000).unwrap());
+        assert_eq!(
+            mapping_observation_status(&conn, &mapping, &observation, 1_000).unwrap(),
+            MappingObservationStatus::Exact
+        );
         let mut malformed = observation;
         malformed.participants.push(RcsParticipantObservation {
             identity: "+not-an-identity".into(),
@@ -1071,7 +1106,10 @@ mod tests {
             is_visible: true,
             is_me: false,
         });
-        assert!(!mapping_matches_observation(&conn, &mapping, &malformed, 1_000).unwrap());
+        assert_ne!(
+            mapping_observation_status(&conn, &mapping, &malformed, 1_000).unwrap(),
+            MappingObservationStatus::Exact
+        );
         assert_eq!(get(&conn, conversation_id).unwrap(), Some(mapping));
     }
 }

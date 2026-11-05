@@ -236,19 +236,70 @@ fn canonical_recipients(recipients: &[String]) -> Result<Vec<String>, Error> {
 /// It is deliberately not serializable: Google identifiers and proof material stay local.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RcsPermit {
-    pub command_id: CommandId,
-    pub conversation_id: ConversationId,
-    pub tmp_id: String,
-    pub mapping_revision: u64,
-    pub proof_digest: [u8; 32],
-    pub google_conversation_id: String,
-    /// Restricted local-native transport projection, constructed during core admission.
-    pub target: LocalRcsTargetSnapshot,
-    pub message: MessagePayload,
+    command_id: CommandId,
+    conversation_id: ConversationId,
+    tmp_id: String,
+    mapping_revision: u64,
+    proof_digest: [u8; 32],
+    google_conversation_id: String,
+    target: LocalRcsTargetSnapshot,
+    message: MessagePayload,
 }
 
 impl RcsPermit {
-    /// Produces the restricted native commit payload; callers cannot supply its target or proof.
+    pub(crate) fn from_admission(
+        command_id: CommandId,
+        message: MessagePayload,
+        tmp_id: String,
+        mapping: &RcsMapping,
+        observation: &RcsMappingObservation,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            command_id,
+            conversation_id: message.record.conversation_id,
+            tmp_id,
+            mapping_revision: mapping.mapping_revision,
+            proof_digest: mapping.proof.digest,
+            google_conversation_id: mapping.google_conversation_id.clone(),
+            target: local_target_snapshot(mapping, observation)?,
+            message,
+        })
+    }
+
+    pub fn command_id(&self) -> CommandId {
+        self.command_id
+    }
+
+    pub fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    pub fn tmp_id(&self) -> &str {
+        &self.tmp_id
+    }
+
+    pub fn mapping_revision(&self) -> u64 {
+        self.mapping_revision
+    }
+
+    pub fn proof_digest(&self) -> [u8; 32] {
+        self.proof_digest
+    }
+
+    pub fn google_conversation_id(&self) -> &str {
+        &self.google_conversation_id
+    }
+
+    pub fn target(&self) -> &LocalRcsTargetSnapshot {
+        &self.target
+    }
+
+    pub fn message(&self) -> &MessagePayload {
+        &self.message
+    }
+
+    /// Returns a detached projection of this immutable permit. Native commit must compare the
+    /// projection with its prepared facts before admitting an external effect.
     pub fn native_commit_projection(&self) -> NativeRcsCommitProjection {
         NativeRcsCommitProjection {
             command_id: self.command_id.to_string(),
@@ -360,7 +411,7 @@ fn canonical_e164(identity: &str) -> Result<String, Error> {
         .ok_or(Error::InvalidRequest("RCS own identity must be E.164"))
 }
 
-pub(crate) fn local_target_snapshot(
+fn local_target_snapshot(
     mapping: &RcsMapping,
     observation: &RcsMappingObservation,
 ) -> Result<LocalRcsTargetSnapshot, Error> {

@@ -569,3 +569,28 @@ fn same_revision_payload_contradiction_invalidates_old_mapping_authority() {
     );
     assert!(client.rcs_mapping(conversation_id).unwrap().is_none());
 }
+
+#[test]
+fn initial_mapping_requires_one_sim_participant_id_join_before_card_validation() {
+    let (_directory, _config, client, _conversation_id) = client_with_participant("raw-peer");
+    let mut mismatched = observation("raw-peer", 1);
+    mismatched.outgoing.outgoing_id = "conversation-outgoing".into();
+    mismatched.native_evidence.current_settings_sims[0].outgoing_id =
+        "conversation-outgoing".into();
+    assert_eq!(
+        client.verify_rcs_mapping(&mismatched, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
+    );
+
+    let (_directory, _config, client, _conversation_id) = client_with_participant("raw-peer");
+    let mut duplicate = observation("raw-peer", 1);
+    let mut other = duplicate.native_evidence.current_settings_sims[0].clone();
+    other.sim_payload.sim_number += 1;
+    other.own_identity_raw = "+12025550101".into();
+    other.rcs_chats_enabled = false;
+    duplicate.native_evidence.current_settings_sims.push(other);
+    assert_eq!(
+        client.verify_rcs_mapping(&duplicate, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
+    );
+}

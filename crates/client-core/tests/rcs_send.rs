@@ -277,37 +277,37 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
     let permit = gateway
         .begin_rcs_send_attempt(command_id, &current_observation, 1_000)
         .unwrap();
-    assert_eq!(permit.conversation_id, captured.conversation_id);
+    assert_eq!(permit.conversation_id(), captured.conversation_id);
     assert_eq!(
-        permit.google_conversation_id,
+        permit.google_conversation_id(),
         mapping.google_conversation_id
     );
-    assert_eq!(permit.mapping_revision, mapping.mapping_revision);
-    assert_eq!(permit.proof_digest, mapping.proof.digest);
-    assert_eq!(permit.target.canonical_recipient, "raw:peer-local");
-    assert_eq!(permit.target.selected_sim_id, "android-subscription-7");
-    assert_eq!(permit.target.outgoing.outgoing_id, "google-outgoing");
-    assert_eq!(permit.target.outgoing.sim_payload.two, 2);
-    assert_eq!(permit.target.outgoing.sim_payload.sim_number, 7);
-    assert_eq!(permit.target.carrier_binding.android_subscription_id, 7);
+    assert_eq!(permit.mapping_revision(), mapping.mapping_revision);
+    assert_eq!(permit.proof_digest(), mapping.proof.digest);
+    assert_eq!(permit.target().canonical_recipient, "raw:peer-local");
+    assert_eq!(permit.target().selected_sim_id, "android-subscription-7");
+    assert_eq!(permit.target().outgoing.outgoing_id, "google-outgoing");
+    assert_eq!(permit.target().outgoing.sim_payload.two, 2);
+    assert_eq!(permit.target().outgoing.sim_payload.sim_number, 7);
+    assert_eq!(permit.target().carrier_binding.android_subscription_id, 7);
     assert_ne!(
-        permit.target.selected_sim_id,
-        permit.target.outgoing.outgoing_id
+        permit.target().selected_sim_id,
+        permit.target().outgoing.outgoing_id
     );
     assert_eq!(
-        permit.target.participants[0].google_participant_id,
+        permit.target().participants[0].google_participant_id,
         "google-peer"
     );
     assert_eq!(
-        permit.target.peppy_conversation_id,
+        permit.target().peppy_conversation_id,
         captured.conversation_id.to_string()
     );
-    assert_eq!(permit.target.conversation_type, RcsConversationType::Rcs);
-    assert_eq!(permit.target.status, "eligible");
-    assert_eq!(permit.target.send_mode, RcsSendMode::Automatic);
-    assert!(!permit.target.read_only);
+    assert_eq!(permit.target().conversation_type, RcsConversationType::Rcs);
+    assert_eq!(permit.target().status, "eligible");
+    assert_eq!(permit.target().send_mode, RcsSendMode::Automatic);
+    assert!(!permit.target().read_only);
     let projection = permit.native_commit_projection();
-    assert_eq!(projection.proof_version, permit.target.proof_version);
+    assert_eq!(projection.proof_version, permit.target().proof_version);
     let serialized = serde_json::to_value(projection).unwrap();
     assert_eq!(
         serialized["target"]["peppy_conversation_id"],
@@ -317,7 +317,7 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
     assert_eq!(serialized["target"]["status"], "eligible");
     assert_eq!(serialized["target"]["send_mode"], "Automatic");
     assert_eq!(serialized["target"]["read_only"], false);
-    assert!(uuid::Uuid::parse_str(&permit.tmp_id).is_ok());
+    assert!(uuid::Uuid::parse_str(permit.tmp_id()).is_ok());
     assert_eq!(
         gateway
             .begin_rcs_send_attempt(command_id, &current_observation, 1_000)
@@ -341,7 +341,7 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
         .unwrap();
     assert_eq!(
         reopened
-            .reconcile_rcs_tmp_id(&permit.tmp_id, &permit.google_conversation_id, None)
+            .reconcile_rcs_tmp_id(permit.tmp_id(), permit.google_conversation_id(), None)
             .unwrap(),
         Some(SendState::OutcomeUnknown)
     );
@@ -362,7 +362,7 @@ fn automatic_admission_upgrades_a_legacy_carrier_command_only_with_an_exact_mapp
     else {
         panic!("expected an RCS permit");
     };
-    assert!(uuid::Uuid::parse_str(&permit.tmp_id).is_ok());
+    assert!(uuid::Uuid::parse_str(permit.tmp_id()).is_ok());
     assert_eq!(
         gateway
             .begin_automatic_send_attempt(command_id, Some(&current), 1_001)
@@ -547,6 +547,16 @@ fn attempt_count(config: &ClientConfig, command_id: CommandId) -> i64 {
         .unwrap()
 }
 
+fn rcs_ledger_count(config: &ClientConfig, command_id: CommandId) -> i64 {
+    encrypted_connection(config)
+        .query_row(
+            "SELECT COUNT(*) FROM rcs_send_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 fn rcs_command(
     recipient: &str,
 ) -> (
@@ -605,19 +615,43 @@ fn rcs_command(
 }
 
 #[test]
-fn strict_admission_refuses_when_the_completed_lookup_is_withdrawn() {
-    let (_directory, _vault, _config, gateway, command_id, current) = rcs_command("peer-local");
+fn current_lookup_withdrawal_revokes_strict_authority_across_reopen() {
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
     let conversation_id = command_conversation(&gateway);
-    let mut incomplete = current;
-    incomplete.native_evidence.lookup_complete = false;
-    incomplete.native_evidence.google_candidate_count = 2;
+    let mut withdrawn = current.clone();
+    withdrawn.native_evidence.lookup_complete = false;
+    withdrawn.native_evidence.google_candidate_count = 2;
 
     assert!(
         gateway
-            .begin_rcs_send_attempt(command_id, &incomplete, 1_000)
+            .begin_rcs_send_attempt(command_id, &withdrawn, 1_000)
             .is_err()
     );
-    assert!(gateway.rcs_mapping(conversation_id).unwrap().is_some());
+    assert_eq!(attempt_count(&config, command_id), 0);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(reopened.rcs_mapping(conversation_id).unwrap().is_none());
+    assert!(
+        reopened
+            .begin_rcs_send_attempt(command_id, &current, 1_000)
+            .is_err()
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+
+    let fresh = fresh_reobservation(current);
+    assert!(matches!(
+        reopened.verify_rcs_mapping(&fresh, 1_001).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+}
+
+fn fresh_reobservation(mut observation: RcsMappingObservation) -> RcsMappingObservation {
+    observation.mapping_revision += 1;
+    observation.observed_at_ms = 1_001;
+    observation.native_evidence.settings_validated_at_ms = 1_001;
+    observation.native_evidence.conversation_observed_at_ms = 1_001;
+    observation.carrier_binding.route_observed_at_ms = 1_001;
+    observation
 }
 
 fn command_conversation(gateway: &Client) -> ConversationId {
@@ -651,9 +685,11 @@ fn contradictory_admission_revokes_mapping_durably_without_creating_permits() {
     let (_directory, vault, config, gateway, command_id, mut current) = rcs_command("peer-local");
     let conversation_id = command_conversation(&gateway);
     current.outgoing.sim_payload.two += 1;
-    assert!(gateway
-        .begin_rcs_send_attempt(command_id, &current, 1_000)
-        .is_err());
+    assert!(
+        gateway
+            .begin_rcs_send_attempt(command_id, &current, 1_000)
+            .is_err()
+    );
     assert_eq!(attempt_count(&config, command_id), 0);
     drop(gateway);
     let reopened = unlocked(&config, &vault);
@@ -685,9 +721,11 @@ fn contradictory_admission_revokes_mapping_durably_without_creating_permits() {
         .unwrap();
     let mut contradictory = current;
     contradictory.outgoing.sim_payload.two += 1;
-    assert!(gateway
-        .retry_rcs_failed_before_submission(command_id, &contradictory, 1_001)
-        .is_err());
+    assert!(
+        gateway
+            .retry_rcs_failed_before_submission(command_id, &contradictory, 1_001)
+            .is_err()
+    );
     assert_eq!(attempt_count(&config, command_id), 1);
     drop(gateway);
     let reopened = unlocked(&config, &vault);
@@ -699,25 +737,37 @@ fn contradictory_admission_revokes_mapping_durably_without_creating_permits() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(persisted_tmp_id, initial.tmp_id);
+    assert_eq!(persisted_tmp_id, initial.tmp_id());
     assert_eq!(attempt_count(&config, command_id), 1);
 }
 
 #[test]
-fn strict_admission_refuses_ambiguous_complete_sim_sets() {
-    for duplicate_join in [true, false] {
+fn strict_admission_refuses_mismatched_or_duplicate_google_sim_joins() {
+    for mutation in 0..5 {
         let (_directory, _vault, _config, gateway, command_id, mut current) =
             rcs_command("peer-local");
-        let mut duplicate = current.native_evidence.current_settings_sims[0].clone();
-        if !duplicate_join {
-            duplicate.outgoing_id = "other-outgoing".into();
-            duplicate.sim_participant_id = "other-participant".into();
-            duplicate.sim_payload.sim_number = 8;
+        if mutation == 0 {
+            current.outgoing.outgoing_id = "conversation-outgoing".into();
+            current.native_evidence.current_settings_sims[0].outgoing_id =
+                "conversation-outgoing".into();
+        } else {
+            let mut duplicate = current.native_evidence.current_settings_sims[0].clone();
+            match mutation {
+                1 => duplicate.sim_payload.two += 1,
+                2 => duplicate.own_identity_raw = "+12025550101".into(),
+                3 => duplicate.rcs_chats_enabled = false,
+                4 => {
+                    duplicate.sim_payload.sim_number += 1;
+                    duplicate.own_identity_raw = "+12025550101".into();
+                    duplicate.rcs_chats_enabled = false;
+                }
+                _ => unreachable!(),
+            }
+            current
+                .native_evidence
+                .current_settings_sims
+                .push(duplicate);
         }
-        current
-            .native_evidence
-            .current_settings_sims
-            .push(duplicate);
 
         assert!(
             gateway
@@ -725,6 +775,96 @@ fn strict_admission_refuses_ambiguous_complete_sim_sets() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn duplicate_sim_join_withdrawal_revokes_automatic_authority_across_reopen() {
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let conversation_id = command_conversation(&gateway);
+    let mut withdrawn = current.clone();
+    let mut duplicate = withdrawn.native_evidence.current_settings_sims[0].clone();
+    duplicate.sim_payload.sim_number += 1;
+    duplicate.own_identity_raw = "+12025550101".into();
+    duplicate.rcs_chats_enabled = false;
+    withdrawn
+        .native_evidence
+        .current_settings_sims
+        .push(duplicate);
+
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&withdrawn), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+    assert_eq!(rcs_ledger_count(&config, command_id), 0);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(reopened.rcs_mapping(conversation_id).unwrap().is_none());
+    assert_eq!(
+        reopened
+            .begin_automatic_send_attempt(command_id, Some(&current), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+}
+
+#[test]
+fn duplicate_sim_join_withdrawal_preserves_failed_retry_state_until_reverified() {
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let conversation_id = command_conversation(&gateway);
+    let first = gateway
+        .begin_rcs_send_attempt(command_id, &current, 1_000)
+        .unwrap();
+    let tmp_id = first.tmp_id().to_owned();
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    let mut withdrawn = current.clone();
+    let mut duplicate = withdrawn.native_evidence.current_settings_sims[0].clone();
+    duplicate.sim_payload.two += 1;
+    withdrawn
+        .native_evidence
+        .current_settings_sims
+        .push(duplicate);
+
+    assert!(
+        gateway
+            .retry_rcs_failed_before_submission(command_id, &withdrawn, 1_001)
+            .is_err()
+    );
+    assert_eq!(attempt_count(&config, command_id), 1);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(reopened.rcs_mapping(conversation_id).unwrap().is_none());
+    assert!(
+        reopened
+            .retry_rcs_failed_before_submission(command_id, &current, 1_001)
+            .is_err()
+    );
+    assert_eq!(attempt_count(&config, command_id), 1);
+    assert_eq!(
+        encrypted_connection(&config)
+            .query_row(
+                "SELECT tmp_id FROM rcs_send_ledger WHERE command_id=?",
+                [command_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        tmp_id
+    );
+
+    let fresh = fresh_reobservation(current);
+    assert!(matches!(
+        reopened.verify_rcs_mapping(&fresh, 1_001).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let retry = reopened
+        .retry_rcs_failed_before_submission(command_id, &fresh, 1_001)
+        .unwrap();
+    assert_eq!(retry.tmp_id(), tmp_id);
 }
 
 #[test]
@@ -927,9 +1067,9 @@ fn rcs_retry_accepts_a_fresh_same_target_proof_after_the_old_proof_expires() {
     let retry = gateway
         .retry_rcs_failed_before_submission(command_id, &refreshed, 31_001)
         .unwrap();
-    assert_eq!(retry.command_id, first.command_id);
-    assert_eq!(retry.tmp_id, first.tmp_id);
-    assert_eq!(retry.mapping_revision, 2);
+    assert_eq!(retry.command_id(), first.command_id());
+    assert_eq!(retry.tmp_id(), first.tmp_id());
+    assert_eq!(retry.mapping_revision(), 2);
 }
 
 #[test]
@@ -982,7 +1122,7 @@ fn explicit_unknown_resend_creates_new_command_with_local_lineage_and_no_permit(
     assert_ne!(queued.command_id, command_id);
     assert_eq!(
         gateway
-            .reconcile_rcs_tmp_id(&original.tmp_id, &original.google_conversation_id, None)
+            .reconcile_rcs_tmp_id(original.tmp_id(), original.google_conversation_id(), None)
             .unwrap(),
         Some(SendState::OutcomeUnknown)
     );
@@ -1001,7 +1141,7 @@ fn explicit_unknown_resend_creates_new_command_with_local_lineage_and_no_permit(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_ne!(tmp_id, original.tmp_id);
+    assert_ne!(tmp_id, original.tmp_id());
     assert_eq!(retry_of, command_id.to_string());
 }
 
@@ -1359,9 +1499,9 @@ fn concurrent_cross_api_admissions_create_exactly_one_rcs_attempt_and_uuid() {
         (
             Ok(AutomaticPermitDecision::Rcs(permit)),
             Err(Error::AlreadyAttempted(SendState::AttemptRecorded)),
-        ) => permit.tmp_id,
+        ) => permit.tmp_id().to_owned(),
         (Ok(AutomaticPermitDecision::AlreadyAttempted(SendState::AttemptRecorded)), Ok(permit)) => {
-            permit.tmp_id
+            permit.tmp_id().to_owned()
         }
         results => panic!("expected one permit and one recorded-attempt refusal, got {results:?}"),
     };
@@ -1407,7 +1547,7 @@ fn automatic_carrier_upgrade_remains_frozen_as_rcs_outcome_unknown_after_reopen(
         )
         .unwrap();
     assert_eq!(transport, "rcs");
-    assert_eq!(tmp_id, first.tmp_id);
+    assert_eq!(tmp_id, first.tmp_id());
 }
 
 #[test]
@@ -1462,7 +1602,7 @@ fn upgraded_carrier_rcs_retry_and_explicit_unknown_resend_preserve_finalization_
     let retry = gateway
         .retry_rcs_failed_before_submission(command_id, &current, 1_001)
         .unwrap();
-    assert_eq!(retry.tmp_id, first.tmp_id);
+    assert_eq!(retry.tmp_id(), first.tmp_id());
 
     drop(gateway);
     let gateway = unlocked(&config, &vault);
@@ -1475,7 +1615,7 @@ fn upgraded_carrier_rcs_retry_and_explicit_unknown_resend_preserve_finalization_
             |row| row.get(0),
         )
         .unwrap();
-    assert_ne!(resend_tmp_id, first.tmp_id);
+    assert_ne!(resend_tmp_id, first.tmp_id());
     assert_eq!(attempt_count(&config, resend.command_id), 0);
     assert_eq!(
         gateway
@@ -1484,4 +1624,49 @@ fn upgraded_carrier_rcs_retry_and_explicit_unknown_resend_preserve_finalization_
         AutomaticPermitDecision::Blocked(PermitBlock::NotReceived)
     );
     assert_eq!(attempt_count(&config, resend.command_id), 0);
+}
+
+#[test]
+fn stale_foreign_and_database_error_refusals_do_not_revoke_current_mapping() {
+    for refusal in 0..2 {
+        let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+        let conversation_id = command_conversation(&gateway);
+        let mut refused = current;
+        let now_ms = if refusal == 0 {
+            1_000 + RCS_MAPPING_FRESHNESS_MS + 1
+        } else {
+            refused.google_conversation_id = "foreign-google-conversation".into();
+            1_000
+        };
+        assert!(
+            gateway
+                .begin_rcs_send_attempt(command_id, &refused, now_ms)
+                .is_err()
+        );
+        assert_eq!(attempt_count(&config, command_id), 0);
+        drop(gateway);
+        let reopened = unlocked(&config, &vault);
+        assert!(reopened.rcs_mapping(conversation_id).unwrap().is_some());
+    }
+
+    let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let conversation_id = command_conversation(&gateway);
+    drop(gateway);
+    let connection = encrypted_connection(&config);
+    connection
+        .execute(
+            "UPDATE metadata SET v='not-json' WHERE k='rcs_mapping_context_v1'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let reopened = unlocked(&config, &vault);
+    assert_eq!(
+        reopened
+            .begin_rcs_send_attempt(command_id, &current, 1_000)
+            .unwrap_err(),
+        Error::Database
+    );
+    assert!(reopened.rcs_mapping(conversation_id).unwrap().is_some());
+    assert_eq!(attempt_count(&config, command_id), 0);
 }

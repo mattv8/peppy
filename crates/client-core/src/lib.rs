@@ -133,9 +133,8 @@ pub use rcs_mapping::{
 pub use rcs_native::{
     LocalRcsTargetSnapshot, NativeCarrierRouteBinding, NativeOwnNumberSource,
     NativeRcsCommitProjection, NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing,
-    NativeRcsPrepareRequest,
-    NativeRcsParticipant, NativeRcsSimPayload, NativeRcsTargetClass, NativeSettingsCurrentness,
-    NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
+    NativeRcsParticipant, NativeRcsPrepareRequest, NativeRcsSimPayload, NativeRcsTargetClass,
+    NativeSettingsCurrentness, NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
@@ -3679,7 +3678,9 @@ impl Client {
         if send_retention_blocked(&tx, command_id)? {
             return Err(Error::InvalidRequest("RCS media unavailable"));
         }
-        let Some(mapping) = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)? else {
+        let Some(mapping) =
+            exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?
+        else {
             commit_mapping_refusal(tx)?;
             return Err(Error::InvalidRequest("mapping unproven"));
         };
@@ -3972,7 +3973,9 @@ impl Client {
         {
             return Err(Error::InvalidRequest("RCS text required"));
         }
-        let Some(mapping) = exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)? else {
+        let Some(mapping) =
+            exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?
+        else {
             commit_mapping_refusal(tx)?;
             return Err(Error::InvalidRequest("mapping unproven"));
         };
@@ -9742,10 +9745,17 @@ fn exact_rcs_mapping(
     let Some(mapping) = rcs_mapping::get(conn, conversation_id)? else {
         return Ok(None);
     };
-    if rcs_mapping::mapping_matches_observation(conn, &mapping, observation, now_ms)? {
-        Ok(Some(mapping))
-    } else {
-        Ok(None)
+    match rcs_mapping::mapping_observation_status(conn, &mapping, observation, now_ms)? {
+        rcs_mapping::MappingObservationStatus::Exact => Ok(Some(mapping)),
+        rcs_mapping::MappingObservationStatus::CurrentWithdrawal => {
+            rcs_mapping::invalidate_mapping(
+                conn,
+                conversation_id,
+                "current_observation_withdrawn",
+            )?;
+            Ok(None)
+        }
+        rcs_mapping::MappingObservationStatus::Mismatch => Ok(None),
     }
 }
 
@@ -9849,16 +9859,7 @@ fn rcs_permit(
     mapping: &RcsMapping,
     observation: &RcsMappingObservation,
 ) -> Result<RcsPermit, Error> {
-    Ok(RcsPermit {
-        command_id,
-        conversation_id: message.record.conversation_id,
-        tmp_id,
-        mapping_revision: mapping.mapping_revision,
-        proof_digest: mapping.proof.digest,
-        google_conversation_id: mapping.google_conversation_id.clone(),
-        target: rcs_send::local_target_snapshot(mapping, observation)?,
-        message,
-    })
+    RcsPermit::from_admission(command_id, message, tmp_id, mapping, observation)
 }
 
 fn pinned_profile(conn: &Connection, epoch: u32) -> Result<Option<KeyProfile>, Error> {
