@@ -188,6 +188,27 @@ class RestrictedSetupControllerTest {
         } finally { scope.cancel() }
     }
 
+    @Test fun `first grant only failure uses partial readback and still turns wireless debugging off`() = runBlocking {
+        val discovery = FakeDiscovery()
+        val transport = FakeTransport().apply { failAfterFirstGrant = true }
+        val scope = CoroutineScope(Dispatchers.Default)
+        try {
+            val controller = controller(
+                scope, discovery, transport, FakeNotifier(),
+                readback = RestrictedSetupReadback(RestrictedSetupAccess.ALLOWED, RestrictedSetupAccess.NOT_ALLOWED),
+            )
+
+            completeAttempt(controller, discovery)
+
+            assertEquals(RestrictedSetupStage.FAILED, controller.state.value.stage)
+            assertEquals(RestrictedSetupFailure.NOT_VERIFIED, controller.state.value.failure)
+            assertEquals(RestrictedSetupAccess.ALLOWED, controller.state.value.access)
+            assertEquals(RestrictedSetupAccess.NOT_ALLOWED, controller.state.value.blockedSendersAccess)
+            assertEquals(WirelessDebuggingOutcome.REQUESTED, controller.state.value.wirelessDebugging)
+            assertEquals(listOf("pair", "connect", "grant-restricted", "readback", "off"), transport.events)
+        } finally { scope.cancel() }
+    }
+
     @Test fun `unsupported capability is skipped during verification`() = runBlocking {
         val discovery = FakeDiscovery()
         val transport = FakeTransport()
@@ -678,6 +699,7 @@ class RestrictedSetupControllerTest {
         var rejectPair = false
         var turnOffFails = false
         var grantFails = false
+        var failAfterFirstGrant = false
         var grantDelayMillis = 0L
         var turnOffDelayMillis = 0L
         var closeFails = false
@@ -686,7 +708,13 @@ class RestrictedSetupControllerTest {
         val closeAttempts = AtomicInteger()
         override suspend fun pair(endpoint: LocalEndpoint, code: CharArray) { events += "pair"; onPair(); if (rejectPair) throw PairingRejectedException() }
         override suspend fun connect(endpoint: LocalEndpoint) { events += "connect" }
-        override suspend fun grantAdvancedFeatures() { events += "grant-restricted"; events += "grant-blocked"; if (grantDelayMillis > 0) delay(grantDelayMillis); if (grantFails) error("failed") }
+        override suspend fun grantAdvancedFeatures() {
+            events += "grant-restricted"
+            if (failAfterFirstGrant) throw java.io.IOException("Connection lost after first grant")
+            events += "grant-blocked"
+            if (grantDelayMillis > 0) delay(grantDelayMillis)
+            if (grantFails) error("failed")
+        }
         override suspend fun turnWirelessDebuggingOff() { events += "off"; if (turnOffDelayMillis > 0) delay(turnOffDelayMillis); if (turnOffFails) error("failed") }
         override fun close() {
             closeAttempts.incrementAndGet()
