@@ -36,6 +36,7 @@ mod conversation_pinning;
 mod conversation_tones;
 mod deferred_media;
 mod device_succession;
+mod ephemeral;
 mod gateway_settings;
 mod history_import;
 mod initial_replay;
@@ -49,6 +50,10 @@ mod message_origin;
 mod notification_preferences;
 mod sender_blocklist;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
+pub use ephemeral::{
+    MAX_TYPING_ROSTER, TYPING_START_INTERVAL_MS, TYPING_STARTS_PER_MINUTE, TypingOrigin,
+    TypingState, TypingView,
+};
 mod media_paging;
 mod mms;
 mod mms_backfill;
@@ -107,12 +112,18 @@ pub use peppy_domain::{
     EnvelopeId, MessageId, MessageRecord, SendState, SourceSequence, VaultId,
 };
 pub use peppy_protocol::{
-    CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, GatewayRoute,
+    CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, EphemeralSignalV1,
+    GatewayRoute,
 };
 use peppy_protocol::{MAX_CIPHERTEXT_BYTES, MAX_COMPACTION_SUPERSEDES, PROTOCOL_VERSION};
 pub use phone_read::{
     PHONE_READ_EFFECT_TTL_MS, PhoneReadCandidate, PhoneReadEffect, PhoneReadTransport,
     ProviderRowRef,
+};
+pub use rcs_capability::{
+    RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS,
+    RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkEligibilityPayload,
+    RcsLinkStatusEvent, RcsLinkStatusPayload, RcsLinkStatusProjection,
 };
 pub use rcs_mapping::{
     RCS_MAPPING_FRESHNESS_MS, RCS_MAPPING_PROOF_VERSION, RcsConversationType, RcsLinkState,
@@ -121,12 +132,11 @@ pub use rcs_mapping::{
 };
 pub use rcs_native::{
     LocalRcsTargetSnapshot, NativeCarrierRouteBinding, NativeOwnNumberSource,
-    NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing, NativeRcsParticipant,
+    NativeRcsCommitProjection, NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing,
     NativeRcsPrepareRequest,
-    NativeRcsSimPayload, NativeRcsTargetClass, NativeSettingsCurrentness,
-    NativeSettingsProvenance, NativeRcsCommitProjection, restricted_native_rcs_handoff_schema,
+    NativeRcsParticipant, NativeRcsSimPayload, NativeRcsTargetClass, NativeSettingsCurrentness,
+    NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
 };
-pub use rcs_capability::{RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkEligibilityPayload, RcsLinkStatusEvent, RcsLinkStatusPayload, RcsLinkStatusProjection};
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -1114,6 +1124,7 @@ pub(crate) struct Store {
     db_key: Zeroizing<[u8; 32]>,
     keys: BTreeMap<u32, EpochKeys>,
     active_epoch: Option<u32>,
+    ephemeral: ephemeral::EphemeralTypingState,
     pub(crate) media_dir: PathBuf,
     pub(crate) media_cache: media_cache::MediaCacheState,
 }
@@ -1234,12 +1245,17 @@ impl Client {
         now_ms: i64,
     ) -> Result<usize, Error> {
         if eligibility.len() > RCS_CAPABILITY_PUBLISH_BATCH {
-            return Err(Error::InvalidRequest("RCS capability batch exceeds the maximum"));
+            return Err(Error::InvalidRequest(
+                "RCS capability batch exceeds the maximum",
+            ));
         }
         if status.observed_at_ms > now_ms {
             return Err(Error::InvalidRequest("future RCS capability status"));
         }
-        if eligibility.iter().any(|projection| projection.observed_at_ms > now_ms) {
+        if eligibility
+            .iter()
+            .any(|projection| projection.observed_at_ms > now_ms)
+        {
             return Err(Error::InvalidRequest("future RCS eligibility projection"));
         }
         let mut guard = self.lock()?;
@@ -1252,7 +1268,9 @@ impl Client {
         if publish_rcs_capability_payload(
             &tx,
             &ctx,
-            &PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status: status.clone() }),
+            &PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: status.clone(),
+            }),
             format!("status:{}", status.gateway_device_id),
             status.capability_revision,
             now_ms,
@@ -1260,14 +1278,21 @@ impl Client {
             published += 1;
         }
         for projection in eligibility {
-            if projection.gateway_device_id != ctx.device_id || !rcs_capability::valid_eligibility(projection) {
+            if projection.gateway_device_id != ctx.device_id
+                || !rcs_capability::valid_eligibility(projection)
+            {
                 return Err(Error::InvalidRequest("invalid RCS eligibility projection"));
             }
             if publish_rcs_capability_payload(
                 &tx,
                 &ctx,
-                &PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload { eligibility: projection.clone() }),
-                format!("eligibility:{}:{}", projection.gateway_device_id, projection.conversation_id),
+                &PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                    eligibility: projection.clone(),
+                }),
+                format!(
+                    "eligibility:{}:{}",
+                    projection.gateway_device_id, projection.conversation_id
+                ),
                 projection.mapping_revision,
                 now_ms,
             )? {
@@ -1279,7 +1304,11 @@ impl Client {
     }
 
     /// Returns the current content-free capability gate for automatic RCS dispatch.
-    pub fn rcs_gateway_supported(&self, gateway_device_id: DeviceId, now_ms: i64) -> Result<bool, Error> {
+    pub fn rcs_gateway_supported(
+        &self,
+        gateway_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<bool, Error> {
         rcs_capability::current_gateway(&self.lock()?.conn, gateway_device_id, now_ms)
     }
 
@@ -1299,7 +1328,12 @@ impl Client {
         gateway_device_id: DeviceId,
         now_ms: i64,
     ) -> Result<Option<RcsEligibilityProjection>, Error> {
-        rcs_capability::projection(&self.lock()?.conn, conversation_id, gateway_device_id, now_ms)
+        rcs_capability::projection(
+            &self.lock()?.conn,
+            conversation_id,
+            gateway_device_id,
+            now_ms,
+        )
     }
 
     /// Stores a completed local carrier-only lookup bound to the current linked context.
@@ -1316,6 +1350,76 @@ impl Client {
         transaction.commit()?;
         Ok(())
     }
+    /// Returns whether current, content-free RCS evidence permits a typing signal for a
+    /// conversation. It is a gate only; it does not create durable state or grant send authority.
+    pub fn typing_signal_allowed(
+        &self,
+        conversation_id: ConversationId,
+        gateway_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<bool, Error> {
+        Ok(matches!(
+            self.rcs_eligibility_projection(conversation_id, gateway_device_id, now_ms)?,
+            Some(RcsEligibilityProjection {
+                eligibility: RcsEligibility::Eligible,
+                ..
+            })
+        ))
+    }
+
+    /// Seals a short-lived signal only under the active event epoch. The caller explicitly
+    /// chooses each action; no preference or pending signal is persisted.
+    pub fn seal_typing_signal(
+        &self,
+        conversation_id: ConversationId,
+        gateway_device_id: DeviceId,
+        origin: TypingOrigin,
+        state: TypingState,
+        now_ms: i64,
+    ) -> Result<Option<EphemeralSignalV1>, Error> {
+        if !self.typing_signal_allowed(conversation_id, gateway_device_id, now_ms)? {
+            return Ok(None);
+        }
+        let mut store = self.lock()?;
+        let epoch = store.active_epoch.ok_or(Error::KeysUnavailable)?;
+        let vault_id = store.config.vault_id;
+        let device_id = store.config.device_id;
+        let Store {
+            keys, ephemeral, ..
+        } = &mut *store;
+        let key = &keys.get(&epoch).ok_or(Error::KeysUnavailable)?.event;
+        ephemeral.seal(
+            ephemeral::SealContext {
+                key,
+                vault_id,
+                sender_device_id: device_id,
+                key_epoch: epoch,
+            },
+            ephemeral::SealRequest {
+                conversation_id,
+                origin,
+                state,
+                now_ms,
+            },
+        )
+    }
+
+    /// Opens an authenticated signal from the bounded transient roster. Invalid, stale,
+    /// unauthenticated, or out-of-order signals are discarded without a durable record.
+    pub fn open_typing_signal(
+        &self,
+        signal: &EphemeralSignalV1,
+        trusted_devices: &[DeviceId],
+        received_at_ms: i64,
+    ) -> Result<Option<TypingView>, Error> {
+        let mut store = self.lock()?;
+        let vault_id = store.config.vault_id;
+        let Store {
+            keys, ephemeral, ..
+        } = &mut *store;
+        Ok(ephemeral.open(keys, vault_id, signal, trusted_devices, received_at_ms))
+    }
+
     /// Opens (or shares) the per-canonical-path owner. A second open must present the same key
     /// and identity. A wrong key is reported, never treated as a new database.
     pub fn open(config: ClientConfig, db_key: DatabaseKey) -> Result<Self, Error> {
@@ -1345,6 +1449,7 @@ impl Client {
             db_key: Zeroizing::new(*db_key.0),
             keys: BTreeMap::new(),
             active_epoch: None,
+            ephemeral: ephemeral::EphemeralTypingState::default(),
             media_dir,
             media_cache: media_cache::MediaCacheState::default(),
         };
@@ -1935,9 +2040,17 @@ impl Client {
         seal_pending(&tx, &ctx, MAX_SEAL_BATCH)?;
         tx.commit()?;
         s.active_epoch = Some(epoch);
+        s.ephemeral.clear();
         for keys in s.keys.values_mut() {
             keys.local_identity_seal = None;
         }
+        Ok(())
+    }
+
+    /// Clears process-only typing state when the host locks its session. Restarting also creates
+    /// a fresh empty state; this method never writes the database.
+    pub fn clear_ephemeral_typing(&self) -> Result<(), Error> {
+        self.lock()?.ephemeral.clear();
         Ok(())
     }
 
@@ -3433,7 +3546,8 @@ impl Client {
             .map(|(id, subscription_id, payload)| {
                 Ok(PendingAutomaticCommand {
                     command_id: parse(&id)?,
-                    original_subscription_id: (!subscription_id.is_empty()).then_some(subscription_id),
+                    original_subscription_id: (!subscription_id.is_empty())
+                        .then_some(subscription_id),
                     message: localize(&s.conn, decode(payload.as_bytes())?)?.0,
                 })
             })
@@ -3497,7 +3611,10 @@ impl Client {
             &subscription_id,
             now_ms,
         )?;
-        if matches!(carrier_admission, rcs_send::CarrierAdmission::InvalidateProof) {
+        if matches!(
+            carrier_admission,
+            rcs_send::CarrierAdmission::InvalidateProof
+        ) {
             rcs_send::invalidate_carrier_only_proof(&tx, message.record.conversation_id)?;
             tx.commit()?;
             return Ok(PermitDecision::Blocked(
@@ -3606,7 +3723,9 @@ impl Client {
     ) -> Result<AutomaticPermitDecision, Error> {
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
-        let tx = guard.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ledger: Option<(u32, String, String, bool)> = tx
             .query_row(
                 "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
@@ -3621,7 +3740,9 @@ impl Client {
             return Ok(AutomaticPermitDecision::AlreadyAttempted(state));
         }
         if restore_guarded(&tx)? {
-            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::RestoreGuarded));
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::RestoreGuarded,
+            ));
         }
         if historical {
             return Ok(AutomaticPermitDecision::Blocked(PermitBlock::Historical));
@@ -3631,7 +3752,11 @@ impl Client {
             Some(active) if epoch < active => {
                 return Ok(AutomaticPermitDecision::Blocked(PermitBlock::StaleEpoch));
             }
-            _ => return Ok(AutomaticPermitDecision::Blocked(PermitBlock::EpochNotActive)),
+            _ => {
+                return Ok(AutomaticPermitDecision::Blocked(
+                    PermitBlock::EpochNotActive,
+                ));
+            }
         }
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
         if !media_ready {
@@ -3643,7 +3768,9 @@ impl Client {
                 now_ms,
             )?;
             tx.commit()?;
-            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MediaUnavailable));
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::MediaUnavailable,
+            ));
         }
         if send_retention_blocked(&tx, command_id)? {
             invalidate_automatic_carrier_proof_if_contradicted(
@@ -3654,13 +3781,18 @@ impl Client {
                 now_ms,
             )?;
             tx.commit()?;
-            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MediaUnavailable));
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::MediaUnavailable,
+            ));
         }
         if subscription_id.is_empty() {
             let Some(observation) = observation else {
-                return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven));
+                return Ok(AutomaticPermitDecision::Blocked(
+                    PermitBlock::MappingUnproven,
+                ));
             };
-            let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms) {
+            let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms)
+            {
                 Ok(permit) => AutomaticPermitDecision::Rcs(permit),
                 Err(Error::InvalidRequest(_)) => {
                     AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
@@ -3675,9 +3807,12 @@ impl Client {
             if subscription_id != observation.selected_sim_id {
                 rcs_send::invalidate_carrier_only_proof(&tx, conversation_id)?;
                 tx.commit()?;
-                return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven));
+                return Ok(AutomaticPermitDecision::Blocked(
+                    PermitBlock::MappingUnproven,
+                ));
             }
-            let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms) {
+            let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms)
+            {
                 Ok(permit) => AutomaticPermitDecision::Rcs(permit),
                 Err(Error::InvalidRequest(_)) => {
                     rcs_send::invalidate_carrier_only_proof(&tx, conversation_id)?;
@@ -3689,7 +3824,9 @@ impl Client {
             return Ok(decision);
         }
         if rcs_mapping::current_link_state(&tx)?.is_none() {
-            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven));
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::MappingUnproven,
+            ));
         }
         let admission = rcs_send::carrier_admission(
             &tx,
@@ -3768,7 +3905,10 @@ impl Client {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
-        if !media_ready || message.transport != Transport::Sms || !message.record.attachments.is_empty() {
+        if !media_ready
+            || message.transport != Transport::Sms
+            || !message.record.attachments.is_empty()
+        {
             return Err(Error::InvalidRequest("RCS text required"));
         }
         let route = GatewayRoute::RcsLink { gateway_device_id };
@@ -7388,12 +7528,22 @@ fn apply_record(
     };
     match (envelope.purpose, payload) {
         (EnvelopePurpose::Event, PrivatePayload::RcsLinkStatus(status)) => {
-            if !rcs_capability::apply_status(conn, &status.status, producer, envelope.producer_sequence.0)? {
+            if !rcs_capability::apply_status(
+                conn,
+                &status.status,
+                producer,
+                envelope.producer_sequence.0,
+            )? {
                 return Ok(Some(Q::InvalidPayload));
             }
         }
         (EnvelopePurpose::Event, PrivatePayload::RcsLinkEligibility(eligibility)) => {
-            if !rcs_capability::apply_eligibility(conn, &eligibility.eligibility, producer, envelope.producer_sequence.0)? {
+            if !rcs_capability::apply_eligibility(
+                conn,
+                &eligibility.eligibility,
+                producer,
+                envelope.producer_sequence.0,
+            )? {
                 return Ok(Some(Q::InvalidPayload));
             }
         }
@@ -8196,16 +8346,23 @@ fn publish_rcs_capability_payload(
     now_ms: i64,
 ) -> Result<bool, Error> {
     let body = serde_json::to_string(payload).map_err(|_| Error::Database)?;
-    let previous: Option<(u64, String, i64)> = conn.query_row(
-        "SELECT revision,body,published_at_ms FROM rcs_capability_published WHERE identity=?",
-        [&identity],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).optional()?;
+    let previous: Option<(u64, String, i64)> = conn
+        .query_row(
+            "SELECT revision,body,published_at_ms FROM rcs_capability_published WHERE identity=?",
+            [&identity],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
     if let Some((previous_revision, previous_body, published_at_ms)) = previous {
-        if revision < previous_revision || (revision == previous_revision && previous_body != body) {
-            return Err(Error::InvalidRequest("nonmonotonic RCS capability revision"));
+        if revision < previous_revision || (revision == previous_revision && previous_body != body)
+        {
+            return Err(Error::InvalidRequest(
+                "nonmonotonic RCS capability revision",
+            ));
         }
-        if revision == previous_revision && now_ms.saturating_sub(published_at_ms) < RCS_CAPABILITY_KEEPALIVE_MS {
+        if revision == previous_revision
+            && now_ms.saturating_sub(published_at_ms) < RCS_CAPABILITY_KEEPALIVE_MS
+        {
             return Ok(false);
         }
     }
@@ -8215,7 +8372,12 @@ fn publish_rcs_capability_payload(
             rcs_capability::apply_status(conn, &status.status, ctx.device_id, sequence)?;
         }
         PrivatePayload::RcsLinkEligibility(eligibility) => {
-            rcs_capability::apply_eligibility(conn, &eligibility.eligibility, ctx.device_id, sequence)?;
+            rcs_capability::apply_eligibility(
+                conn,
+                &eligibility.eligibility,
+                ctx.device_id,
+                sequence,
+            )?;
         }
         _ => return Err(Error::Database),
     }
@@ -9019,8 +9181,16 @@ fn compaction_group(
         PrivatePayload::RcsLinkEligibility(eligibility) => (
             b"rcs-link-eligibility",
             vec![
-                eligibility.eligibility.gateway_device_id.to_string().into_bytes(),
-                eligibility.eligibility.conversation_id.to_string().into_bytes(),
+                eligibility
+                    .eligibility
+                    .gateway_device_id
+                    .to_string()
+                    .into_bytes(),
+                eligibility
+                    .eligibility
+                    .conversation_id
+                    .to_string()
+                    .into_bytes(),
             ],
             false,
         ),
@@ -9138,8 +9308,14 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
         PrivatePayload::NotificationPreferences { .. } => {
             Some(notification_preferences::IDENTITY.to_owned())
         }
-        PrivatePayload::RcsLinkStatus(status) => Some(format!("rcs-link-status:{}", status.status.gateway_device_id)),
-        PrivatePayload::RcsLinkEligibility(eligibility) => Some(format!("rcs-link-eligibility:{}:{}", eligibility.eligibility.gateway_device_id, eligibility.eligibility.conversation_id)),
+        PrivatePayload::RcsLinkStatus(status) => Some(format!(
+            "rcs-link-status:{}",
+            status.status.gateway_device_id
+        )),
+        PrivatePayload::RcsLinkEligibility(eligibility) => Some(format!(
+            "rcs-link-eligibility:{}:{}",
+            eligibility.eligibility.gateway_device_id, eligibility.eligibility.conversation_id
+        )),
         PrivatePayload::ContactBookState { book } => book
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -10608,10 +10784,13 @@ mod tests {
                     params![command_id.to_string(), uuid::Uuid::new_v4().to_string(), vec![0_u8; 32]],
                 ).unwrap();
             }
-            store.conn.execute_batch(
-                "ALTER TABLE attempts DROP COLUMN finalized_transport;
+            store
+                .conn
+                .execute_batch(
+                    "ALTER TABLE attempts DROP COLUMN finalized_transport;
                  UPDATE schema_meta SET version=46;",
-            ).unwrap();
+                )
+                .unwrap();
         }
         drop(client);
 
@@ -10619,18 +10798,23 @@ mod tests {
         drop(reopened);
         let conn = Connection::open(&config.database_path).unwrap();
         apply_database_key(&conn, &DatabaseKey::new(&[46; 32]).unwrap()).unwrap();
-        let transport = |command_id: CommandId| conn.query_row(
-            "SELECT finalized_transport FROM attempts WHERE command_id=?",
-            [command_id.to_string()],
-            |row| row.get::<_, String>(0),
-        ).unwrap();
+        let transport = |command_id: CommandId| {
+            conn.query_row(
+                "SELECT finalized_transport FROM attempts WHERE command_id=?",
+                [command_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
         assert_eq!(transport(carrier), "carrier");
         assert_eq!(transport(rcs), "rcs");
-        let preallocated_attempts: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM attempts WHERE command_id=?",
-            [preallocated.to_string()],
-            |row| row.get(0),
-        ).unwrap();
+        let preallocated_attempts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM attempts WHERE command_id=?",
+                [preallocated.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(preallocated_attempts, 0);
     }
 

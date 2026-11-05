@@ -9,6 +9,10 @@ autotests = false
 name = "integration"
 path = "tests/integration.rs"
 
+[[test]]
+name = "ephemeral"
+path = "tests/ephemeral.rs"
+
 [dependencies]
 base64.workspace = true
 peppy-crypto.workspace = true
