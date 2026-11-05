@@ -345,6 +345,8 @@ mod tests {
         );
 
         let mut largest = frame(sender_device_id, live_now_ms() + 10_000);
+        largest.key_epoch = u32::MAX;
+        largest.sequence = u64::MAX.to_string();
         largest.ciphertext_b64 = STANDARD.encode(vec![0_u8; 5_700]);
         let serialized = serde_json::to_string(&Notify {
             instance_id: Uuid::from_u128(5),
@@ -355,8 +357,18 @@ mod tests {
         assert!(serialized.len() < MAX_NOTIFY_PAYLOAD_BYTES);
 
         drop(remote_backend);
+        let remote_reconnected = PgLiveBackend::new(pool.clone(), remote_hub.clone());
+        wait_ready(&remote_reconnected).await;
         let mut no_replay = remote_hub.register(vault_id, receiver_device_id);
         assert_eq!(no_replay.receiver.try_recv(), Err(TryRecvError::Empty));
+        let next = frame(sender_device_id, live_now_ms() + 10_000);
+        local_backend.publish(vault_id, next.clone()).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), no_replay.receiver.recv())
+                .await
+                .unwrap(),
+            Some(next)
+        );
         assert_eq!(retained_counts(&pool).await, retained_before);
     }
 
