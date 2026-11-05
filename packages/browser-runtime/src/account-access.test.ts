@@ -8,6 +8,7 @@ const request: AttachmentRetentionRequestDto = {
 };
 
 const notice = { kind: "notice", notice: { kind: "read_only_past_due", severity: "error", deadline: null, manageUrl: null, dismissible: false, snoozeKey: "read_only_past_due:none" } };
+const canceledNotice = { kind: "notice", notice: { kind: "read_only_canceled", severity: "error", deadline: null, manageUrl: null, dismissible: false, snoozeKey: "read_only_canceled:none" } };
 
 /** The core classifies status and body; this fake echoes what the Rust parse command would return for each status. */
 function session(parse: (input: { status: number; body: string; trustedOrigins: string[] }) => unknown) {
@@ -36,6 +37,13 @@ describe("AccountAccessDriver", () => {
     });
     const result = await driver({ retention: vi.fn(async () => "{\"access\":\"read_only\"}") }, fake).status();
     expect(result).toEqual(notice);
+    expect(fake.queries).toEqual(["_worker_account_access_request", "_worker_account_access_parse"]);
+  });
+
+  it("forwards the core's read-only canceled notice unchanged", async () => {
+    const fake = session(() => canceledNotice);
+    const result = await driver({ retention: vi.fn(async () => "{\"access\":\"read_only\",\"reason\":\"canceled\"}") }, fake).status();
+    expect(result).toEqual(canceledNotice);
     expect(fake.queries).toEqual(["_worker_account_access_request", "_worker_account_access_parse"]);
   });
 
