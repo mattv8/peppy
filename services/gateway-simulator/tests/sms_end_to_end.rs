@@ -163,7 +163,7 @@ fn client(dir: &TempDir, name: &str, s: &Server, device: DeviceId) -> Client {
     c
 }
 fn route(id: DeviceId) -> GatewayRoute {
-    GatewayRoute {
+    GatewayRoute::Carrier {
         gateway_device_id: id,
         subscription_id: "sim-1".into(),
     }
@@ -977,7 +977,7 @@ async fn advertised_sim_route_is_discoverable_and_foreign_route_never_effects() 
                 recipients: vec![ADDRESS.into()],
                 body: "foreign simulated SIM".into(),
             },
-            GatewayRoute {
+            GatewayRoute::Carrier {
                 gateway_device_id: gateway_p.id,
                 subscription_id: "other-sim".into(),
             },

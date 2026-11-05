@@ -402,7 +402,7 @@ fn core_client(root: &Path, name: &str, vault: &VaultFixture, device_id: DeviceI
 }
 
 fn route(gateway_device_id: DeviceId) -> GatewayRoute {
-    GatewayRoute {
+    GatewayRoute::Carrier {
         gateway_device_id,
         subscription_id: "recovery-sim-1".into(),
     }
