@@ -78,6 +78,16 @@ fn imported_sms_plan_is_paused(client: &Client) -> bool {
         .paused
 }
 
+fn remove_rcs_mapping_schema(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch(
+            "DROP TABLE rcs_send_ledger;
+             DROP TABLE rcs_mapping_proofs;
+             DROP TABLE rcs_conversation_mappings;",
+        )
+        .unwrap();
+}
+
 fn capture_events(client: &Client, count: usize) {
     for id in 0..count {
         client
@@ -142,7 +152,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 45);
+    assert_eq!(version, 46);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -154,6 +164,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
         outbox_index.contains("(envelope_id,compaction,purpose,state)"),
         "{outbox_index}"
     );
+    remove_rcs_mapping_schema(&connection);
     connection
         .execute_batch(
             "DROP INDEX outbox_pending_events_history;
@@ -248,7 +259,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 45);
+    assert_eq!(version, 46);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -371,6 +382,7 @@ fn version_31_upgrade_preserves_partial_floors_completed_scopes_and_descending_p
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
+    remove_rcs_mapping_schema(&connection);
     connection
         .execute_batch(
             "
