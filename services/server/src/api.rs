@@ -287,7 +287,8 @@ pub(super) struct ApiState {
     setup_window_started: std::time::Instant,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
     live_hub: crate::live::LiveHub,
-    live_backend: Option<Arc<dyn crate::live::LiveBackend>>,
+    live_backend: Arc<crate::live_postgres::PgLiveBackend>,
+    live_readiness: tokio::sync::watch::Receiver<bool>,
     live_rate_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
 }
 struct PeerAddress(Option<IpAddr>);
@@ -544,6 +545,12 @@ pub(crate) fn build_router(
     let push_config_response = push_advertisement
         .response()
         .expect("router requires a validated push configuration");
+    let live_hub = crate::live::LiveHub::new();
+    let live_backend = Arc::new(crate::live_postgres::PgLiveBackend::new(
+        db.clone(),
+        live_hub.clone(),
+    ));
+    let live_readiness = live_backend.subscribe_readiness();
     let router = Router::new()
         .route("/v1/vault", get(vault_header))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
@@ -663,10 +670,9 @@ pub(crate) fn build_router(
         claim_policy,
         setup_window_started: std::time::Instant::now(),
         trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs.clone()),
-        live_hub: crate::live::LiveHub::new(),
-        // No backend is configured in this stage. Keep the public route disabled
-        // rather than exposing an in-process-only relay across replicas.
-        live_backend: None,
+        live_hub,
+        live_backend,
+        live_readiness,
         live_rate_limiter: Arc::new(std::sync::Mutex::new(
             crate::live::LiveRateLimiter::default(),
         )),
@@ -2683,16 +2689,18 @@ async fn live_websocket(
     // Authenticate before deciding whether the relay is available, so failed
     // credentials never receive an upgrade or register a hub sink.
     let principal = authenticated(&state, &headers, Operation::Sync).await?;
-    let Some(backend) = state.live_backend.clone() else {
+    if !state.live_backend.is_ready() {
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "live_unavailable",
         ));
-    };
+    }
+    let backend: Arc<dyn crate::live::LiveBackend> = state.live_backend.clone();
+    let readiness = state.live_readiness.clone();
     Ok(upgrade
         .max_message_size(8_192)
         .max_frame_size(8_192)
-        .on_upgrade(move |socket| live_session(socket, state, principal, peer, backend))
+        .on_upgrade(move |socket| live_session(socket, state, principal, peer, backend, readiness))
         .into_response())
 }
 
@@ -2702,6 +2710,7 @@ async fn live_session(
     principal: Principal,
     peer: Option<IpAddr>,
     backend: Arc<dyn crate::live::LiveBackend>,
+    readiness: tokio::sync::watch::Receiver<bool>,
 ) {
     let registration = state
         .live_hub
@@ -2713,8 +2722,10 @@ async fn live_session(
         &principal,
         peer,
         backend,
+        generation,
         registration.receiver,
         registration.cancellation,
+        readiness,
     )
     .await;
     state.live_hub.unregister(
@@ -2730,14 +2741,25 @@ async fn live_session_inner(
     principal: &Principal,
     peer: Option<IpAddr>,
     backend: Arc<dyn crate::live::LiveBackend>,
+    generation: u64,
     mut outgoing: tokio::sync::mpsc::Receiver<LiveFrameV1>,
     mut cancellation: tokio::sync::watch::Receiver<bool>,
+    mut readiness: tokio::sync::watch::Receiver<bool>,
 ) {
     let hello = match serde_json::to_string(&LiveHelloV1::new()) {
         Ok(hello) => hello,
         Err(_) => return live_close(&mut socket, 1011, "live_unavailable").await,
     };
-    if !live_send(&mut socket, Message::Text(hello.into()), &mut cancellation).await {
+    if !matches!(
+        live_send(
+            &mut socket,
+            Message::Text(hello.into()),
+            &mut cancellation,
+            &mut readiness,
+        )
+        .await,
+        LiveWait::Complete
+    ) {
         return;
     }
     let mut recheck = tokio::time::interval(Duration::from_secs(20));
@@ -2748,25 +2770,32 @@ async fn live_session_inner(
                 let _ = changed;
                 return;
             }
-            _ = recheck.tick() => match still_active(state, principal).await {
-                Ok(true) if authorize(state, principal, Operation::Sync).await.is_ok() => {
+            changed = readiness.changed() => {
+                let _ = changed;
+                if !*readiness.borrow_and_update() {
+                    return live_close(&mut socket, 1011, "live_unavailable").await;
+                }
+            }
+            _ = recheck.tick() => match live_revalidate(state, principal, &mut cancellation, &mut readiness).await {
+                LiveRevalidation::Authorized => {
                     if challenge.is_some() {
                         return;
                     }
                     let token = Uuid::new_v4().as_bytes().to_vec();
-                    if !live_send(&mut socket, Message::Ping(token.clone().into()), &mut cancellation).await {
+                    if !matches!(live_send(&mut socket, Message::Ping(token.clone().into()), &mut cancellation, &mut readiness).await, LiveWait::Complete) {
                         return;
                     }
                     challenge = Some(token);
                 }
-                Ok(true) | Ok(false) => return live_close(&mut socket, 1008, "live_unauthorized").await,
-                Err(_) => return live_close(&mut socket, 1011, "live_unavailable").await,
+                LiveRevalidation::Unauthorized => return live_close(&mut socket, 1008, "live_unauthorized").await,
+                LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
+                LiveRevalidation::Cancelled => return,
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_))) | None => return,
                 Some(Err(_)) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
                 Some(Ok(Message::Ping(payload))) => {
-                    if !live_send(&mut socket, Message::Pong(payload), &mut cancellation).await { return; }
+                    if !matches!(live_send(&mut socket, Message::Pong(payload), &mut cancellation, &mut readiness).await, LiveWait::Complete) { return; }
                 }
                 Some(Ok(Message::Pong(payload))) => {
                     if challenge.as_ref().is_some_and(|token| token.as_slice() == payload.as_ref()) {
@@ -2791,24 +2820,31 @@ async fn live_session_inner(
                             return live_close(&mut socket, 1008, "invalid_live_frame").await;
                         }
                     }
-                    if !live_publish(
+                    match live_publish(
                         backend.as_ref(),
                         VaultId(principal.vault),
                         frame.clone(),
                         &mut cancellation,
+                        &mut readiness,
                     )
                     .await
                     {
-                        if *cancellation.borrow_and_update() {
-                            return;
+                        LiveWait::Complete => {}
+                        LiveWait::Cancelled => return,
+                        LiveWait::Unavailable => {
+                            return live_close(&mut socket, 1011, "live_unavailable").await;
                         }
-                        return live_close(&mut socket, 1011, "live_unavailable").await;
+                    }
+                    if *cancellation.borrow_and_update() {
+                        return;
                     }
                     // The backend was available when this frame was accepted;
-                    // local fan-out is only a latency optimization.
-                    let _ = state.live_hub.forward(
+                    // local fan-out is only a latency optimization. The hub
+                    // fences it to this still-current socket generation.
+                    let _ = state.live_hub.forward_current(
                         VaultId(principal.vault),
                         DeviceId(principal.device),
+                        generation,
                         frame,
                         live_now_ms(),
                     );
@@ -2817,7 +2853,7 @@ async fn live_session_inner(
             frame = outgoing.recv() => match frame {
                 Some(frame) if live_frame_is_current(&frame, live_now_ms()) => {
                     let Ok(frame) = serde_json::to_string(&frame) else { continue; };
-                    if !live_send(&mut socket, Message::Text(frame.into()), &mut cancellation).await { return; }
+                    if !matches!(live_send(&mut socket, Message::Text(frame.into()), &mut cancellation, &mut readiness).await, LiveWait::Complete) { return; }
                 }
                 Some(_) => continue,
                 None => return,
@@ -2847,13 +2883,21 @@ async fn live_send(
     socket: &mut WebSocket,
     message: Message,
     cancellation: &mut tokio::sync::watch::Receiver<bool>,
-) -> bool {
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+) -> LiveWait {
     if *cancellation.borrow_and_update() {
-        return false;
+        return LiveWait::Cancelled;
+    }
+    if !*readiness.borrow_and_update() {
+        return LiveWait::Unavailable;
     }
     tokio::select! {
-        result = tokio::time::timeout(Duration::from_secs(5), socket.send(message)) => matches!(result, Ok(Ok(()))),
-        _ = cancellation.changed() => false,
+        biased;
+        _ = cancellation.changed() => LiveWait::Cancelled,
+        _ = readiness.changed() => LiveWait::Unavailable,
+        result = tokio::time::timeout(Duration::from_secs(5), socket.send(message)) => {
+            if matches!(result, Ok(Ok(()))) { LiveWait::Complete } else { LiveWait::Unavailable }
+        },
     }
 }
 
@@ -2862,13 +2906,65 @@ async fn live_publish(
     vault_id: VaultId,
     frame: LiveFrameV1,
     cancellation: &mut tokio::sync::watch::Receiver<bool>,
-) -> bool {
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+) -> LiveWait {
     if *cancellation.borrow_and_update() {
-        return false;
+        return LiveWait::Cancelled;
+    }
+    if !*readiness.borrow_and_update() {
+        return LiveWait::Unavailable;
     }
     tokio::select! {
-        result = tokio::time::timeout(Duration::from_secs(5), backend.publish(vault_id, frame)) => matches!(result, Ok(Ok(()))),
-        _ = cancellation.changed() => false,
+        biased;
+        _ = cancellation.changed() => LiveWait::Cancelled,
+        _ = readiness.changed() => LiveWait::Unavailable,
+        result = tokio::time::timeout(Duration::from_secs(5), backend.publish(vault_id, frame)) => {
+            if matches!(result, Ok(Ok(()))) { LiveWait::Complete } else { LiveWait::Unavailable }
+        },
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LiveWait {
+    Complete,
+    Cancelled,
+    Unavailable,
+}
+
+enum LiveRevalidation {
+    Authorized,
+    Unauthorized,
+    Unavailable,
+    Cancelled,
+}
+
+async fn live_revalidate(
+    state: &ApiState,
+    principal: &Principal,
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+) -> LiveRevalidation {
+    if *cancellation.borrow_and_update() {
+        return LiveRevalidation::Cancelled;
+    }
+    if !*readiness.borrow_and_update() {
+        return LiveRevalidation::Unavailable;
+    }
+    tokio::select! {
+        biased;
+        _ = cancellation.changed() => LiveRevalidation::Cancelled,
+        _ = readiness.changed() => LiveRevalidation::Unavailable,
+        result = tokio::time::timeout(Duration::from_secs(5), async {
+            match still_active(state, principal).await {
+                Ok(false) => Ok(false),
+                Ok(true) => authorize(state, principal, Operation::Sync).await.map(|_| true),
+                Err(_) => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "live_unavailable")),
+            }
+        }) => match result {
+            Ok(Ok(true)) => LiveRevalidation::Authorized,
+            Ok(Ok(false)) | Ok(Err(ApiError(StatusCode::FORBIDDEN, _))) => LiveRevalidation::Unauthorized,
+            Ok(Err(_)) | Err(_) => LiveRevalidation::Unavailable,
+        },
     }
 }
 

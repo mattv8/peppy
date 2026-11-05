@@ -175,6 +175,46 @@ impl LiveHub {
     ) -> Result<usize, LiveReject> {
         Self::validate_frame(authenticated_device_id, &frame, now_ms)?;
         let sinks = self.inner.sinks.lock().expect("live hub lock poisoned");
+        Ok(Self::forward_locked(
+            &sinks,
+            vault_id,
+            authenticated_device_id,
+            frame,
+        ))
+    }
+
+    /// Delivers only while this exact socket generation remains current. The
+    /// current-generation check and local fan-out share one mutex acquisition.
+    pub(crate) fn forward_current(
+        &self,
+        vault_id: VaultId,
+        authenticated_device_id: DeviceId,
+        generation: u64,
+        frame: EphemeralSignalV1,
+        now_ms: u64,
+    ) -> Result<Option<usize>, LiveReject> {
+        Self::validate_frame(authenticated_device_id, &frame, now_ms)?;
+        let sinks = self.inner.sinks.lock().expect("live hub lock poisoned");
+        if sinks
+            .get(&(vault_id, authenticated_device_id))
+            .is_none_or(|sink| sink.generation != generation)
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self::forward_locked(
+            &sinks,
+            vault_id,
+            authenticated_device_id,
+            frame,
+        )))
+    }
+
+    fn forward_locked(
+        sinks: &HashMap<(VaultId, DeviceId), LiveSink>,
+        vault_id: VaultId,
+        authenticated_device_id: DeviceId,
+        frame: EphemeralSignalV1,
+    ) -> usize {
         let mut accepted = 0;
         for (&(sink_vault, sink_device), sink) in sinks.iter() {
             if sink_vault == vault_id
@@ -184,7 +224,7 @@ impl LiveHub {
                 accepted += 1;
             }
         }
-        Ok(accepted)
+        accepted
     }
 
     pub(crate) fn validate_frame(
