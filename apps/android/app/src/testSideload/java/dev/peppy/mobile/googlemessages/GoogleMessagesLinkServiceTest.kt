@@ -30,13 +30,17 @@ class GoogleMessagesLinkServiceTest {
     fun `cancel before run entry closes the handle and native run rejects admission`() {
         val handle = FenceHandle()
         val beforeRun = CountDownLatch(1)
-        val holdRun = CountDownLatch(1)
+        val interruptObserved = CountDownLatch(1)
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(beforeRun = {
             beforeRun.countDown()
-            try {
-                holdRun.await()
-            } catch (_: InterruptedException) {
-                // Destruction interrupts this pre-call fence after closing the captured handle.
+            var closed = false
+            while (!closed) {
+                try {
+                    handle.closeCalled.await()
+                    closed = true
+                } catch (_: InterruptedException) {
+                    interruptObserved.countDown()
+                }
             }
         })
         installEngine(handle)
@@ -45,6 +49,7 @@ class GoogleMessagesLinkServiceTest {
 
         controller.destroy()
 
+        assertTrue(interruptObserved.await(1, TimeUnit.SECONDS))
         assertTrue(handle.closed)
         assertTrue(handle.runRejected.await(1, TimeUnit.SECONDS))
         assertEquals(1, handle.runCalls.get())
@@ -180,13 +185,18 @@ class GoogleMessagesLinkServiceTest {
         override fun checkHealth(): Long = -1
         override fun unlink() = Unit
         override fun stop() = Unit
-        override fun close() { closed = true }
+        open override fun close() { closed = true }
         override fun status(): String = currentStatus
     }
 
     private class FenceHandle : StatusHandle(LINKED_STATUS) {
+        val closeCalled = CountDownLatch(1)
         val runRejected = CountDownLatch(1)
         val runCalls = AtomicInteger()
+        override fun close() {
+            super.close()
+            closeCalled.countDown()
+        }
         override fun run() {
             runCalls.incrementAndGet()
             if (closed) {

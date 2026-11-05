@@ -58,10 +58,6 @@ object LinkRuntime {
         signalChange()
     }
 
-    internal fun stopRunningHandle() = synchronized(this) {
-        cachedHandle?.stop()
-    }
-
     internal fun handleLease(context: Context): LinkHandleLease? {
         val opened = (handle(context) as? LinkOpenResult.Open)?.handle ?: return null
         return synchronized(this) {
