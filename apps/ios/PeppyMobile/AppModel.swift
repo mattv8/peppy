@@ -38,7 +38,9 @@ final class AppModel {
     private(set) var attachmentStorageRefreshing = false
     private(set) var attachmentStorageIsStale = false
     private(set) var devices: [DeviceRosterItem] = []
-    private(set) var googleMessagesLinkStatuses: [String: GoogleMessagesLinkStatus] = [:]
+    private(set) var googleMessagesLinkStatuses: [String: GoogleMessagesLinkPresentation] = [:]
+    private var deviceRosterRevision = 0
+    private var linkStatusRequestGeneration = 0
     private(set) var devicesLoaded = false
     private(set) var relay: RelayWakeClient?
     var relayOrigin = UserDefaults.standard.string(forKey: "peppy.relay-origin") ?? ""
@@ -142,8 +144,9 @@ final class AppModel {
     }
 
     func refresh() async {
+        let previousIdentity = status.identity
         await run(.refreshing) { try await $0.refreshEnrollment() }
-        await refreshDevices()
+        if status.identity == previousIdentity, lastError == nil { await refreshDevices() }
     }
 
     /// Invoked only from the visible Account settings surface or its explicit refresh control.
@@ -420,23 +423,74 @@ final class AppModel {
     }
 
     func refreshDevices() async {
-        defer { devicesLoaded = true }
+        let identity = status.identity
+        let keysUnlocked = status.keysUnlocked
+        defer {
+            if status.identity == identity, status.keysUnlocked == keysUnlocked {
+                devicesLoaded = true
+            }
+        }
         do {
-            devices = try await session.devices()
+            let nextDevices = try await session.devices()
+            guard status.identity == identity, status.keysUnlocked == keysUnlocked else { return }
+            devices = nextDevices
+            deviceRosterRevision &+= 1
             await refreshGoogleMessagesLinkStatuses()
         }
-        catch { lastError = (error as? ClientError)?.userMessage ?? "Could not load devices." }
+        catch {
+            guard status.identity == identity, status.keysUnlocked == keysUnlocked else { return }
+            lastError = (error as? ClientError)?.userMessage ?? "Could not load devices."
+        }
     }
 
-    func googleMessagesLinkStatus(for device: DeviceRosterItem) -> GoogleMessagesLinkStatus? {
+    func googleMessagesLinkStatus(for device: DeviceRosterItem) -> GoogleMessagesLinkPresentation? {
         googleMessagesLinkStatuses[device.id]
     }
 
+    var googleMessagesLinkStatusDeadline: Int64? {
+        googleMessagesLinkStatuses.values.compactMap(\.expiresAtMs).min()
+    }
+
+    func expireGoogleMessagesLinkStatuses(at nowMs: Int64) {
+        googleMessagesLinkStatuses = googleMessagesLinkStatuses.mapValues { $0.expired(at: nowMs) }
+    }
+
     private func refreshGoogleMessagesLinkStatuses() async {
-        googleMessagesLinkStatuses = await session.googleMessagesLinkStatuses(
-            for: devices,
-            currentDeviceID: status.identity?.deviceId
+        guard let identity = status.identity else {
+            invalidateGoogleMessagesLinkStatuses()
+            return
+        }
+        let requestGeneration = linkStatusRequestGeneration &+ 1
+        linkStatusRequestGeneration = requestGeneration
+        let request = GoogleMessagesLinkStatusRequest(
+            identityKey: googleMessagesLinkIdentityKey,
+            rosterRevision: deviceRosterRevision,
+            generation: requestGeneration,
+            keysUnlocked: status.keysUnlocked
         )
+        let roster = devices
+        let values = await session.googleMessagesLinkStatuses(
+            for: roster,
+            currentDeviceID: identity.deviceId
+        )
+        guard request.accepts(
+            identityKey: googleMessagesLinkIdentityKey,
+            rosterRevision: deviceRosterRevision,
+            generation: linkStatusRequestGeneration,
+            keysUnlocked: status.keysUnlocked
+        )
+        else { return }
+        googleMessagesLinkStatuses = values
+    }
+
+    private var googleMessagesLinkIdentityKey: String? {
+        status.identity.map { "\($0.origin)|\($0.vaultId)|\($0.deviceId)" }
+    }
+
+    private func invalidateGoogleMessagesLinkStatuses() {
+        linkStatusRequestGeneration &+= 1
+        deviceRosterRevision &+= 1
+        googleMessagesLinkStatuses = [:]
     }
 
     func revokeDevice(_ id: String) async {
@@ -473,7 +527,7 @@ final class AppModel {
         lastSync = nil
         lastSyncDate = nil
         devices = []
-        googleMessagesLinkStatuses = [:]
+        invalidateGoogleMessagesLinkStatuses()
         serverReachability = .unknown
         clearAttachmentStorage()
     }
@@ -818,7 +872,12 @@ final class AppModel {
     }
 
     private func setStatus(_ nextStatus: SessionStatus) {
-        if status.identity != nextStatus.identity { clearAttachmentStorage() }
+        if status.identity != nextStatus.identity || status.keysUnlocked != nextStatus.keysUnlocked {
+            clearAttachmentStorage()
+            devices = []
+            devicesLoaded = false
+            invalidateGoogleMessagesLinkStatuses()
+        }
         status = nextStatus
     }
 

@@ -10,7 +10,8 @@ import Testing
         current: Bool = true,
         availability: Bool = true,
         health: Bool = true,
-        phoneResponsive: Bool = true
+        phoneResponsive: Bool = true,
+        expiresAtMs: Int64? = 1
     ) -> NativeRcsLinkStatus {
         NativeRcsLinkStatus(
             state: state,
@@ -20,42 +21,64 @@ import Testing
             phoneResponsive: phoneResponsive,
             observedAtMs: 0,
             capabilityRevision: 1,
-            featureBits: 0
+            featureBits: 0,
+            expiresAtMs: expiresAtMs
         )
     }
 
     @Test func mapsMissingAndUnlinkedStatusesToNoPresentation() {
-        #expect(GoogleMessagesLinkStatus.presentation(for: nil) == nil)
-        #expect(GoogleMessagesLinkStatus.presentation(for: status(.unlinked)) == nil)
-        #expect(GoogleMessagesLinkStatus.presentation(for: status(.unavailable)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: nil) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.unlinked)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.unavailable)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.unlinked, current: false)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.unavailable, current: false)) == nil)
     }
 
     @Test func mapsCurrentStatusesAndAttentionHelp() {
-        #expect(GoogleMessagesLinkStatus.presentation(for: status(.linked)) == .connected)
-        #expect(GoogleMessagesLinkStatus.presentation(for: status(.linked, phoneResponsive: false)) == .phoneNotResponding)
-        #expect(GoogleMessagesLinkStatus.presentation(for: status(.needsRelink)) == .needsRelink)
-        #expect(GoogleMessagesLinkStatus.presentation(for: status(.signedOut)) == .signedOut)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked))?.status == .connected)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked, phoneResponsive: false))?.status == .phoneNotResponding)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked, availability: false))?.status == .unconfirmed)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked, health: false))?.status == .unconfirmed)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.needsRelink))?.status == .needsRelink)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.signedOut))?.status == .signedOut)
         #expect(GoogleMessagesLinkStatus.needsRelink.helpKey == "google_messages_link_remote_help_attention")
         #expect(GoogleMessagesLinkStatus.phoneNotResponding.helpKey == "google_messages_link_remote_help_unresponsive")
     }
 
     @Test func mapsStaleEvidenceToUnconfirmedBeforeLinkHealth() {
-        #expect(GoogleMessagesLinkStatus.presentation(for: status(.linked, current: false)) == .unconfirmed)
-        #expect(GoogleMessagesLinkStatus.presentation(for: status(.needsRelink, current: false)) == .unconfirmed)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.linked, current: false))?.status == .unconfirmed)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.needsRelink, current: false))?.status == .unconfirmed)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: status(.signedOut, current: false))?.status == .unconfirmed)
     }
 
-    @Test func filtersRevokedCurrentAndNonGatewayRowsWithoutCallingCore() async throws {
-        let server = try FakeServer(passphrase: "io synthetic vault passphrase")
-        let session = NativeSession(secureStore: InMemorySecureStore(), transport: server, databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false)
-        let rows = [
-            DeviceRosterItem(id: gatewayID, role: "gateway", revoked: true, keyEpoch: 1),
-            DeviceRosterItem(id: "00000000-0000-0000-0000-000000000002", role: "device", revoked: false, keyEpoch: 1),
-            DeviceRosterItem(id: "00000000-0000-0000-0000-000000000003", role: "gateway", revoked: false, keyEpoch: 1),
-        ]
+    @Test func filtersRowsAndKeepsAPresentRemoteGateway() {
+        let remoteGateway = DeviceRosterItem(id: gatewayID, role: "gateway", revoked: false, keyEpoch: 1)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: remoteGateway, currentDeviceID: nil, status: status(.linked))?.status == .connected)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: DeviceRosterItem(id: gatewayID, role: "gateway", revoked: true, keyEpoch: 1), currentDeviceID: nil, status: status(.linked)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: DeviceRosterItem(id: gatewayID, role: "device", revoked: false, keyEpoch: 1), currentDeviceID: nil, status: status(.linked)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: remoteGateway, currentDeviceID: gatewayID, status: status(.linked)) == nil)
+    }
 
-        let values = await session.googleMessagesLinkStatuses(for: rows, currentDeviceID: "00000000-0000-0000-0000-000000000003")
+    @Test func expiresCurrentPresentationAtTheCoreDeadline() {
+        let current = GoogleMessagesLinkPresentation.presentation(for: status(.linked, expiresAtMs: 1_001))!
+        #expect(current.expired(at: 1_000).status == .connected)
+        #expect(current.expired(at: 1_001).status == .unconfirmed)
+        #expect(current.expired(at: 1_001).expiresAtMs == nil)
+    }
 
-        #expect(values.isEmpty)
+    @Test func discardsAStatusReadAfterLockOrIdentityChange() {
+        let request = GoogleMessagesLinkStatusRequest(
+            identityKey: "origin|vault|device",
+            rosterRevision: 2,
+            generation: 4,
+            keysUnlocked: true
+        )
+
+        #expect(request.accepts(identityKey: "origin|vault|device", rosterRevision: 2, generation: 4, keysUnlocked: true))
+        #expect(!request.accepts(identityKey: "origin|vault|device", rosterRevision: 2, generation: 4, keysUnlocked: false))
+        #expect(!request.accepts(identityKey: "next-origin|vault|device", rosterRevision: 2, generation: 4, keysUnlocked: true))
+        #expect(!request.accepts(identityKey: "origin|vault|device", rosterRevision: 3, generation: 4, keysUnlocked: true))
+        #expect(!request.accepts(identityKey: "origin|vault|device", rosterRevision: 2, generation: 5, keysUnlocked: true))
     }
 
     @Test func readOnlyLinkStatusDoesNotCreateCarrierWork() async throws {

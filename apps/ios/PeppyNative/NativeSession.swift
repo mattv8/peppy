@@ -50,21 +50,70 @@ public enum GoogleMessagesLinkStatus: Equatable, Sendable {
         }
     }
 
-    public var needsAttention: Bool { helpKey != nil }
+    public var needsAttention: Bool {
+        switch self {
+        case .phoneNotResponding, .needsRelink, .signedOut: true
+        case .connected, .unconfirmed: false
+        }
+    }
+
+}
+
+public struct GoogleMessagesLinkPresentation: Equatable, Sendable {
+    public let status: GoogleMessagesLinkStatus
+    public let expiresAtMs: Int64?
+
+    func expired(at nowMs: Int64) -> Self {
+        guard let expiresAtMs, nowMs >= expiresAtMs else { return self }
+        return Self(status: .unconfirmed, expiresAtMs: nil)
+    }
 
     static func presentation(for status: NativeRcsLinkStatus?) -> Self? {
         guard let status else { return nil }
-        guard status.current else { return .unconfirmed }
+        guard status.state != .unlinked, status.state != .unavailable else { return nil }
+        guard status.current, let expiresAtMs = status.expiresAtMs else {
+            return Self(status: .unconfirmed, expiresAtMs: nil)
+        }
 
         switch status.state {
         case .linked:
-            return status.availability && status.health && status.phoneResponsive
-                ? .connected
-                : .phoneNotResponding
-        case .needsRelink: return .needsRelink
-        case .signedOut: return .signedOut
+            let presentation: GoogleMessagesLinkStatus
+            if !status.availability || !status.health { presentation = .unconfirmed }
+            else if !status.phoneResponsive { presentation = .phoneNotResponding }
+            else { presentation = .connected }
+            return Self(status: presentation, expiresAtMs: expiresAtMs)
+        case .needsRelink: return Self(status: .needsRelink, expiresAtMs: expiresAtMs)
+        case .signedOut: return Self(status: .signedOut, expiresAtMs: expiresAtMs)
         case .unlinked, .unavailable: return nil
         }
+    }
+
+    static func presentation(
+        for device: DeviceRosterItem,
+        currentDeviceID: String?,
+        status: NativeRcsLinkStatus?
+    ) -> Self? {
+        guard device.role == "gateway", !device.revoked, device.id != currentDeviceID else { return nil }
+        return presentation(for: status)
+    }
+}
+
+public struct GoogleMessagesLinkStatusRequest: Equatable, Sendable {
+    let identityKey: String?
+    let rosterRevision: Int
+    let generation: Int
+    let keysUnlocked: Bool
+
+    func accepts(
+        identityKey: String?,
+        rosterRevision: Int,
+        generation: Int,
+        keysUnlocked: Bool
+    ) -> Bool {
+        self.identityKey == identityKey
+            && self.rosterRevision == rosterRevision
+            && self.generation == generation
+            && self.keysUnlocked == keysUnlocked
     }
 }
 
@@ -880,17 +929,22 @@ public actor NativeSession {
     public func googleMessagesLinkStatuses(
         for devices: [DeviceRosterItem],
         currentDeviceID: String?
-    ) -> [String: GoogleMessagesLinkStatus] {
+    ) -> [String: GoogleMessagesLinkPresentation] {
         guard let client else { return [:] }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
 
-        return Dictionary(uniqueKeysWithValues: devices.compactMap { device in
-            guard device.role == "gateway", !device.revoked, device.id != currentDeviceID,
-                  let status = try? client.rcsLinkStatus(gatewayDeviceId: device.id, nowMs: nowMs),
-                  let presentation = GoogleMessagesLinkStatus.presentation(for: status)
-            else { return nil }
-            return (device.id, presentation)
-        })
+        var values: [String: GoogleMessagesLinkPresentation] = [:]
+        for device in devices where device.role == "gateway" && !device.revoked && device.id != currentDeviceID {
+            let status = try? client.rcsLinkStatus(gatewayDeviceId: device.id, nowMs: nowMs)
+            if let presentation = GoogleMessagesLinkPresentation.presentation(
+                for: device,
+                currentDeviceID: currentDeviceID,
+                status: status
+            ) {
+                values[device.id] = presentation
+            }
+        }
+        return values
     }
 
     public func revokeDevice(_ deviceId: String) async throws -> SessionStatus {

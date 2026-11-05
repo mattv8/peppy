@@ -477,8 +477,8 @@ struct DeviceView: View {
                     Text(device.revoked ? "Revoked" : device.role).font(.footnote).foregroundStyle(.secondary)
                     if let linkStatus = model.googleMessagesLinkStatus(for: device) {
                         LabeledContent {
-                            Text(LocalizedStringKey("peppy.\(linkStatus.valueKey)"), tableName: "Peppy")
-                                .foregroundStyle(linkStatus.needsAttention ? colors.WarningText : colors.TextPrimary)
+                            Text(LocalizedStringKey("peppy.\(linkStatus.status.valueKey)"), tableName: "Peppy")
+                                .foregroundStyle(linkStatus.status.needsAttention ? colors.WarningText : colors.TextPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
                         } label: {
                             Text("peppy.google_messages_link_title", tableName: "Peppy")
@@ -486,7 +486,7 @@ struct DeviceView: View {
                         }
                         .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("device-link-status-\(device.id)")
-                        if let helpKey = linkStatus.helpKey {
+                        if let helpKey = linkStatus.status.helpKey {
                             Text(LocalizedStringKey("peppy.\(helpKey)"), tableName: "Peppy")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
@@ -504,7 +504,16 @@ struct DeviceView: View {
             }
         } header: {
             Text("peppy.devices", tableName: "Peppy")
-        }.accessibilityIdentifier("devices-section").task { await model.refreshDevices() }
+        }
+        .accessibilityIdentifier("devices-section")
+        .task { await model.refreshDevices() }
+        .task(id: model.googleMessagesLinkStatusDeadline) {
+            guard let deadline = model.googleMessagesLinkStatusDeadline else { return }
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
+            try? await Task.sleep(for: .milliseconds(max(1, deadline - nowMs)))
+            guard !Task.isCancelled else { return }
+            model.expireGoogleMessagesLinkStatuses(at: Int64(Date().timeIntervalSince1970 * 1_000))
+        }
     }
 
     private var relaySection: some View {
