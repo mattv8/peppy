@@ -5,6 +5,7 @@ pub mod enrollment;
 pub mod health;
 pub mod instance;
 pub(crate) mod live;
+pub(crate) mod live_postgres;
 pub mod presence;
 pub mod rls;
 pub mod scope;

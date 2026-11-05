@@ -66,6 +66,7 @@ impl PgLiveBackend {
     /// A receiver changes whenever the LISTEN registration becomes available or
     /// unavailable. Socket sessions use it to close instead of continuing to
     /// claim cross-replica delivery after the listener is lost.
+    #[allow(dead_code)]
     pub(crate) fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
         self.inner.readiness.subscribe()
     }
@@ -188,9 +189,13 @@ mod tests {
     }
 
     async fn wait_ready(backend: &PgLiveBackend) {
+        let mut readiness = backend.subscribe_readiness();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !backend.is_ready() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            while !*readiness.borrow_and_update() {
+                readiness
+                    .changed()
+                    .await
+                    .expect("backend should remain alive");
             }
         })
         .await
