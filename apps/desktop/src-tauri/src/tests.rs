@@ -13,10 +13,11 @@ use crate::{
 };
 use peppy_client_core::{
     ComposeDraftUpdate, DeviceId, Direction, GatewayRoute, IncomingSms, KeyProfile,
-    MmsAcquisitionInput, MmsSource, OutgoingSms, Transport, VaultCheckHeader,
+    MmsAcquisitionInput, MmsSource, OutgoingSms, RcsCapabilityState, RcsEligibility,
+    RcsEligibilityProjection, RcsLinkStatusEvent, Transport, VaultCheckHeader,
 };
 use peppy_crypto::{create_vault_check_header, derive_root_key};
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
 #[test]
 fn restart_marker_preserves_visible_windows_and_backgrounds_hidden_windows() {
@@ -200,6 +201,76 @@ pub(crate) fn gateway(id: &str, sms: bool, mms: bool) -> GatewayView {
         mms_limit_source: mms.then_some("fallback".into()),
         mms_max_recipients: mms.then_some(20),
     }
+}
+
+#[test]
+fn native_snapshot_projects_current_rcs_only_for_the_selected_existing_conversation() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let conversation = session
+        .client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+15555550101".into(),
+            body: "message".into(),
+            provider_message_id: Some("rcs-snapshot".into()),
+            imported: false,
+        })
+        .unwrap()
+        .conversation_id;
+    let gateway_id = fixture.binding.device_id.clone();
+    let gateway_device_id = gateway_id.parse().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    session
+        .client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms: now,
+                capability_revision: 1,
+                feature_bits: 1,
+            },
+            &[RcsEligibilityProjection {
+                conversation_id: conversation,
+                eligibility: RcsEligibility::Eligible,
+                feature_bits: 1,
+                mapping_revision: 1,
+                observed_at_ms: now,
+                gateway_device_id,
+            }],
+            now,
+        )
+        .unwrap();
+    let mut gateway_view = gateway(&gateway_id, true, false);
+    gateway_view.simulated = false;
+    session.set_status(|status| status.gateways = vec![gateway_view]);
+    let outbox_before_snapshot = session.client.pending_outbox_count().unwrap();
+
+    let snapshot = session
+        .snapshot(
+            Some(&conversation.to_string()),
+            None,
+            crate::head(),
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .0;
+    let rcs = snapshot.rcs_status.unwrap();
+    assert_eq!(rcs.gateways[0].gateway_id, gateway_id);
+    assert_eq!(rcs.eligibilities[0].conversation_id, conversation.to_string());
+    assert_eq!(rcs.eligibilities[0].eligibility, peppy_desktop_api::RcsEligibilityState::Eligible);
+    assert_eq!(session.client.pending_outbox_count().unwrap(), outbox_before_snapshot);
 }
 
 fn assert_sanitized(json: &str, dir: &Path) {

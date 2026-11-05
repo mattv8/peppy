@@ -952,6 +952,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         contact_sync: None,
         tone_overrides: None,
         sync_progress: None,
+        rcs_status: None,
     }
 }
 

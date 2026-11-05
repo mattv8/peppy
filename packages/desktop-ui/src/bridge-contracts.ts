@@ -20,6 +20,7 @@ import type {
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
+import type { RcsStatusSnapshot } from "@peppy/generated/rcs-status";
 export type {
   HistorySearchAttemptInput,
   HistorySearchReason,
@@ -41,6 +42,7 @@ export type {
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
 export type { AccountAccessResult, AccountNoticeDto, AccountNoticeKindDto, AccountNoticeSeverityDto } from "@peppy/generated/account-access";
+export type { RcsConversationEligibility, RcsEligibilityState, RcsGatewayState, RcsGatewayStatus, RcsStatusSnapshot } from "@peppy/generated/rcs-status";
 
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
@@ -66,7 +68,7 @@ export type GatewayView = { id: string; name: string; simId: string; online: boo
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
 /** Exact durable cursors only; `targetHighWater` is a transient authenticated replay cut, not a percentage denominator. */
 export type SyncProgress = { phase: "receiving" | "applying" | "waitingForKeys" | "current"; receivedThrough: string; processedThrough: string; targetHighWater?: string; snapshotReceived?: string; snapshotExpected?: string; snapshotRemaining?: string };
-export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress };
+export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress; rcsStatus?: RcsStatusSnapshot };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type DiscardDraftInput = Pick<Draft, "id" | "conversationId"> & { expectedRevision: string };

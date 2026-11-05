@@ -28,6 +28,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock, Weak,
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -1658,6 +1659,22 @@ impl Session {
             }
         };
         drop(status);
+        let rcs_status = {
+            let status = self
+                .status
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            dto::rcs_status::snapshot_at(
+                &self.client,
+                &status.gateways,
+                &status.revoked_device_ids,
+                active,
+                active.is_some_and(|id| conversations.iter().any(|item| item.conversation_id == id)),
+                unlocked,
+                now_ms(),
+            )
+            .map_err(core_error)?
+        };
         let mut addresses: Vec<(String, Option<String>)> = Vec::new();
         for view in &views {
             for address in view.participants.iter().flatten().chain([&view.name]) {
@@ -1711,6 +1728,7 @@ impl Session {
             contact_sync: contacts.sync,
             tone_overrides,
             sync_progress: Some(sync_progress),
+            rcs_status,
         };
         Ok((snapshot, hydration))
     }
@@ -1778,6 +1796,14 @@ impl Session {
                 .unwrap_or_else(|poison| poison.into_inner()),
         );
     }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(i64::MAX)
 }
 
 fn snapshot_preview_ids(messages: &[Message]) -> HashSet<AttachmentId> {

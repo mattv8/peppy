@@ -18,6 +18,7 @@ use std::{
     path::{Component, Path, PathBuf},
     str::FromStr,
     sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -581,6 +582,16 @@ impl BrowserCore {
         let notices = client.notification_snapshot().map_err(core)?;
         let replay_progress = client.replay_progress().map_err(core)?;
         let (connection_state, connection_error_code) = connection_snapshot(&self.context);
+        let rcs_status = dto::rcs_status::snapshot_at(
+            client,
+            self.context.gateways.as_deref().unwrap_or_default(),
+            &self.context.revoked_device_ids,
+            active,
+            active.is_some_and(|id| conversations.iter().any(|item| item.conversation_id == id)),
+            unlocked,
+            now_ms(),
+        )
+        .map_err(core)?;
         serde_json::to_value(dto::Snapshot {
             version: "1",
             mode: "browser",
@@ -642,6 +653,7 @@ impl BrowserCore {
                 snapshot_expected: None,
                 snapshot_remaining: None,
             }),
+            rcs_status,
         })
         .map_err(|_| core(CoreError::Database))
     }
@@ -777,6 +789,14 @@ impl BrowserCore {
         }
         Ok(path)
     }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(i64::MAX)
 }
 
 fn message_view(client: &Client, message: &Message) -> dto::MessageView {
@@ -961,6 +981,7 @@ mod tests {
     use super::*;
     use peppy_client_core::{
         ComposeDraftUpdate, Cursor, DraftId, GatewayRoute, IncomingSms, OutgoingSms,
+        RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent,
     };
     use peppy_crypto::{create_vault_check_header, derive_root_key};
 
@@ -972,6 +993,75 @@ mod tests {
 
     fn open(core: &mut BrowserCore, vault: VaultId, device: DeviceId, key: [u8; 32]) {
         value(&core.dispatch(&json!({"command":"open","args":{"vaultId":vault.to_string(),"deviceId":device.to_string(),"databaseKey":key,"origin":"https://peppy.test/","deviceRole":"device"}}).to_string()));
+    }
+
+    #[test]
+    fn snapshot_projects_only_the_current_selected_conversation_for_a_valid_gateway() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = VaultId::new();
+        let gateway = DeviceId::new();
+        let mut core = BrowserCore::new(root.path().to_path_buf());
+        open(&mut core, vault, gateway, [7; 32]);
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        value(&core.dispatch(
+            &json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string(),
+        ));
+        let conversation = core
+            .client()
+            .unwrap()
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550101".into(),
+                body: "message".into(),
+                provider_message_id: Some("rcs-snapshot".into()),
+                imported: false,
+            })
+            .unwrap()
+            .conversation_id;
+        let now = now_ms();
+        core.client()
+            .unwrap()
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: gateway,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now,
+                    capability_revision: 1,
+                    feature_bits: 99,
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id: conversation,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 99,
+                    mapping_revision: 1,
+                    observed_at_ms: now,
+                    gateway_device_id: gateway,
+                }],
+                now,
+            )
+            .unwrap();
+        value(&core.dispatch(
+            &json!({"command":"set_host_context","args":{"gateways":[{"id":gateway,"name":"Gateway","simId":"sim","online":true,"simulated":false,"supportsSms":true,"supportsMms":false}]}}).to_string(),
+        ));
+        let outbox_before_snapshot = core.client().unwrap().pending_outbox_count().unwrap();
+
+        let snapshot = value(&core.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
+        ));
+        assert_eq!(snapshot["rcsStatus"]["gateways"][0]["gatewayId"], gateway.to_string());
+        assert_eq!(snapshot["rcsStatus"]["eligibilities"][0]["conversationId"], conversation.to_string());
+        assert_eq!(snapshot["rcsStatus"]["eligibilities"][0]["eligibility"], "eligible");
+        assert!(snapshot["rcsStatus"]["gateways"][0]["featureBits"].is_null());
+        assert!(snapshot["rcsStatus"]["eligibilities"][0]["featureBits"].is_null());
+        assert_eq!(core.client().unwrap().pending_outbox_count().unwrap(), outbox_before_snapshot);
     }
 
     #[test]

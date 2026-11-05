@@ -19,6 +19,8 @@ pub mod gateways;
 pub mod images;
 pub mod notification_activation;
 pub use notification_activation::*;
+pub mod rcs_status;
+pub use rcs_status::*;
 pub mod search;
 pub use search::*;
 pub mod search_history;
@@ -67,6 +69,9 @@ pub struct Snapshot {
     /// Durable replay frontiers only. Hosts omit this until their sync lane can provide it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_progress: Option<SyncProgress>,
+    /// Bounded, read-only RCS display state. Omitted while locked or unsupported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcs_status: Option<RcsStatusSnapshot>,
 }
 
 /// Sanitized, exact replay status. Cursors and snapshot counts remain decimal strings so JS never
