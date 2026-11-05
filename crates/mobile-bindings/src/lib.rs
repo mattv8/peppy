@@ -4322,6 +4322,38 @@ mod tests {
     }
 
     #[test]
+    fn rcs_status_expiry_boundary_matches_core_freshness() {
+        let (_path, client, gateway_device_id) = rcs_client();
+        let gateway = parse_id::<peppy_client_core::DeviceId>(&gateway_device_id).unwrap();
+        let linked = rcs_status(
+            gateway,
+            peppy_client_core::RcsCapabilityState::Linked,
+            1,
+            1_000,
+        );
+        publish_rcs(&client, &linked, &[], 1_000);
+
+        let status = client
+            .rcs_link_status(gateway_device_id.clone(), 1_000)
+            .unwrap()
+            .unwrap();
+        let deadline = status.expires_at_ms.unwrap();
+        assert_eq!(
+            deadline,
+            1_000 + peppy_client_core::RCS_CAPABILITY_STALE_MS + 1
+        );
+        let current_at = |now_ms| {
+            client
+                .rcs_link_status(gateway_device_id.clone(), now_ms)
+                .unwrap()
+                .unwrap()
+                .current
+        };
+        assert!(current_at(deadline - 1));
+        assert!(!current_at(deadline));
+    }
+
+    #[test]
     fn contact_sync_request_methods_forward_json_to_core() {
         let vault_id = uuid::Uuid::new_v4().to_string();
         let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();

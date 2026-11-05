@@ -8837,6 +8837,14 @@ public struct NativeRcsLinkStatus: Equatable, Hashable {
     public var observedAtMs: Int64
     public var capabilityRevision: UInt64
     public var featureBits: UInt32
+    /**
+     * First instant (ms) at which core reports this evidence as not current;
+     * `current` is true strictly before it. Native code must treat `now >=
+     * expires_at_ms` as not current, without rereading `current`, and schedule
+     * at most one timer for it. `None` means no valid deadline and `current` is
+     * `false`. Time expiry is separate from link state and health fields.
+     */
+    public var expiresAtMs: Int64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8844,7 +8852,14 @@ public struct NativeRcsLinkStatus: Equatable, Hashable {
         /**
          * Whether the content-free capability evidence is fresh. This is display
          * state only and never authorizes a transport effect.
-         */current: Bool, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, capabilityRevision: UInt64, featureBits: UInt32) {
+         */current: Bool, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, capabilityRevision: UInt64, featureBits: UInt32, 
+        /**
+         * First instant (ms) at which core reports this evidence as not current;
+         * `current` is true strictly before it. Native code must treat `now >=
+         * expires_at_ms` as not current, without rereading `current`, and schedule
+         * at most one timer for it. `None` means no valid deadline and `current` is
+         * `false`. Time expiry is separate from link state and health fields.
+         */expiresAtMs: Int64?) {
         self.state = state
         self.current = current
         self.availability = availability
@@ -8853,6 +8868,7 @@ public struct NativeRcsLinkStatus: Equatable, Hashable {
         self.observedAtMs = observedAtMs
         self.capabilityRevision = capabilityRevision
         self.featureBits = featureBits
+        self.expiresAtMs = expiresAtMs
     }
 
     
@@ -8878,7 +8894,8 @@ public struct FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer {
                 phoneResponsive: FfiConverterBool.read(from: &buf), 
                 observedAtMs: FfiConverterInt64.read(from: &buf), 
                 capabilityRevision: FfiConverterUInt64.read(from: &buf), 
-                featureBits: FfiConverterUInt32.read(from: &buf)
+                featureBits: FfiConverterUInt32.read(from: &buf), 
+                expiresAtMs: FfiConverterOptionInt64.read(from: &buf)
         )
     }
 
@@ -8891,6 +8908,7 @@ public struct FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer {
         FfiConverterInt64.write(value.observedAtMs, into: &buf)
         FfiConverterUInt64.write(value.capabilityRevision, into: &buf)
         FfiConverterUInt32.write(value.featureBits, into: &buf)
+        FfiConverterOptionInt64.write(value.expiresAtMs, into: &buf)
     }
 }
 

@@ -12624,6 +12624,15 @@ data class NativeRcsLinkStatus (
     var `capabilityRevision`: kotlin.ULong
     , 
     var `featureBits`: kotlin.UInt
+    , 
+    /**
+     * First instant (ms) at which core reports this evidence as not current;
+     * `current` is true strictly before it. Native code must treat `now >=
+     * expires_at_ms` as not current, without rereading `current`, and schedule
+     * at most one timer for it. `None` means no valid deadline and `current` is
+     * `false`. Time expiry is separate from link state and health fields.
+     */
+    var `expiresAtMs`: kotlin.Long?
     
 ){
     
@@ -12648,6 +12657,7 @@ public object FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer<Native
             FfiConverterLong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterOptionalLong.read(buf),
         )
     }
 
@@ -12659,7 +12669,8 @@ public object FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer<Native
             FfiConverterBoolean.allocationSize(value.`phoneResponsive`) +
             FfiConverterLong.allocationSize(value.`observedAtMs`) +
             FfiConverterULong.allocationSize(value.`capabilityRevision`) +
-            FfiConverterUInt.allocationSize(value.`featureBits`)
+            FfiConverterUInt.allocationSize(value.`featureBits`) +
+            FfiConverterOptionalLong.allocationSize(value.`expiresAtMs`)
     )
 
     override fun write(value: NativeRcsLinkStatus, buf: ByteBuffer) {
@@ -12671,6 +12682,7 @@ public object FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer<Native
             FfiConverterLong.write(value.`observedAtMs`, buf)
             FfiConverterULong.write(value.`capabilityRevision`, buf)
             FfiConverterUInt.write(value.`featureBits`, buf)
+            FfiConverterOptionalLong.write(value.`expiresAtMs`, buf)
     }
 }
 
