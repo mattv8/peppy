@@ -3,6 +3,7 @@ use super::common::*;
 fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
     RcsMappingObservation {
         google_conversation_id: "google-conversation".into(),
+        google_candidate_count: 1,
         participants: vec![RcsParticipantObservation {
             identity: participant.into(),
             is_visible: true,
@@ -79,11 +80,17 @@ fn refuses_stale_ambiguous_and_invalid_non_e164_observations() {
         is_me: false,
     });
     let missing = observation("unseen-raw-peer", 3);
+    let mut multiple_google = observation("raw-peer", 4);
+    multiple_google.google_candidate_count = 2;
 
     for (input, reason) in [
         (stale, RcsMappingRefusal::StaleObservation),
         (ambiguous, RcsMappingRefusal::ParticipantAmbiguous),
         (missing, RcsMappingRefusal::PeppyConversationMissing),
+        (
+            multiple_google,
+            RcsMappingRefusal::GoogleConversationAmbiguous,
+        ),
     ] {
         assert_eq!(
             client.verify_rcs_mapping(&input, 1_000).unwrap(),

@@ -7,7 +7,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 const LIVE_CHANNEL_CAPACITY: usize = 32;
 const FUTURE_TOLERANCE_MS: u64 = 30_000;
@@ -39,11 +39,13 @@ struct LiveHubInner {
 struct LiveSink {
     generation: u64,
     sender: mpsc::Sender<EphemeralSignalV1>,
+    cancellation: watch::Sender<bool>,
 }
 
 pub(crate) struct LiveRegistration {
     pub(crate) generation: u64,
     pub(crate) receiver: mpsc::Receiver<EphemeralSignalV1>,
+    pub(crate) cancellation: watch::Receiver<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -76,14 +78,16 @@ impl LiveRateLimiter {
         let now = std::time::Instant::now();
         Self::prune(&mut self.device, now);
         Self::prune(&mut self.address, now);
-        if self.device.len() >= LIVE_RATE_BUCKET_CAPACITY {
-            self.device.clear();
+        if !Self::can_reserve(&self.device, device)
+            || !address.is_none_or(|address| Self::can_reserve(&self.address, address))
+        {
+            return false;
         }
-        if self.address.len() >= LIVE_RATE_BUCKET_CAPACITY {
-            self.address.clear();
+        Self::reserve(&mut self.device, device, now);
+        if let Some(address) = address {
+            Self::reserve(&mut self.address, address, now);
         }
-        Self::reserve(&mut self.device, device, now)
-            && address.is_none_or(|address| Self::reserve(&mut self.address, address, now))
+        true
     }
 
     fn prune<K: std::cmp::Eq + std::hash::Hash>(
@@ -97,16 +101,22 @@ impl LiveRateLimiter {
         buckets: &mut HashMap<K, LiveRateBucket>,
         key: K,
         now: std::time::Instant,
-    ) -> bool {
+    ) {
         let bucket = buckets.entry(key).or_insert(LiveRateBucket {
             started: now,
             count: 0,
         });
-        if bucket.count >= LIVE_RATE_LIMIT {
-            return false;
-        }
         bucket.count += 1;
-        true
+    }
+
+    fn can_reserve<K: std::cmp::Eq + std::hash::Hash>(
+        buckets: &HashMap<K, LiveRateBucket>,
+        key: K,
+    ) -> bool {
+        match buckets.get(&key) {
+            Some(bucket) => bucket.count < LIVE_RATE_LIMIT,
+            None => buckets.len() < LIVE_RATE_BUCKET_CAPACITY,
+        }
     }
 }
 
@@ -117,6 +127,7 @@ impl LiveHub {
 
     pub(crate) fn register(&self, vault_id: VaultId, device_id: DeviceId) -> LiveRegistration {
         let (sender, receiver) = mpsc::channel(LIVE_CHANNEL_CAPACITY);
+        let (cancellation_sender, cancellation) = watch::channel(false);
         let mut sinks = self.inner.sinks.lock().expect("live hub lock poisoned");
         let generation = self
             .inner
@@ -126,10 +137,20 @@ impl LiveHub {
             })
             .expect("live generation exhausted")
             + 1;
-        sinks.insert((vault_id, device_id), LiveSink { generation, sender });
+        if let Some(replaced) = sinks.insert(
+            (vault_id, device_id),
+            LiveSink {
+                generation,
+                sender,
+                cancellation: cancellation_sender,
+            },
+        ) {
+            let _ = replaced.cancellation.send(true);
+        }
         LiveRegistration {
             generation,
             receiver,
+            cancellation,
         }
     }
 
@@ -174,6 +195,13 @@ impl LiveHub {
         if frame.sender_device_id != authenticated_device_id {
             return Err(LiveReject::SenderMismatch);
         }
+        Self::validate_current(frame, now_ms)
+    }
+
+    pub(crate) fn validate_current(
+        frame: &EphemeralSignalV1,
+        now_ms: u64,
+    ) -> Result<(), LiveReject> {
         frame.validate().map_err(|_| LiveReject::InvalidFrame)?;
         let sent_at_ms: u64 = frame
             .sent_at_ms
@@ -363,5 +391,39 @@ mod tests {
         assert!(!limiter.allow(device(1), Some(address)));
         assert!(!limiter.allow(device(2), Some(address)));
         assert!(limiter.allow(device(3), Some("127.0.0.2".parse().unwrap())));
+    }
+
+    #[test]
+    fn rate_limiter_rejects_new_keys_at_capacity_without_resetting_existing_buckets() {
+        let mut limiter = LiveRateLimiter::default();
+        for value in 1..=LIVE_RATE_BUCKET_CAPACITY {
+            assert!(limiter.allow(device(value as u128), None));
+        }
+        assert!(!limiter.allow(device((LIVE_RATE_BUCKET_CAPACITY + 1) as u128), None));
+        for _ in 1..LIVE_RATE_LIMIT {
+            assert!(limiter.allow(device(1), None));
+        }
+        assert!(!limiter.allow(device(1), None));
+    }
+
+    #[test]
+    fn rate_limiter_reserves_device_and_ip_together() {
+        let mut limiter = LiveRateLimiter::default();
+        let address = "127.0.0.1".parse().unwrap();
+        for _ in 0..LIVE_RATE_LIMIT {
+            assert!(limiter.allow(device(1), Some(address)));
+        }
+        assert!(!limiter.allow(device(2), Some(address)));
+        assert!(limiter.allow(device(2), Some("127.0.0.2".parse().unwrap())));
+    }
+
+    #[test]
+    fn replacement_cancels_old_generation() {
+        let hub = LiveHub::new();
+        let mut old = hub.register(vault(1), device(1));
+        let current = hub.register(vault(1), device(1));
+        assert!(*old.cancellation.borrow_and_update());
+        hub.unregister(vault(1), device(1), old.generation);
+        assert!(current.generation > old.generation);
     }
 }

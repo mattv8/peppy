@@ -44,6 +44,8 @@ pub struct RcsParticipantObservation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RcsMappingObservation {
     pub google_conversation_id: String,
+    /// Number of eligible Google candidates returned by the bounded lookup for this target.
+    pub google_candidate_count: u32,
     pub participants: Vec<RcsParticipantObservation>,
     pub conversation_type: RcsConversationType,
     pub status: String,
@@ -64,6 +66,7 @@ pub struct RcsMappingObservation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcsMappingRefusal {
     StaleObservation,
+    GoogleConversationAmbiguous,
     LinkUnavailable,
     IneligibleConversation,
     InvalidIdentity,
@@ -79,6 +82,7 @@ impl RcsMappingRefusal {
     pub const fn code(self) -> &'static str {
         match self {
             Self::StaleObservation => "stale_observation",
+            Self::GoogleConversationAmbiguous => "google_conversation_ambiguous",
             Self::LinkUnavailable => "link_unavailable",
             Self::IneligibleConversation => "ineligible_conversation",
             Self::InvalidIdentity => "invalid_identity",
@@ -150,6 +154,11 @@ fn verify(
     if now_ms.saturating_sub(observation.observed_at_ms).abs() > RCS_MAPPING_FRESHNESS_MS {
         return Ok(RcsMappingOutcome::Refused(
             RcsMappingRefusal::StaleObservation,
+        ));
+    }
+    if observation.google_candidate_count != 1 {
+        return Ok(RcsMappingOutcome::Refused(
+            RcsMappingRefusal::GoogleConversationAmbiguous,
         ));
     }
     if observation.link_state != RcsLinkState::Linked {

@@ -2714,6 +2714,7 @@ async fn live_session(
         peer,
         backend,
         registration.receiver,
+        registration.cancellation,
     )
     .await;
     state.live_hub.unregister(
@@ -2730,25 +2731,30 @@ async fn live_session_inner(
     peer: Option<IpAddr>,
     backend: Arc<dyn crate::live::LiveBackend>,
     mut outgoing: tokio::sync::mpsc::Receiver<LiveFrameV1>,
+    mut cancellation: tokio::sync::watch::Receiver<bool>,
 ) {
     let hello = match serde_json::to_string(&LiveHelloV1::new()) {
         Ok(hello) => hello,
         Err(_) => return live_close(&mut socket, 1011, "live_unavailable").await,
     };
-    if socket.send(Message::Text(hello.into())).await.is_err() {
+    if !live_send(&mut socket, Message::Text(hello.into()), &mut cancellation).await {
         return;
     }
     let mut recheck = tokio::time::interval(Duration::from_secs(20));
     let mut challenge: Option<Vec<u8>> = None;
     loop {
         tokio::select! {
+            changed = cancellation.changed() => {
+                let _ = changed;
+                return;
+            }
             _ = recheck.tick() => match still_active(state, principal).await {
                 Ok(true) if authorize(state, principal, Operation::Sync).await.is_ok() => {
                     if challenge.is_some() {
                         return;
                     }
                     let token = Uuid::new_v4().as_bytes().to_vec();
-                    if socket.send(Message::Ping(token.clone().into())).await.is_err() {
+                    if !live_send(&mut socket, Message::Ping(token.clone().into()), &mut cancellation).await {
                         return;
                     }
                     challenge = Some(token);
@@ -2757,9 +2763,10 @@ async fn live_session_inner(
                 Err(_) => return live_close(&mut socket, 1011, "live_unavailable").await,
             },
             incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                Some(Ok(Message::Close(_))) | None => return,
+                Some(Err(_)) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
                 Some(Ok(Message::Ping(payload))) => {
-                    if socket.send(Message::Pong(payload)).await.is_err() { return; }
+                    if !live_send(&mut socket, Message::Pong(payload), &mut cancellation).await { return; }
                 }
                 Some(Ok(Message::Pong(payload))) => {
                     if challenge.as_ref().is_some_and(|token| token.as_slice() == payload.as_ref()) {
@@ -2784,11 +2791,17 @@ async fn live_session_inner(
                             return live_close(&mut socket, 1008, "invalid_live_frame").await;
                         }
                     }
-                    if backend
-                        .publish(VaultId(principal.vault), frame.clone())
-                        .await
-                        .is_err()
+                    if !live_publish(
+                        backend.as_ref(),
+                        VaultId(principal.vault),
+                        frame.clone(),
+                        &mut cancellation,
+                    )
+                    .await
                     {
+                        if *cancellation.borrow_and_update() {
+                            return;
+                        }
                         return live_close(&mut socket, 1011, "live_unavailable").await;
                     }
                     // The backend was available when this frame was accepted;
@@ -2804,7 +2817,7 @@ async fn live_session_inner(
             frame = outgoing.recv() => match frame {
                 Some(frame) if live_frame_is_current(&frame, live_now_ms()) => {
                     let Ok(frame) = serde_json::to_string(&frame) else { continue; };
-                    if socket.send(Message::Text(frame.into())).await.is_err() { return; }
+                    if !live_send(&mut socket, Message::Text(frame.into()), &mut cancellation).await { return; }
                 }
                 Some(_) => continue,
                 None => return,
@@ -2823,15 +2836,40 @@ fn live_now_ms() -> u64 {
 }
 
 fn live_frame_is_current(frame: &LiveFrameV1, now_ms: u64) -> bool {
-    frame.validate().is_ok()
-        && frame
-            .expires_at_ms
-            .parse::<u64>()
-            .is_ok_and(|expires_at_ms| expires_at_ms > now_ms)
+    crate::live::LiveHub::validate_current(frame, now_ms).is_ok()
 }
 
 async fn live_close(socket: &mut WebSocket, code: u16, reason: &'static str) {
-    ws_close(socket, code, reason).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), ws_close(socket, code, reason)).await;
+}
+
+async fn live_send(
+    socket: &mut WebSocket,
+    message: Message,
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    if *cancellation.borrow_and_update() {
+        return false;
+    }
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(5), socket.send(message)) => matches!(result, Ok(Ok(()))),
+        _ = cancellation.changed() => false,
+    }
+}
+
+async fn live_publish(
+    backend: &dyn crate::live::LiveBackend,
+    vault_id: VaultId,
+    frame: LiveFrameV1,
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    if *cancellation.borrow_and_update() {
+        return false;
+    }
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(5), backend.publish(vault_id, frame)) => matches!(result, Ok(Ok(()))),
+        _ = cancellation.changed() => false,
+    }
 }
 
 /// WebSocket close codes. Clients reconnect and resume on 4429, take a
