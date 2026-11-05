@@ -172,6 +172,7 @@ async fn listen_once(state: &Inner) -> Result<(), sqlx::Error> {
 async fn setup_listener(pool: &PgPool, timeout: Duration) -> Result<PgListener, sqlx::Error> {
     within_setup_deadline(timeout, async {
         let mut listener = PgListener::connect_with(pool).await?;
+        listener.discard_on_drop();
         listener.eager_reconnect(false);
         listener.listen(LIVE_NOTIFY_CHANNEL).await?;
         Ok(listener)
@@ -206,8 +207,15 @@ fn live_now_ms() -> u64 {
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use std::str::FromStr;
+    use futures_util::FutureExt;
+    use std::{str::FromStr, sync::Arc};
     use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        sync::{Notify as Signal, oneshot},
+    };
+    use url::Url;
 
     fn frame(sender_device_id: DeviceId, expires_at_ms: u64) -> EphemeralSignalV1 {
         frame_at(sender_device_id, live_now_ms(), expires_at_ms)
@@ -259,6 +267,97 @@ mod tests {
                 .await
                 .unwrap(),
         )
+    }
+
+    async fn stalled_listen_proxy(database_url: &str) -> (String, oneshot::Receiver<()>) {
+        let upstream = Url::parse(database_url).unwrap();
+        let upstream_address = format!(
+            "{}:{}",
+            upstream.host_str().unwrap(),
+            upstream.port().unwrap_or(5432)
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let mut proxy_url = upstream;
+        proxy_url.set_host(Some("127.0.0.1")).unwrap();
+        proxy_url.set_port(Some(proxy_address.port())).unwrap();
+        let (disposed_tx, disposed_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let (client, _) = listener.accept().await.unwrap();
+            let upstream = TcpStream::connect(upstream_address).await.unwrap();
+            let (mut client_read, mut client_write) = client.into_split();
+            let (mut upstream_read, mut upstream_write) = upstream.into_split();
+            let listen_sent = Arc::new(Signal::new());
+            let listen_sent_for_client = listen_sent.clone();
+            let client_done = tokio::spawn(async move {
+                let length = client_read.read_u32().await.unwrap() as usize;
+                let mut startup = vec![0; length - 4];
+                client_read.read_exact(&mut startup).await.unwrap();
+                upstream_write.write_u32(length as u32).await.unwrap();
+                upstream_write.write_all(&startup).await.unwrap();
+                loop {
+                    let kind = match client_read.read_u8().await {
+                        Ok(kind) => kind,
+                        Err(_) => return,
+                    };
+                    let length = client_read.read_u32().await.unwrap() as usize;
+                    let mut body = vec![0; length - 4];
+                    client_read.read_exact(&mut body).await.unwrap();
+                    if kind == b'Q' && body.starts_with(b"LISTEN ") {
+                        listen_sent_for_client.notify_one();
+                    }
+                    upstream_write.write_u8(kind).await.unwrap();
+                    upstream_write.write_u32(length as u32).await.unwrap();
+                    upstream_write.write_all(&body).await.unwrap();
+                }
+            });
+
+            loop {
+                let kind = upstream_read.read_u8().await.unwrap();
+                let length = upstream_read.read_u32().await.unwrap() as usize;
+                let mut body = vec![0; length - 4];
+                upstream_read.read_exact(&mut body).await.unwrap();
+                if kind == b'Z' && listen_sent.notified().now_or_never().is_some() {
+                    let _ = client_done.await;
+                    let _ = disposed_tx.send(());
+                    return;
+                }
+                client_write.write_u8(kind).await.unwrap();
+                client_write.write_u32(length as u32).await.unwrap();
+                client_write.write_all(&body).await.unwrap();
+            }
+        });
+
+        (proxy_url.into(), disposed_rx)
+    }
+
+    #[tokio::test]
+    async fn timed_out_listen_setup_discards_its_stalled_pool_connection() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("TEST_DATABASE_URL is required for PostgreSQL live relay tests");
+        let (proxy_url, disposed) = stalled_listen_proxy(&database_url).await;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .min_connections(0)
+            .connect_lazy(&proxy_url)
+            .unwrap();
+
+        assert!(matches!(
+            setup_listener(&pool, Duration::from_millis(100)).await,
+            Err(sqlx::Error::PoolTimedOut)
+        ));
+        tokio::time::timeout(Duration::from_secs(1), disposed)
+            .await
+            .expect("listener drop must close the stalled proxy connection")
+            .expect("proxy must observe the listener connection closing");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while pool.size() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("discarded listener must free the only listener-pool slot");
     }
 
     #[tokio::test]

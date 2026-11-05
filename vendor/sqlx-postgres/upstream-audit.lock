@@ -1,0 +1,10 @@
+# This maintained lock file preserves cargo-audit coverage for the vendored
+# upstream package. Remove this vendor patch when upstream supports
+# PgListener::discard_on_drop.
+version = 3
+
+[[package]]
+name = "sqlx-postgres"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46"
