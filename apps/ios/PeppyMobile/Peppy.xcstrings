@@ -3651,6 +3651,116 @@
         }
       }
     },
+    "peppy.google_messages_link_replaces_browser": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking replaces any Messages for Web browser session you keep open on this account."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in to Google"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading Google sign-in…"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_blocked_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google may refuse sign-in in an app."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_blocked_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google blocked sign-in"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_load_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load Google's sign-in page. Check your connection and try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish linking"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You are signed in. Nothing is saved if you cancel."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_check_only_phone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only this phone has Google Messages on this account"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link this phone"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_not_ready": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy cannot start linking right now. Close this screen and check the link in Settings."
+          }
+        }
+      }
+    },
     "peppy.remote_messaging_notifications_disabled": {
       "localizations": {
         "en": {
