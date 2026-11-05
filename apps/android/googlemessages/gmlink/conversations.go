@@ -13,7 +13,6 @@ const (
 	conversationPageSize  = 25
 	conversationPageLimit = 20
 	conversationTimeout   = 30 * time.Second
-	settingsMaxAge        = 5 * time.Minute
 )
 
 type conversationSummary struct{ id string }
@@ -93,11 +92,17 @@ func (link *Link) recordConversationEvent(conversation *gmproto.Conversation) {
 	link.conversationEvents = append(link.conversationEvents, conversationEvent{Code: "conversation_updated", GoogleConversationID: conversation.GetConversationID()})
 }
 
-func (link *Link) recordSettings(settings *gmproto.Settings) {
-	if settings == nil || settings.GetSIMCards() == nil {
+func (link *Link) recordSettings(event *libgm.WrappedSettings) {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if event == nil || event.IsOld || event.Settings == nil || event.Settings.GetSIMCards() == nil {
+		link.invalidateSettingsLocked()
 		return
 	}
-	link.mu.Lock()
-	link.settings, link.settingsAt = settings, time.Now()
-	link.mu.Unlock()
+	link.settings, link.settingsAt = event.Settings, time.Now()
+	link.settingsVersion++
+}
+
+func (link *Link) invalidateSettingsLocked() {
+	link.settings, link.settingsAt = nil, time.Time{}
 }

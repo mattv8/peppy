@@ -16,6 +16,7 @@ import (
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"google.golang.org/protobuf/proto"
 )
 
 // Host is implemented by the Kotlin runtime.
@@ -58,6 +59,7 @@ type Link struct {
 	conversationIndex  map[string]conversationSummary
 	settings           *gmproto.Settings
 	settingsAt         time.Time
+	settingsVersion    uint64
 
 	// m2VerificationPassed is supplied by the Android host only after the owner-gated
 	// on-device procedures recorded in g0-libgm-verification.md have passed. It is
@@ -627,6 +629,7 @@ func (link *Link) queueEvent(event any) {
 	if !relevantEvent(event) {
 		return
 	}
+	event = cloneQueuedEvent(event)
 	link.mu.Lock()
 	if link.closed {
 		link.mu.Unlock()
@@ -641,13 +644,25 @@ func (link *Link) queueEvent(event any) {
 	}
 }
 
+func cloneQueuedEvent(event any) any {
+	settings, ok := event.(*libgm.WrappedSettings)
+	if !ok || settings == nil || settings.Settings == nil {
+		return event
+	}
+	cloned, ok := proto.Clone(settings.Settings).(*gmproto.Settings)
+	if !ok {
+		return &libgm.WrappedSettings{IsOld: settings.IsOld}
+	}
+	return &libgm.WrappedSettings{Settings: cloned, IsOld: settings.IsOld}
+}
+
 // relevantEvent reports whether projectEvent handles the event.
 func relevantEvent(event any) bool {
 	switch event.(type) {
 	case *events.AuthTokenRefreshed, *events.GaiaLoggedOut, *events.ListenFatalError, *events.AccountChange,
 		*events.ListenTemporaryError, *events.ListenRecovered, *events.PhoneNotResponding,
 		*events.PhoneRespondingAgain, *events.NoDataReceived, *events.ActiveSessionSet, *gmproto.UserAlertEvent,
-		*gmproto.Conversation, *gmproto.Settings:
+		*gmproto.Conversation, *libgm.WrappedSettings:
 		return true
 	}
 	return false
@@ -703,8 +718,12 @@ func (link *Link) projectEvent(event any) {
 		}
 	case *gmproto.Conversation:
 		link.recordConversationEvent(value)
-	case *gmproto.Settings:
+	case *libgm.WrappedSettings:
 		link.recordSettings(value)
+	case *gmproto.Settings:
+		link.mu.Lock()
+		link.invalidateSettingsLocked()
+		link.mu.Unlock()
 	}
 }
 

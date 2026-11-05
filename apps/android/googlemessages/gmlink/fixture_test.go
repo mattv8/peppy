@@ -415,6 +415,27 @@ func (fixture *phoneFixture) queue(data *gmproto.RPCMessageData) {
 	if err != nil {
 		panic(err)
 	}
+	fixture.queueBlock(block)
+}
+
+func (fixture *phoneFixture) queueSettings(settings *gmproto.Settings) {
+	encrypted, err := fixture.auth.RequestCrypto.Encrypt(mustMarshal(&gmproto.UpdateEvents{Event: &gmproto.UpdateEvents_SettingsEvent{SettingsEvent: settings}}))
+	if err != nil {
+		panic(err)
+	}
+	fixture.queue(&gmproto.RPCMessageData{Action: gmproto.ActionType_GET_UPDATES, EncryptedData: encrypted})
+}
+
+func (fixture *phoneFixture) queueOldEvent() {
+	count := int32(1)
+	block, err := pblite.Marshal(&gmproto.LongPollingPayload{Ack: &gmproto.StartAckMessage{Count: &count}})
+	if err != nil {
+		panic(err)
+	}
+	fixture.queueBlock(block)
+}
+
+func (fixture *phoneFixture) queueBlock(block []byte) {
 	fixture.mu.Lock()
 	current := fixture.current
 	if current == nil {

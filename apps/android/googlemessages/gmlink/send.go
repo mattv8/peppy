@@ -90,7 +90,7 @@ func validRcsRequest(request rcsSendRequest) bool {
 func (link *Link) currentSettings() (*gmproto.Settings, string) {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if link.settings == nil || link.settingsAt.IsZero() || time.Since(link.settingsAt) > settingsMaxAge {
+	if link.settings == nil || link.settingsAt.IsZero() {
 		return nil, "settings_unavailable"
 	}
 	return link.settings, ""
