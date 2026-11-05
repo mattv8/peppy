@@ -49,6 +49,7 @@ type Link struct {
 	closed      bool
 	stopRun     context.CancelFunc
 	pairCancel  context.CancelFunc
+	pairDone    chan struct{}
 
 	changes chan any
 }
@@ -62,6 +63,8 @@ var (
 	unpairTimeout   = 30 * time.Second
 	healthTimeout   = 30 * time.Second
 	pairWaitTimeout = 5 * time.Minute
+	// pairUnwindTimeout bounds how long Unlink waits for a cancelled pair to unwind.
+	pairUnwindTimeout = 10 * time.Second
 )
 
 // Open restores a persisted link, or creates an unlinked link for empty state.
@@ -163,18 +166,14 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 	}
 	link.state, link.pairingFrom, link.stopCode = statePairing, previous, ""
 	ctx, cancel := context.WithCancel(context.Background())
-	link.pairCancel = cancel
+	done := make(chan struct{})
+	link.pairCancel, link.pairDone = cancel, done
 	link.mu.Unlock()
-	if err := link.persist(); err != nil {
-		cancel()
-		link.restorePair(previous, "persist_failed")
-		return errPersistFailed
-	}
 	completed := false
 	defer func() {
 		cancel()
 		link.mu.Lock()
-		link.pairCancel = nil
+		link.pairCancel, link.pairDone = nil, nil
 		link.mu.Unlock()
 		if !completed {
 			code := pairCode(err)
@@ -182,7 +181,12 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 				link.emit("link", code, 0)
 			}
 		}
+		// Unlink waits on done, so it sees the restored or committed state.
+		close(done)
 	}()
+	if err = link.persist(); err != nil {
+		return pairFailure("persist_failed")
+	}
 	persist := link.persist
 	if relink {
 		persist = link.persistRotated(auth)
@@ -357,21 +361,34 @@ func (link *Link) CheckHealth() int64 {
 	return latency
 }
 
-// Unlink makes one Gaia unpair request when a pairing exists, then wipes the local link.
-// An in-flight pair is cancelled first so it cannot commit over the unlink.
+// Unlink cancels any in-flight pair or relink and waits, bounded, for it to unwind. Then
+// it unpairs the pairing the link ends up with, once, and wipes the local link. A pair
+// that commits first is unpaired; one that loses commits nothing.
 func (link *Link) Unlink() error {
 	link.mu.Lock()
 	if link.closed {
 		link.mu.Unlock()
 		return errLinkClosed
 	}
+	var pairDone chan struct{}
 	if link.pairCancel != nil {
 		link.pairCancel()
+		pairDone = link.pairDone
 	}
+	link.mu.Unlock()
+	if pairDone != nil {
+		select {
+		case <-pairDone:
+		case <-time.After(pairUnwindTimeout):
+		}
+	}
+	link.Stop()
+	link.mu.Lock()
 	auth := link.auth
 	paired := auth != nil && auth.PairingID != uuid.Nil
+	// Leaving pairing here stops a pair that is still unwinding from committing.
+	link.state, link.pairingFrom = stateUnlinked, ""
 	link.mu.Unlock()
-	link.Stop()
 	var err error
 	if paired {
 		client := link.newClient(auth, link.persist)
@@ -381,7 +398,7 @@ func (link *Link) Unlink() error {
 		client.Disconnect()
 	}
 	link.mu.Lock()
-	link.state, link.pairingFrom, link.auth = stateUnlinked, "", libgm.NewAuthData()
+	link.auth = libgm.NewAuthData()
 	link.healthy, link.responding, link.lastOKMS = false, false, 0
 	if err != nil {
 		link.stopCode = "unlink_remote_failed"
@@ -440,13 +457,18 @@ func (link *Link) newClient(auth *libgm.AuthData, persist func() error) *libgm.C
 }
 
 // persistRotated persists a relink's rotated cookies. The stored auth takes them, so a
-// relink that fails keeps the rotations; the candidate stays the one the client uses.
+// relink that fails keeps the rotations. Only a pair that still owns the link takes
+// them: a rotation that lands after sign-out or unlink writes nothing.
 func (link *Link) persistRotated(candidate *libgm.AuthData) func() error {
 	return func() error {
 		candidate.CookiesLock.RLock()
 		cookies := maps.Clone(candidate.Cookies)
 		candidate.CookiesLock.RUnlock()
 		link.mu.Lock()
+		if link.state != statePairing {
+			link.mu.Unlock()
+			return nil
+		}
 		link.auth.SetCookies(cookies)
 		link.mu.Unlock()
 		return link.persist()

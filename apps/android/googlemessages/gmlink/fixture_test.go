@@ -1,6 +1,7 @@
 package gmlink
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/json"
@@ -385,6 +386,8 @@ type safetyHost struct {
 	events      []eventCode
 	emoji       chan string
 	failPersist bool
+	holdLinked  chan struct{}
+	release     chan struct{}
 }
 
 func newSafetyHost() *safetyHost {
@@ -393,12 +396,35 @@ func newSafetyHost() *safetyHost {
 
 func (host *safetyHost) PersistState(state []byte) error {
 	host.mu.Lock()
-	defer host.mu.Unlock()
 	if host.failPersist {
+		host.mu.Unlock()
 		return errors.New("synthetic persistence failure")
 	}
+	hold := host.holdLinked != nil && bytes.Contains(state, []byte(`"state":"linked"`))
+	reached, release := host.holdLinked, host.release
+	if hold {
+		host.holdLinked = nil
+	}
+	host.mu.Unlock()
+	if hold {
+		close(reached)
+		<-release
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
 	host.states = append(host.states, append([]byte(nil), state...))
 	return nil
+}
+
+// holdNextLinkedPersist makes the next envelope that commits a link block inside
+// PersistState until the returned release channel is closed. reached closes when the
+// host is holding it.
+func (host *safetyHost) holdNextLinkedPersist() (reached, release chan struct{}) {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	host.holdLinked = make(chan struct{})
+	host.release = make(chan struct{})
+	return host.holdLinked, host.release
 }
 
 func (host *safetyHost) setFailPersist(fail bool) {
