@@ -1,4 +1,6 @@
 use super::common::*;
+use std::fs;
+use std::sync::{Arc, Barrier};
 
 fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
     RcsMappingObservation {
@@ -337,6 +339,126 @@ fn encrypted_connection(config: &ClientConfig) -> rusqlite::Connection {
         )
         .unwrap();
     connection
+}
+
+fn attachment_response(
+    operation: &PendingAttachmentUseOperation,
+    state: AttachmentUseState,
+) -> AttachmentUseResponse {
+    AttachmentUseResponse {
+        use_id: operation.use_id,
+        attachment_id: operation.attachment_id,
+        device_id: operation.device_id,
+        kind: operation.kind,
+        state,
+    }
+}
+
+fn carrier_mms_command(
+    retention_enabled: bool,
+) -> (
+    tempfile::TempDir,
+    Vault,
+    ClientConfig,
+    Client,
+    Client,
+    CommandId,
+    AttachmentInfo,
+    ConversationId,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&directory, "sender-media", &vault);
+    let gateway_config = config(&directory, "gateway-media", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    gateway
+        .configure_attachment_retention_protocol(retention_enabled)
+        .unwrap();
+    let captured = gateway
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "peer-local".into(),
+            body: String::new(),
+            provider_message_id: Some("provider-media-local".into()),
+            imported: true,
+        })
+        .unwrap();
+    let source = directory.path().join("automatic-media.txt");
+    fs::write(&source, b"automatic media").unwrap();
+    let attachment = sender
+        .prepare_attachment(&source, "text/plain", "automatic-media.txt")
+        .unwrap();
+    let sender_use = sender
+        .begin_attachment_retention_use(attachment.attachment_id, AttachmentUseKind::PendingSend)
+        .unwrap();
+    let queued = sender
+        .queue_mms(
+            OutgoingMms {
+                conversation_id: captured.conversation_id,
+                recipients: vec!["peer-local".into()],
+                body: "media".into(),
+                attachment_ids: vec![attachment.attachment_id],
+                subject: None,
+            },
+            GatewayRoute::Carrier {
+                gateway_device_id: gateway_config.device_id,
+                subscription_id: "sim-local".into(),
+            },
+        )
+        .unwrap();
+    sender
+        .mark_attachment_uploaded(attachment.attachment_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    sender
+        .apply_attachment_retention_response(&attachment_response(
+            &sender_use,
+            AttachmentUseState::Registered,
+        ))
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&sender);
+    server.sync(&gateway);
+    (
+        directory,
+        vault,
+        gateway_config,
+        sender,
+        gateway,
+        queued.command_id,
+        attachment,
+        captured.conversation_id,
+    )
+}
+
+fn record_media_carrier_proof(gateway: &Client, conversation_id: ConversationId) {
+    let mut unknown = observation("peer-local", 1);
+    unknown.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
+    gateway
+        .record_carrier_only_proof(
+            &CarrierOnlyProof {
+                conversation_id,
+                recipients: vec!["peer-local".into()],
+                subscription_id: "sim-local".into(),
+                observed_at_ms: 1_000,
+                link_generation: 1,
+                session_generation: 1,
+                context_revision: 1,
+            },
+            1_000,
+        )
+        .unwrap();
+}
+
+fn attempt_count(config: &ClientConfig, command_id: CommandId) -> i64 {
+    encrypted_connection(config)
+        .query_row(
+            "SELECT COUNT(*) FROM attempts WHERE command_id=?",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 fn rcs_command(
@@ -750,4 +872,331 @@ fn carrier_only_proof_rejects_multiple_or_mixed_raw_recipients() {
     let mut proof = carrier_proof(&command);
     proof.recipients = vec!["peer-local".into(), "different-peer-local".into()];
     assert!(gateway.record_carrier_only_proof(&proof, 1_000).is_err());
+}
+
+#[test]
+fn automatic_locally_available_unregistered_media_invalidates_contradicted_proof_durably() {
+    let (_directory, vault, config, sender, gateway, command_id, attachment, conversation_id) =
+        carrier_mms_command(true);
+    gateway
+        .install_downloaded_attachment(
+            attachment.attachment_id,
+            &sender.native_cipher_file(attachment.attachment_id).unwrap(),
+        )
+        .unwrap();
+    record_media_carrier_proof(&gateway, conversation_id);
+    let retention_use = gateway
+        .pending_attachment_retention_operations()
+        .unwrap()
+        .into_iter()
+        .find(|operation| operation.kind == AttachmentUseKind::PendingSend)
+        .unwrap();
+    let contradictory = observation("different-peer-local", 1);
+
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&contradictory), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MediaUnavailable)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+    gateway
+        .apply_attachment_retention_response(&attachment_response(
+            &retention_use,
+            AttachmentUseState::Registered,
+        ))
+        .unwrap();
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    reopened
+        .configure_attachment_retention_protocol(true)
+        .unwrap();
+    for operation in reopened
+        .prepare_attachment_retention_operations(100)
+        .unwrap()
+    {
+        reopened
+            .apply_attachment_retention_response(&attachment_response(
+                &operation,
+                AttachmentUseState::Registered,
+            ))
+            .unwrap();
+    }
+    reopened.mark_attachment_retention_reconciled().unwrap();
+    assert_eq!(
+        reopened
+            .begin_automatic_send_attempt(command_id, None, 1_001)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+}
+
+#[test]
+fn automatic_download_pending_media_invalidates_contradicted_proof_durably() {
+    let (_directory, vault, config, sender, gateway, command_id, attachment, conversation_id) =
+        carrier_mms_command(false);
+    record_media_carrier_proof(&gateway, conversation_id);
+    let contradictory = observation("different-peer-local", 1);
+
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&contradictory), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MediaUnavailable)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+    gateway
+        .install_downloaded_attachment(
+            attachment.attachment_id,
+            &sender.native_cipher_file(attachment.attachment_id).unwrap(),
+        )
+        .unwrap();
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert_eq!(
+        reopened
+            .begin_automatic_send_attempt(command_id, None, 1_001)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+}
+
+#[test]
+fn automatic_fresh_carrier_proof_permits_original_sim_once_and_rcs_link_never_carrier() {
+    let (_directory, _vault, config, gateway, command_id) = carrier_command();
+    let mut unknown = observation("peer-local", 1);
+    unknown.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
+    let command = gateway.pending_commands().unwrap().pop().unwrap();
+    gateway
+        .record_carrier_only_proof(&carrier_proof(&command), 1_000)
+        .unwrap();
+
+    let AutomaticPermitDecision::Carrier(permitted) = gateway
+        .begin_automatic_send_attempt(command_id, None, 1_000)
+        .unwrap()
+    else {
+        panic!("fresh proof must permit carrier");
+    };
+    assert_eq!(permitted.subscription_id, "sim-local");
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, None, 1_001)
+            .unwrap(),
+        AutomaticPermitDecision::AlreadyAttempted(SendState::AttemptRecorded)
+    );
+    assert_eq!(attempt_count(&config, command_id), 1);
+
+    let (_directory, _vault, config, gateway, command_id, _current) = rcs_command("peer-local");
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, None, 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+}
+
+#[test]
+fn automatic_restore_history_and_epoch_fences_reject_without_attempts() {
+    let (_directory, _vault, config, gateway, command_id) = carrier_command();
+    gateway.mark_restored_gateway().unwrap();
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, None, 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::RestoreGuarded)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    drop(gateway);
+    encrypted_connection(&config)
+        .execute(
+            "UPDATE command_ledger SET historical=1 WHERE command_id=?",
+            [command_id.to_string()],
+        )
+        .unwrap();
+    let gateway = unlocked(&config, &vault);
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, None, 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::Historical)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    let epoch_two = Vault::epoch(vault.id, 2);
+    gateway
+        .unlock(&epoch_two.profile, &epoch_two.header, PASSPHRASE)
+        .unwrap();
+    gateway.activate_epoch(2).unwrap();
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, None, 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::StaleEpoch)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+}
+
+#[test]
+fn concurrent_cross_api_admissions_create_exactly_one_rcs_attempt_and_uuid() {
+    let (_directory, _vault, config, gateway, command_id, current) = rcs_command("peer-local");
+    let barrier = Arc::new(Barrier::new(2));
+    let automatic_client = gateway.clone();
+    let rcs_client = gateway.clone();
+    let automatic_observation = current.clone();
+    let rcs_observation = current;
+    let automatic_barrier = barrier.clone();
+    let rcs_barrier = barrier;
+
+    let (automatic, strict) = std::thread::scope(|scope| {
+        let automatic = scope.spawn(|| {
+            automatic_barrier.wait();
+            automatic_client.begin_automatic_send_attempt(
+                command_id,
+                Some(&automatic_observation),
+                1_000,
+            )
+        });
+        let strict = scope.spawn(|| {
+            rcs_barrier.wait();
+            rcs_client.begin_rcs_send_attempt(command_id, &rcs_observation, 1_000)
+        });
+        (automatic.join().unwrap(), strict.join().unwrap())
+    });
+
+    let winning_tmp_id = match (automatic, strict) {
+        (
+            Ok(AutomaticPermitDecision::Rcs(permit)),
+            Err(Error::AlreadyAttempted(SendState::AttemptRecorded)),
+        ) => permit.tmp_id,
+        (Ok(AutomaticPermitDecision::AlreadyAttempted(SendState::AttemptRecorded)), Ok(permit)) => {
+            permit.tmp_id
+        }
+        results => panic!("expected one permit and one recorded-attempt refusal, got {results:?}"),
+    };
+    assert_eq!(attempt_count(&config, command_id), 1);
+    let connection = encrypted_connection(&config);
+    let (attempts, tmp_id): (i64, String) = connection
+        .query_row(
+            "SELECT COUNT(*),r.tmp_id FROM attempts a JOIN rcs_send_ledger r USING(command_id) WHERE a.command_id=? AND a.finalized_transport='rcs'",
+            [command_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(attempts, 1);
+    assert_eq!(tmp_id, winning_tmp_id);
+}
+
+#[test]
+fn automatic_carrier_upgrade_remains_frozen_as_rcs_outcome_unknown_after_reopen() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    let current = observation("peer-local", 1);
+    gateway.verify_rcs_mapping(&current, 1_000).unwrap();
+    let AutomaticPermitDecision::Rcs(first) = gateway
+        .begin_automatic_send_attempt(command_id, Some(&current), 1_000)
+        .unwrap()
+    else {
+        panic!("expected RCS upgrade");
+    };
+    drop(gateway);
+
+    let reopened = unlocked(&config, &vault);
+    assert_eq!(
+        reopened
+            .begin_automatic_send_attempt(command_id, None, 1_001)
+            .unwrap(),
+        AutomaticPermitDecision::AlreadyAttempted(SendState::OutcomeUnknown)
+    );
+    let connection = encrypted_connection(&config);
+    let (transport, tmp_id): (String, String) = connection
+        .query_row(
+            "SELECT a.finalized_transport,r.tmp_id FROM attempts a JOIN rcs_send_ledger r USING(command_id) WHERE a.command_id=?",
+            [command_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(transport, "rcs");
+    assert_eq!(tmp_id, first.tmp_id);
+}
+
+#[test]
+fn automatic_original_sim_mismatch_invalidates_existing_proof_across_reopen() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    let mut unknown = observation("peer-local", 1);
+    unknown.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
+    let command = gateway.pending_commands().unwrap().pop().unwrap();
+    gateway
+        .record_carrier_only_proof(&carrier_proof(&command), 1_000)
+        .unwrap();
+    let mut wrong_sim = observation("peer-local", 2);
+    wrong_sim.selected_sim_id = "different-sim".into();
+
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&wrong_sim), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+    );
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(command_id, None, 1_001)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+    drop(gateway);
+    assert_eq!(
+        unlocked(&config, &vault)
+            .begin_automatic_send_attempt(command_id, None, 1_001)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+    assert_eq!(attempt_count(&config, command_id), 0);
+}
+
+#[test]
+fn upgraded_carrier_rcs_retry_and_explicit_unknown_resend_preserve_finalization_rules() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    let current = observation("peer-local", 1);
+    gateway.verify_rcs_mapping(&current, 1_000).unwrap();
+    let AutomaticPermitDecision::Rcs(first) = gateway
+        .begin_automatic_send_attempt(command_id, Some(&current), 1_000)
+        .unwrap()
+    else {
+        panic!("expected RCS upgrade");
+    };
+    gateway
+        .record_send_result(command_id, SendResult::FailedBeforeSubmission)
+        .unwrap();
+    let retry = gateway
+        .retry_rcs_failed_before_submission(command_id, &current, 1_001)
+        .unwrap();
+    assert_eq!(retry.tmp_id, first.tmp_id);
+
+    drop(gateway);
+    let gateway = unlocked(&config, &vault);
+    let resend = gateway.resend_rcs_outcome_unknown(command_id).unwrap();
+    let connection = encrypted_connection(&config);
+    let resend_tmp_id: String = connection
+        .query_row(
+            "SELECT tmp_id FROM rcs_send_ledger WHERE command_id=?",
+            [resend.command_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(resend_tmp_id, first.tmp_id);
+    assert_eq!(attempt_count(&config, resend.command_id), 0);
+    assert_eq!(
+        gateway
+            .begin_automatic_send_attempt(resend.command_id, Some(&current), 1_002)
+            .unwrap(),
+        AutomaticPermitDecision::Blocked(PermitBlock::NotReceived)
+    );
+    assert_eq!(attempt_count(&config, resend.command_id), 0);
 }
