@@ -44,7 +44,8 @@ pub struct RcsParticipantObservation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RcsMappingObservation {
     pub google_conversation_id: String,
-    /// Number of eligible Google candidates returned by the bounded lookup for this target.
+    /// Number of eligible Google candidates from a completed, target- and session-scoped lookup.
+    /// Partial indexes and targeted fetches cannot attest uniqueness.
     pub google_candidate_count: u32,
     pub participants: Vec<RcsParticipantObservation>,
     pub conversation_type: RcsConversationType,
@@ -76,6 +77,7 @@ pub enum RcsMappingRefusal {
     PeppyConversationAmbiguous,
     MappingConflict,
     NonMonotonicRevision,
+    RetiredContext,
 }
 
 impl RcsMappingRefusal {
@@ -92,6 +94,7 @@ impl RcsMappingRefusal {
             Self::PeppyConversationAmbiguous => "peppy_conversation_ambiguous",
             Self::MappingConflict => "mapping_conflict",
             Self::NonMonotonicRevision => "nonmonotonic_revision",
+            Self::RetiredContext => "retired_context",
         }
     }
 }
@@ -126,13 +129,18 @@ pub(crate) fn verify_and_store(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<RcsMappingOutcome, Error> {
+    match update_context(conn, observation)? {
+        ContextUpdate::Retired => {
+            return Ok(RcsMappingOutcome::Refused(
+                RcsMappingRefusal::RetiredContext,
+            ));
+        }
+        ContextUpdate::Changed => invalidate_all_mappings(conn, "context_changed")?,
+        ContextUpdate::Unchanged => {}
+    }
     let outcome = verify(conn, observation, now_ms)?;
     let RcsMappingOutcome::Mapped(mapping) = &outcome else {
-        invalidate_google_mapping(
-            conn,
-            &observation.google_conversation_id,
-            refusal_code(&outcome),
-        )?;
+        invalidate_for_refusal(conn, observation, refusal_code(&outcome))?;
         return Ok(outcome);
     };
     put(conn, mapping)?;
@@ -191,7 +199,9 @@ fn verify(
     let visible = observation
         .participants
         .iter()
-        .filter(|participant| participant.is_visible)
+        .filter(|participant| {
+            participant.is_visible && canonical_identity(&participant.identity).is_some()
+        })
         .collect::<Vec<_>>();
     if visible.is_empty() {
         return Ok(RcsMappingOutcome::Refused(
@@ -299,14 +309,26 @@ fn peppy_conversations_for_identity(
     conn: &Connection,
     identity: &str,
 ) -> Result<Vec<ConversationId>, Error> {
-    let address = identity.strip_prefix("raw:").unwrap_or(identity);
-    let mut statement = conn.prepare(
-        "SELECT DISTINCT conversation_id FROM addresses WHERE address=? ORDER BY conversation_id",
-    )?;
-    statement
-        .query_map([address], |row| row.get::<_, String>(0))?
-        .map(|row| crate::parse(&row?).map_err(|_| Error::Database))
-        .collect()
+    let mut statement = conn.prepare("SELECT conversation_id,payload FROM messages")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut conversations = std::collections::BTreeSet::new();
+    for row in rows {
+        let (conversation_id, payload) = row?;
+        let payload: crate::MessagePayload = crate::decode(payload.as_bytes())?;
+        let identities = payload
+            .sender_address
+            .iter()
+            .chain(payload.recipients.iter());
+        if identities
+            .filter_map(|address| canonical_identity(address))
+            .any(|address| address == identity)
+        {
+            conversations.insert(crate::parse(&conversation_id).map_err(|_| Error::Database)?);
+        }
+    }
+    Ok(conversations.into_iter().collect())
 }
 
 fn highest_revision(
@@ -395,17 +417,135 @@ fn proof_digest(
     digest.finalize().into()
 }
 
-fn invalidate_google_mapping(
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextUpdate {
+    Unchanged,
+    Changed,
+    Retired,
+}
+
+const RCS_CONTEXT_KEY: &str = "rcs_mapping_context_v1";
+
+pub(crate) fn update_context(
     conn: &Connection,
-    google_conversation_id: &str,
+    observation: &RcsMappingObservation,
+) -> Result<ContextUpdate, Error> {
+    let context = context_value(observation);
+    let current = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(current) = current {
+        let Some((link_generation, session_generation)) = context_generations(&current) else {
+            return Err(Error::Database);
+        };
+        if (observation.link_generation, observation.session_generation)
+            < (link_generation, session_generation)
+        {
+            return Ok(ContextUpdate::Retired);
+        }
+        if current == context {
+            return Ok(ContextUpdate::Unchanged);
+        }
+    }
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![RCS_CONTEXT_KEY, context],
+    )?;
+    Ok(ContextUpdate::Changed)
+}
+
+#[allow(dead_code)] // R2 consumes this validator while its public permit wrapper is being integrated.
+pub(crate) fn mapping_matches_observation(
+    conn: &Connection,
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<bool, Error> {
+    if now_ms.saturating_sub(mapping.verified_at_ms).abs() > RCS_MAPPING_FRESHNESS_MS {
+        return Ok(false);
+    }
+    let Some(context) = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    if context != context_value(observation)
+        || observation.link_state != RcsLinkState::Linked
+        || mapping.mapping_revision != observation.mapping_revision
+        || mapping.verified_at_ms != observation.observed_at_ms
+    {
+        return Ok(false);
+    }
+    let own_identity = match canonical_identity(&observation.selected_sim_own_identity) {
+        Some(identity) => identity,
+        None => return Ok(false),
+    };
+    Ok(mapping.proof.digest == proof_digest(observation, mapping.class, &own_identity))
+}
+
+fn context_value(observation: &RcsMappingObservation) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        observation.link_generation,
+        observation.session_generation,
+        observation.identity_region,
+        canonical_identity(&observation.selected_sim_own_identity).unwrap_or_default(),
+        observation.selected_sim_id,
+        observation.canonicalizer_revision,
+        observation.link_state as u8,
+        observation.conversation_type as u8,
+        observation.send_mode as u8,
+    )
+}
+
+fn context_generations(context: &str) -> Option<(u64, u64)> {
+    let mut values = context.splitn(3, ':');
+    Some((values.next()?.parse().ok()?, values.next()?.parse().ok()?))
+}
+
+fn invalidate_for_refusal(
+    conn: &Connection,
+    observation: &RcsMappingObservation,
     code: &str,
 ) -> Result<(), Error> {
-    if google_conversation_id.is_empty() {
-        return Ok(());
+    if code == RcsMappingRefusal::MappingConflict.code() {
+        let own_identity = canonical_identity(&observation.selected_sim_own_identity);
+        let participant = observation
+            .participants
+            .iter()
+            .filter(|participant| participant.is_visible && !participant.is_me)
+            .filter_map(|participant| canonical_identity(&participant.identity))
+            .find(|identity| own_identity.as_deref() != Some(identity.as_str()));
+        if let Some(participant) = participant {
+            for conversation_id in peppy_conversations_for_identity(conn, &participant)? {
+                conn.execute(
+                    "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE peppy_conversation_id=? AND invalidated_at_ms IS NULL",
+                    params![code, conversation_id.to_string()],
+                )?;
+            }
+            return Ok(());
+        }
     }
     conn.execute(
         "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE google_conversation_id=? AND invalidated_at_ms IS NULL",
-        params![code, google_conversation_id],
+        params![code, observation.google_conversation_id],
+    )?;
+    Ok(())
+}
+
+fn invalidate_all_mappings(conn: &Connection, code: &str) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE invalidated_at_ms IS NULL",
+        [code],
     )?;
     Ok(())
 }

@@ -45,6 +45,24 @@ fn client_with_participant(
     (directory, config, client, captured.conversation_id)
 }
 
+fn capture_in_conversation(
+    client: &Client,
+    participant: &str,
+    provider_id: &str,
+) -> ConversationId {
+    let conversation_id = ConversationId::new();
+    client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation_id),
+            sender_address: participant.into(),
+            body: String::new(),
+            provider_message_id: Some(provider_id.into()),
+            imported: true,
+        })
+        .unwrap();
+    conversation_id
+}
+
 #[test]
 fn verified_mapping_is_fresh_local_and_survives_reopen() {
     let (_directory, config, client, conversation_id) = client_with_participant("raw-peer");
@@ -144,5 +162,133 @@ fn self_chat_and_nonmonotonic_revision_are_explicit() {
     assert_eq!(
         client.verify_rcs_mapping(&self_chat, 1_000).unwrap(),
         RcsMappingOutcome::Refused(RcsMappingRefusal::NonMonotonicRevision)
+    );
+}
+
+#[test]
+fn refuses_raw_identity_with_multiple_authoritative_message_conversations() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-mapping-duplicates", &vault);
+    let client = open(&config);
+    capture_in_conversation(&client, "raw-peer", "row-a");
+    capture_in_conversation(&client, "raw-peer", "row-b");
+
+    assert_eq!(
+        client
+            .verify_rcs_mapping(&observation("raw-peer", 1), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::PeppyConversationAmbiguous)
+    );
+}
+
+#[test]
+fn raw_national_identity_never_matches_inferred_international_alias() {
+    let (_directory, _config, client, _conversation_id) = client_with_participant("2025550123");
+    let international = format!("+{}{}", "1202", "5550123");
+    assert_eq!(
+        client
+            .verify_rcs_mapping(&observation(&international, 1), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::PeppyConversationMissing)
+    );
+}
+
+#[test]
+fn formatted_explicit_international_identity_is_canonical_equivalent() {
+    let international = format!("+{}{}", "1202", "5550123");
+    let formatted = format!("+{} {}", "1", "202 555 0123");
+    let (_directory, _config, client, _conversation_id) = client_with_participant(&formatted);
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&observation(&international, 1), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+}
+
+#[test]
+fn context_and_conflict_invalidate_all_affected_mappings() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-mapping-context", &vault);
+    let client = open(&config);
+    let conversation_a = capture_in_conversation(&client, "peer-a", "row-a");
+    let conversation_b = capture_in_conversation(&client, "peer-b", "row-b");
+    let mut mapping_a = observation("peer-a", 1);
+    mapping_a.google_conversation_id = "google-a".into();
+    let mut mapping_b = observation("peer-b", 1);
+    mapping_b.google_conversation_id = "google-b".into();
+    assert!(matches!(
+        client.verify_rcs_mapping(&mapping_a, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    assert!(matches!(
+        client.verify_rcs_mapping(&mapping_b, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+
+    let mut conflict = observation("peer-a", 2);
+    conflict.google_conversation_id = "google-b".into();
+    assert_eq!(
+        client.verify_rcs_mapping(&conflict, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::MappingConflict)
+    );
+    assert!(client.rcs_mapping(conversation_a).unwrap().is_none());
+    assert!(client.rcs_mapping(conversation_b).unwrap().is_some());
+
+    let mut refreshed = mapping_a.clone();
+    refreshed.mapping_revision = 3;
+    refreshed.session_generation = 8;
+    assert!(matches!(
+        client.verify_rcs_mapping(&refreshed, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    assert!(client.rcs_mapping(conversation_b).unwrap().is_none());
+
+    let mut delayed = mapping_b.clone();
+    delayed.mapping_revision = 2;
+    assert_eq!(
+        client.verify_rcs_mapping(&delayed, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::RetiredContext)
+    );
+
+    let mut terminal = refreshed;
+    terminal.google_conversation_id.clear();
+    terminal.link_state = RcsLinkState::Unlinked;
+    terminal.session_generation = 9;
+    assert!(matches!(
+        client.verify_rcs_mapping(&terminal, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(_)
+    ));
+    assert!(client.rcs_mapping(conversation_a).unwrap().is_none());
+}
+
+#[test]
+fn empty_participants_do_not_create_or_change_a_mapping_candidate() {
+    let (_directory, _config, client, _conversation_id) = client_with_participant("raw-peer");
+    let mut mixed = observation("raw-peer", 1);
+    mixed.participants.insert(
+        0,
+        RcsParticipantObservation {
+            identity: "  ".into(),
+            is_visible: true,
+            is_me: false,
+        },
+    );
+    assert!(matches!(
+        client.verify_rcs_mapping(&mixed, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let mut empty = mixed;
+    empty.mapping_revision = 2;
+    empty.participants = vec![RcsParticipantObservation {
+        identity: String::new(),
+        is_visible: true,
+        is_me: false,
+    }];
+    assert_eq!(
+        client.verify_rcs_mapping(&empty, 1_000).unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::ParticipantAmbiguous)
     );
 }
