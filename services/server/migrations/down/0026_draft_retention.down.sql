@@ -1,0 +1,11 @@
+DROP TABLE draft_attachment_holds;
+DROP TABLE draft_terminals;
+DROP TABLE draft_revisions;
+DROP TABLE draft_branches;
+DROP TABLE draft_incarnations;
+DROP INDEX attachments_draft_id;
+ALTER TABLE attachments DROP COLUMN draft_id;
+ALTER TABLE upload_reservations DROP COLUMN draft_id;
+ALTER TABLE vaults DROP COLUMN draft_change_seq;
+ALTER TABLE storage_deletions DROP CONSTRAINT storage_deletions_reason_check;
+ALTER TABLE storage_deletions ADD CONSTRAINT storage_deletions_reason_check CHECK (reason IN ('upload_attempt','superseded_upload','expired_reservation','public_copy','finalized_attachment','vault_deleted','retention_cleanup'));

@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 25] = [
+const UP: [&str; 26] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -29,9 +29,10 @@ const UP: [&str; 25] = [
     include_str!("../migrations/0023_origin_tag_indexes.sql"),
     include_str!("../migrations/0024_compacted_origin_tag_index.sql"),
     include_str!("../migrations/0025_validate_origin_tag_constraints.sql"),
+    include_str!("../migrations/0026_draft_retention.sql"),
 ];
 
-const DOWN: [&str; 25] = [
+const DOWN: [&str; 26] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -57,6 +58,7 @@ const DOWN: [&str; 25] = [
     include_str!("../migrations/down/0023_origin_tag_indexes.down.sql"),
     include_str!("../migrations/down/0024_compacted_origin_tag_index.down.sql"),
     include_str!("../migrations/down/0025_validate_origin_tag_constraints.down.sql"),
+    include_str!("../migrations/down/0026_draft_retention.down.sql"),
 ];
 
 #[tokio::test]
@@ -171,6 +173,13 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(trigger_exists(database, "encrypted_records_immutable").await);
     assert!(column_exists(database, "encrypted_records", "origin_tag").await);
     assert!(column_exists(database, "compacted_records", "origin_tag").await);
+    assert!(table_exists(database, "draft_incarnations").await);
+    assert!(table_exists(database, "draft_branches").await);
+    assert!(table_exists(database, "draft_revisions").await);
+    assert!(table_exists(database, "draft_terminals").await);
+    assert!(table_exists(database, "draft_attachment_holds").await);
+    assert!(column_exists(database, "vaults", "draft_change_seq").await);
+    assert!(column_exists(database, "attachments", "draft_id").await);
     assert!(index_exists(database, "encrypted_records_origin_tag_unique").await);
     assert!(index_exists(database, "compacted_records_origin_tag_unique").await);
 }

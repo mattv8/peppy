@@ -1,6 +1,7 @@
 pub mod api;
 pub mod attachment_retention;
 pub mod config;
+pub mod draft_retention;
 pub mod enrollment;
 pub mod health;
 pub mod instance;

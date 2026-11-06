@@ -1,6 +1,7 @@
 mod account_access;
 pub(crate) mod admission;
 mod attachments;
+mod drafts;
 mod instance;
 mod key_profiles;
 mod sync;
@@ -567,6 +568,13 @@ pub(crate) fn build_router(
         .route("/v1/snapshot", get(sync::snapshot_start))
         .route("/v1/snapshot/records", get(sync::snapshot_records))
         .route("/v1/commands/pending", get(sync::pending_commands))
+        .route("/v1/drafts", get(drafts::list))
+        .route(
+            "/v1/drafts/{draft_id}/revisions/{revision_id}",
+            put(drafts::put),
+        )
+        .route("/v1/drafts/{draft_id}/send", post(drafts::send))
+        .route("/v1/drafts/{draft_id}/discard", post(drafts::discard))
         .route(
             "/v1/vault/key-profiles",
             get(key_profiles::list).post(key_profiles::register),

@@ -994,6 +994,7 @@ pub mod billing_play;
 pub mod billing_web;
 pub mod computer_enrollment;
 pub mod devices;
+pub mod drafts;
 pub mod enrollment;
 pub mod presence;
 pub mod tester_admin;
