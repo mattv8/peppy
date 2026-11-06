@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridge } from "../bridge/bridge";
 import { InvalidMediaViewerWindow, MediaViewerWindow, readMediaViewerWindow } from "./MediaViewerWindow";
 
@@ -13,7 +13,22 @@ const pageItem = (id: string, messageId = `message-${id}`) => ({
   timestamp: "2026-01-01T00:00:00.000Z",
 });
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+const LAYOUT_KEY = "peppy.layout.v1";
+const storedValues = new Map<string, string>();
+const memoryStorage = {
+  getItem: (key: string) => storedValues.get(key) ?? null,
+  setItem: (key: string, value: string) => storedValues.set(key, value),
+  clear: () => storedValues.clear(),
+};
+
+beforeEach(() => {
+  vi.stubGlobal("localStorage", memoryStorage);
+  localStorage.clear();
+  document.documentElement.removeAttribute("data-accent");
+  document.body.removeAttribute("data-accent");
+});
+
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("readMediaViewerWindow", () => {
   it("accepts a complete valid media route", () => {
@@ -36,6 +51,54 @@ describe("readMediaViewerWindow", () => {
 });
 
 describe("MediaViewerWindow", () => {
+  it("applies a stored accent color", () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ accentColor: 99 }));
+
+    render(<MediaViewerWindow conversationId="aurora" attachmentId="file" messageId="message-file" />);
+
+    expect(document.body).toHaveAttribute("data-accent", "99");
+  });
+
+  it("applies a stored accent color to an invalid viewer route", () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ accentColor: 99 }));
+
+    render(<InvalidMediaViewerWindow />);
+
+    expect(document.body).toHaveAttribute("data-accent", "99");
+  });
+
+  it("updates the accent color from storage events", async () => {
+    render(<InvalidMediaViewerWindow />);
+    await act(async () => undefined);
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ accentColor: 99 }));
+
+    act(() => window.dispatchEvent(new StorageEvent("storage", { key: LAYOUT_KEY, newValue: JSON.stringify({ accentColor: 99 }) })));
+
+    expect(document.body).toHaveAttribute("data-accent", "99");
+  });
+
+  it("leaves no accent attribute for default or coral", () => {
+    const defaultView = render(<InvalidMediaViewerWindow />);
+
+    expect(document.body).not.toHaveAttribute("data-accent");
+    defaultView.unmount();
+
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ accentColor: 7 }));
+
+    render(<InvalidMediaViewerWindow />);
+
+    expect(document.body).not.toHaveAttribute("data-accent");
+  });
+
+  it("removes the accent attribute when the viewer unmounts", () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ accentColor: 99 }));
+    const view = render(<InvalidMediaViewerWindow />);
+
+    view.unmount();
+
+    expect(document.body).not.toHaveAttribute("data-accent");
+  });
+
   it("loads the target media without joining the draft lifecycle", async () => {
     vi.spyOn(bridge, "media_page_around").mockResolvedValue({ target: pageItem("file"), newer: [], older: [] });
     vi.spyOn(bridge, "load_media").mockResolvedValue({ state: "ready", url: "blob:file", mediaType: "image/jpeg", byteSize: 1 });

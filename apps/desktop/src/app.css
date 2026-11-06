@@ -1,3 +1,5 @@
+@import "./shell/accent-theme.css";
+
 * {
   box-sizing: border-box;
 }
@@ -1181,6 +1183,40 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 }
 .settings-theme-row label {
   flex: 0 0 auto;
+}
+#settings-view .settings-field {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 4px;
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+}
+#settings-view .settings-theme-row [data-tone-picker] {
+  display: block;
+}
+#settings-view [data-tone-picker-panel] {
+  background: var(--peppy-surface-widget);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+#settings-view .settings-theme-row .tone-picker-field {
+  width: 160px;
+  padding: 0 7px;
+  border-color: var(--peppy-border);
+  background: var(--peppy-surface-widget);
+}
+#settings-view .settings-theme-row .tone-picker-field > span:not([data-tone-picker-swatch]) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#settings-view .settings-theme-row {
+  flex-wrap: wrap;
+}
+#settings-view .settings-theme-row > .settings-error {
+  flex: 1 1 100%;
+  margin: 0;
 }
 #settings-navigation-position, #settings-popout-mode {
   display: grid;
