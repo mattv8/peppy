@@ -547,6 +547,134 @@ fn google_contact_typing_displays_only_for_the_current_gateway() {
 }
 
 #[test]
+fn old_unlocked_epoch_frames_survive_cutover_and_unknown_epochs_do_not_mutate_receive_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let next_epoch = Vault::epoch(vault.id, 2);
+    let sender_config = config(&directory, "v2-old-epoch-sender", &vault);
+    let receiver_config = config(&directory, "v2-old-epoch-receiver", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let receiver = unlocked(&receiver_config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&receiver, receiver_config.device_id, conversation);
+    let mut server = Server::default();
+    server.upload(&receiver);
+    server.sync(&sender);
+    let roster = vec![sender_config.device_id, receiver_config.device_id];
+    sender
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster.clone(),
+                local_gateway_device_id: sender_config.device_id,
+                local_executor: LiveExecutor::None,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+    receiver
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster,
+                local_gateway_device_id: receiver_config.device_id,
+                local_executor: LiveExecutor::CurrentGateway,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+    let initial = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        1_001,
+        1_001,
+    )
+    .unwrap();
+    let challenge = receiver
+        .open_typing_signal_v2(
+            &initial.signal,
+            LiveClock {
+                wall_ms: 1_001,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    let acknowledgement = sender
+        .open_typing_signal_v2(
+            &challenge,
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_002,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    receiver
+        .open_typing_signal_v2(
+            &acknowledgement,
+            LiveClock {
+                wall_ms: 1_003,
+                mono_ms: 1_003,
+            },
+        )
+        .unwrap();
+    let old_epoch = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        4_001,
+        4_001,
+    )
+    .unwrap();
+    sender
+        .unlock(&next_epoch.profile, &next_epoch.header, PASSPHRASE)
+        .unwrap();
+    receiver
+        .unlock(&next_epoch.profile, &next_epoch.header, PASSPHRASE)
+        .unwrap();
+    sender.activate_epoch(2).unwrap();
+    receiver.activate_epoch(2).unwrap();
+    let mut unknown_epoch = old_epoch.signal.clone();
+    unknown_epoch.key_epoch = 99;
+    assert_eq!(
+        receiver
+            .open_typing_signal_v2(
+                &unknown_epoch,
+                LiveClock {
+                    wall_ms: 4_001,
+                    mono_ms: 4_001
+                }
+            )
+            .unwrap()
+            .action,
+        None
+    );
+    assert!(matches!(
+        receiver
+            .open_typing_signal_v2(
+                &old_epoch.signal,
+                LiveClock {
+                    wall_ms: 4_002,
+                    mono_ms: 4_002
+                }
+            )
+            .unwrap()
+            .action,
+        Some(LiveAction::GatewayTypingIntent { .. })
+    ));
+}
+
+#[test]
 fn hostile_v2_headers_drop_without_retiring_a_valid_roster_receiver() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
