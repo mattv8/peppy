@@ -191,37 +191,52 @@ fn delayed_same_session_ack_preserves_the_consumed_floor() {
         .unwrap()
         .session_update
         .unwrap();
-    let post_floor_start = seal(
+    let initial_start = seal(
         &sender,
         conversation,
         receiver_config.device_id,
         TypingStateV2::Started,
         4_001,
     );
-    let action = receiver
-        .open_typing_signal_v2(
-            &post_floor_start.signal,
-            LiveClock {
-                wall_ms: 4_001,
-                mono_ms: 4_001,
-            },
-        )
-        .unwrap()
-        .action
-        .unwrap();
-    assert!(
-        matches!(action, LiveAction::GatewayTypingIntent { session_token, .. } if session_token == initial_update.current_session_token)
-    );
-    let renewal = seal(
+    assert!(matches!(
+        receiver
+            .open_typing_signal_v2(
+                &initial_start.signal,
+                LiveClock {
+                    wall_ms: 4_001,
+                    mono_ms: 4_001,
+                },
+            )
+            .unwrap()
+            .action,
+        Some(LiveAction::GatewayTypingIntent { session_token, .. })
+            if session_token == initial_update.current_session_token
+    ));
+
+    let renewal_trigger = seal(
         &sender,
         conversation,
         receiver_config.device_id,
-        TypingStateV2::Started,
+        TypingStateV2::Stopped,
         11_002,
     );
-    let renewal_challenge = receiver
+    let renewal_outcome = receiver
         .open_typing_signal_v2(
-            &renewal.signal,
+            &renewal_trigger.signal,
+            LiveClock {
+                wall_ms: 11_002,
+                mono_ms: 11_002,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        renewal_outcome.action,
+        Some(LiveAction::GatewayTypingIntent { session_token, .. })
+            if session_token == initial_update.current_session_token
+    ));
+    let delayed_ack = sender
+        .open_typing_signal_v2(
+            &renewal_outcome.reply.unwrap(),
             LiveClock {
                 wall_ms: 11_002,
                 mono_ms: 11_002,
@@ -230,39 +245,54 @@ fn delayed_same_session_ack_preserves_the_consumed_floor() {
         .unwrap()
         .reply
         .unwrap();
+    let post_floor_start = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        11_003,
+    );
+    assert!(
+        post_floor_start.signal.sequence.parse::<u64>().unwrap()
+            > delayed_ack.sequence.parse::<u64>().unwrap()
+    );
+    assert!(matches!(
+        receiver
+            .open_typing_signal_v2(
+                &post_floor_start.signal,
+                LiveClock {
+                    wall_ms: 11_003,
+                    mono_ms: 11_003,
+                },
+            )
+            .unwrap()
+            .action,
+        Some(LiveAction::GatewayTypingIntent { session_token, .. })
+            if session_token == initial_update.current_session_token
+    ));
     let post_floor_stop = seal(
         &sender,
         conversation,
         receiver_config.device_id,
         TypingStateV2::Stopped,
-        11_003,
+        11_004,
     );
-    let stop_action = receiver
-        .open_typing_signal_v2(
-            &post_floor_stop.signal,
-            LiveClock {
-                wall_ms: 11_003,
-                mono_ms: 11_003,
-            },
-        )
-        .unwrap()
-        .action
-        .unwrap();
-    assert!(
-        matches!(stop_action, LiveAction::GatewayTypingIntent { session_token, .. } if session_token == initial_update.current_session_token)
-    );
-    let delayed_ack = sender
-        .open_typing_signal_v2(
-            &renewal_challenge,
-            LiveClock {
-                wall_ms: 11_003,
-                mono_ms: 11_003,
-            },
-        )
-        .unwrap()
-        .reply
-        .unwrap();
-    let accepted = receiver
+    assert!(matches!(
+        receiver
+            .open_typing_signal_v2(
+                &post_floor_stop.signal,
+                LiveClock {
+                    wall_ms: 11_004,
+                    mono_ms: 11_004,
+                },
+            )
+            .unwrap()
+            .action,
+        Some(LiveAction::GatewayTypingIntent { session_token, .. })
+            if session_token == initial_update.current_session_token
+    ));
+
+    let renewed = receiver
         .open_typing_signal_v2(
             &delayed_ack,
             LiveClock {
@@ -271,7 +301,7 @@ fn delayed_same_session_ack_preserves_the_consumed_floor() {
             },
         )
         .unwrap();
-    assert_eq!(accepted.session_update, None);
+    assert_eq!(renewed.session_update, None);
     let replay = receiver
         .open_typing_signal_v2(
             &post_floor_start.signal,
@@ -283,6 +313,91 @@ fn delayed_same_session_ack_preserves_the_consumed_floor() {
         .unwrap();
     assert!(replay.action.is_none());
     assert_eq!(replay.session_update, None);
+
+    let fresh_start = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        19_004,
+    );
+    assert!(matches!(
+        receiver
+            .open_typing_signal_v2(
+                &fresh_start.signal,
+                LiveClock {
+                    wall_ms: 19_004,
+                    mono_ms: 19_004,
+                },
+            )
+            .unwrap()
+            .action,
+        Some(LiveAction::GatewayTypingIntent { session_token, .. })
+            if session_token == initial_update.current_session_token
+    ));
+
+    sender.disable_live_typing().unwrap();
+    sender
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: vec![sender_config.device_id, receiver_config.device_id],
+                local_gateway_device_id: sender_config.device_id,
+                local_executor: LiveExecutor::None,
+            },
+            LiveClock {
+                wall_ms: 20_000,
+                mono_ms: 20_000,
+            },
+        )
+        .unwrap();
+    let replacement = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        20_001,
+    );
+    let replacement_challenge = receiver
+        .open_typing_signal_v2(
+            &replacement.signal,
+            LiveClock {
+                wall_ms: 20_001,
+                mono_ms: 20_001,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    let replacement_acknowledgement = sender
+        .open_typing_signal_v2(
+            &replacement_challenge,
+            LiveClock {
+                wall_ms: 20_002,
+                mono_ms: 20_002,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    let replacement_update = receiver
+        .open_typing_signal_v2(
+            &replacement_acknowledgement,
+            LiveClock {
+                wall_ms: 20_003,
+                mono_ms: 20_003,
+            },
+        )
+        .unwrap()
+        .session_update
+        .unwrap();
+    assert_eq!(
+        replacement_update.replaced_session_token,
+        Some(initial_update.current_session_token)
+    );
+    assert_eq!(
+        replacement_update.validation_revision,
+        initial_update.validation_revision + 1
+    );
 }
 
 #[test]
@@ -293,8 +408,10 @@ fn replacement_ack_retires_actions_from_the_old_session() {
     let receiver_config = config(&directory, "replacement-receiver", &vault);
     let sender = unlocked(&sender_config, &vault);
     let receiver = unlocked(&receiver_config, &vault);
-    let conversation = ConversationId::new();
-    publish_eligible(&receiver, receiver_config.device_id, conversation);
+    let original_conversation = ConversationId::new();
+    let withheld_conversation = ConversationId::new();
+    publish_eligible(&receiver, receiver_config.device_id, original_conversation);
+    publish_eligible(&receiver, receiver_config.device_id, withheld_conversation);
     let mut server = Server::default();
     server.upload(&receiver);
     server.sync(&sender);
@@ -307,7 +424,7 @@ fn replacement_ack_retires_actions_from_the_old_session() {
 
     let first = seal(
         &sender,
-        conversation,
+        original_conversation,
         receiver_config.device_id,
         TypingStateV2::Started,
         1_001,
@@ -347,7 +464,7 @@ fn replacement_ack_retires_actions_from_the_old_session() {
         .unwrap();
     let old_action = seal(
         &sender,
-        conversation,
+        original_conversation,
         receiver_config.device_id,
         TypingStateV2::Started,
         4_003,
@@ -363,13 +480,14 @@ fn replacement_ack_retires_actions_from_the_old_session() {
             )
             .unwrap()
             .action,
-        Some(LiveAction::GatewayTypingIntent { session_token, .. }) if session_token == first_update.current_session_token
+        Some(LiveAction::GatewayTypingIntent { session_token, .. })
+            if session_token == first_update.current_session_token
     ));
-    let stale = seal(
+    let withheld_start = seal(
         &sender,
-        conversation,
+        withheld_conversation,
         receiver_config.device_id,
-        TypingStateV2::Stopped,
+        TypingStateV2::Started,
         4_004,
     );
 
@@ -389,7 +507,7 @@ fn replacement_ack_retires_actions_from_the_old_session() {
         .unwrap();
     let replacement = seal(
         &sender,
-        conversation,
+        original_conversation,
         receiver_config.device_id,
         TypingStateV2::Started,
         5_001,
@@ -442,7 +560,7 @@ fn replacement_ack_retires_actions_from_the_old_session() {
     assert!(
         receiver
             .open_typing_signal_v2(
-                &stale.signal,
+                &withheld_start.signal,
                 LiveClock {
                     wall_ms: 5_004,
                     mono_ms: 5_004
