@@ -1342,6 +1342,76 @@ async fn stale_g1_recheck_cannot_renew_a_replaced_ticket_socket_lease() {
 }
 
 #[tokio::test]
+async fn live_ticket_reaper_terminalizes_and_reclaims_only_eligible_rows() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let expired_session = URL_SAFE_NO_PAD.encode([43_u8; 16]);
+    let expired_ticket = issue_ticket(&server, expired_session.clone()).await;
+    let session_hash = Sha256::digest(URL_SAFE_NO_PAD.decode(&expired_session).unwrap()).to_vec();
+    sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()-interval '1 second' WHERE session_id_hash=$1")
+        .bind(&session_hash)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE live_tickets SET issued_at=now()-interval '2 seconds', expires_at=now()-interval '1 second' WHERE ticket_digest=$1")
+        .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&expired_ticket).unwrap()).to_vec())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let recent_tombstone = URL_SAFE_NO_PAD.encode([44_u8; 16]);
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::DELETE, recent_tombstone.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    let old_tombstone = URL_SAFE_NO_PAD.encode([45_u8; 16]);
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::DELETE, old_tombstone.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    sqlx::query("UPDATE live_ticket_sessions SET closed_at=now()-interval '6 minutes' WHERE session_id_hash=$1")
+        .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&old_tombstone).unwrap()).to_vec())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    crate::live_ticket_maintenance::reap_live_tickets(&server.pool, 100)
+        .await
+        .unwrap();
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM live_ticket_sessions WHERE session_id_hash=$1")
+            .bind(&session_hash)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "terminal");
+    let tickets: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE ticket_digest=$1")
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&expired_ticket).unwrap()).to_vec())
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(tickets, 0);
+    let retained: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE session_id_hash=$1")
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(recent_tombstone).unwrap()).to_vec())
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(retained, 1);
+    let reaped: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE session_id_hash=$1")
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(old_tombstone).unwrap()).to_vec())
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(reaped, 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn delayed_ticket_cancel_for_g1_leaves_g2_open() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let session_id = URL_SAFE_NO_PAD.encode([37_u8; 16]);

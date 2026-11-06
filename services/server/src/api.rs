@@ -479,6 +479,24 @@ impl Maintenance {
 }
 
 fn spawn_instance_maintenance(db: PgPool) {
+    let live_ticket_db = db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(error) = crate::live_ticket_maintenance::reap_live_tickets(
+                &live_ticket_db,
+                crate::live_ticket_maintenance::LIVE_TICKET_REAP_BATCH,
+            )
+            .await
+            {
+                tracing::warn!(
+                    kind = database_error_kind(&error),
+                    "live ticket retention sweep failed"
+                );
+            }
+        }
+    });
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3_600));
         loop {
