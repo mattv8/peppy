@@ -81,6 +81,8 @@ import {
   type AttachmentView,
   type ConversationView,
   type DesktopSnapshot,
+  type DesktopRcsSnapshot,
+  type RcsConversationMetadata,
   type GatewayView,
   type MessageStatus,
   type MessageView,
@@ -137,6 +139,8 @@ import { GatewayPicker } from "./setup/GatewayPicker";
 import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars, readShareTyping } from "./shell/layout-persistence";
 import { RcsBadge } from "./rcs/RcsBadge";
+import { ConversationRcsNotice } from "./rcs/ConversationRcsNotice";
+import { RcsMessageMeta } from "./rcs/RcsMessageMeta";
 import { useRcsRoute } from "./rcs/useRcsRoute";
 import { TypingAnnouncer, TypingIndicator } from "./typing/TypingIndicator";
 import { useTypingDisplay } from "./typing/useTypingDisplay";
@@ -254,6 +258,7 @@ const STATUS_LABEL: Record<MessageStatus, string> = {
   "failed-before-submit": "Failed before submit",
   "failed-confirmed": "Failed",
   unknown: "Unknown delivery state — not retried",
+  read: "Read",
 };
 
 const TIMELESS_OUTGOING_STATUSES = new Set<MessageStatus>(["queued-local", "server-accepted"]);
@@ -635,7 +640,9 @@ function MessageMeta({ message, hideTime = false }: { message: MessageView; hide
   const formattedTime = formatDateTime(displayedTime);
   const isoTime = isoDateTime(displayedTime);
   const deliveryConfirmed = message.status === "delivery-confirmed";
-  const phoneHistory = message.sender === "self" && !message.status && Boolean(formattedTime);
+  const rcsMessage = message.transport === "rcs";
+  const read = rcsMessage && message.status === "read";
+  const phoneHistory = !rcsMessage && message.sender === "self" && !message.status && Boolean(formattedTime);
   const compactStatus = message.status && ["gateway-persisted", "preparing", "submitted", "sent"].includes(message.status);
   const statusLabel = message.status ? STATUS_LABEL[message.status] : undefined;
   const validTime = Boolean(formattedTime && isoTime);
@@ -648,16 +655,18 @@ function MessageMeta({ message, hideTime = false }: { message: MessageView; hide
       ? "Delivery confirmed; time unavailable"
       : "Delivery confirmed";
   const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
-  const showTextStatus = !deliveryConfirmed && Boolean(message.status) && (!compactStatus || !validTime);
+  const showTextStatus = !read && !deliveryConfirmed && Boolean(message.status) && (!compactStatus || !validTime);
   const showCompactStatus = !deliveryConfirmed && Boolean(compactStatus && validTime);
-  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory) return null;
-  return <div className="message-meta" data-message-meta={message.id} data-status={message.status}>
+  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read) return null;
+  return <div className="message-meta" data-message-meta={message.id} data-status={message.status} aria-live={rcsMessage ? "off" : undefined}>
     {showTextStatus && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
+    {read && <RcsMessageMeta messageId={message.id} status={message.status} />}
     {showTextStatus && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
     {showTime && <time dateTime={isoTime}>{formattedTime}</time>}
     {showCompactStatus && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
+    {rcsMessage && !read && <RcsMessageMeta messageId={message.id} status={message.status} />}
   </div>;
 }
 
@@ -1600,7 +1609,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
-  const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<DesktopRcsSnapshot | null>(null);
   const [conversationTab, setConversationTab] = useState<ConversationTab>("messages");
   const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);
   const [lightboxAttachmentId, setLightboxAttachmentId] = useState<string>();
@@ -4970,7 +4979,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <h1 data-header-title>Contacts</h1>
               ) : (
                 <div className="header-copy-details">
-                  <div data-header-title-row><b data-header-title>{title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!headPanel && rcsRoute.current && <RcsBadge />}</div>
+                  <div data-header-title-row><b data-header-title>{title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!headPanel && rcsRoute.current && <RcsBadge encryptionReported={(active as RcsConversationMetadata | undefined)?.rcsEncryption === true} />}</div>
                   {active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
                 </div>
               )}
@@ -5038,6 +5047,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             </button>}
           </header>
           {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationSpamNotice folder={active.folder} folderReason={active.folderReason} unblock={active.unblock} />}
+          {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationRcsNotice historyGap={(active as RcsConversationMetadata).rcsHistoryGap} />}
           {senderUnblockConfirmation && <SenderUnblockConfirmation
             name={senderUnblockConfirmation.name}
             canUnblock={senderUnblockConfirmation.canUnblock}

@@ -1267,12 +1267,13 @@ impl Session {
         budget: &mut usize,
         hydration: &mut DeferredHydration,
         eligible: Option<&HashSet<AttachmentId>>,
-    ) -> Vec<dto::MessageView> {
+    ) -> BridgeResult<Vec<dto::MessageView>> {
         let mut retention_states = HashMap::new();
         messages
             .iter()
             .map(|message| {
-                dto::message_view(
+                dto::rcs_receive::message_view(
+                    &self.client,
                     message,
                     self.attachment_views(
                         message,
@@ -1281,7 +1282,7 @@ impl Session {
                         eligible,
                         &mut retention_states,
                     ),
-                )
+                ).map_err(core_error)
             })
             .collect()
     }
@@ -1300,7 +1301,7 @@ impl Session {
             .messages_page(conversation, Some(anchor), INITIAL_HISTORY_MESSAGES)
             .map_err(core_error)?;
         let (mut budget, mut hydration) = (MAX_PREVIEWS_PER_SNAPSHOT, DeferredHydration::default());
-        let messages = self.message_views(page.messages, &mut budget, &mut hydration, None);
+        let messages = self.message_views(page.messages, &mut budget, &mut hydration, None)?;
         Ok(HistoryPage {
             conversation_id: conversation.to_string(),
             messages,
@@ -1320,7 +1321,8 @@ impl Session {
         let mut hydration = DeferredHydration::default();
         let mut retention_states = HashMap::new();
         Ok(peppy_desktop_api::message_window_view(window, |message| {
-            dto::message_view(
+            dto::rcs_receive::message_view(
+                &self.client,
                 &message,
                 self.attachment_views(
                     &message,
@@ -1329,7 +1331,7 @@ impl Session {
                     None,
                     &mut retention_states,
                 ),
-            )
+            ).map_err(core_error)
         }))
     }
 
@@ -1554,7 +1556,7 @@ impl Session {
                 .map_err(core_error)?;
                 let eligible = snapshot_preview_ids(&messages);
                 (
-                    self.message_views(messages, &mut budget, &mut hydration, Some(&eligible)),
+                    self.message_views(messages, &mut budget, &mut hydration, Some(&eligible))?,
                     Some(has_more),
                 )
             } else {

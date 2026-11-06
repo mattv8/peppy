@@ -50,10 +50,10 @@ export type TypingSignal = {
   state: "started" | "stopped";
   expiresAtMs?: string;
 };
-export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
+export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown" | "read";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
-export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
+export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
 export type MediaMetadataView = { width?: number; height?: number; durationMs?: string; thumbnail?: AttachmentView; previewUnavailable?: "thumbnail_unavailable" };
@@ -64,6 +64,7 @@ export type MediaOpen = { state: "ready"; url: string; mediaType: string; byteSi
 /** `participants` are native-provided reply addressees and exclude a confirmed self address. */
 /** Draft flags are authoritative host metadata; do not infer them from an unloaded message list. */
 export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; recipientlessDraft?: boolean; draftOnly?: boolean; pinned?: boolean; folder?: ConversationFolder; folderReason?: "marked" | "blocked"; unblock?: "pending" | "failed"; canUnblock?: boolean };
+export type RcsConversationMetadata = { rcsEncryption?: boolean; rcsHistoryGap?: boolean };
 /** Effective folder from core: an archived conversation reads as `inbox` once a newer message arrives. */
 export type ConversationFolder = "inbox" | "archived" | "spam";
 export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
@@ -74,6 +75,7 @@ export type Draft = { id: string; conversationId: string; text: string; recipien
 /** Exact durable cursors only; `targetHighWater` is a transient authenticated replay cut, not a percentage denominator. */
 export type SyncProgress = { phase: "receiving" | "applying" | "waitingForKeys" | "current"; receivedThrough: string; processedThrough: string; targetHighWater?: string; snapshotReceived?: string; snapshotExpected?: string; snapshotRemaining?: string };
 export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress; rcsStatus?: RcsStatusSnapshot };
+export type DesktopRcsSnapshot = DesktopSnapshot & { conversations: Array<ConversationView & RcsConversationMetadata> };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type DiscardDraftInput = Pick<Draft, "id" | "conversationId"> & { expectedRevision: string };
@@ -176,7 +178,7 @@ export const readAccountAccess = async (bridge: { account_access?(): Promise<Acc
 };
 
 export interface DesktopBridge {
-  load_state(conversationId?: string, historyFromMessageId?: string, options?: { metadataOnly?: boolean }): Promise<DesktopSnapshot>;
+  load_state(conversationId?: string, historyFromMessageId?: string, options?: { metadataOnly?: boolean }): Promise<DesktopRcsSnapshot>;
   search_local(input: LocalSearchRequest): Promise<LocalSearchPage>;
   advance_search_index(input?: { budgetRows?: number }): Promise<SearchIndexProgress>;
   get_history_search(): Promise<HistorySearchSnapshot>;

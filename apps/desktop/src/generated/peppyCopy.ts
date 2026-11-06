@@ -1146,6 +1146,11 @@ export const peppyCopy = {
   reenrol_drafts_warning: "Drafts you hadn't sent on this computer may not come back.",
   reenrol_start_cta: "Show connection code",
   reenrol_still_unavailable: "The protected key is still unavailable.",
+  rcs_message_failed_reported: "Google Messages reported that this message could not be delivered.",
+  rcs_message_unknown_hint: "Peppy can't tell whether this was sent. It will not send it again by itself.",
+  rcs_history_gap_notice: "Some messages from around when this chat switched how it connects may be missing here. Peppy could not tell which were already saved, so it did not import any of them.",
+  rcs_e2ee_badge_label: "End-to-end encrypted",
+  rcs_e2ee_badge_description: "Google Messages reports end-to-end encryption for this chat. This is Google's report and is separate from how Peppy protects your vault.",
 } as const;
 
 export type PeppyCopyKey = keyof typeof peppyCopy;
