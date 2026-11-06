@@ -867,6 +867,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_create_compose_draft(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_disable_live_typing(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_discard_unreferenced_attachment(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_dismiss_notification(
@@ -876,6 +878,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_drain_message_history_capture_results(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_deferred_gateway_media(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_live_typing(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_evict_attachment_ciphertext(
     ): Int
@@ -966,6 +970,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_typing_signal_v2(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity(
     ): Int
@@ -1069,6 +1075,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_send_compose_draft(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_send_compose_draft_checked_transport(
@@ -1108,6 +1116,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_provider_error(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_scan_checkpoint(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_typing_sharing(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_acquisitions_after(
     ): Int
@@ -1367,6 +1377,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_create_compose_draft(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_disable_live_typing(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_discard_unreferenced_attachment(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_dismiss_notification(`ptr`: Long,`target`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1377,6 +1389,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_enable_deferred_gateway_media(`ptr`: Long,`wifiConnected`: Byte,`mediaWifiOnly`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_enable_live_typing(`ptr`: Long,`context`: RustBuffer.ByValue,`clock`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_evict_attachment_ciphertext(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_export_native_key_cache_for_native_storage(`ptr`: Long,`epoch`: Int,uniffi_out_err: UniffiRustCallStatus, 
@@ -1467,6 +1481,8 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_native_plaintext_file(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_typing_signal_v2(`ptr`: Long,`frameJson`: RustBuffer.ByValue,`clock`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pause_mms_backfill_for_local_capacity(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_attachment_retention_operations(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1569,6 +1585,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_save_compose_draft(`ptr`: Long,`draftId`: RustBuffer.ByValue,`expectedRevision`: Long,`update`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_seal_typing_signal_v2(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`gatewayDeviceId`: RustBuffer.ByValue,`origin`: RustBuffer.ByValue,`state`: RustBuffer.ByValue,`clock`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_send_compose_draft(`ptr`: Long,`draftId`: RustBuffer.ByValue,`expectedRevision`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_send_compose_draft_checked_transport(`ptr`: Long,`draftId`: RustBuffer.ByValue,`expectedRevision`: Long,`expectedTransport`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1608,6 +1626,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_provider_error(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`providerError`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_scan_checkpoint(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`subscriptionId`: RustBuffer.ByValue,`imported`: Byte,`providerMessageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_typing_sharing(`ptr`: Long,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_acquisitions_after(`ptr`: Long,`afterId`: RustBuffer.ByValue,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2246,6 +2266,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_create_compose_draft() and 0xFFFF) != 64980) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_disable_live_typing() and 0xFFFF) != 460) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_discard_unreferenced_attachment() and 0xFFFF) != 15319) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2259,6 +2282,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_deferred_gateway_media() and 0xFFFF) != 47618) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_live_typing() and 0xFFFF) != 53016) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_evict_attachment_ciphertext() and 0xFFFF) != 53494) {
@@ -2394,6 +2420,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file() and 0xFFFF) != 2659) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_typing_signal_v2() and 0xFFFF) != 46286) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity() and 0xFFFF) != 20629) {
@@ -2549,6 +2578,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft() and 0xFFFF) != 5300) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() and 0xFFFF) != 1319) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_send_compose_draft() and 0xFFFF) != 23646) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2607,6 +2639,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_scan_checkpoint() and 0xFFFF) != 31950) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_typing_sharing() and 0xFFFF) != 8197) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_acquisitions_after() and 0xFFFF) != 47158) {
@@ -3399,6 +3434,11 @@ public interface NativeClientInterface {
     
     fun `createComposeDraft`(`conversationId`: kotlin.String?): NativeComposeDraft
     
+    /**
+     * Retires the current memory-only live typing incarnation.
+     */
+    fun `disableLiveTyping`()
+    
     fun `discardUnreferencedAttachment`(`attachmentId`: kotlin.String): kotlin.Boolean
     
     fun `dismissNotification`(`target`: NativeNotificationTarget)
@@ -3416,6 +3456,11 @@ public interface NativeClientInterface {
      * Supplies transient Android network facts for deferred gateway MMS media selection.
      */
     fun `enableDeferredGatewayMedia`(`wifiConnected`: kotlin.Boolean, `mediaWifiOnly`: kotlin.Boolean)
+    
+    /**
+     * Enables memory-only live typing from host-attested roster and executor facts.
+     */
+    fun `enableLiveTyping`(`context`: NativeLiveEnableContext, `clock`: NativeLiveClock): kotlin.ULong
     
     fun `evictAttachmentCiphertext`(`attachmentId`: kotlin.String): kotlin.Boolean
     
@@ -3533,6 +3578,11 @@ public interface NativeClientInterface {
     fun `openHistoryImportGate`(`reason`: kotlin.String): kotlin.Boolean
     
     fun `openNativePlaintextFile`(`attachmentId`: kotlin.String): NativePlaintextHandle
+    
+    /**
+     * Opens a canonical private live transport frame and returns only sanitized host metadata.
+     */
+    fun `openTypingSignalV2`(`frameJson`: kotlin.String, `clock`: NativeLiveClock): NativeLiveOutcome
     
     fun `pauseMmsBackfillForLocalCapacity`(`generation`: kotlin.String, `scope`: kotlin.String)
     
@@ -3693,6 +3743,11 @@ public interface NativeClientInterface {
     
     fun `saveComposeDraft`(`draftId`: kotlin.String, `expectedRevision`: kotlin.ULong, `update`: NativeComposeDraftUpdate): NativeComposeDraft
     
+    /**
+     * Seals a canonical protocol frame for the private live transport.
+     */
+    fun `sealTypingSignalV2`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `origin`: NativeTypingOrigin, `state`: NativeTypingState, `clock`: NativeLiveClock): NativeLiveOutbound?
+    
     fun `sendComposeDraft`(`draftId`: kotlin.String, `expectedRevision`: kotlin.ULong): NativeQueuedSend
     
     fun `sendComposeDraftCheckedTransport`(`draftId`: kotlin.String, `expectedRevision`: kotlin.ULong, `expectedTransport`: kotlin.String): NativeQueuedSend
@@ -3736,6 +3791,11 @@ public interface NativeClientInterface {
     fun `setSmsProviderError`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `providerError`: kotlin.Boolean)
     
     fun `setSmsScanCheckpoint`(`sourceGeneration`: kotlin.String, `subscriptionId`: kotlin.String, `imported`: kotlin.Boolean, `providerMessageId`: kotlin.String)
+    
+    /**
+     * Separately controls whether this enabled incarnation seals outbound typing frames.
+     */
+    fun `setTypingSharing`(`enabled`: kotlin.Boolean)
     
     fun `smsAcquisitionsAfter`(`afterId`: kotlin.String?, `limit`: kotlin.ULong): List<NativeSmsAcquisition>
     
@@ -4735,6 +4795,22 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    /**
+     * Retires the current memory-only live typing incarnation.
+     */
+    @Throws(NativeLiveTypingException::class)override fun `disableLiveTyping`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(NativeLiveTypingException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_disable_live_typing(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `discardUnreferencedAttachment`(`attachmentId`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithHandle {
@@ -4812,6 +4888,25 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
 }
     }
     
+    
+
+    
+    /**
+     * Enables memory-only live typing from host-attested roster and executor facts.
+     */
+    @Throws(NativeLiveTypingException::class)override fun `enableLiveTyping`(`context`: NativeLiveEnableContext, `clock`: NativeLiveClock): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(NativeLiveTypingException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_enable_live_typing(
+        it,
+        
+        FfiConverterTypeNativeLiveEnableContext.lower(`context`),
+        FfiConverterTypeNativeLiveClock.lower(`clock`),_status)
+}
+    }
+    )
+    }
     
 
     
@@ -5507,6 +5602,25 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`attachmentId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Opens a canonical private live transport frame and returns only sanitized host metadata.
+     */
+    @Throws(NativeLiveTypingException::class)override fun `openTypingSignalV2`(`frameJson`: kotlin.String, `clock`: NativeLiveClock): NativeLiveOutcome {
+            return FfiConverterTypeNativeLiveOutcome.lift(
+    callWithHandle {
+    uniffiRustCallWithError(NativeLiveTypingException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_typing_signal_v2(
+        it,
+        
+        FfiConverterString.lower(`frameJson`),
+        FfiConverterTypeNativeLiveClock.lower(`clock`),_status)
 }
     }
     )
@@ -6353,6 +6467,28 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    /**
+     * Seals a canonical protocol frame for the private live transport.
+     */
+    @Throws(NativeLiveTypingException::class)override fun `sealTypingSignalV2`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `origin`: NativeTypingOrigin, `state`: NativeTypingState, `clock`: NativeLiveClock): NativeLiveOutbound? {
+            return FfiConverterOptionalTypeNativeLiveOutbound.lift(
+    callWithHandle {
+    uniffiRustCallWithError(NativeLiveTypingException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_seal_typing_signal_v2(
+        it,
+        
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterString.lower(`gatewayDeviceId`),
+        FfiConverterTypeNativeTypingOrigin.lower(`origin`),
+        FfiConverterTypeNativeTypingState.lower(`state`),
+        FfiConverterTypeNativeLiveClock.lower(`clock`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `sendComposeDraft`(`draftId`: kotlin.String, `expectedRevision`: kotlin.ULong): NativeQueuedSend {
             return FfiConverterTypeNativeQueuedSend.lift(
     callWithHandle {
@@ -6668,6 +6804,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`subscriptionId`),
         FfiConverterBoolean.lower(`imported`),
         FfiConverterString.lower(`providerMessageId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Separately controls whether this enabled incarnation seals outbound typing frames.
+     */
+    @Throws(NativeLiveTypingException::class)override fun `setTypingSharing`(`enabled`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(NativeLiveTypingException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_typing_sharing(
+        it,
+        
+        FfiConverterBoolean.lower(`enabled`),_status)
 }
     }
     
@@ -10730,6 +10883,221 @@ public object FfiConverterTypeNativeIngestResult: FfiConverterRustBuffer<NativeI
 
 
 
+data class NativeLiveClock (
+    var `wallMs`: kotlin.Long
+    , 
+    var `monoMs`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveClock: FfiConverterRustBuffer<NativeLiveClock> {
+    override fun read(buf: ByteBuffer): NativeLiveClock {
+        return NativeLiveClock(
+            FfiConverterLong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeLiveClock) = (
+            FfiConverterLong.allocationSize(value.`wallMs`) +
+            FfiConverterULong.allocationSize(value.`monoMs`)
+    )
+
+    override fun write(value: NativeLiveClock, buf: ByteBuffer) {
+            FfiConverterLong.write(value.`wallMs`, buf)
+            FfiConverterULong.write(value.`monoMs`, buf)
+    }
+}
+
+
+
+data class NativeLiveEnableContext (
+    var `trustedRoster`: List<kotlin.String>
+    , 
+    var `localGatewayDeviceId`: kotlin.String
+    , 
+    var `localExecutor`: NativeLiveExecutor
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveEnableContext: FfiConverterRustBuffer<NativeLiveEnableContext> {
+    override fun read(buf: ByteBuffer): NativeLiveEnableContext {
+        return NativeLiveEnableContext(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeNativeLiveExecutor.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeLiveEnableContext) = (
+            FfiConverterSequenceString.allocationSize(value.`trustedRoster`) +
+            FfiConverterString.allocationSize(value.`localGatewayDeviceId`) +
+            FfiConverterTypeNativeLiveExecutor.allocationSize(value.`localExecutor`)
+    )
+
+    override fun write(value: NativeLiveEnableContext, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`trustedRoster`, buf)
+            FfiConverterString.write(value.`localGatewayDeviceId`, buf)
+            FfiConverterTypeNativeLiveExecutor.write(value.`localExecutor`, buf)
+    }
+}
+
+
+
+data class NativeLiveOutbound (
+    var `generation`: kotlin.ULong
+    , 
+    var `frameJson`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveOutbound: FfiConverterRustBuffer<NativeLiveOutbound> {
+    override fun read(buf: ByteBuffer): NativeLiveOutbound {
+        return NativeLiveOutbound(
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeLiveOutbound) = (
+            FfiConverterULong.allocationSize(value.`generation`) +
+            FfiConverterString.allocationSize(value.`frameJson`)
+    )
+
+    override fun write(value: NativeLiveOutbound, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`generation`, buf)
+            FfiConverterString.write(value.`frameJson`, buf)
+    }
+}
+
+
+
+data class NativeLiveOutcome (
+    var `generation`: kotlin.ULong
+    , 
+    var `sessionUpdate`: NativeLiveSessionUpdate?
+    , 
+    var `action`: NativeLiveAction?
+    , 
+    var `replyFrameJson`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveOutcome: FfiConverterRustBuffer<NativeLiveOutcome> {
+    override fun read(buf: ByteBuffer): NativeLiveOutcome {
+        return NativeLiveOutcome(
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalTypeNativeLiveSessionUpdate.read(buf),
+            FfiConverterOptionalTypeNativeLiveAction.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeLiveOutcome) = (
+            FfiConverterULong.allocationSize(value.`generation`) +
+            FfiConverterOptionalTypeNativeLiveSessionUpdate.allocationSize(value.`sessionUpdate`) +
+            FfiConverterOptionalTypeNativeLiveAction.allocationSize(value.`action`) +
+            FfiConverterOptionalString.allocationSize(value.`replyFrameJson`)
+    )
+
+    override fun write(value: NativeLiveOutcome, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`generation`, buf)
+            FfiConverterOptionalTypeNativeLiveSessionUpdate.write(value.`sessionUpdate`, buf)
+            FfiConverterOptionalTypeNativeLiveAction.write(value.`action`, buf)
+            FfiConverterOptionalString.write(value.`replyFrameJson`, buf)
+    }
+}
+
+
+
+data class NativeLiveSessionUpdate (
+    var `peerDeviceId`: kotlin.String
+    , 
+    var `replacedSessionToken`: kotlin.ULong?
+    , 
+    var `currentSessionToken`: kotlin.ULong
+    , 
+    var `validationRevision`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveSessionUpdate: FfiConverterRustBuffer<NativeLiveSessionUpdate> {
+    override fun read(buf: ByteBuffer): NativeLiveSessionUpdate {
+        return NativeLiveSessionUpdate(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeLiveSessionUpdate) = (
+            FfiConverterString.allocationSize(value.`peerDeviceId`) +
+            FfiConverterOptionalULong.allocationSize(value.`replacedSessionToken`) +
+            FfiConverterULong.allocationSize(value.`currentSessionToken`) +
+            FfiConverterULong.allocationSize(value.`validationRevision`)
+    )
+
+    override fun write(value: NativeLiveSessionUpdate, buf: ByteBuffer) {
+            FfiConverterString.write(value.`peerDeviceId`, buf)
+            FfiConverterOptionalULong.write(value.`replacedSessionToken`, buf)
+            FfiConverterULong.write(value.`currentSessionToken`, buf)
+            FfiConverterULong.write(value.`validationRevision`, buf)
+    }
+}
+
+
+
 /**
  * Sanitized message presentation data. Database keys, passphrases, purpose keys,
  * and envelope encryption keys are never returned through this record.
@@ -14551,6 +14919,279 @@ public object FfiConverterTypeNativeIngestState: FfiConverterRustBuffer<NativeIn
 
 
 
+sealed class NativeLiveAction {
+    
+    data class Display(
+        val `peerDeviceId`: kotlin.String, 
+        val `sessionToken`: kotlin.ULong, 
+        val `sequence`: kotlin.ULong, 
+        val `conversationId`: kotlin.String, 
+        val `state`: uniffi.peppy_mobile_bindings.NativeTypingState, 
+        val `deadlineMono`: kotlin.ULong) : NativeLiveAction()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class GatewayTypingIntent(
+        val `peerDeviceId`: kotlin.String, 
+        val `sessionToken`: kotlin.ULong, 
+        val `sequence`: kotlin.ULong, 
+        val `conversationId`: kotlin.String, 
+        val `state`: uniffi.peppy_mobile_bindings.NativeTypingState, 
+        val `deadlineMono`: kotlin.ULong) : NativeLiveAction()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveAction : FfiConverterRustBuffer<NativeLiveAction>{
+    override fun read(buf: ByteBuffer): NativeLiveAction {
+        return when(buf.getInt()) {
+            1 -> NativeLiveAction.Display(
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterTypeNativeTypingState.read(buf),
+                FfiConverterULong.read(buf),
+                )
+            2 -> NativeLiveAction.GatewayTypingIntent(
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterTypeNativeTypingState.read(buf),
+                FfiConverterULong.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: NativeLiveAction): ULong = when(value) {
+        is NativeLiveAction.Display -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`peerDeviceId`)
+                + FfiConverterULong.allocationSize(value.`sessionToken`)
+                + FfiConverterULong.allocationSize(value.`sequence`)
+                + FfiConverterString.allocationSize(value.`conversationId`)
+                + FfiConverterTypeNativeTypingState.allocationSize(value.`state`)
+                + FfiConverterULong.allocationSize(value.`deadlineMono`)
+            )
+        }
+        is NativeLiveAction.GatewayTypingIntent -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`peerDeviceId`)
+                + FfiConverterULong.allocationSize(value.`sessionToken`)
+                + FfiConverterULong.allocationSize(value.`sequence`)
+                + FfiConverterString.allocationSize(value.`conversationId`)
+                + FfiConverterTypeNativeTypingState.allocationSize(value.`state`)
+                + FfiConverterULong.allocationSize(value.`deadlineMono`)
+            )
+        }
+    }
+
+    override fun write(value: NativeLiveAction, buf: ByteBuffer) {
+        when(value) {
+            is NativeLiveAction.Display -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`peerDeviceId`, buf)
+                FfiConverterULong.write(value.`sessionToken`, buf)
+                FfiConverterULong.write(value.`sequence`, buf)
+                FfiConverterString.write(value.`conversationId`, buf)
+                FfiConverterTypeNativeTypingState.write(value.`state`, buf)
+                FfiConverterULong.write(value.`deadlineMono`, buf)
+                Unit
+            }
+            is NativeLiveAction.GatewayTypingIntent -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`peerDeviceId`, buf)
+                FfiConverterULong.write(value.`sessionToken`, buf)
+                FfiConverterULong.write(value.`sequence`, buf)
+                FfiConverterString.write(value.`conversationId`, buf)
+                FfiConverterTypeNativeTypingState.write(value.`state`, buf)
+                FfiConverterULong.write(value.`deadlineMono`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class NativeLiveExecutor {
+    
+    NONE,
+    CURRENT_GATEWAY;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveExecutor: FfiConverterRustBuffer<NativeLiveExecutor> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeLiveExecutor.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeLiveExecutor) = 4UL
+
+    override fun write(value: NativeLiveExecutor, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+
+sealed class NativeLiveTypingException: kotlin.Exception() {
+    
+    class Clock(
+        ) : NativeLiveTypingException() {
+        override val message
+            get() = ""
+    }
+    
+    class Disabled(
+        ) : NativeLiveTypingException() {
+        override val message
+            get() = ""
+    }
+    
+    class CounterExhausted(
+        ) : NativeLiveTypingException() {
+        override val message
+            get() = ""
+    }
+    
+    class Crypto(
+        ) : NativeLiveTypingException() {
+        override val message
+            get() = ""
+    }
+    
+    class InvalidContext(
+        ) : NativeLiveTypingException() {
+        override val message
+            get() = ""
+    }
+    
+
+    
+
+
+    companion object ErrorHandler : UniffiRustCallStatusErrorHandler<NativeLiveTypingException> {
+        override fun lift(error_buf: RustBuffer.ByValue): NativeLiveTypingException = FfiConverterTypeNativeLiveTypingError.lift(error_buf)
+    }
+
+    
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveTypingError : FfiConverterRustBuffer<NativeLiveTypingException> {
+    override fun read(buf: ByteBuffer): NativeLiveTypingException {
+        
+
+        return when(buf.getInt()) {
+            1 -> NativeLiveTypingException.Clock()
+            2 -> NativeLiveTypingException.Disabled()
+            3 -> NativeLiveTypingException.CounterExhausted()
+            4 -> NativeLiveTypingException.Crypto()
+            5 -> NativeLiveTypingException.InvalidContext()
+            else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: NativeLiveTypingException): ULong {
+        return when(value) {
+            is NativeLiveTypingException.Clock -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is NativeLiveTypingException.Disabled -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is NativeLiveTypingException.CounterExhausted -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is NativeLiveTypingException.Crypto -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is NativeLiveTypingException.InvalidContext -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: NativeLiveTypingException, buf: ByteBuffer) {
+        when(value) {
+            is NativeLiveTypingException.Clock -> {
+                buf.putInt(1)
+                Unit
+            }
+            is NativeLiveTypingException.Disabled -> {
+                buf.putInt(2)
+                Unit
+            }
+            is NativeLiveTypingException.CounterExhausted -> {
+                buf.putInt(3)
+                Unit
+            }
+            is NativeLiveTypingException.Crypto -> {
+                buf.putInt(4)
+                Unit
+            }
+            is NativeLiveTypingException.InvalidContext -> {
+                buf.putInt(5)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+
+}
+
+
+
 
 enum class NativeMmsAcquisitionState {
     
@@ -15444,6 +16085,74 @@ public object FfiConverterTypeNativeStorageCleanupUnavailableReason: FfiConverte
 
 
 
+enum class NativeTypingOrigin {
+    
+    VAULT_DEVICE,
+    GOOGLE_CONTACT;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeTypingOrigin: FfiConverterRustBuffer<NativeTypingOrigin> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeTypingOrigin.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeTypingOrigin) = 4UL
+
+    override fun write(value: NativeTypingOrigin, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeTypingState {
+    
+    STARTED,
+    STOPPED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeTypingState: FfiConverterRustBuffer<NativeTypingState> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeTypingState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeTypingState) = 4UL
+
+    override fun write(value: NativeTypingState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class SyncStepState {
     
     COMPLETED,
@@ -15705,6 +16414,70 @@ public object FfiConverterOptionalTypeNativeCarrierCommand: FfiConverterRustBuff
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeNativeLiveOutbound: FfiConverterRustBuffer<NativeLiveOutbound?> {
+    override fun read(buf: ByteBuffer): NativeLiveOutbound? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeLiveOutbound.read(buf)
+    }
+
+    override fun allocationSize(value: NativeLiveOutbound?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeLiveOutbound.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeLiveOutbound?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeLiveOutbound.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeLiveSessionUpdate: FfiConverterRustBuffer<NativeLiveSessionUpdate?> {
+    override fun read(buf: ByteBuffer): NativeLiveSessionUpdate? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeLiveSessionUpdate.read(buf)
+    }
+
+    override fun allocationSize(value: NativeLiveSessionUpdate?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeLiveSessionUpdate.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeLiveSessionUpdate?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeLiveSessionUpdate.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeNativePendingVaultRequest: FfiConverterRustBuffer<NativePendingVaultRequest?> {
     override fun read(buf: ByteBuffer): NativePendingVaultRequest? {
         if (buf.get().toInt() == 0) {
@@ -15919,6 +16692,38 @@ public object FfiConverterOptionalTypeNativeEnrollmentMethod: FfiConverterRustBu
         } else {
             buf.put(1)
             FfiConverterTypeNativeEnrollmentMethod.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeLiveAction: FfiConverterRustBuffer<NativeLiveAction?> {
+    override fun read(buf: ByteBuffer): NativeLiveAction? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeLiveAction.read(buf)
+    }
+
+    override fun allocationSize(value: NativeLiveAction?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeLiveAction.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeLiveAction?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeLiveAction.write(value, buf)
         }
     }
 }

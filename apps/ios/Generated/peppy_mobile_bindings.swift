@@ -773,6 +773,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func createComposeDraft(conversationId: String?) throws  -> NativeComposeDraft
     
+    /**
+     * Retires the current memory-only live typing incarnation.
+     */
+    func disableLiveTyping() throws 
+    
     func discardUnreferencedAttachment(attachmentId: String) throws  -> Bool
     
     func dismissNotification(target: NativeNotificationTarget) throws 
@@ -790,6 +795,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * Supplies transient Android network facts for deferred gateway MMS media selection.
      */
     func enableDeferredGatewayMedia(wifiConnected: Bool, mediaWifiOnly: Bool) throws 
+    
+    /**
+     * Enables memory-only live typing from host-attested roster and executor facts.
+     */
+    func enableLiveTyping(context: NativeLiveEnableContext, clock: NativeLiveClock) throws  -> UInt64
     
     func evictAttachmentCiphertext(attachmentId: String) throws  -> Bool
     
@@ -907,6 +917,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func openHistoryImportGate(reason: String) throws  -> Bool
     
     func openNativePlaintextFile(attachmentId: String) throws  -> NativePlaintextHandle
+    
+    /**
+     * Opens a canonical private live transport frame and returns only sanitized host metadata.
+     */
+    func openTypingSignalV2(frameJson: String, clock: NativeLiveClock) throws  -> NativeLiveOutcome
     
     func pauseMmsBackfillForLocalCapacity(generation: String, scope: String) throws 
     
@@ -1067,6 +1082,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: NativeComposeDraftUpdate) throws  -> NativeComposeDraft
     
+    /**
+     * Seals a canonical protocol frame for the private live transport.
+     */
+    func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, origin: NativeTypingOrigin, state: NativeTypingState, clock: NativeLiveClock) throws  -> NativeLiveOutbound?
+    
     func sendComposeDraft(draftId: String, expectedRevision: UInt64) throws  -> NativeQueuedSend
     
     func sendComposeDraftCheckedTransport(draftId: String, expectedRevision: UInt64, expectedTransport: String) throws  -> NativeQueuedSend
@@ -1110,6 +1130,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func setSmsProviderError(sourceGeneration: String, providerScope: String, providerError: Bool) throws 
     
     func setSmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool, providerMessageId: String) throws 
+    
+    /**
+     * Separately controls whether this enabled incarnation seals outbound typing frames.
+     */
+    func setTypingSharing(enabled: Bool) throws 
     
     func smsAcquisitionsAfter(afterId: String?, limit: UInt64) throws  -> [NativeSmsAcquisition]
     
@@ -1783,6 +1808,17 @@ open func createComposeDraft(conversationId: String?)throws  -> NativeComposeDra
 })
 }
     
+    /**
+     * Retires the current memory-only live typing incarnation.
+     */
+open func disableLiveTyping()throws   {try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_disable_live_typing(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
 open func discardUnreferencedAttachment(attachmentId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1836,6 +1872,20 @@ open func enableDeferredGatewayMedia(wifiConnected: Bool, mediaWifiOnly: Bool)th
         FfiConverterBool.lower(mediaWifiOnly),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Enables memory-only live typing from host-attested roster and executor facts.
+     */
+open func enableLiveTyping(context: NativeLiveEnableContext, clock: NativeLiveClock)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_enable_live_typing(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativeLiveEnableContext_lower(context),
+        FfiConverterTypeNativeLiveClock_lower(clock),uniffiCallStatus
+    )
+})
 }
     
 open func evictAttachmentCiphertext(attachmentId: String)throws  -> Bool  {
@@ -2309,6 +2359,20 @@ open func openNativePlaintextFile(attachmentId: String)throws  -> NativePlaintex
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_native_plaintext_file(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(attachmentId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Opens a canonical private live transport frame and returns only sanitized host metadata.
+     */
+open func openTypingSignalV2(frameJson: String, clock: NativeLiveClock)throws  -> NativeLiveOutcome  {
+    return try  FfiConverterTypeNativeLiveOutcome_lift(try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_typing_signal_v2(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(frameJson),
+        FfiConverterTypeNativeLiveClock_lower(clock),uniffiCallStatus
     )
 })
 }
@@ -2897,6 +2961,23 @@ open func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: Na
 })
 }
     
+    /**
+     * Seals a canonical protocol frame for the private live transport.
+     */
+open func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, origin: NativeTypingOrigin, state: NativeTypingState, clock: NativeLiveClock)throws  -> NativeLiveOutbound?  {
+    return try  FfiConverterOptionTypeNativeLiveOutbound.lift(try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_seal_typing_signal_v2(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterString.lower(gatewayDeviceId),
+        FfiConverterTypeNativeTypingOrigin_lower(origin),
+        FfiConverterTypeNativeTypingState_lower(state),
+        FfiConverterTypeNativeLiveClock_lower(clock),uniffiCallStatus
+    )
+})
+}
+    
 open func sendComposeDraft(draftId: String, expectedRevision: UInt64)throws  -> NativeQueuedSend  {
     return try  FfiConverterTypeNativeQueuedSend_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3114,6 +3195,18 @@ open func setSmsScanCheckpoint(sourceGeneration: String, subscriptionId: String,
         FfiConverterString.lower(subscriptionId),
         FfiConverterBool.lower(imported),
         FfiConverterString.lower(providerMessageId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Separately controls whether this enabled incarnation seals outbound typing frames.
+     */
+open func setTypingSharing(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_typing_sharing(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(enabled),uniffiCallStatus
     )
 }
 }
@@ -6479,6 +6572,296 @@ public func FfiConverterTypeNativeIngestResult_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeNativeIngestResult_lower(_ value: NativeIngestResult) -> RustBuffer {
     return FfiConverterTypeNativeIngestResult.lower(value)
+}
+
+
+public struct NativeLiveClock: Equatable, Hashable {
+    public var wallMs: Int64
+    public var monoMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(wallMs: Int64, monoMs: UInt64) {
+        self.wallMs = wallMs
+        self.monoMs = monoMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeLiveClock: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveClock: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveClock {
+        return
+            try NativeLiveClock(
+                wallMs: FfiConverterInt64.read(from: &buf), 
+                monoMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeLiveClock, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.wallMs, into: &buf)
+        FfiConverterUInt64.write(value.monoMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveClock_lift(_ buf: RustBuffer) throws -> NativeLiveClock {
+    return try FfiConverterTypeNativeLiveClock.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveClock_lower(_ value: NativeLiveClock) -> RustBuffer {
+    return FfiConverterTypeNativeLiveClock.lower(value)
+}
+
+
+public struct NativeLiveEnableContext: Equatable, Hashable {
+    public var trustedRoster: [String]
+    public var localGatewayDeviceId: String
+    public var localExecutor: NativeLiveExecutor
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(trustedRoster: [String], localGatewayDeviceId: String, localExecutor: NativeLiveExecutor) {
+        self.trustedRoster = trustedRoster
+        self.localGatewayDeviceId = localGatewayDeviceId
+        self.localExecutor = localExecutor
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeLiveEnableContext: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveEnableContext: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveEnableContext {
+        return
+            try NativeLiveEnableContext(
+                trustedRoster: FfiConverterSequenceString.read(from: &buf), 
+                localGatewayDeviceId: FfiConverterString.read(from: &buf), 
+                localExecutor: FfiConverterTypeNativeLiveExecutor.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeLiveEnableContext, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.trustedRoster, into: &buf)
+        FfiConverterString.write(value.localGatewayDeviceId, into: &buf)
+        FfiConverterTypeNativeLiveExecutor.write(value.localExecutor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveEnableContext_lift(_ buf: RustBuffer) throws -> NativeLiveEnableContext {
+    return try FfiConverterTypeNativeLiveEnableContext.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveEnableContext_lower(_ value: NativeLiveEnableContext) -> RustBuffer {
+    return FfiConverterTypeNativeLiveEnableContext.lower(value)
+}
+
+
+public struct NativeLiveOutbound: Equatable, Hashable {
+    public var generation: UInt64
+    public var frameJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(generation: UInt64, frameJson: String) {
+        self.generation = generation
+        self.frameJson = frameJson
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeLiveOutbound: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveOutbound: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveOutbound {
+        return
+            try NativeLiveOutbound(
+                generation: FfiConverterUInt64.read(from: &buf), 
+                frameJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeLiveOutbound, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.generation, into: &buf)
+        FfiConverterString.write(value.frameJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveOutbound_lift(_ buf: RustBuffer) throws -> NativeLiveOutbound {
+    return try FfiConverterTypeNativeLiveOutbound.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveOutbound_lower(_ value: NativeLiveOutbound) -> RustBuffer {
+    return FfiConverterTypeNativeLiveOutbound.lower(value)
+}
+
+
+public struct NativeLiveOutcome: Equatable, Hashable {
+    public var generation: UInt64
+    public var sessionUpdate: NativeLiveSessionUpdate?
+    public var action: NativeLiveAction?
+    public var replyFrameJson: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(generation: UInt64, sessionUpdate: NativeLiveSessionUpdate?, action: NativeLiveAction?, replyFrameJson: String?) {
+        self.generation = generation
+        self.sessionUpdate = sessionUpdate
+        self.action = action
+        self.replyFrameJson = replyFrameJson
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeLiveOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveOutcome {
+        return
+            try NativeLiveOutcome(
+                generation: FfiConverterUInt64.read(from: &buf), 
+                sessionUpdate: FfiConverterOptionTypeNativeLiveSessionUpdate.read(from: &buf), 
+                action: FfiConverterOptionTypeNativeLiveAction.read(from: &buf), 
+                replyFrameJson: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeLiveOutcome, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.generation, into: &buf)
+        FfiConverterOptionTypeNativeLiveSessionUpdate.write(value.sessionUpdate, into: &buf)
+        FfiConverterOptionTypeNativeLiveAction.write(value.action, into: &buf)
+        FfiConverterOptionString.write(value.replyFrameJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveOutcome_lift(_ buf: RustBuffer) throws -> NativeLiveOutcome {
+    return try FfiConverterTypeNativeLiveOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveOutcome_lower(_ value: NativeLiveOutcome) -> RustBuffer {
+    return FfiConverterTypeNativeLiveOutcome.lower(value)
+}
+
+
+public struct NativeLiveSessionUpdate: Equatable, Hashable {
+    public var peerDeviceId: String
+    public var replacedSessionToken: UInt64?
+    public var currentSessionToken: UInt64
+    public var validationRevision: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(peerDeviceId: String, replacedSessionToken: UInt64?, currentSessionToken: UInt64, validationRevision: UInt64) {
+        self.peerDeviceId = peerDeviceId
+        self.replacedSessionToken = replacedSessionToken
+        self.currentSessionToken = currentSessionToken
+        self.validationRevision = validationRevision
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeLiveSessionUpdate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveSessionUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveSessionUpdate {
+        return
+            try NativeLiveSessionUpdate(
+                peerDeviceId: FfiConverterString.read(from: &buf), 
+                replacedSessionToken: FfiConverterOptionUInt64.read(from: &buf), 
+                currentSessionToken: FfiConverterUInt64.read(from: &buf), 
+                validationRevision: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeLiveSessionUpdate, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.peerDeviceId, into: &buf)
+        FfiConverterOptionUInt64.write(value.replacedSessionToken, into: &buf)
+        FfiConverterUInt64.write(value.currentSessionToken, into: &buf)
+        FfiConverterUInt64.write(value.validationRevision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveSessionUpdate_lift(_ buf: RustBuffer) throws -> NativeLiveSessionUpdate {
+    return try FfiConverterTypeNativeLiveSessionUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveSessionUpdate_lower(_ value: NativeLiveSessionUpdate) -> RustBuffer {
+    return FfiConverterTypeNativeLiveSessionUpdate.lower(value)
 }
 
 
@@ -11367,6 +11750,249 @@ public func FfiConverterTypeNativeIngestState_lower(_ value: NativeIngestState) 
 
 
 
+public enum NativeLiveAction: Equatable, Hashable {
+    
+    case display(peerDeviceId: String, sessionToken: UInt64, sequence: UInt64, conversationId: String, state: NativeTypingState, deadlineMono: UInt64
+    )
+    case gatewayTypingIntent(peerDeviceId: String, sessionToken: UInt64, sequence: UInt64, conversationId: String, state: NativeTypingState, deadlineMono: UInt64
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeLiveAction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveAction: FfiConverterRustBuffer {
+    typealias SwiftType = NativeLiveAction
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveAction {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .display(peerDeviceId: try FfiConverterString.read(from: &buf), sessionToken: try FfiConverterUInt64.read(from: &buf), sequence: try FfiConverterUInt64.read(from: &buf), conversationId: try FfiConverterString.read(from: &buf), state: try FfiConverterTypeNativeTypingState.read(from: &buf), deadlineMono: try FfiConverterUInt64.read(from: &buf)
+        )
+        
+        case 2: return .gatewayTypingIntent(peerDeviceId: try FfiConverterString.read(from: &buf), sessionToken: try FfiConverterUInt64.read(from: &buf), sequence: try FfiConverterUInt64.read(from: &buf), conversationId: try FfiConverterString.read(from: &buf), state: try FfiConverterTypeNativeTypingState.read(from: &buf), deadlineMono: try FfiConverterUInt64.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeLiveAction, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .display(peerDeviceId,sessionToken,sequence,conversationId,state,deadlineMono):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(peerDeviceId, into: &buf)
+            FfiConverterUInt64.write(sessionToken, into: &buf)
+            FfiConverterUInt64.write(sequence, into: &buf)
+            FfiConverterString.write(conversationId, into: &buf)
+            FfiConverterTypeNativeTypingState.write(state, into: &buf)
+            FfiConverterUInt64.write(deadlineMono, into: &buf)
+            
+        
+        case let .gatewayTypingIntent(peerDeviceId,sessionToken,sequence,conversationId,state,deadlineMono):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(peerDeviceId, into: &buf)
+            FfiConverterUInt64.write(sessionToken, into: &buf)
+            FfiConverterUInt64.write(sequence, into: &buf)
+            FfiConverterString.write(conversationId, into: &buf)
+            FfiConverterTypeNativeTypingState.write(state, into: &buf)
+            FfiConverterUInt64.write(deadlineMono, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveAction_lift(_ buf: RustBuffer) throws -> NativeLiveAction {
+    return try FfiConverterTypeNativeLiveAction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveAction_lower(_ value: NativeLiveAction) -> RustBuffer {
+    return FfiConverterTypeNativeLiveAction.lower(value)
+}
+
+
+
+
+public enum NativeLiveExecutor: Equatable, Hashable {
+    
+    case none
+    case currentGateway
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeLiveExecutor: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveExecutor: FfiConverterRustBuffer {
+    typealias SwiftType = NativeLiveExecutor
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveExecutor {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .none
+        
+        case 2: return .currentGateway
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeLiveExecutor, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .none:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .currentGateway:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveExecutor_lift(_ buf: RustBuffer) throws -> NativeLiveExecutor {
+    return try FfiConverterTypeNativeLiveExecutor.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveExecutor_lower(_ value: NativeLiveExecutor) -> RustBuffer {
+    return FfiConverterTypeNativeLiveExecutor.lower(value)
+}
+
+
+
+public 
+enum NativeLiveTypingError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    case Clock
+    case Disabled
+    case CounterExhausted
+    case Crypto
+    case InvalidContext
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension NativeLiveTypingError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveTypingError: FfiConverterRustBuffer {
+    typealias SwiftType = NativeLiveTypingError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveTypingError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .Clock
+        case 2: return .Disabled
+        case 3: return .CounterExhausted
+        case 4: return .Crypto
+        case 5: return .InvalidContext
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeLiveTypingError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case .Clock:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .Disabled:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .CounterExhausted:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .Crypto:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .InvalidContext:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveTypingError_lift(_ buf: RustBuffer) throws -> NativeLiveTypingError {
+    return try FfiConverterTypeNativeLiveTypingError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveTypingError_lower(_ value: NativeLiveTypingError) -> RustBuffer {
+    return FfiConverterTypeNativeLiveTypingError.lower(value)
+}
+
+
+
 public enum NativeMmsAcquisitionState: Equatable, Hashable {
     
     case pending
@@ -13264,6 +13890,138 @@ public func FfiConverterTypeNativeStorageCleanupUnavailableReason_lower(_ value:
 
 
 
+public enum NativeTypingOrigin: Equatable, Hashable {
+    
+    case vaultDevice
+    case googleContact
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeTypingOrigin: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeTypingOrigin: FfiConverterRustBuffer {
+    typealias SwiftType = NativeTypingOrigin
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeTypingOrigin {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .vaultDevice
+        
+        case 2: return .googleContact
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeTypingOrigin, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .vaultDevice:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .googleContact:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeTypingOrigin_lift(_ buf: RustBuffer) throws -> NativeTypingOrigin {
+    return try FfiConverterTypeNativeTypingOrigin.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeTypingOrigin_lower(_ value: NativeTypingOrigin) -> RustBuffer {
+    return FfiConverterTypeNativeTypingOrigin.lower(value)
+}
+
+
+
+
+public enum NativeTypingState: Equatable, Hashable {
+    
+    case started
+    case stopped
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeTypingState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeTypingState: FfiConverterRustBuffer {
+    typealias SwiftType = NativeTypingState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeTypingState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .started
+        
+        case 2: return .stopped
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeTypingState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .started:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .stopped:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeTypingState_lift(_ buf: RustBuffer) throws -> NativeTypingState {
+    return try FfiConverterTypeNativeTypingState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeTypingState_lower(_ value: NativeTypingState) -> RustBuffer {
+    return FfiConverterTypeNativeTypingState.lower(value)
+}
+
+
+
+
 public enum SyncStepState: Equatable, Hashable {
     
     case completed
@@ -13499,6 +14257,54 @@ fileprivate struct FfiConverterOptionTypeNativeCarrierCommand: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNativeLiveOutbound: FfiConverterRustBuffer {
+    typealias SwiftType = NativeLiveOutbound?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeLiveOutbound.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeLiveOutbound.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeNativeLiveSessionUpdate: FfiConverterRustBuffer {
+    typealias SwiftType = NativeLiveSessionUpdate?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeLiveSessionUpdate.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeLiveSessionUpdate.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeNativePendingVaultRequest: FfiConverterRustBuffer {
     typealias SwiftType = NativePendingVaultRequest?
 
@@ -13659,6 +14465,30 @@ fileprivate struct FfiConverterOptionTypeNativeEnrollmentMethod: FfiConverterRus
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeNativeEnrollmentMethod.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeNativeLiveAction: FfiConverterRustBuffer {
+    typealias SwiftType = NativeLiveAction?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeLiveAction.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeLiveAction.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -14982,6 +15812,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_create_compose_draft() != 64980) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_disable_live_typing() != 460) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_discard_unreferenced_attachment() != 15319) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14995,6 +15828,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_deferred_gateway_media() != 47618) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_live_typing() != 53016) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_evict_attachment_ciphertext() != 53494) {
@@ -15130,6 +15966,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file() != 2659) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_typing_signal_v2() != 46286) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity() != 20629) {
@@ -15285,6 +16124,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft() != 5300) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() != 1319) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_send_compose_draft() != 23646) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15343,6 +16185,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_scan_checkpoint() != 31950) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_typing_sharing() != 8197) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_acquisitions_after() != 47158) {

@@ -1,0 +1,283 @@
+//! Sanitized UniFFI boundary for memory-only live typing.
+
+use peppy_client_core::{
+    Client, ConversationId, DeviceId, LiveAction, LiveClock, LiveEnableContext, LiveError,
+    LiveExecutor, LiveOutcome,
+};
+use peppy_protocol::{EphemeralSignalV2, TypingOriginV2, TypingStateV2};
+use std::{str::FromStr, sync::Mutex};
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeLiveEnableContext {
+    pub trusted_roster: Vec<String>,
+    pub local_gateway_device_id: String,
+    pub local_executor: NativeLiveExecutor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeLiveExecutor {
+    None,
+    CurrentGateway,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct NativeLiveClock {
+    pub wall_ms: i64,
+    pub mono_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeTypingOrigin {
+    VaultDevice,
+    GoogleContact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeTypingState {
+    Started,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeLiveOutbound {
+    pub generation: u64,
+    pub frame_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeLiveSessionUpdate {
+    pub peer_device_id: String,
+    pub replaced_session_token: Option<u64>,
+    pub current_session_token: u64,
+    pub validation_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeLiveAction {
+    Display {
+        peer_device_id: String,
+        session_token: u64,
+        sequence: u64,
+        conversation_id: String,
+        state: NativeTypingState,
+        deadline_mono: u64,
+    },
+    GatewayTypingIntent {
+        peer_device_id: String,
+        session_token: u64,
+        sequence: u64,
+        conversation_id: String,
+        state: NativeTypingState,
+        deadline_mono: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeLiveOutcome {
+    pub generation: u64,
+    pub session_update: Option<NativeLiveSessionUpdate>,
+    pub action: Option<NativeLiveAction>,
+    pub reply_frame_json: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum NativeLiveTypingError {
+    #[error("clock")]
+    Clock,
+    #[error("disabled")]
+    Disabled,
+    #[error("counter_exhausted")]
+    CounterExhausted,
+    #[error("crypto")]
+    Crypto,
+    #[error("invalid_context")]
+    InvalidContext,
+}
+
+pub(crate) fn with_live_client<T>(
+    handle: &Mutex<Option<Client>>,
+    operation: impl FnOnce(&Client) -> Result<T, NativeLiveTypingError>,
+) -> Result<T, NativeLiveTypingError> {
+    let client = handle
+        .lock()
+        .map_err(|_| NativeLiveTypingError::InvalidContext)?
+        .as_ref()
+        .ok_or(NativeLiveTypingError::InvalidContext)?
+        .clone();
+    operation(&client)
+}
+
+pub(crate) fn enable_context(
+    value: NativeLiveEnableContext,
+) -> Result<LiveEnableContext, NativeLiveTypingError> {
+    let trusted_roster = value
+        .trusted_roster
+        .iter()
+        .map(|device_id| parse_device_id(device_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(LiveEnableContext {
+        trusted_roster,
+        local_gateway_device_id: parse_device_id(&value.local_gateway_device_id)?,
+        local_executor: match value.local_executor {
+            NativeLiveExecutor::None => LiveExecutor::None,
+            NativeLiveExecutor::CurrentGateway => LiveExecutor::CurrentGateway,
+        },
+    })
+}
+
+pub(crate) fn parse_device_id(value: &str) -> Result<DeviceId, NativeLiveTypingError> {
+    DeviceId::from_str(value).map_err(|_| NativeLiveTypingError::InvalidContext)
+}
+
+pub(crate) fn parse_conversation_id(value: &str) -> Result<ConversationId, NativeLiveTypingError> {
+    ConversationId::from_str(value).map_err(|_| NativeLiveTypingError::InvalidContext)
+}
+
+pub(crate) fn clock(value: NativeLiveClock) -> Result<LiveClock, NativeLiveTypingError> {
+    if value.wall_ms < 0 {
+        return Err(NativeLiveTypingError::Clock);
+    }
+    Ok(LiveClock {
+        wall_ms: value.wall_ms,
+        mono_ms: value.mono_ms,
+    })
+}
+
+pub(crate) fn origin(value: NativeTypingOrigin) -> TypingOriginV2 {
+    match value {
+        NativeTypingOrigin::VaultDevice => TypingOriginV2::VaultDevice,
+        NativeTypingOrigin::GoogleContact => TypingOriginV2::GoogleContact,
+    }
+}
+
+pub(crate) fn state(value: NativeTypingState) -> TypingStateV2 {
+    match value {
+        NativeTypingState::Started => TypingStateV2::Started,
+        NativeTypingState::Stopped => TypingStateV2::Stopped,
+    }
+}
+
+pub(crate) fn parse_frame(value: &str) -> Option<EphemeralSignalV2> {
+    let frame = serde_json::from_str::<EphemeralSignalV2>(value).ok()?;
+    frame.validate().ok()?;
+    Some(frame)
+}
+
+pub(crate) fn outbound_view(
+    value: Option<peppy_client_core::LiveOutbound>,
+) -> Result<Option<NativeLiveOutbound>, NativeLiveTypingError> {
+    value
+        .map(|outbound| {
+            Ok(NativeLiveOutbound {
+                generation: outbound.generation.0,
+                frame_json: serde_json::to_string(&outbound.signal)
+                    .map_err(|_| NativeLiveTypingError::Crypto)?,
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn outcome_view(value: LiveOutcome) -> Result<NativeLiveOutcome, NativeLiveTypingError> {
+    Ok(NativeLiveOutcome {
+        generation: value.generation.0,
+        session_update: value.session_update.map(|update| NativeLiveSessionUpdate {
+            peer_device_id: update.peer_device_id.to_string(),
+            replaced_session_token: update.replaced_session_token,
+            current_session_token: update.current_session_token,
+            validation_revision: update.validation_revision,
+        }),
+        action: value.action.map(action_view),
+        reply_frame_json: value
+            .reply
+            .map(|frame| serde_json::to_string(&frame).map_err(|_| NativeLiveTypingError::Crypto))
+            .transpose()?,
+    })
+}
+
+pub(crate) fn empty_outcome() -> LiveOutcome {
+    LiveOutcome {
+        generation: peppy_client_core::LiveEnableGeneration(0),
+        session_update: None,
+        action: None,
+        reply: None,
+    }
+}
+
+fn action_view(value: LiveAction) -> NativeLiveAction {
+    match value {
+        LiveAction::Display {
+            peer_device_id,
+            session_token,
+            sequence,
+            conversation_id,
+            state,
+            deadline_mono,
+        } => NativeLiveAction::Display {
+            peer_device_id: peer_device_id.to_string(),
+            session_token,
+            sequence,
+            conversation_id: conversation_id.to_string(),
+            state: state_view(state),
+            deadline_mono,
+        },
+        LiveAction::GatewayTypingIntent {
+            peer_device_id,
+            session_token,
+            sequence,
+            conversation_id,
+            state,
+            deadline_mono,
+        } => NativeLiveAction::GatewayTypingIntent {
+            peer_device_id: peer_device_id.to_string(),
+            session_token,
+            sequence,
+            conversation_id: conversation_id.to_string(),
+            state: state_view(state),
+            deadline_mono,
+        },
+    }
+}
+
+fn state_view(value: TypingStateV2) -> NativeTypingState {
+    match value {
+        TypingStateV2::Started => NativeTypingState::Started,
+        TypingStateV2::Stopped => NativeTypingState::Stopped,
+    }
+}
+
+pub(crate) fn live_error(value: LiveError) -> NativeLiveTypingError {
+    match value {
+        LiveError::Clock => NativeLiveTypingError::Clock,
+        LiveError::Disabled => NativeLiveTypingError::Disabled,
+        LiveError::CounterExhausted => NativeLiveTypingError::CounterExhausted,
+        LiveError::Crypto => NativeLiveTypingError::Crypto,
+        LiveError::InvalidContext => NativeLiveTypingError::InvalidContext,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_use_the_fixed_host_codes() {
+        assert!(matches!(
+            live_error(LiveError::Disabled),
+            NativeLiveTypingError::Disabled
+        ));
+        assert!(matches!(
+            parse_device_id("not-a-device"),
+            Err(NativeLiveTypingError::InvalidContext)
+        ));
+    }
+
+    #[test]
+    fn malformed_frames_have_an_empty_sanitized_outcome() {
+        assert!(parse_frame("not-json").is_none());
+        let outcome = outcome_view(empty_outcome()).unwrap();
+        assert_eq!(outcome.generation, 0);
+        assert_eq!(outcome.session_update, None);
+        assert_eq!(outcome.action, None);
+        assert_eq!(outcome.reply_frame_json, None);
+    }
+}

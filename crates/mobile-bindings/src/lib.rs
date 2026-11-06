@@ -29,6 +29,7 @@ mod attachment_retention;
 mod hosted;
 pub mod newenrollment;
 mod rcs_status;
+mod typing;
 
 pub use rcs_status::{
     NativeRcsEligibility, NativeRcsEligibilityProjection, NativeRcsLinkState, NativeRcsLinkStatus,
@@ -1911,6 +1912,85 @@ impl NativeClient {
         with_client(&self.client, |client| {
             client.unlock(&profile, &header, &passphrase)
         })
+    }
+
+    /// Enables memory-only live typing from host-attested roster and executor facts.
+    pub fn enable_live_typing(
+        &self,
+        context: typing::NativeLiveEnableContext,
+        clock: typing::NativeLiveClock,
+    ) -> Result<u64, typing::NativeLiveTypingError> {
+        let context = typing::enable_context(context)?;
+        let clock = typing::clock(clock)?;
+        typing::with_live_client(&self.client, |client| {
+            client
+                .enable_live_typing(context, clock)
+                .map_err(typing::live_error)
+        })
+        .map(|generation| generation.0)
+    }
+
+    /// Retires the current memory-only live typing incarnation.
+    pub fn disable_live_typing(&self) -> Result<(), typing::NativeLiveTypingError> {
+        typing::with_live_client(&self.client, |client| {
+            client
+                .disable_live_typing()
+                .map_err(|_| typing::NativeLiveTypingError::InvalidContext)
+        })
+    }
+
+    /// Separately controls whether this enabled incarnation seals outbound typing frames.
+    pub fn set_typing_sharing(&self, enabled: bool) -> Result<(), typing::NativeLiveTypingError> {
+        typing::with_live_client(&self.client, |client| {
+            client
+                .set_typing_sharing(enabled)
+                .map_err(typing::live_error)
+        })
+    }
+
+    /// Seals a canonical protocol frame for the private live transport.
+    pub fn seal_typing_signal_v2(
+        &self,
+        conversation_id: String,
+        gateway_device_id: String,
+        origin: typing::NativeTypingOrigin,
+        state: typing::NativeTypingState,
+        clock: typing::NativeLiveClock,
+    ) -> Result<Option<typing::NativeLiveOutbound>, typing::NativeLiveTypingError> {
+        let conversation_id = typing::parse_conversation_id(&conversation_id)?;
+        let gateway_device_id = typing::parse_device_id(&gateway_device_id)?;
+        let clock = typing::clock(clock)?;
+        typing::with_live_client(&self.client, |client| {
+            client
+                .seal_typing_signal_v2(
+                    conversation_id,
+                    gateway_device_id,
+                    typing::origin(origin),
+                    typing::state(state),
+                    clock,
+                )
+                .map_err(typing::live_error)
+        })
+        .and_then(typing::outbound_view)
+    }
+
+    /// Opens a canonical private live transport frame and returns only sanitized host metadata.
+    pub fn open_typing_signal_v2(
+        &self,
+        frame_json: String,
+        clock: typing::NativeLiveClock,
+    ) -> Result<typing::NativeLiveOutcome, typing::NativeLiveTypingError> {
+        let clock = typing::clock(clock)?;
+        typing::with_live_client(&self.client, |client| {
+            let frame = match typing::parse_frame(&frame_json) {
+                Some(frame) => frame,
+                None => return Ok(typing::empty_outcome()),
+            };
+            client
+                .open_typing_signal_v2(&frame, clock)
+                .map_err(typing::live_error)
+        })
+        .and_then(typing::outcome_view)
     }
 
     pub fn gateway_settings(&self) -> Result<NativeGatewaySettings, MobileBindingsError> {
