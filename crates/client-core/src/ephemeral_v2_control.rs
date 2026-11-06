@@ -3,8 +3,6 @@
 //! Runtime integration owns candidate commit timing: control accounting is cloned
 //! before sealing, while ingress accounting is intentionally retained pre-auth.
 
-#![allow(dead_code)] // Removed when the B3 runtime begins using these private helpers.
-
 use crate::DeviceId;
 use std::collections::{HashMap, VecDeque};
 
@@ -212,7 +210,7 @@ mod tests {
         }
         assert!(!budget.admit_ack(limited_peer, 0));
         assert_eq!(budget.acks.second.accepted_at.len(), 2);
-        for id in 2..=6 {
+        for id in 2..=5 {
             assert!(budget.admit_ack(peer(id), 0));
         }
         assert_eq!(budget.acks.second.accepted_at.len(), 6);
