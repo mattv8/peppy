@@ -380,7 +380,7 @@ class AndroidBackendTests(unittest.TestCase):
             self.assertIn("verifier", calls.read_text())
             self.assertNotIn("docker", calls.read_text())
             self.assertIn("sdk:--licenses", calls.read_text())
-            self.assertIn("sdk:platforms;android-37 build-tools;36.0.0 platform-tools ndk;27.2.12479018", calls.read_text())
+            self.assertIn("sdk:platforms;android-37.0 build-tools;36.0.0 platform-tools ndk;27.2.12479018", calls.read_text())
             self.assertNotIn("path-sdkmanager", calls.read_text())
             self.assertNotIn("brew", calls.read_text())
             self.assertIn(

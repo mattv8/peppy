@@ -176,7 +176,7 @@ prepare_sdk() {
     require_license_approval
     SDKMANAGER=${SDKMANAGER:-sdkmanager}
     accept_licenses
-    run_sdkmanager "platforms;android-37" "build-tools;36.0.0" "platform-tools" "ndk;27.2.12479018"
+    run_sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "platform-tools" "ndk;27.2.12479018"
 }
 find_sdkmanager() {
     local candidate
