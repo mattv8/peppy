@@ -3,33 +3,17 @@ package gmlink
 import (
 	"encoding/json"
 	"reflect"
-	"sort"
 	"testing"
-	"unicode/utf8"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 	"google.golang.org/protobuf/proto"
 )
 
-const (
-	groupParticipantLimit = 100
-	groupStringLimit      = 256
-)
-
-type groupProjection struct {
-	ConversationID string
-	Type           int32
-	Status         int32
-	ReadOnly       bool
-	SendMode       int32
-	ParticipantIDs []string
-}
-
 func TestM4GroupProjectionFiltersSortsAndBoundsParticipants(t *testing.T) {
 	conversation := validGroupConversation()
 	conversation.Participants = append(conversation.Participants, &gmproto.Participant{IsVisible: false, ID: &gmproto.SmallInfo{ParticipantID: "hidden"}}, &gmproto.Participant{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "member-a"}})
 	projection, code := projectGroup(conversation)
-	if code != "verified" || !reflect.DeepEqual(projection.ParticipantIDs, []string{"member-a", "member-b"}) || projection.Type != int32(gmproto.ConversationType_RCS) {
+	if code != groupResolved || !reflect.DeepEqual(projection.ParticipantIDs, []string{"member-a", "member-b"}) || projection.Type != int32(gmproto.ConversationType_RCS) {
 		t.Fatalf("projection=%#v code=%q", projection, code)
 	}
 }
@@ -59,7 +43,7 @@ func TestM4GroupProjectionFailsClosed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			candidate := cloneGroup(validGroupConversation())
 			mutate(candidate)
-			if _, code := projectGroup(candidate); code == "verified" {
+			if _, code := projectGroup(candidate); code == groupResolved {
 				t.Fatal("accepted unsafe group")
 			}
 		})
@@ -89,53 +73,6 @@ func TestM4RequestShapesAndActualDrainPath(t *testing.T) {
 	}
 }
 
-func projectGroup(c *gmproto.Conversation) (groupProjection, string) {
-	if c == nil || !c.GetIsGroupChat() || !boundedGroupString(c.GetConversationID()) || c.GetType() == gmproto.ConversationType_UNKNOWN_CONVERSATION_TYPE || c.GetStatus() == gmproto.ConversationStatus_UNKNOWN_CONVERSATION_STATUS || !knownGroupType(c.GetType()) || !knownGroupStatus(c.GetStatus()) || !knownGroupSendMode(c.GetSendMode()) {
-		return groupProjection{}, "group_projection_unverified"
-	}
-	ids, seen, selfCount := make([]string, 0, len(c.GetParticipants())), map[string]struct{}{}, 0
-	for _, participant := range c.GetParticipants() {
-		if participant == nil || !participant.GetIsVisible() {
-			continue
-		}
-		if participant.GetIsMe() {
-			selfCount++
-			continue
-		}
-		id := participant.GetID().GetParticipantID()
-		if !boundedGroupString(id) {
-			return groupProjection{}, "group_projection_unverified"
-		}
-		if _, duplicate := seen[id]; duplicate {
-			return groupProjection{}, "group_projection_unverified"
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
-		if len(ids) > groupParticipantLimit {
-			return groupProjection{}, "group_projection_unverified"
-		}
-	}
-	if len(ids) == 0 || selfCount != 1 {
-		return groupProjection{}, "group_projection_unverified"
-	}
-	sort.Strings(ids)
-	return groupProjection{c.GetConversationID(), int32(c.GetType()), int32(c.GetStatus()), c.GetReadOnly(), int32(c.GetSendMode()), ids}, "verified"
-}
-func boundedGroupString(value string) bool {
-	return value != "" && utf8.ValidString(value) && len(value) <= groupStringLimit
-}
-func knownGroupType(value gmproto.ConversationType) bool {
-	_, ok := gmproto.ConversationType_name[int32(value)]
-	return ok
-}
-func knownGroupStatus(value gmproto.ConversationStatus) bool {
-	_, ok := gmproto.ConversationStatus_name[int32(value)]
-	return ok
-}
-func knownGroupSendMode(value gmproto.ConversationSendMode) bool {
-	_, ok := gmproto.ConversationSendMode_name[int32(value)]
-	return ok
-}
 func validGroupConversation() *gmproto.Conversation {
 	return &gmproto.Conversation{ConversationID: "group-opaque", IsGroupChat: true, Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE, Participants: []*gmproto.Participant{{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "member-b"}}, {IsVisible: true, IsMe: true, ID: &gmproto.SmallInfo{ParticipantID: "self"}}}}
 }
