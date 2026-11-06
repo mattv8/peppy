@@ -46,6 +46,8 @@ mod activation_session_tests;
 mod draft_command_tests;
 mod hosted;
 mod lifecycle;
+#[allow(dead_code)]
+pub(crate) mod live_typing;
 mod login_item;
 mod material_state;
 mod media;
