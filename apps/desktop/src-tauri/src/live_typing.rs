@@ -510,6 +510,46 @@ fn apply_enable_context(
     Ok(generation)
 }
 
+fn live_enable_context(session: &Session) -> Option<LiveEnableContext> {
+    let status = session
+        .status
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    enable_context(
+        &status,
+        RcsSnapshotInputs {
+            client: &session.client,
+            now_ms: wall_ms(),
+        },
+    )
+}
+
+fn reevaluate_context(
+    state: &mut LiveTypingState,
+    inbound: &mut InboundTyping,
+    session: &Session,
+    outbound: &mut Option<mpsc::Receiver<String>>,
+) {
+    let previous_generation = state.generation();
+    let generation = apply_enable_context(
+        state,
+        session,
+        live_enable_context(session),
+        session.live_typing.clock(),
+    )
+    .unwrap_or_else(|_| {
+        disable(state, session);
+        None
+    });
+    if generation == previous_generation {
+        return;
+    }
+    session.live_typing.detach();
+    inbound.clear();
+    emit_events(inbound);
+    *outbound = generation.map(|_| session.live_typing.attach());
+}
+
 pub(crate) fn start(session: Arc<Session>) {
     session.track_worker(tokio::spawn(supervise(session.clone())));
 }
@@ -549,33 +589,8 @@ async fn supervise(session: Arc<Session>) {
             backoff = (backoff * 2).min(LIVE_MAX_BACKOFF);
             continue;
         }
-        let context = {
-            let status = session
-                .status
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            enable_context(
-                &status,
-                RcsSnapshotInputs {
-                    client: &session.client,
-                    now_ms: wall_ms(),
-                },
-            )
-        };
-        let enabled = match apply_enable_context(
-            &mut state,
-            &session,
-            context,
-            session.live_typing.clock(),
-        ) {
-            Ok(Some(_)) => true,
-            Ok(None) => false,
-            Err(_) => {
-                disable(&mut state, &session);
-                false
-            }
-        };
-        let mut outbound = enabled.then(|| session.live_typing.attach());
+        let mut outbound = None;
+        reevaluate_context(&mut state, &mut inbound, &session, &mut outbound);
         loop {
             let elapsed_mono = session.live_typing.mono_ms();
             let expiry_delay = inbound
@@ -589,6 +604,9 @@ async fn supervise(session: Arc<Session>) {
                     emit_events(&mut inbound);
                     let _ = socket.close(None).await;
                     return;
+                }
+                _ = session.live_context_wake.notified() => {
+                    reevaluate_context(&mut state, &mut inbound, &session, &mut outbound);
                 }
                 frame = async {
                     match outbound.as_mut() {
@@ -743,6 +761,7 @@ mod tests {
         gateways::{CapabilitiesResponse, DevicesResponse},
         RcsConversationEligibility, RcsGatewayStatus,
     };
+    use tokio::net::TcpListener;
 
     const NOW_MS: i64 = 10_000;
 
@@ -779,7 +798,13 @@ mod tests {
     }
 
     fn session_with_linked_eligible_gateway() -> (crate::tests::Fixture, Session, ConversationId) {
-        let fixture = fixture_at("http://127.0.0.1:9");
+        session_with_linked_eligible_gateway_at("http://127.0.0.1:9")
+    }
+
+    fn session_with_linked_eligible_gateway_at(
+        origin: &str,
+    ) -> (crate::tests::Fixture, Session, ConversationId) {
+        let fixture = fixture_at(origin);
         let session = open(&fixture, &fixture.binding, &[]);
         session
             .client
@@ -1290,6 +1315,82 @@ mod tests {
             clock(),
         ));
         assert!(outbound.try_recv().is_ok());
+    }
+
+    async fn wait_for_live_enabled(session: &Session, expected: bool) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let enabled = session.client.set_typing_sharing(true).is_ok();
+                if enabled == expected {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for live typing enabled={expected}"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_retires_and_reenables_after_roster_refresh() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (fixture, session, conversation_id) = session_with_linked_eligible_gateway_at(&origin);
+        let gateway_device_id: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let now_ms = wall_ms();
+        session
+            .client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now_ms,
+                    capability_revision: 2,
+                    feature_bits: 1,
+                    linked_since_ms: Some(now_ms),
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 1,
+                    mapping_revision: 2,
+                    observed_at_ms: now_ms,
+                    gateway_device_id,
+                }],
+                now_ms,
+            )
+            .unwrap();
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        install_gateway(&session, &fixture.binding.device_id);
+        let session = Arc::new(session);
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&LiveHelloV2::new()).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            while socket.next().await.is_some() {}
+        });
+        let supervisor = tokio::spawn(supervise(session.clone()));
+
+        wait_for_live_enabled(&session, true).await;
+        roster_refresh(&session, &fixture.binding.device_id, true);
+        wait_for_live_enabled(&session, false).await;
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        install_gateway(&session, &fixture.binding.device_id);
+        session.notify();
+        wait_for_live_enabled(&session, true).await;
+
+        session.cancel.cancel();
+        supervisor.await.unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

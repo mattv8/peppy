@@ -126,6 +126,8 @@ pub struct Session {
     pub work_wake: Notify,
     /// Wakes a pending reconnect wait (for example after unlock).
     pub reconnect_wake: Notify,
+    /// Wakes the live-typing supervisor to re-evaluate its runtime context.
+    pub(crate) live_context_wake: Notify,
     /// Wakes the live supervisor for an explicitly requested bounded inbound replay.
     pub replay_wake: Notify,
     pub cancel: CancellationToken,
@@ -382,6 +384,7 @@ pub fn open_session(
         download_retries: Mutex::new(HashMap::new()),
         work_wake: Notify::new(),
         reconnect_wake: Notify::new(),
+        live_context_wake: Notify::new(),
         replay_wake: Notify::new(),
         cancel: CancellationToken::new(),
         attachment_retention_negotiated: AtomicBool::new(false),
@@ -646,6 +649,7 @@ impl Session {
 
     pub fn notify(&self) {
         self.deferred_follow_up.reset();
+        self.live_context_wake.notify_one();
         (self.notifier)();
     }
 
