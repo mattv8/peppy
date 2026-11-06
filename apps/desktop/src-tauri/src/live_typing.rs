@@ -1773,6 +1773,149 @@ mod tests {
         assert!(!closed);
     }
 
+    fn real_supervisor_session(
+        origin: &str,
+    ) -> (crate::tests::Fixture, Arc<Session>, ConversationId) {
+        let (fixture, session, conversation_id) = session_with_linked_eligible_gateway_at(origin);
+        let gateway_device_id: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let now_ms = wall_ms();
+        session
+            .client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now_ms,
+                    capability_revision: 2,
+                    feature_bits: 1,
+                    linked_since_ms: Some(now_ms),
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 1,
+                    mapping_revision: 2,
+                    observed_at_ms: now_ms,
+                    gateway_device_id,
+                }],
+                now_ms,
+            )
+            .unwrap();
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        install_gateway(&session, &fixture.binding.device_id);
+        (fixture, Arc::new(session), conversation_id)
+    }
+
+    async fn accept_live_peer(listener: &TcpListener) -> WebSocketStream<tokio::net::TcpStream> {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(stream).await.unwrap()
+    }
+
+    async fn send_server_hello(socket: &mut WebSocketStream<tokio::net::TcpStream>) {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&LiveHelloV2::new()).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervisor_negotiation_failure_observes_backoff_before_retry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (_, session, _) = real_supervisor_session(&origin);
+        let supervisor = tokio::spawn(supervise(session.clone()));
+
+        let mut first = accept_live_peer(&listener).await;
+        first.send(Message::Text("{}".into())).await.unwrap();
+        assert!(timeout(Duration::from_millis(750), listener.accept())
+            .await
+            .is_err());
+
+        let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("supervisor did not retry after negotiation backoff")
+            .unwrap();
+        let mut second = tokio_tungstenite::accept_async(stream).await.unwrap();
+        send_server_hello(&mut second).await;
+        wait_for_live_enabled(&session, true).await;
+
+        session.cancel.cancel();
+        supervisor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervisor_socket_loss_reconnects_with_a_new_generation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (fixture, session, conversation_id) = real_supervisor_session(&origin);
+        let gateway: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let supervisor = tokio::spawn(supervise(session.clone()));
+
+        let mut first_peer = accept_live_peer(&listener).await;
+        send_server_hello(&mut first_peer).await;
+        wait_for_live_enabled(&session, true).await;
+        let first_generation = session
+            .client
+            .seal_typing_signal_v2(
+                conversation_id,
+                gateway,
+                peppy_protocol::TypingOriginV2::VaultDevice,
+                peppy_protocol::TypingStateV2::Started,
+                session.live_typing.clock(),
+            )
+            .unwrap()
+            .unwrap()
+            .generation;
+        drop(first_peer);
+        wait_for_live_enabled(&session, false).await;
+
+        let mut second_peer = timeout(Duration::from_secs(2), accept_live_peer(&listener))
+            .await
+            .expect("supervisor did not reconnect after socket loss");
+        send_server_hello(&mut second_peer).await;
+        wait_for_live_enabled(&session, true).await;
+        let second_generation = session
+            .client
+            .seal_typing_signal_v2(
+                conversation_id,
+                gateway,
+                peppy_protocol::TypingOriginV2::VaultDevice,
+                peppy_protocol::TypingStateV2::Started,
+                session.live_typing.clock(),
+            )
+            .unwrap()
+            .unwrap()
+            .generation;
+        assert_ne!(first_generation, second_generation);
+
+        session.cancel.cancel();
+        supervisor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervisor_session_drain_completes_while_tcp_peer_stalls_io() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (_, session, _) = real_supervisor_session(&origin);
+        let supervisor = tokio::spawn(supervise(session.clone()));
+
+        let mut stalled_peer = accept_live_peer(&listener).await;
+        send_server_hello(&mut stalled_peer).await;
+        wait_for_live_enabled(&session, true).await;
+
+        session.cancel.cancel();
+        timeout(Duration::from_millis(300), supervisor)
+            .await
+            .expect("supervisor drain blocked on stalled TCP peer")
+            .unwrap();
+        drop(stalled_peer);
+    }
+
     #[tokio::test]
     async fn supervisor_retires_and_reenables_after_roster_refresh() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
