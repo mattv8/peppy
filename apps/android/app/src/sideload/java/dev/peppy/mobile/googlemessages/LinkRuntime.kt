@@ -179,20 +179,20 @@ object LinkRuntime {
             }
         }
 
-        override fun rcsEvent(recordJson: String) = rcsEventOwned(recordJson, -1, -1)
+        override fun rcsEvent(recordJson: String) = rcsEventOwned(recordJson, -1, -1, -1)
 
-        override fun rcsEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long) {
+        override fun rcsEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long) {
             callbackExecutor().execute {
-                if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
+                if (!acceptsStreamCallback(generation, ownerGeneration, ownerRevision, streamEpoch)) return@execute
                 (LinkRuntimeTestHooks.rcsReceiveSink ?: NoOpRcsReceiveSink).receive(recordJson)
             }
         }
 
-        override fun typingEvent(recordJson: String) = typingEventOwned(recordJson, -1, -1)
+        override fun typingEvent(recordJson: String) = typingEventOwned(recordJson, -1, -1, -1)
 
-        override fun typingEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long) {
+        override fun typingEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long) {
             callbackExecutor().execute {
-                if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
+                if (!acceptsStreamCallback(generation, ownerGeneration, ownerRevision, streamEpoch)) return@execute
                 (LinkRuntimeTestHooks.typingReceiveSink ?: NoOpTypingReceiveSink).receive(recordJson)
             }
         }
@@ -220,6 +220,13 @@ object LinkRuntime {
         if (handle != handleGeneration) return@synchronized false
         val current = cachedHandle ?: return@synchronized false
         ownerGeneration >= 0 && ownerRevision >= 0 && current.acceptsOutput(ownerGeneration, ownerRevision)
+    }
+
+    private fun acceptsStreamCallback(handle: Long, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long): Boolean = synchronized(this) {
+        if (handle != handleGeneration) return@synchronized false
+        val current = cachedHandle ?: return@synchronized false
+        ownerGeneration >= 0 && ownerRevision >= 0 && streamEpoch >= 0 &&
+            current.acceptsStreamOutput(ownerGeneration, ownerRevision, streamEpoch)
     }
 
     private fun assignEmojiIfCurrent(handle: Long, attempt: Long, value: String) = synchronized(this) {

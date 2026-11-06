@@ -23,8 +23,8 @@ import (
 type Host interface {
 	PersistState(sealed []byte) error
 	Event(kind, code string, value, generation, revision int64)
-	RcsEvent(recordJSON string, generation, revision int64)
-	TypingEvent(recordJSON string, generation, revision int64)
+	RcsEvent(recordJSON string, generation, revision, streamEpoch int64)
+	TypingEvent(recordJSON string, generation, revision, streamEpoch int64)
 	ShowEmoji(emoji string, generation, revision int64)
 }
 
@@ -132,10 +132,12 @@ type hostOutput struct {
 	rcsRecord         string
 	typingRecord      string
 	generation        uint64
+	streamEpoch       uint64
 	revision          uint64
 	requireGeneration bool
 	requirePair       bool
 	requireRevision   bool
+	requireStream     bool
 	done              chan struct{}
 }
 
@@ -1679,6 +1681,9 @@ func (link *Link) outputAdmitted(output hostOutput) bool {
 	if output.requireRevision {
 		admitted = admitted && link.stateRevision == output.revision
 	}
+	if output.requireStream {
+		admitted = admitted && link.streamEpoch == output.streamEpoch && link.hasOwnerVerificationLocked()
+	}
 	return admitted
 }
 
@@ -1692,7 +1697,9 @@ func (link *Link) deliverOutput(output hostOutput) {
 	if link.outputStart != nil {
 		link.outputStart(output)
 	}
-	link.callHost(output)
+	if link.outputAdmitted(output) {
+		link.callHost(output)
+	}
 	close(output.done)
 
 	link.outputMu.Lock()
@@ -1706,9 +1713,9 @@ func (link *Link) callHost(output hostOutput) {
 	case output.emoji != "":
 		link.host.ShowEmoji(output.emoji, int64(output.generation), int64(output.revision))
 	case output.rcsRecord != "":
-		link.host.RcsEvent(output.rcsRecord, int64(output.generation), int64(output.revision))
+		link.host.RcsEvent(output.rcsRecord, int64(output.generation), int64(output.revision), int64(output.streamEpoch))
 	case output.typingRecord != "":
-		link.host.TypingEvent(output.typingRecord, int64(output.generation), int64(output.revision))
+		link.host.TypingEvent(output.typingRecord, int64(output.generation), int64(output.revision), int64(output.streamEpoch))
 	default:
 		link.host.Event(output.kind, output.code, output.value, int64(output.generation), int64(output.revision))
 	}
@@ -1722,6 +1729,16 @@ func (link *Link) AcceptsOutput(generation, revision int64) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
 	return !link.closed && link.generation == uint64(generation) && link.stateRevision == uint64(revision)
+}
+
+// AcceptsStreamOutput additionally validates the stream evidence that produced a receive callback.
+func (link *Link) AcceptsStreamOutput(generation, revision, streamEpoch int64) bool {
+	if generation < 0 || revision < 0 || streamEpoch < 0 {
+		return false
+	}
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	return !link.closed && link.generation == uint64(generation) && link.stateRevision == uint64(revision) && link.streamEpoch == uint64(streamEpoch) && link.hasOwnerVerificationLocked()
 }
 
 func (link *Link) finalizeCloseLocked() {

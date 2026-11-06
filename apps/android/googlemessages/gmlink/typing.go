@@ -137,8 +137,10 @@ func (link *Link) projectTypingEventFor(queued queuedEvent, data *gmproto.Typing
 		typingRecord:      string(encoded),
 		generation:        queued.generation,
 		revision:          revision,
+		streamEpoch:       queued.streamEpoch,
 		requireGeneration: true,
 		requireRevision:   true,
+		requireStream:     true,
 	})
 }
 

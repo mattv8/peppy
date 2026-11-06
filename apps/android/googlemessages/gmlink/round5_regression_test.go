@@ -116,7 +116,7 @@ func TestTerminalCompletionCarriesRetirementIdentity(t *testing.T) {
 	}
 }
 
-func (*reentrantOperationHost) RcsEvent(string, int64, int64)    {}
-func (*ownedIdentityHost) RcsEvent(string, int64, int64)         {}
-func (*reentrantOperationHost) TypingEvent(string, int64, int64) {}
-func (*ownedIdentityHost) TypingEvent(string, int64, int64)      {}
+func (*reentrantOperationHost) RcsEvent(string, int64, int64, int64)    {}
+func (*ownedIdentityHost) RcsEvent(string, int64, int64, int64)         {}
+func (*reentrantOperationHost) TypingEvent(string, int64, int64, int64) {}
+func (*ownedIdentityHost) TypingEvent(string, int64, int64, int64)      {}

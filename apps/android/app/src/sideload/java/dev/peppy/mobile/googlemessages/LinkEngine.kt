@@ -10,8 +10,8 @@ interface LinkHost {
     fun typingEvent(recordJson: String)
     fun showEmoji(emoji: String)
     fun eventOwned(kind: String, code: String, value: Long, generation: Long, revision: Long) = event(kind, code, value)
-    fun rcsEventOwned(recordJson: String, generation: Long, revision: Long) = rcsEvent(recordJson)
-    fun typingEventOwned(recordJson: String, generation: Long, revision: Long) = typingEvent(recordJson)
+    fun rcsEventOwned(recordJson: String, generation: Long, revision: Long, streamEpoch: Long) = rcsEvent(recordJson)
+    fun typingEventOwned(recordJson: String, generation: Long, revision: Long, streamEpoch: Long) = typingEvent(recordJson)
     fun showEmojiOwned(emoji: String, generation: Long, revision: Long) = showEmoji(emoji)
 }
 
@@ -25,6 +25,8 @@ interface LinkHandle {
     fun close()
     fun status(): String
     fun acceptsOutput(generation: Long, revision: Long): Boolean = true
+    fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
+        acceptsOutput(generation, revision)
 }
 
 interface LinkEngine {

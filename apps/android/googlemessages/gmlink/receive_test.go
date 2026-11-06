@@ -282,18 +282,22 @@ func assertRejectedProjectionHasNoBody(t *testing.T, projection rcsProjection) {
 }
 
 type ownedRecordHost struct {
-	rcsRecords    []string
-	typingRecords []string
+	rcsRecords         []string
+	rcsStreamEpochs    []int64
+	typingRecords      []string
+	typingStreamEpochs []int64
 }
 
 func (*ownedRecordHost) PersistState([]byte) error                 { return nil }
 func (*ownedRecordHost) Event(string, string, int64, int64, int64) {}
 func (*ownedRecordHost) ShowEmoji(string, int64, int64)            {}
-func (host *ownedRecordHost) RcsEvent(record string, _, _ int64) {
+func (host *ownedRecordHost) RcsEvent(record string, _, _, streamEpoch int64) {
 	host.rcsRecords = append(host.rcsRecords, record)
+	host.rcsStreamEpochs = append(host.rcsStreamEpochs, streamEpoch)
 }
-func (host *ownedRecordHost) TypingEvent(record string, _, _ int64) {
+func (host *ownedRecordHost) TypingEvent(record string, _, _, streamEpoch int64) {
 	host.typingRecords = append(host.typingRecords, record)
+	host.typingStreamEpochs = append(host.typingStreamEpochs, streamEpoch)
 }
 
 func receiveWiringLink(host Host) *Link {
@@ -503,5 +507,33 @@ func TestFetchRcsGapUsesPerPageDeadline(t *testing.T) {
 
 	if got.Code != "gap_deadline" || got.HasMore || got.NextCursor != "" || len(got.Records) != 0 {
 		t.Fatalf("result = %#v", got)
+	}
+}
+
+func TestRcsOutputDropsRevokedStreamInsidePlatformDispatch(t *testing.T) {
+	host := &ownedRecordHost{}
+	link := receiveWiringLink(host)
+	output := hostOutput{
+		rcsRecord:         `{"code":"ok"}`,
+		generation:        7,
+		revision:          11,
+		streamEpoch:       3,
+		requireGeneration: true,
+		requireRevision:   true,
+		requireStream:     true,
+		done:              make(chan struct{}),
+	}
+	link.outputActive = 1
+	link.outputStart = func(hostOutput) {
+		link.mu.Lock()
+		link.invalidateEvidenceLocked()
+		link.ownerVerification = nil
+		link.mu.Unlock()
+	}
+
+	link.deliverOutput(output)
+
+	if len(host.rcsRecords) != 0 {
+		t.Fatalf("records = %v", host.rcsRecords)
 	}
 }

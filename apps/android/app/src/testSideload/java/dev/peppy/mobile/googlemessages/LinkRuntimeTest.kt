@@ -320,7 +320,7 @@ class LinkRuntimeTest {
         lateinit var host: LinkHost
         val queued = QueueExecutor()
         var currentGeneration = 3L
-        val handle = FakeHandle { generation, revision -> generation == currentGeneration && revision == 4L }
+        val handle = FakeHandle(accepts = { generation, revision -> generation == currentGeneration && revision == 4L })
         val events = mutableListOf<String>()
         LinkRuntimeTestHooks.callbackExecutor = queued
         LinkRuntimeTestHooks.engine = object : LinkEngine {
@@ -346,9 +346,15 @@ class LinkRuntimeTest {
     fun `receive sink accepts current owner and drops stale owner`() {
         lateinit var host: LinkHost
         val queued = QueueExecutor()
-        var currentGeneration = 3L
+        val currentGeneration = 3L
+        var currentStreamEpoch = 8L
         val records = mutableListOf<String>()
-        val handle = FakeHandle { generation, revision -> generation == currentGeneration && revision == 4L }
+        val handle = FakeHandle(
+            accepts = { generation, revision -> generation == currentGeneration && revision == 4L },
+            acceptsStream = { generation, revision, streamEpoch ->
+                generation == currentGeneration && revision == 4L && streamEpoch == currentStreamEpoch
+            },
+        )
         LinkRuntimeTestHooks.callbackExecutor = queued
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true
@@ -358,10 +364,10 @@ class LinkRuntimeTest {
         LinkRuntimeTestHooks.rcsReceiveSink = RcsReceiveSink { records += it }
         LinkRuntime.handle(context)
 
-        host.rcsEventOwned("accepted", 3, 4)
+        host.rcsEventOwned("accepted", 3, 4, 8)
         queued.runAll()
-        host.rcsEventOwned("stale", 3, 4)
-        currentGeneration = 5
+        host.rcsEventOwned("stale", 3, 4, 8)
+        currentStreamEpoch = 9
         queued.runAll()
 
         assertEquals(listOf("accepted"), records)
@@ -371,9 +377,15 @@ class LinkRuntimeTest {
     fun `typing sink accepts current owner and drops stale owner`() {
         lateinit var host: LinkHost
         val queued = QueueExecutor()
-        var currentGeneration = 3L
+        val currentGeneration = 3L
+        var currentStreamEpoch = 8L
         val records = mutableListOf<String>()
-        val handle = FakeHandle { generation, revision -> generation == currentGeneration && revision == 4L }
+        val handle = FakeHandle(
+            accepts = { generation, revision -> generation == currentGeneration && revision == 4L },
+            acceptsStream = { generation, revision, streamEpoch ->
+                generation == currentGeneration && revision == 4L && streamEpoch == currentStreamEpoch
+            },
+        )
         LinkRuntimeTestHooks.callbackExecutor = queued
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true
@@ -383,10 +395,10 @@ class LinkRuntimeTest {
         LinkRuntimeTestHooks.typingReceiveSink = TypingReceiveSink { records += it }
         LinkRuntime.handle(context)
 
-        host.typingEventOwned("accepted", 3, 4)
+        host.typingEventOwned("accepted", 3, 4, 8)
         queued.runAll()
-        host.typingEventOwned("stale", 3, 4)
-        currentGeneration = 5
+        host.typingEventOwned("stale", 3, 4, 8)
+        currentStreamEpoch = 9
         queued.runAll()
 
         assertEquals(listOf("accepted"), records)
@@ -457,6 +469,7 @@ class LinkRuntimeTest {
 
     private open class FakeHandle(
         private val accepts: (Long, Long) -> Boolean = { _, _ -> true },
+        private val acceptsStream: (Long, Long, Long) -> Boolean = { generation, revision, _ -> accepts(generation, revision) },
     ) : LinkHandle {
         var closed = false
         override fun pair(cookiesJson: ByteArray) = Unit
@@ -468,6 +481,8 @@ class LinkRuntimeTest {
         override fun close() { closed = true }
         override fun status(): String = """{\"state\":\"unlinked\"}"""
         override fun acceptsOutput(generation: Long, revision: Long): Boolean = accepts(generation, revision)
+        override fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
+            acceptsStream(generation, revision, streamEpoch)
     }
 
     private class BlockingCloseHandle : FakeHandle() {

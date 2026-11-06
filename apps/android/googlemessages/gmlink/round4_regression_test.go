@@ -233,7 +233,7 @@ func TestAuthRevisionIsAllocatedWithSnapshotCapture(t *testing.T) {
 	}
 }
 
-func (*orderedOutputHost) RcsEvent(string, int64, int64)       {}
-func (*replacementFenceHost) RcsEvent(string, int64, int64)    {}
-func (*orderedOutputHost) TypingEvent(string, int64, int64)    {}
-func (*replacementFenceHost) TypingEvent(string, int64, int64) {}
+func (*orderedOutputHost) RcsEvent(string, int64, int64, int64)       {}
+func (*replacementFenceHost) RcsEvent(string, int64, int64, int64)    {}
+func (*orderedOutputHost) TypingEvent(string, int64, int64, int64)    {}
+func (*replacementFenceHost) TypingEvent(string, int64, int64, int64) {}

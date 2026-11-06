@@ -210,8 +210,10 @@ func (link *Link) projectRcsEventFor(queued queuedEvent, wrapped *libgm.WrappedM
 		rcsRecord:         string(encoded),
 		generation:        queued.generation,
 		revision:          revision,
+		streamEpoch:       queued.streamEpoch,
 		requireGeneration: true,
 		requireRevision:   true,
+		requireStream:     true,
 	})
 }
 

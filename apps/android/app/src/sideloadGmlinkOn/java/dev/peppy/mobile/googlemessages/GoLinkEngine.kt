@@ -14,6 +14,8 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
     override fun close() = link.close()
     override fun status(): String = link.status()
     override fun acceptsOutput(generation: Long, revision: Long): Boolean = link.acceptsOutput(generation, revision)
+    override fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
+        link.acceptsStreamOutput(generation, revision, streamEpoch)
 }
 
 private object GoLinkEngine : LinkEngine {
@@ -39,17 +41,17 @@ private object GoLinkEngine : LinkEngine {
                 }
             }
 
-            override fun rcsEvent(recordJson: String, generation: Long, revision: Long) {
+            override fun rcsEvent(recordJson: String, generation: Long, revision: Long, streamEpoch: Long) {
                 try {
-                    linkHost.rcsEventOwned(recordJson, generation, revision)
+                    linkHost.rcsEventOwned(recordJson, generation, revision, streamEpoch)
                 } catch (_: Throwable) {
                     // Host receive delivery must not unwind through JNI.
                 }
             }
 
-            override fun typingEvent(recordJson: String, generation: Long, revision: Long) {
+            override fun typingEvent(recordJson: String, generation: Long, revision: Long, streamEpoch: Long) {
                 try {
-                    linkHost.typingEventOwned(recordJson, generation, revision)
+                    linkHost.typingEventOwned(recordJson, generation, revision, streamEpoch)
                 } catch (_: Throwable) {
                     // Host typing delivery must not unwind through JNI.
                 }
