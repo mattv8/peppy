@@ -79,17 +79,20 @@ type Link struct {
 	completionOutputReady func()
 	pairCleanupReady      func(uint64)
 
-	changes                chan any
-	conversationEvents     []conversationEvent
-	conversationCandidates map[string][]conversationSummary
-	conversationTargets    map[string][]string
-	indexRevision          uint64
-	settings               *gmproto.Settings
-	settingsAt             time.Time
-	settingsVersion        uint64
-	streamEpoch            uint64
-	streamSource           libgm.StreamSource
-	streamOpen             bool
+	changes                      chan any
+	conversationEvents           []conversationEvent
+	conversationCandidates       map[string][]conversationSummary
+	conversationTargets          map[string][]string
+	indexRevision                uint64
+	conversationIndexComplete    bool
+	conversationIndexGeneration  uint64
+	conversationIndexStreamEpoch uint64
+	settings                     *gmproto.Settings
+	settingsAt                   time.Time
+	settingsVersion              uint64
+	streamEpoch                  uint64
+	streamSource                 libgm.StreamSource
+	streamOpen                   bool
 
 	ownerVerification *ownerVerification
 }
@@ -546,28 +549,17 @@ func (link *Link) RefreshConversationIndex() error {
 	if !link.hasM2Verification() {
 		return errors.New("m2_verification_required")
 	}
-	link.mu.Lock()
-	indexRevision := link.indexRevision
-	link.mu.Unlock()
+	indexRevision, started := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !started {
+		return errors.New("conversation_lookup_stale")
+	}
 	ctx, cancel := context.WithTimeout(runCtx, conversationTimeout)
 	defer cancel()
-	var conversations []*gmproto.Conversation
-	for _, folder := range []gmproto.ListConversationsRequest_Folder{gmproto.ListConversationsRequest_INBOX, gmproto.ListConversationsRequest_ARCHIVE, gmproto.ListConversationsRequest_SPAM_BLOCKED} {
-		var cursor *gmproto.Cursor
-		for page := 0; page < conversationPageLimit; page++ {
-			response, err := client.ListConversations(ctx, &gmproto.ListConversationsRequest{Count: conversationPageSize, Folder: folder, Cursor: cursor})
-			if err != nil || response == nil {
-				return errors.New("conversation_lookup_failed")
-			}
-			conversations = append(conversations, response.GetConversations()...)
-			cursor = response.GetCursor()
-			if cursor == nil {
-				break
-			}
-			if page == conversationPageLimit-1 {
-				return errors.New("conversation_lookup_incomplete")
-			}
-		}
+	conversations, code := scanConversationPages(ctx, func(ctx context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		return client.ListConversations(ctx, request)
+	})
+	if code != "" {
+		return errors.New(code)
 	}
 	if !link.replaceConversationIndexFor(generation, streamEpoch, indexRevision, conversations) {
 		return errors.New("conversation_lookup_stale")
@@ -614,24 +606,25 @@ func (link *Link) ResolveExistingConversation(target string) string {
 	}
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	summaries := link.conversationCandidates[target]
-	var found string
-	for _, summary := range summaries {
-		if !summary.eligible {
-			continue
-		}
-		if found != "" {
-			return conversationJSON("conversation_ambiguous")
-		}
-		found = summary.id
+	if !link.hasOwnerVerificationLocked() {
+		return conversationJSON("m2_verification_required")
 	}
-	if found != "" {
-		return resolvedConversationJSON(found)
+	if !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation {
+		return conversationJSON("conversation_lookup_unknown")
 	}
-	if len(summaries) > 0 {
+	found := make(map[string]struct{})
+	for _, summary := range link.conversationCandidates[target] {
+		if summary.eligible {
+			found[summary.id] = struct{}{}
+		}
+	}
+	if len(found) > 1 {
 		return conversationJSON("conversation_ambiguous")
 	}
-	return conversationJSON("implicit_creation_refused")
+	for id := range found {
+		return resolvedConversationJSON(id)
+	}
+	return conversationJSON("conversation_not_found_complete")
 }
 
 // DrainConversationEvents returns local, content-free event correlations.
@@ -790,6 +783,7 @@ func (link *Link) stopRunLocked() {
 func (link *Link) invalidateEvidenceLocked() {
 	link.streamEpoch++
 	link.invalidateSettingsLocked()
+	link.invalidateConversationIndexLocked()
 }
 
 func (link *Link) retirePhysicalSourceLocked() {
@@ -805,10 +799,8 @@ func (link *Link) streamSourceMatchesLocked(source libgm.StreamSource) bool {
 func (link *Link) revokeLocked() {
 	link.generation++
 	link.ownerVerification = nil
-	link.conversationCandidates = make(map[string][]conversationSummary)
-	link.conversationTargets = make(map[string][]string)
-	link.conversationEvents = nil
 	link.retirePhysicalSourceLocked()
+	link.clearConversationIndexLocked()
 	if link.stopRun != nil {
 		link.stopRun()
 	}
@@ -960,8 +952,7 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		link.streamSource = value.Source
 		link.streamOpen = true
 		link.ownerVerification = nil
-		link.conversationCandidates = make(map[string][]conversationSummary)
-		link.conversationTargets = make(map[string][]string)
+		link.clearConversationIndexLocked()
 		link.mu.Unlock()
 		return
 	case *libgm.StreamRetired:
@@ -993,35 +984,25 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 	switch event.(type) {
 	case *libgm.StreamRetired, *libgm.ContinuityLost:
 		link.retirePhysicalSourceLocked()
-		link.conversationCandidates = make(map[string][]conversationSummary)
-		link.conversationTargets = make(map[string][]string)
 		link.ownerVerification = nil
 	default:
 		if invalidatesAtIngress(event) {
 			link.invalidateEvidenceLocked()
-			link.conversationCandidates = make(map[string][]conversationSummary)
-			link.conversationTargets = make(map[string][]string)
 		}
 		if settings, ok := event.(*libgm.WrappedSettings); ok && settings != nil && !settings.IsOld && settings.Settings != nil && settings.Settings.GetSIMCards() != nil {
 			link.invalidateEvidenceLocked()
 			link.settingsVersion++
-			link.conversationCandidates = make(map[string][]conversationSummary)
-			link.conversationTargets = make(map[string][]string)
 		}
 	}
 	var completion *terminalCompletion
 	if terminalAtIngress(event) {
 		link.invalidateEvidenceLocked()
 		link.healthy, link.responding, link.lastOKMS = false, false, 0
-		link.conversationCandidates = make(map[string][]conversationSummary)
-		link.conversationTargets = make(map[string][]string)
 		completion = link.commitTerminalLocked(generation, event)
 	}
 	if _, ok := event.(*events.PhoneNotResponding); ok {
 		link.invalidateEvidenceLocked()
 		link.healthy, link.responding, link.lastOKMS = false, false, 0
-		link.conversationCandidates = make(map[string][]conversationSummary)
-		link.conversationTargets = make(map[string][]string)
 	}
 	if invalidatesOwnerEvidence(event) {
 		link.ownerVerification = nil
@@ -1060,6 +1041,11 @@ func cloneQueuedEvent(event any) any {
 		return &libgm.WrappedSettings{Settings: cloned, IsOld: settings.IsOld}
 	case *gmproto.Settings:
 		cloned, ok := proto.Clone(settings).(*gmproto.Settings)
+		if ok {
+			return cloned
+		}
+	case *gmproto.Conversation:
+		cloned, ok := proto.Clone(settings).(*gmproto.Conversation)
 		if ok {
 			return cloned
 		}
@@ -1253,6 +1239,15 @@ func (link *Link) projectQueuedEvent(queued queuedEvent) {
 	}
 }
 
+func (link *Link) invalidateDirectEvidence(clearOwner bool) {
+	link.mu.Lock()
+	link.invalidateEvidenceLocked()
+	if clearOwner {
+		link.ownerVerification = nil
+	}
+	link.mu.Unlock()
+}
+
 func (link *Link) setRespondingFor(generation uint64, responding bool) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
@@ -1282,14 +1277,18 @@ func (link *Link) projectEvent(event any) {
 			link.signOutIf("signed_out", activeState)
 		}
 	case *events.ListenTemporaryError:
+		link.invalidateDirectEvidence(true)
 		link.emit("conn", "temporary_error", 0)
 	case *events.StreamGap:
+		link.invalidateDirectEvidence(true)
 		link.emit("conn", "temporary_error", 0)
 	case *events.ListenRecovered:
 		link.emit("conn", "recovered", 0)
 	case *events.PhoneNotResponding:
 		link.mu.Lock()
 		link.responding = false
+		link.invalidateEvidenceLocked()
+		link.ownerVerification = nil
 		link.mu.Unlock()
 		link.emit("conn", "phone_not_responding", 0)
 	case *events.PhoneRespondingAgain:
@@ -1298,8 +1297,10 @@ func (link *Link) projectEvent(event any) {
 		link.mu.Unlock()
 		link.emit("conn", "phone_responding", 0)
 	case *events.NoDataReceived:
+		link.invalidateDirectEvidence(true)
 		link.emit("conn", "no_data", 0)
 	case *events.ActiveSessionSet:
+		link.invalidateDirectEvidence(true)
 		link.emit("session", "active_session_set", 0)
 	case *gmproto.UserAlertEvent:
 		if value.GetAlertType() == gmproto.AlertType_BROWSER_ACTIVE {
@@ -1310,11 +1311,10 @@ func (link *Link) projectEvent(event any) {
 	case *gmproto.Conversation:
 		link.recordConversationEvent(value)
 	case *libgm.WrappedSettings:
+		link.invalidateDirectEvidence(value == nil || value.IsOld || value.Settings == nil || value.Settings.GetSIMCards() == nil)
 		link.recordSettings(value)
 	case *gmproto.Settings:
-		link.mu.Lock()
-		link.invalidateSettingsLocked()
-		link.mu.Unlock()
+		link.invalidateDirectEvidence(true)
 	}
 }
 
@@ -1492,8 +1492,6 @@ func (link *Link) recordHealthFor(generation uint64, ok bool, latency int64) {
 	link.healthy = ok
 	if !ok {
 		link.invalidateEvidenceLocked()
-		link.conversationCandidates = make(map[string][]conversationSummary)
-		link.conversationTargets = make(map[string][]string)
 		link.ownerVerification = nil
 	} else {
 		link.lastOKMS = time.Now().UnixMilli()
