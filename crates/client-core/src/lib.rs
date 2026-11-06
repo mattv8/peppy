@@ -2082,6 +2082,12 @@ impl Client {
         Ok(())
     }
 
+    /// Enables or suppresses outbound live typing frames for this enabled incarnation.
+    pub fn set_typing_sharing(&self, enabled: bool) -> Result<(), LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::set_sharing(&mut store, enabled)
+    }
+
     /// Seals v2 typing only after checking fresh eligibility under the Store lock. The returned
     /// frame is an opaque detached copy: hosts must recheck its generation before transmit; it is
     /// not itself single-use authority or a host publication fence.

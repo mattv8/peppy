@@ -296,6 +296,52 @@ fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
 }
 
 #[test]
+fn disabled_sharing_preserves_outbound_clock_and_sequence_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "v2-sharing", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&client, config.device_id, conversation);
+    enable(
+        &client,
+        config.device_id,
+        LiveClock {
+            wall_ms: 1_000,
+            mono_ms: 1_000,
+        },
+    );
+
+    client.set_typing_sharing(false).unwrap();
+    assert_eq!(
+        seal(
+            &client,
+            conversation,
+            config.device_id,
+            TypingStateV2::Started,
+            -1,
+            999,
+        ),
+        None
+    );
+    client.set_typing_sharing(true).unwrap();
+    assert_eq!(
+        seal(
+            &client,
+            conversation,
+            config.device_id,
+            TypingStateV2::Started,
+            1_001,
+            1_001,
+        )
+        .unwrap()
+        .signal
+        .sequence,
+        "1"
+    );
+}
+
+#[test]
 fn v2_rejects_empty_host_roster() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();

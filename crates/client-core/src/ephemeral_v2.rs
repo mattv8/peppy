@@ -107,6 +107,7 @@ pub(crate) struct EphemeralV2State {
     control_budget: ControlBudget,
     ingress_budget: IngressBudget,
     receiver: Option<EphemeralV2SessionState>,
+    sharing_enabled: bool,
     context: Option<LiveEnableContext>,
 }
 
@@ -122,6 +123,7 @@ impl Default for EphemeralV2State {
             control_budget: ControlBudget::default(),
             ingress_budget: IngressBudget::default(),
             receiver: None,
+            sharing_enabled: true,
             context: None,
         }
     }
@@ -183,6 +185,7 @@ pub(crate) fn enable(
         control_budget: ControlBudget::default(),
         ingress_budget: IngressBudget::default(),
         receiver: Some(EphemeralV2SessionState::new(SessionId(session_id))),
+        sharing_enabled: true,
         context: Some(context),
     };
     Ok(LiveEnableGeneration(generation))
@@ -198,6 +201,9 @@ pub(crate) fn seal(
 ) -> Result<Option<LiveOutbound>, LiveError> {
     if !store.ephemeral_v2.enabled {
         return Err(LiveError::Disabled);
+    }
+    if !store.ephemeral_v2.sharing_enabled {
+        return Ok(None);
     }
     let mut clock_candidate = store
         .ephemeral_v2
@@ -290,6 +296,14 @@ pub(crate) fn seal(
         generation: LiveEnableGeneration(store.ephemeral_v2.generation),
         signal,
     }))
+}
+
+pub(crate) fn set_sharing(store: &mut Store, enabled: bool) -> Result<(), LiveError> {
+    if !store.ephemeral_v2.enabled {
+        return Err(LiveError::Disabled);
+    }
+    store.ephemeral_v2.sharing_enabled = enabled;
+    Ok(())
 }
 
 pub(crate) fn open(
