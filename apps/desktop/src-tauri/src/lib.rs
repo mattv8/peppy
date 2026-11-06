@@ -44,6 +44,8 @@ mod heads_runtime;
 mod activation_session_tests;
 #[cfg(test)]
 mod draft_command_tests;
+#[cfg(test)]
+mod rcs_snapshot_tests;
 mod hosted;
 mod lifecycle;
 #[allow(dead_code)]

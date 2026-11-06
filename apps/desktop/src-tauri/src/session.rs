@@ -319,6 +319,17 @@ impl Drop for Session {
     }
 }
 
+/// Projects one chat's RCS facts for the snapshot. A failed read claims nothing, so it cannot fail
+/// the snapshot for the other conversations.
+pub(crate) fn rcs_conversation_flags(
+    metadata: Result<Option<peppy_client_core::RcsConversationMetadata>, peppy_client_core::Error>,
+) -> (Option<bool>, bool) {
+    match metadata {
+        Ok(Some(metadata)) => (metadata.rcs_encryption, metadata.rcs_history_gap),
+        Ok(None) | Err(_) => (None, false),
+    }
+}
+
 fn host() -> BridgeError {
     BridgeError::host_state()
 }
@@ -1282,7 +1293,8 @@ impl Session {
                         eligible,
                         &mut retention_states,
                     ),
-                ).map_err(core_error)
+                )
+                .map_err(core_error)
             })
             .collect()
     }
@@ -1559,10 +1571,10 @@ impl Session {
                 .client
                 .mms_reply_context(conversation.conversation_id)
                 .ok();
-            let rcs_metadata = self
-                .client
-                .rcs_conversation_metadata(conversation.conversation_id)
-                .map_err(core_error)?;
+            let (rcs_encryption, rcs_history_gap) = rcs_conversation_flags(
+                self.client
+                    .rcs_conversation_metadata(conversation.conversation_id),
+            );
             views.push(ConversationView {
                 id: conversation.conversation_id.to_string(),
                 name,
@@ -1580,10 +1592,8 @@ impl Session {
                 folder_reason: conversation.folder_reason,
                 unblock: conversation.unblock,
                 can_unblock: conversation.can_unblock,
-                rcs_encryption: rcs_metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.rcs_encryption),
-                rcs_history_gap: rcs_metadata.is_some_and(|metadata| metadata.rcs_history_gap),
+                rcs_encryption,
+                rcs_history_gap,
             });
         }
         let listed: HashSet<ConversationId> =
