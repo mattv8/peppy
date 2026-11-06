@@ -93,7 +93,7 @@ impl Client {
         Ok(RcsOwnership {
             conversation_id,
             owner: RcsReceiveOwner::Link,
-            ownership_generation: generation as u64,
+            ownership_generation: generation,
             history_token: Some(initial_history_token.into()),
             detector_floor: provider_floor,
         })
