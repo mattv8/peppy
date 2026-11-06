@@ -38,9 +38,23 @@ fun strictBooleanProperty(name: String): Boolean = providers.gradleProperty(name
     }
 } ?: false
 
+fun resolveGoogleMessagesLink(distribution: String, sideloadTaskRequested: Boolean, explicitValue: String?): Boolean {
+    val explicit = explicitValue?.let { value ->
+        when (value) {
+            "true" -> true
+            "false" -> false
+            else -> throw GradleException("peppyGoogleMessagesLink must be true or false; got '$value'")
+        }
+    }
+    if (distribution == "play") {
+        require(explicit != true) { "peppyGoogleMessagesLink cannot be enabled for Play distribution" }
+        return false
+    }
+    return explicit ?: sideloadTaskRequested
+}
+
 val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
 val peppySideloadDebugSigning = strictBooleanProperty("peppySideloadDebugSigning")
-val peppyGoogleMessagesLink = strictBooleanProperty("peppyGoogleMessagesLink")
 val googleMessagesAar = rootProject.layout.projectDirectory.file("googlemessages/build/gmlink.aar")
 val releaseTaskRequested = gradle.startParameter.taskNames.any { taskName ->
     taskName.contains("release", ignoreCase = true) || taskName.contains("sideload", ignoreCase = true)
@@ -56,6 +70,11 @@ val peppyDistribution = providers.gradleProperty("peppyDistribution").orNull ?: 
 require(peppyDistribution in setOf("direct", "play")) {
     "peppyDistribution must be direct or play; got '$peppyDistribution'"
 }
+val peppyGoogleMessagesLink = resolveGoogleMessagesLink(
+    peppyDistribution,
+    gradle.startParameter.taskNames.any { taskName -> taskName.contains("sideload", ignoreCase = true) },
+    providers.gradleProperty("peppyGoogleMessagesLink").orNull,
+)
 val jnaVersion = "5.17.0"
 
 fun gitValueOrNull(vararg arguments: String): String? = runCatching {
@@ -270,7 +289,6 @@ android {
         getByName("debug").res.srcDir(developmentTlsResources)
         getByName("sideload").manifest.srcFile("src/sideload/AndroidManifest.xml")
         getByName("sideload").java.srcDir(if (peppyGoogleMessagesLink) "src/sideloadGmlinkOn/java" else "src/sideloadGmlinkOff/java")
-        if (peppyGoogleMessagesLink) getByName("sideload").assets.srcDir("src/sideloadGmlinkOn/assets")
     }
 
     testOptions {
@@ -880,6 +898,14 @@ val verifySideloadGoogleMessagesLink = tasks.register("verifySideloadGoogleMessa
 
 val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleaseRestrictedSetupExclusionFixtures") {
     doLast {
+        check(runCatching { resolveGoogleMessagesLink("play", false, "true") }.isFailure) {
+            "Play distribution must reject an explicit Google Messages link property"
+        }
+        check(!resolveGoogleMessagesLink("play", true, null)) { "Play distribution must disable the Google Messages link" }
+        check(resolveGoogleMessagesLink("direct", true, null)) { "Direct sideload tasks must enable the Google Messages link" }
+        check(!resolveGoogleMessagesLink("direct", true, "false")) { "Explicit false must disable the Google Messages link" }
+        check(!resolveGoogleMessagesLink("direct", false, null)) { "Debug tasks must keep the Google Messages stub" }
+
         val fixtureDirectory = layout.buildDirectory.dir("tmp/restricted-setup-exclusion-fixtures").get().asFile
         fixtureDirectory.deleteRecursively()
         fixtureDirectory.mkdirs()
