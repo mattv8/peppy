@@ -297,6 +297,35 @@ impl LiveTestServer {
         (socket, protocol)
     }
 
+    async fn ticket_upgrade_status(
+        &self,
+        session_id: &str,
+        ticket: &str,
+        origin: Option<&str>,
+        bearer: bool,
+    ) -> StatusCode {
+        let mut request = self.ws_url.clone().into_client_request().unwrap();
+        request.headers_mut().insert(
+            "sec-websocket-protocol",
+            live_ticket_protocol(session_id, ticket).parse().unwrap(),
+        );
+        if let Some(origin) = origin {
+            request
+                .headers_mut()
+                .insert("origin", origin.parse().unwrap());
+        }
+        if bearer {
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {}", self.owner_token).parse().unwrap(),
+            );
+        }
+        let tungstenite::Error::Http(response) = connect_async(request).await.unwrap_err() else {
+            panic!("ticket upgrade unexpectedly succeeded")
+        };
+        response.status()
+    }
+
     async fn snapshot(&self) -> serde_json::Value {
         reqwest::Client::new()
             .get(format!("{}/v1/snapshot", self.base_url))
@@ -1059,6 +1088,83 @@ async fn ticket_live_upgrade_echoes_protocol_and_sends_hello() {
     let ticket = issue_ticket(&server, session_id.clone()).await;
     let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
     expect_strict_hello(&mut socket).await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn ticket_live_upgrade_rejects_replay_origin_mixed_revoked_and_closed_sessions() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+
+    let replay_session = URL_SAFE_NO_PAD.encode([32_u8; 16]);
+    let replay_ticket = issue_ticket(&server, replay_session.clone()).await;
+    let (socket, _) = server
+        .connect_with_ticket(&replay_session, &replay_ticket)
+        .await;
+    drop(socket);
+    assert_eq!(
+        server
+            .ticket_upgrade_status(
+                &replay_session,
+                &replay_ticket,
+                Some("https://web.peppy.test"),
+                false,
+            )
+            .await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let origin_session = replay_session;
+    let origin_ticket = issue_ticket(&server, origin_session.clone()).await;
+    assert_eq!(
+        server
+            .ticket_upgrade_status(
+                &origin_session,
+                &origin_ticket,
+                Some("https://wrong.peppy.test"),
+                false,
+            )
+            .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        server
+            .ticket_upgrade_status(&origin_session, &origin_ticket, None, false)
+            .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        server
+            .ticket_upgrade_status(
+                &origin_session,
+                &origin_ticket,
+                Some("https://web.peppy.test"),
+                true,
+            )
+            .await,
+        StatusCode::BAD_REQUEST
+    );
+
+    let revoked_session = origin_session;
+    let revoked_ticket = origin_ticket;
+    sqlx::query(
+        "UPDATE devices SET revoked_at=clock_timestamp() WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        server
+            .ticket_upgrade_status(
+                &revoked_session,
+                &revoked_ticket,
+                Some("https://web.peppy.test"),
+                false,
+            )
+            .await,
+        StatusCode::UNAUTHORIZED
+    );
     server.shutdown().await;
 }
 
