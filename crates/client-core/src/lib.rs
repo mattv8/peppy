@@ -144,8 +144,9 @@ pub use rcs_mapping::{
 pub use rcs_native::{
     LocalRcsTargetSnapshot, NativeCarrierRouteBinding, NativeOwnNumberSource,
     NativeRcsCommitProjection, NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing,
-    NativeRcsParticipant, NativeRcsPrepareRequest, NativeRcsSimPayload, NativeRcsTargetClass,
-    NativeSettingsCurrentness, NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
+    NativeRcsParticipant, NativeRcsPreparation, NativeRcsPrepareRequest, NativeRcsSimPayload,
+    NativeRcsTargetClass, NativeSettingsCurrentness, NativeSettingsProvenance,
+    restricted_native_rcs_handoff_schema,
 };
 pub use rcs_receive::{
     RcsConversationMetadata, RcsConversationTransport, RcsCutover, RcsIdentityOutcome,
@@ -3861,6 +3862,57 @@ impl Client {
         }))
     }
 
+    /// Captures a received command's exact stored mapping without authorizing a send.
+    /// The native host must obtain current observations and consume this preparation at begin.
+    pub fn prepare_native_rcs_send(
+        &self,
+        command_id: CommandId,
+        now_ms: i64,
+    ) -> Result<NativeRcsPreparation, Error> {
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let tx = guard.conn.transaction()?;
+        let message = unattempted_rcs_message(&tx, active, command_id)?;
+        let mapping = rcs_mapping::get(&tx, message.record.conversation_id)?
+            .ok_or(Error::InvalidRequest("mapping unproven"))?;
+        if mapping.proof_version != RCS_MAPPING_PROOF_VERSION
+            || mapping.class != RcsMappingClass::OneToOne
+            || !now_ms
+                .checked_sub(mapping.verified_at_ms)
+                .is_some_and(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(&age))
+        {
+            return Err(Error::InvalidRequest("mapping unproven"));
+        }
+        require_exact_rcs_recipient(&message, &mapping)?;
+        tx.commit()?;
+        Ok(NativeRcsPreparation::new(command_id, mapping))
+    }
+
+    /// Consumes advisory preparation and issues the full native projection only after admission.
+    /// Its caller must keep the projection on the trusted native path, not a renderer JSON API.
+    pub fn begin_native_rcs_send(
+        &self,
+        preparation: NativeRcsPreparation,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<NativeRcsCommitProjection, Error> {
+        let (command_id, prepared_mapping) = preparation.into_parts();
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let permit = admit_rcs_send(
+            tx,
+            active,
+            command_id,
+            Some(&prepared_mapping),
+            observation,
+            now_ms,
+        )?;
+        Ok(permit.native_commit_projection())
+    }
+
     /// Durably records a linked-transport attempt and returns its local-only permit.
     pub fn begin_rcs_send_attempt(
         &self,
@@ -3873,44 +3925,7 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let ledger: Option<(u32, String, String, bool)> = tx
-            .query_row(
-                "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
-                [command_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        let Some((epoch, subscription_id, payload, historical)) = ledger else {
-            return Err(Error::NotFound);
-        };
-        if !subscription_id.is_empty() {
-            return Err(Error::InvalidRequest("RCS route required"));
-        }
-        if let Some(state) = attempt_state(&tx, command_id)? {
-            return Err(Error::AlreadyAttempted(state));
-        }
-        require_received_command_eligible(&tx, active, epoch, historical)?;
-        let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
-        if !media_ready
-            || message.transport != Transport::Sms
-            || !message.record.attachments.is_empty()
-        {
-            return Err(Error::InvalidRequest("RCS text required"));
-        }
-        if send_retention_blocked(&tx, command_id)? {
-            return Err(Error::InvalidRequest("RCS media unavailable"));
-        }
-        let Some(mapping) =
-            exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?
-        else {
-            commit_mapping_refusal(tx)?;
-            return Err(Error::InvalidRequest("mapping unproven"));
-        };
-        require_exact_rcs_recipient(&message, &mapping)?;
-        let tmp_id = finalize_rcs_admission(&tx, command_id, &mapping, observation, now_ms)?;
-        let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
-        tx.commit()?;
-        Ok(permit)
+        admit_rcs_send(tx, active, command_id, None, observation, now_ms)
     }
 
     /// Atomically selects and freezes the only executable transport for an upgraded gateway.
@@ -10054,6 +10069,66 @@ fn attempt_state(conn: &Connection, command_id: CommandId) -> Result<Option<Send
     .optional()?
     .map(|state| decode_state(&state))
     .transpose()
+}
+
+fn unattempted_rcs_message(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+) -> Result<MessagePayload, Error> {
+    let ledger: Option<(u32, String, String, bool)> = conn
+        .query_row(
+            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((epoch, subscription_id, payload, historical)) = ledger else {
+        return Err(Error::NotFound);
+    };
+    if !subscription_id.is_empty() {
+        return Err(Error::InvalidRequest("RCS route required"));
+    }
+    if let Some(state) = attempt_state(conn, command_id)? {
+        return Err(Error::AlreadyAttempted(state));
+    }
+    require_received_command_eligible(conn, active_epoch, epoch, historical)?;
+    let (message, media_ready) = localize(conn, decode(payload.as_bytes())?)?;
+    if !media_ready || message.transport != Transport::Sms || !message.record.attachments.is_empty()
+    {
+        return Err(Error::InvalidRequest("RCS text required"));
+    }
+    if send_retention_blocked(conn, command_id)? {
+        return Err(Error::InvalidRequest("RCS media unavailable"));
+    }
+    Ok(message)
+}
+
+fn admit_rcs_send(
+    tx: rusqlite::Transaction<'_>,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+    prepared_mapping: Option<&RcsMapping>,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<RcsPermit, Error> {
+    let message = unattempted_rcs_message(&tx, active_epoch, command_id)?;
+    if let Some(prepared_mapping) = prepared_mapping
+        && rcs_mapping::get(&tx, message.record.conversation_id)?.as_ref() != Some(prepared_mapping)
+    {
+        return Err(Error::InvalidRequest("mapping changed"));
+    }
+    let Some(mapping) =
+        exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?
+    else {
+        commit_mapping_refusal(tx)?;
+        return Err(Error::InvalidRequest("mapping unproven"));
+    };
+    require_exact_rcs_recipient(&message, &mapping)?;
+    let tmp_id = finalize_rcs_admission(&tx, command_id, &mapping, observation, now_ms)?;
+    let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
+    tx.commit()?;
+    Ok(permit)
 }
 
 fn require_received_command_eligible(

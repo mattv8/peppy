@@ -659,6 +659,9 @@ fn rcs_command(
     )
 }
 
+#[path = "rcs_native_handoff.rs"]
+mod native_handoff;
+
 #[test]
 fn current_lookup_withdrawal_revokes_strict_authority_across_reopen() {
     let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");

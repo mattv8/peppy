@@ -3,7 +3,7 @@
 //! These records are intentionally separate from vault events and shared conversation DTOs. They
 //! are the only JSON-schema-capable projection an Android transport may receive after core has
 //! admitted an RCS attempt.
-use crate::{RcsConversationType, RcsMappingObservation, RcsSendMode};
+use crate::{CommandId, RcsConversationType, RcsMapping, RcsMappingObservation, RcsSendMode};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +143,40 @@ pub struct NativeRcsPrepareRequest {
     pub command_id: String,
     pub peppy_conversation_id: String,
     pub canonical_recipient: String,
+}
+
+/// Core-owned native RCS preparation that retains the complete verified mapping.
+pub struct NativeRcsPreparation {
+    command_id: CommandId,
+    request: NativeRcsPrepareRequest,
+    mapping: RcsMapping,
+}
+
+impl NativeRcsPreparation {
+    pub(crate) fn new(command_id: CommandId, mapping: RcsMapping) -> Self {
+        let request = NativeRcsPrepareRequest {
+            command_id: command_id.to_string(),
+            peppy_conversation_id: mapping.conversation_id.to_string(),
+            canonical_recipient: mapping.proof.canonical_participant.clone(),
+        };
+        Self {
+            command_id,
+            request,
+            mapping,
+        }
+    }
+
+    pub fn request(&self) -> &NativeRcsPrepareRequest {
+        &self.request
+    }
+
+    pub fn mapping(&self) -> &RcsMapping {
+        &self.mapping
+    }
+
+    pub(crate) fn into_parts(self) -> (CommandId, RcsMapping) {
+        (self.command_id, self.mapping)
+    }
 }
 
 /// Schema bundle for the restricted local-native handoff only; it is not an event or public relay API.
