@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -54,13 +55,14 @@ type commitRcsPermit struct {
 }
 
 type preparedRcsTicket struct {
-	id          string
-	expiresAt   time.Time
-	generation  uint64
-	streamEpoch uint64
-	revision    uint64
-	request     prepareRcsRequest
-	payload     *gmproto.SendMessageRequest
+	id           string
+	expiresAt    time.Time
+	generation   uint64
+	streamEpoch  uint64
+	revision     uint64
+	request      prepareRcsRequest
+	payload      *gmproto.SendMessageRequest
+	conversation *gmproto.Conversation
 }
 
 // SendRcs parses and validates a legacy request without dispatching a carrier effect.
@@ -95,7 +97,7 @@ func (link *Link) PrepareRcs(requestJSON string) string {
 	if link.preparedTicket != nil && !now.Before(link.preparedTicket.expiresAt) {
 		link.clearPreparedTicketLocked()
 	}
-	if link.preparedTicket != nil {
+	if link.preparedTicket != nil || link.sendAdmissionInFlight {
 		return sendJSON(rcsSendResult{Code: "busy"})
 	}
 	if link.closed || !link.hasOwnerVerificationLocked() || link.runGeneration != link.generation {
@@ -113,7 +115,7 @@ func (link *Link) PrepareRcs(requestJSON string) string {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
 	ticketID := uuid.NewString()
-	link.preparedTicket = &preparedRcsTicket{id: ticketID, expiresAt: now.Add(preparedRcsTicketTTL), generation: link.generation, streamEpoch: link.streamEpoch, revision: link.indexRevision, request: request, payload: proto.Clone(payload).(*gmproto.SendMessageRequest)}
+	link.preparedTicket = &preparedRcsTicket{id: ticketID, expiresAt: now.Add(preparedRcsTicketTTL), generation: link.generation, streamEpoch: link.streamEpoch, revision: link.indexRevision, request: request, payload: proto.Clone(payload).(*gmproto.SendMessageRequest), conversation: cloneConversation(conversation)}
 	return sendJSON(rcsSendResult{Code: "prepared", TicketID: ticketID})
 }
 
@@ -135,12 +137,22 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
 	link.preparedTicket = nil
+	link.sendAdmissionInFlight = true
 	link.mu.Unlock()
+	defer func() {
+		link.mu.Lock()
+		link.sendAdmissionInFlight = false
+		link.mu.Unlock()
+	}()
 
 	link.rpcMu.Lock()
 	defer link.rpcMu.Unlock()
 	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
 	if !ok || generation != ticket.generation || streamEpoch != ticket.streamEpoch {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	fetched, fetchCode := link.getConversation(runCtx, client, ticket.request.GoogleConversationID)
+	if fetchCode != "" || !proto.Equal(fetched, ticket.conversation) {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
 	link.mu.Lock()
@@ -159,8 +171,12 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 		effect = client.SendMessage
 	}
 	ctx, cancel := context.WithTimeout(runCtx, rcsSendDeadline)
+	ctx = context.WithValue(ctx, sendAdmissionContextKey{}, sendAdmission(func() bool { return link.sendAdmissionCurrent(ticket) }))
 	response, err := effect(ctx, payload)
 	cancel()
+	if errors.Is(err, errSendAdmissionRevoked) {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
 	if err != nil || response == nil {
 		return sendJSON(rcsSendResult{Code: "outcome_unknown"})
 	}
@@ -171,6 +187,20 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
 	return sendJSON(rcsSendResult{Code: "outcome_unknown"})
+}
+
+func (link *Link) sendAdmissionCurrent(ticket *preparedRcsTicket) bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if !link.nowForTicketLocked().Before(ticket.expiresAt) || link.closed || link.generation != ticket.generation || link.runGeneration != ticket.generation || link.streamEpoch != ticket.streamEpoch || link.indexRevision != ticket.revision || !link.hasOwnerVerificationLocked() {
+		return false
+	}
+	current := link.currentSupportedRcsConversationLocked(ticket.request.GoogleConversationID, ticket.generation, ticket.streamEpoch)
+	if current == nil || !proto.Equal(current, ticket.conversation) {
+		return false
+	}
+	payload, code := validatedPayload(current, link.settings, rcsSendRequest{TmpID: ticket.request.TmpID, GoogleConversationID: ticket.request.GoogleConversationID, Content: ticket.request.Content})
+	return code == "" && proto.Equal(payload, ticket.payload)
 }
 
 // CancelPreparedRcs removes an unconsumed ticket. It is intentionally idempotent

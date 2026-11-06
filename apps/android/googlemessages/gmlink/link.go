@@ -101,6 +101,7 @@ type Link struct {
 	streamSource                 libgm.StreamSource
 	streamOpen                   bool
 	preparedTicket               *preparedRcsTicket
+	sendAdmissionInFlight        bool
 	ticketNow                    func() time.Time
 	sendMessage                  func(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error)
 

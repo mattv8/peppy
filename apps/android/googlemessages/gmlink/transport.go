@@ -30,6 +30,12 @@ type transportGuard struct {
 	onStop  func(string)
 }
 
+type sendAdmissionContextKey struct{}
+
+var errSendAdmissionRevoked = errors.New("send_admission_revoked")
+
+type sendAdmission func() bool
+
 func newGuardedSettings(auth *libgm.AuthData, persist func() error, onStop func(code string)) exhttp.ClientSettings {
 	return guardedSettings(exhttp.SensibleClientSettings, auth, persist, onStop)
 }
@@ -57,6 +63,9 @@ func (guard *transportGuard) setBase(settings exhttp.ClientSettings) {
 func (guard *transportGuard) RoundTrip(request *http.Request) (*http.Response, error) {
 	if guard.base == nil || !isAllowedRequest(request) {
 		return nil, errRequestRefused
+	}
+	if admission, _ := request.Context().Value(sendAdmissionContextKey{}).(sendAdmission); admission != nil && !admission() {
+		return nil, errSendAdmissionRevoked
 	}
 	request = request.Clone(request.Context())
 	request.GetBody = nil
