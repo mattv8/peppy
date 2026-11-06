@@ -4670,10 +4670,11 @@ describe("gateway routes", () => {
     const firstAttachment = host.conversations[0].messages[0].attachments[0];
     host.conversations[0].messages[0].attachments.push({ ...firstAttachment, id: "photo-2", name: "photo-two.png" });
     const resolveSave = deferred<boolean>();
+    const rejectSecondSave = deferred<boolean>();
     vi.mocked(bridge.save_attachment)
       .mockRejectedValueOnce({ code: "media-pending" })
       .mockImplementationOnce(() => resolveSave.promise)
-      .mockRejectedValueOnce({ code: "media-pending" })
+      .mockImplementationOnce(() => rejectSecondSave.promise)
       .mockResolvedValue(true);
     render(<App />);
     await screen.findByRole("button", { name: "Save photo.png" });
@@ -4687,11 +4688,19 @@ describe("gateway routes", () => {
       hint?.();
     });
     fireEvent.click(screen.getByRole("button", { name: "Save photo-two.png" }));
-    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo-two.png before saving.");
     expect(bridge.save_attachment).toHaveBeenCalledTimes(3);
+    await act(async () => rejectSecondSave.reject({ code: "media-pending" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("app-notice-action")).toHaveTextContent("Downloading photo-two.png before saving."),
+    );
     await act(async () => resolveSave.resolve(true));
-    await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledWith("photo-2"));
-    expect(bridge.save_attachment).toHaveBeenCalledTimes(4);
+    await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledTimes(4));
+    expect(vi.mocked(bridge.save_attachment).mock.calls.map(([attachmentId]) => attachmentId)).toEqual([
+      "photo-1",
+      "photo-1",
+      "photo-2",
+      "photo-2",
+    ]);
   });
 
   it("stops pending attachment saves after unmount", async () => {
