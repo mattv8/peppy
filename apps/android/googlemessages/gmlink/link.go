@@ -686,14 +686,14 @@ func (link *Link) activeRuntime() (*libgm.Client, context.Context, uint64, uint6
 }
 
 // OwnerGeneration returns the currently running generation used to fence effects.
-// It is zero when no active generation can admit work.
-func (link *Link) OwnerGeneration() uint64 {
+// Gomobile exposes signed 64-bit integers; zero means no active generation.
+func (link *Link) OwnerGeneration() int64 {
 	link.mu.Lock()
 	defer link.mu.Unlock()
 	if link.closed || !link.running || link.runGeneration == 0 || link.runGeneration != link.generation {
 		return 0
 	}
-	return link.runGeneration
+	return int64(link.runGeneration)
 }
 
 // Unlink cancels any in-flight pair or relink and waits, bounded, for it to unwind. Then
