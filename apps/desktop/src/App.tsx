@@ -140,6 +140,7 @@ import { RcsBadge } from "./rcs/RcsBadge";
 import { useRcsRoute } from "./rcs/useRcsRoute";
 import { TypingAnnouncer, TypingIndicator } from "./typing/TypingIndicator";
 import { useTypingDisplay } from "./typing/useTypingDisplay";
+import { useTypingSender } from "./typing/useTypingSender";
 import { peppyCopy } from "./generated/peppyCopy";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { conversationContactAddress } from "./contacts/conversation-contact";
@@ -1707,6 +1708,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
   const [shareTyping, setShareTyping] = useState(readShareTyping);
   const [typingShareError, setTypingShareError] = useState(false);
+  useEffect(() => {
+    void bridge.set_typing_sharing?.({ enabled: shareTyping }).catch(() => undefined);
+  }, []);
   const [groupSenderAvatars, setGroupSenderAvatars] = useState(readGroupSenderAvatars);
   const [showReactions, setShowReactions] = useShowReactions();
   const [pendingReactionId, setPendingReactionId] = useState<string>();
@@ -2061,7 +2065,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (!persistLayout({ shareTyping: enabled })) {
       setShareTyping(previous);
       setTypingShareError(true);
+      return;
     }
+    void bridge.set_typing_sharing?.({ enabled }).catch(() => {
+      persistLayout({ shareTyping: previous });
+      setShareTyping(previous);
+      setTypingShareError(true);
+    });
   };
   const changeGroupSenderAvatars = (enabled: boolean) => {
     setGroupSenderAvatars(enabled);
@@ -3300,6 +3310,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     locked: Boolean(appLock?.locked),
   });
   const typing = useTypingDisplay(bridge, active?.id, rcsRoute.current);
+  const typingSender = useTypingSender({
+    bridge,
+    conversationId: active?.id,
+    current: rcsRoute.current,
+    existing: Boolean(active && slotKey && !isLocalDraftKey(slotKey) && !active.draftOnly),
+    sendSupported: Boolean(slotKey),
+    readOnly: false,
+  });
   const mmsRequired = requiresMms(content, active);
   const routeRecipients = recipientCount(content, active);
   const estimateBytes = draftEstimateBytes(content, attachmentViews);
@@ -4451,8 +4469,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         unavailableReason={sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly}
         placeholder={composerReadOnly ? "Loading draft…" : undefined}
-        onDraftChange={(text) => edit({ text })}
-        onSend={() => void send()}
+        onDraftChange={(text) => {
+          if (!composerReadOnly && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending) typingSender.noteInput(text);
+          edit({ text });
+        }}
+        onSend={() => { typingSender.noteSend(); void send(); }}
         onAddAttachment={slotKey && !composerReadOnly ? () => void addAttachment() : undefined}
         onRemoveAttachment={slotKey && !composerReadOnly ? (id) => edit({ attachmentIds: content.attachmentIds.filter((attachmentId) => attachmentId !== id) }) : undefined}
         statusActive={statusActive}
