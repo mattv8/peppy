@@ -169,13 +169,6 @@ fn delayed_same_session_ack_preserves_the_consumed_floor() {
         .unwrap()
         .reply
         .unwrap();
-    let stop = seal(
-        &sender,
-        conversation,
-        receiver_config.device_id,
-        TypingStateV2::Stopped,
-        1_002,
-    );
     let acknowledgement = sender
         .open_typing_signal_v2(
             &challenge,
@@ -187,38 +180,109 @@ fn delayed_same_session_ack_preserves_the_consumed_floor() {
         .unwrap()
         .reply
         .unwrap();
-    let stop_outcome = receiver
+    let initial_update = receiver
         .open_typing_signal_v2(
-            &stop.signal,
+            &acknowledgement,
             LiveClock {
                 wall_ms: 1_002,
                 mono_ms: 1_002,
             },
         )
+        .unwrap()
+        .session_update
         .unwrap();
-    assert!(stop_outcome.action.is_none());
-    let accepted = receiver
+    let post_floor_start = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        4_001,
+    );
+    let action = receiver
         .open_typing_signal_v2(
-            &acknowledgement,
+            &post_floor_start.signal,
             LiveClock {
                 wall_ms: 4_001,
                 mono_ms: 4_001,
             },
         )
+        .unwrap()
+        .action
         .unwrap();
-    let update = accepted.session_update.unwrap();
+    assert!(
+        matches!(action, LiveAction::GatewayTypingIntent { session_token, .. } if session_token == initial_update.current_session_token)
+    );
+    let renewal = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        11_002,
+    );
+    let renewal_challenge = receiver
+        .open_typing_signal_v2(
+            &renewal.signal,
+            LiveClock {
+                wall_ms: 11_002,
+                mono_ms: 11_002,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    let post_floor_stop = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Stopped,
+        11_003,
+    );
+    let stop_action = receiver
+        .open_typing_signal_v2(
+            &post_floor_stop.signal,
+            LiveClock {
+                wall_ms: 11_003,
+                mono_ms: 11_003,
+            },
+        )
+        .unwrap()
+        .action
+        .unwrap();
+    assert!(
+        matches!(stop_action, LiveAction::GatewayTypingIntent { session_token, .. } if session_token == initial_update.current_session_token)
+    );
+    let delayed_ack = sender
+        .open_typing_signal_v2(
+            &renewal_challenge,
+            LiveClock {
+                wall_ms: 11_003,
+                mono_ms: 11_003,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    let accepted = receiver
+        .open_typing_signal_v2(
+            &delayed_ack,
+            LiveClock {
+                wall_ms: 16_003,
+                mono_ms: 16_003,
+            },
+        )
+        .unwrap();
+    assert_eq!(accepted.session_update, None);
     let replay = receiver
         .open_typing_signal_v2(
-            &stop.signal,
+            &post_floor_start.signal,
             LiveClock {
-                wall_ms: 4_002,
-                mono_ms: 4_002,
+                wall_ms: 16_004,
+                mono_ms: 16_004,
             },
         )
         .unwrap();
     assert!(replay.action.is_none());
     assert_eq!(replay.session_update, None);
-    assert_eq!(accepted.session_update, Some(update));
 }
 
 #[test]
@@ -259,19 +323,12 @@ fn replacement_ack_retires_actions_from_the_old_session() {
         .unwrap()
         .reply
         .unwrap();
-    let stale = seal(
-        &sender,
-        conversation,
-        receiver_config.device_id,
-        TypingStateV2::Stopped,
-        1_002,
-    );
     let acknowledgement = sender
         .open_typing_signal_v2(
             &challenge,
             LiveClock {
-                wall_ms: 1_002,
-                mono_ms: 1_002,
+                wall_ms: 4_001,
+                mono_ms: 4_001,
             },
         )
         .unwrap()
@@ -281,13 +338,40 @@ fn replacement_ack_retires_actions_from_the_old_session() {
         .open_typing_signal_v2(
             &acknowledgement,
             LiveClock {
-                wall_ms: 1_003,
-                mono_ms: 1_003,
+                wall_ms: 4_002,
+                mono_ms: 4_002,
             },
         )
         .unwrap()
         .session_update
         .unwrap();
+    let old_action = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        4_003,
+    );
+    assert!(matches!(
+        receiver
+            .open_typing_signal_v2(
+                &old_action.signal,
+                LiveClock {
+                    wall_ms: 4_003,
+                    mono_ms: 4_003,
+                },
+            )
+            .unwrap()
+            .action,
+        Some(LiveAction::GatewayTypingIntent { session_token, .. }) if session_token == first_update.current_session_token
+    ));
+    let stale = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Stopped,
+        4_004,
+    );
 
     sender.disable_live_typing().unwrap();
     sender
@@ -298,8 +382,8 @@ fn replacement_ack_retires_actions_from_the_old_session() {
                 local_executor: LiveExecutor::None,
             },
             LiveClock {
-                wall_ms: 2_000,
-                mono_ms: 2_000,
+                wall_ms: 5_000,
+                mono_ms: 5_000,
             },
         )
         .unwrap();
@@ -308,14 +392,14 @@ fn replacement_ack_retires_actions_from_the_old_session() {
         conversation,
         receiver_config.device_id,
         TypingStateV2::Started,
-        2_001,
+        5_001,
     );
     let challenge = receiver
         .open_typing_signal_v2(
             &replacement.signal,
             LiveClock {
-                wall_ms: 2_001,
-                mono_ms: 2_001,
+                wall_ms: 5_001,
+                mono_ms: 5_001,
             },
         )
         .unwrap()
@@ -325,8 +409,8 @@ fn replacement_ack_retires_actions_from_the_old_session() {
         .open_typing_signal_v2(
             &challenge,
             LiveClock {
-                wall_ms: 2_002,
-                mono_ms: 2_002,
+                wall_ms: 5_002,
+                mono_ms: 5_002,
             },
         )
         .unwrap()
@@ -336,8 +420,8 @@ fn replacement_ack_retires_actions_from_the_old_session() {
         .open_typing_signal_v2(
             &acknowledgement,
             LiveClock {
-                wall_ms: 2_003,
-                mono_ms: 2_003,
+                wall_ms: 5_003,
+                mono_ms: 5_003,
             },
         )
         .unwrap()
@@ -360,8 +444,8 @@ fn replacement_ack_retires_actions_from_the_old_session() {
             .open_typing_signal_v2(
                 &stale.signal,
                 LiveClock {
-                    wall_ms: 2_004,
-                    mono_ms: 2_004
+                    wall_ms: 5_004,
+                    mono_ms: 5_004
                 }
             )
             .unwrap()
@@ -391,6 +475,48 @@ fn ingress_and_challenge_budgets_recover_after_the_window() {
         sender_config.device_id,
         receiver_config.device_id,
     );
+    let bootstrap = seal(
+        &sender,
+        conversations[0],
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        1_001,
+    );
+    let challenge = receiver
+        .open_typing_signal_v2(
+            &bootstrap.signal,
+            LiveClock {
+                wall_ms: 1_001,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    let acknowledgement = sender
+        .open_typing_signal_v2(
+            &challenge,
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_002,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    assert!(
+        receiver
+            .open_typing_signal_v2(
+                &acknowledgement,
+                LiveClock {
+                    wall_ms: 1_003,
+                    mono_ms: 1_003,
+                },
+            )
+            .unwrap()
+            .session_update
+            .is_some()
+    );
 
     let frames: Vec<_> = conversations
         .iter()
@@ -400,45 +526,179 @@ fn ingress_and_challenge_budgets_recover_after_the_window() {
                 *conversation,
                 receiver_config.device_id,
                 TypingStateV2::Started,
-                1_001,
+                4_001,
             )
         })
         .collect();
-    let mut challenge = None;
     for frame in &frames[..4] {
         let outcome = receiver
             .open_typing_signal_v2(
                 &frame.signal,
                 LiveClock {
-                    wall_ms: 1_005,
-                    mono_ms: 1_005,
+                    wall_ms: 4_001,
+                    mono_ms: 4_001,
                 },
             )
             .unwrap();
-        challenge = challenge.or(outcome.reply);
+        assert!(outcome.action.is_some());
     }
     let excess = receiver
         .open_typing_signal_v2(
             &frames[4].signal,
             LiveClock {
-                wall_ms: 1_005,
-                mono_ms: 1_005,
+                wall_ms: 4_001,
+                mono_ms: 4_001,
             },
         )
         .unwrap();
     assert!(excess.action.is_none() && excess.reply.is_none() && excess.session_update.is_none());
 
-    assert!(challenge.is_some());
     let recovered = receiver
         .open_typing_signal_v2(
             &frames[4].signal,
             LiveClock {
-                wall_ms: 2_010,
-                mono_ms: 2_010,
+                wall_ms: 5_001,
+                mono_ms: 5_001,
             },
         )
         .unwrap();
-    assert!(recovered.action.is_none() && recovered.session_update.is_none());
+    assert!(recovered.action.is_some() && recovered.session_update.is_none());
+}
+
+#[test]
+fn global_challenge_budget_spans_distinct_unknown_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let receiver_config = config(&directory, "challenge-receiver", &vault);
+    let receiver = unlocked(&receiver_config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&receiver, receiver_config.device_id, conversation);
+    let senders: Vec<_> = (0..25)
+        .map(|index| {
+            let sender_config = config(&directory, &format!("challenge-sender-{index}"), &vault);
+            let sender = unlocked(&sender_config, &vault);
+            (sender_config, sender)
+        })
+        .collect();
+    let mut server = Server::default();
+    server.upload(&receiver);
+    for (_, sender) in &senders {
+        server.sync(sender);
+    }
+    let roster: Vec<_> = std::iter::once(receiver_config.device_id)
+        .chain(senders.iter().map(|(config, _)| config.device_id))
+        .collect();
+    receiver
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster.clone(),
+                local_gateway_device_id: receiver_config.device_id,
+                local_executor: LiveExecutor::CurrentGateway,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+    for (sender_config, sender) in &senders {
+        sender
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: vec![sender_config.device_id, receiver_config.device_id],
+                    local_gateway_device_id: sender_config.device_id,
+                    local_executor: LiveExecutor::None,
+                },
+                LiveClock {
+                    wall_ms: 1_000,
+                    mono_ms: 1_000,
+                },
+            )
+            .unwrap();
+    }
+
+    let mut challenges = 0;
+    for (index, (sender_config, sender)) in senders.iter().take(24).enumerate() {
+        let batch_time = 1_001 + (index / 6) as u64 * 1_000;
+        let frame = seal(
+            sender,
+            conversation,
+            receiver_config.device_id,
+            TypingStateV2::Started,
+            batch_time,
+        );
+        let outcome = receiver
+            .open_typing_signal_v2(
+                &frame.signal,
+                LiveClock {
+                    wall_ms: batch_time as i64,
+                    mono_ms: batch_time,
+                },
+            )
+            .unwrap();
+        let expected = index % 6 < 5;
+        assert_eq!(outcome.reply.is_some(), expected);
+        challenges += usize::from(outcome.reply.is_some());
+        assert_eq!(sender_config.device_id, frame.signal.sender_device_id);
+    }
+    assert_eq!(challenges, 20);
+
+    let (blocked_config, blocked_sender) = &senders[24];
+    let blocked = seal(
+        blocked_sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        5_001,
+    );
+    assert!(
+        receiver
+            .open_typing_signal_v2(
+                &blocked.signal,
+                LiveClock {
+                    wall_ms: 5_001,
+                    mono_ms: 5_001,
+                },
+            )
+            .unwrap()
+            .reply
+            .is_none()
+    );
+
+    blocked_sender.disable_live_typing().unwrap();
+    blocked_sender
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: vec![blocked_config.device_id, receiver_config.device_id],
+                local_gateway_device_id: blocked_config.device_id,
+                local_executor: LiveExecutor::None,
+            },
+            LiveClock {
+                wall_ms: 61_001,
+                mono_ms: 61_001,
+            },
+        )
+        .unwrap();
+    let resumed = seal(
+        blocked_sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        61_002,
+    );
+    assert!(
+        receiver
+            .open_typing_signal_v2(
+                &resumed.signal,
+                LiveClock {
+                    wall_ms: 61_002,
+                    mono_ms: 61_002,
+                },
+            )
+            .unwrap()
+            .reply
+            .is_some()
+    );
 }
 
 #[test]
