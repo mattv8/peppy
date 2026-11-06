@@ -847,11 +847,24 @@ async fn live_upgrade_retains_connection_lease_until_disconnect() {
 
 #[tokio::test]
 async fn repeated_live_upgrades_without_frames_are_rate_limited() {
-    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+    const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+    let server = tokio::time::timeout(
+        SETUP_TIMEOUT,
+        LiveTestServer::start(FakeLiveBackend::immediate(), true),
+    )
+    .await
+    .expect("live test server did not start");
     let mut sockets = Vec::new();
-    for _ in 0..crate::live::LIVE_UPGRADE_RATE_LIMIT {
-        let mut socket = server.connect().await;
-        expect_strict_hello(&mut socket).await;
+    for attempt in 0..crate::live::LIVE_UPGRADE_RATE_LIMIT {
+        let mut socket = tokio::time::timeout(SOCKET_TIMEOUT, server.connect())
+            .await
+            .unwrap_or_else(|_| panic!("live upgrade {attempt} did not complete"));
+        tokio::time::timeout(SOCKET_TIMEOUT, expect_strict_hello(&mut socket))
+            .await
+            .unwrap_or_else(|_| panic!("live upgrade {attempt} did not receive hello"));
         sockets.push(socket);
     }
 
@@ -860,14 +873,19 @@ async fn repeated_live_upgrades_without_frames_are_rate_limited() {
         "authorization",
         format!("Bearer {}", server.owner_token).parse().unwrap(),
     );
-    let error = connect_async(request).await.unwrap_err();
+    let error = tokio::time::timeout(SOCKET_TIMEOUT, connect_async(request))
+        .await
+        .expect("rate-limited live upgrade did not complete")
+        .unwrap_err();
     let tungstenite::Error::Http(response) = error else {
         panic!("expected upgrade admission rejection");
     };
     assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
 
     drop(sockets);
-    server.shutdown().await;
+    tokio::time::timeout(SHUTDOWN_TIMEOUT, server.shutdown())
+        .await
+        .expect("live test server did not shut down");
 }
 
 #[tokio::test]

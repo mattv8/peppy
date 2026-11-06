@@ -3284,7 +3284,11 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
     ) {
         return;
     }
-    let mut recheck = tokio::time::interval(live_recheck_interval());
+    let recheck_interval = live_recheck_interval();
+    let mut recheck = tokio::time::interval_at(
+        tokio::time::Instant::now() + recheck_interval,
+        recheck_interval,
+    );
     let mut challenge: Option<Vec<u8>> = None;
     loop {
         tokio::select! {
@@ -3579,21 +3583,31 @@ async fn live_revalidate(
     if !*readiness.borrow_and_update() {
         return LiveRevalidation::Unavailable;
     }
-    tokio::select! {
-        biased;
-        _ = cancellation.changed() => LiveRevalidation::Cancelled,
-        _ = readiness.changed() => LiveRevalidation::Unavailable,
-        result = tokio::time::timeout(Duration::from_secs(5), async {
-            match still_active(state, principal).await {
-                Ok(false) => Ok(false),
-                Ok(true) => authorize(state, principal, Operation::Sync).await.map(|_| true),
-                Err(_) => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "live_unavailable")),
-            }
-        }) => match result {
-            Ok(Ok(true)) => LiveRevalidation::Authorized,
-            Ok(Ok(false)) | Ok(Err(ApiError(StatusCode::FORBIDDEN, _))) => LiveRevalidation::Unauthorized,
-            Ok(Err(_)) | Err(_) => LiveRevalidation::Unavailable,
-        },
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        match still_active(state, principal).await {
+            Ok(false) => Ok(false),
+            Ok(true) => authorize(state, principal, Operation::Sync)
+                .await
+                .map(|_| true),
+            Err(_) => Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "live_unavailable",
+            )),
+        }
+    })
+    .await;
+    if *cancellation.borrow_and_update() {
+        return LiveRevalidation::Cancelled;
+    }
+    if !*readiness.borrow_and_update() {
+        return LiveRevalidation::Unavailable;
+    }
+    match result {
+        Ok(Ok(true)) => LiveRevalidation::Authorized,
+        Ok(Ok(false)) | Ok(Err(ApiError(StatusCode::FORBIDDEN, _))) => {
+            LiveRevalidation::Unauthorized
+        }
+        Ok(Err(_)) | Err(_) => LiveRevalidation::Unavailable,
     }
 }
 

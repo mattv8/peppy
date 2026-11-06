@@ -726,6 +726,21 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
             "public challenge; no admission without proof",
         ),
         (
+            "GET",
+            "/v1/live",
+            "bearer or one-use ticket WebSocket authentication",
+        ),
+        (
+            "POST",
+            "/v1/live/tickets",
+            "live readiness is checked before bearer authentication",
+        ),
+        (
+            "DELETE",
+            "/v1/live/tickets",
+            "live ticket session bearer authentication",
+        ),
+        (
             "POST",
             "/v1/enrollment/challenges/{enrollment_id}/complete",
             "admission and device signatures",
@@ -811,7 +826,7 @@ fn production_route_sources() -> Vec<(std::path::PathBuf, String)> {
 }
 
 fn declared_route_pairs(source: &str) -> Vec<(String, String)> {
-    let mut remaining = source.split("#[cfg(test)]").next().unwrap();
+    let mut remaining = source.split("\n#[cfg(test)]\nmod ").next().unwrap();
     let mut pairs = Vec::new();
     while let Some(start) = remaining.find(".route(") {
         let arguments = &remaining[start + ".route(".len()..];
@@ -888,6 +903,14 @@ fn declared_route_pairs(source: &str) -> Vec<(String, String)> {
         remaining = &arguments[end + 1..];
     }
     pairs
+}
+
+#[test]
+fn route_inventory_keeps_routes_after_inline_test_configuration() {
+    let pairs = declared_route_pairs(
+        "fn build(#[cfg(test)] override_value: Option<()>) { Router::new().route(\"/one\", get(read)); }\n#[cfg(test)]\nmod tests { Router::new().route(\"/test-only\", get(read)); }",
+    );
+    assert_eq!(pairs, vec![route_key("GET", "/one")]);
 }
 
 #[test]
