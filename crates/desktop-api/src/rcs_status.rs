@@ -182,6 +182,181 @@ fn expiry(observed_at_ms: i64) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::gateways::{CapabilitiesResponse, DevicesResponse, gateway_views};
+    use peppy_client_core::{
+        ClientConfig, DatabaseKey, RcsEligibilityProjection, RcsLinkStatusEvent, VaultId,
+    };
+    use std::path::PathBuf;
+
+    struct ClientFixture {
+        client: Client,
+        gateway: DeviceId,
+        directory: PathBuf,
+    }
+
+    impl Drop for ClientFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn fixture() -> ClientFixture {
+        let gateway = DeviceId::new();
+        let directory = std::env::temp_dir().join(format!("desktop-rcs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: gateway,
+            },
+            DatabaseKey::new(&[7; 32]).unwrap(),
+        )
+        .unwrap();
+        ClientFixture {
+            client,
+            gateway,
+            directory,
+        }
+    }
+
+    fn gateway_view(gateway: DeviceId) -> GatewayView {
+        GatewayView {
+            id: gateway.to_string(),
+            name: "Gateway".into(),
+            sim_id: "sim".into(),
+            online: true,
+            simulated: false,
+            supports_sms: true,
+            supports_mms: true,
+            availability: crate::GatewayAvailability::Connected,
+            last_seen_age_seconds: None,
+            presence: None,
+            wake_route: false,
+            capability_note: None,
+            mms_content_version: None,
+            mms_max_bytes: None,
+            mms_limit_source: None,
+            mms_max_recipients: None,
+        }
+    }
+
+    #[test]
+    fn snapshot_projects_real_core_rcs_freshness_boundaries() {
+        let fixture = fixture();
+        let conversation = ConversationId::new();
+        let observed_at_ms = 1_000;
+        fixture
+            .client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: fixture.gateway,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms,
+                    capability_revision: 1,
+                    feature_bits: 1,
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id: conversation,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 1,
+                    mapping_revision: 1,
+                    observed_at_ms,
+                    gateway_device_id: fixture.gateway,
+                }],
+                observed_at_ms,
+            )
+            .unwrap();
+
+        let snapshot = snapshot_at(
+            &fixture.client,
+            &[gateway_view(fixture.gateway)],
+            &HashSet::new(),
+            SnapshotAccess {
+                active_conversation: Some(conversation),
+                active_is_existing: true,
+                roster_validated: true,
+                unlocked: true,
+                now_ms: observed_at_ms + RCS_CAPABILITY_STALE_MS,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(snapshot.gateways[0].current);
+        assert_eq!(
+            snapshot.eligibilities[0].eligibility,
+            RcsEligibilityState::Eligible
+        );
+
+        for now_ms in [
+            observed_at_ms + RCS_CAPABILITY_STALE_MS + 1,
+            observed_at_ms - 1,
+        ] {
+            let snapshot = snapshot_at(
+                &fixture.client,
+                &[gateway_view(fixture.gateway)],
+                &HashSet::new(),
+                SnapshotAccess {
+                    active_conversation: Some(conversation),
+                    active_is_existing: true,
+                    roster_validated: true,
+                    unlocked: true,
+                    now_ms,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+            assert!(!snapshot.gateways[0].current);
+            assert!(snapshot.eligibilities.is_empty());
+        }
+    }
+
+    #[test]
+    fn snapshot_projects_a_fresh_terminal_core_status_without_eligibility() {
+        let fixture = fixture();
+        let observed_at_ms = 1_000;
+        fixture
+            .client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: fixture.gateway,
+                    state: RcsCapabilityState::Unlinked,
+                    availability: false,
+                    health: false,
+                    phone_responsive: false,
+                    observed_at_ms,
+                    capability_revision: 1,
+                    feature_bits: 0,
+                },
+                &[],
+                observed_at_ms,
+            )
+            .unwrap();
+
+        let snapshot = snapshot_at(
+            &fixture.client,
+            &[gateway_view(fixture.gateway)],
+            &HashSet::new(),
+            SnapshotAccess {
+                active_conversation: Some(ConversationId::new()),
+                active_is_existing: true,
+                roster_validated: true,
+                unlocked: true,
+                now_ms: observed_at_ms,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(snapshot.gateways[0].state, RcsGatewayState::Unlinked);
+        assert!(snapshot.gateways[0].current);
+        assert!(!snapshot.gateways[0].healthy);
+        assert!(snapshot.eligibilities.is_empty());
+    }
 
     #[test]
     fn expiry_matches_core_inclusive_currentness_boundary() {
