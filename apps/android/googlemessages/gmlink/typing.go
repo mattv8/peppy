@@ -30,10 +30,10 @@ type typingProjection struct {
 }
 
 type gatewayTypingIntent struct {
-	ConversationID string      `json:"conversation_id"`
-	State          typingState `json:"state"`
-	DeadlineMono   uint64      `json:"deadline_mono"`
-	LinkGeneration uint64      `json:"link_generation"`
+	ConversationID      string      `json:"conversation_id"`
+	State               typingState `json:"state"`
+	RemainingValidityMS uint64      `json:"remaining_validity_ms"`
+	LinkGeneration      uint64      `json:"link_generation"`
 }
 
 type typingSetRequest struct {
@@ -79,9 +79,9 @@ func typingParticipantMatches(data *gmproto.TypingData, conversations []*gmproto
 }
 
 // typingSetArguments admits only a current start intent for a known one-to-one conversation.
-func typingSetArguments(intent gatewayTypingIntent, nowMono uint64, conversations []*gmproto.Conversation, simPayload *gmproto.SIMPayload) (*typingSetRequest, string) {
-	if intent.DeadlineMono <= nowMono {
-		return nil, "typing_expired"
+func typingSetArguments(intent gatewayTypingIntent, conversations []*gmproto.Conversation, simPayload *gmproto.SIMPayload) (*typingSetRequest, string) {
+	if intent.RemainingValidityMS == 0 || intent.RemainingValidityMS > uint64(typingRequestTimeout/time.Millisecond) {
+		return nil, "typing_invalid"
 	}
 	conversation, code := typingConversationFor(intent.ConversationID, conversations)
 	if code != "" {
@@ -111,11 +111,12 @@ func typingConversationFor(id string, conversations []*gmproto.Conversation) (*g
 	return nil, "typing_unknown_conversation"
 }
 
-func typingContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, typingRequestTimeout)
+func typingContext(parent context.Context, remaining time.Duration) (context.Context, context.CancelFunc) {
+	if remaining > typingRequestTimeout {
+		remaining = typingRequestTimeout
+	}
+	return context.WithTimeout(parent, remaining)
 }
-
-var typingMonotonicOrigin = time.Now()
 
 func (link *Link) projectTypingEventFor(queued queuedEvent, data *gmproto.TypingData) {
 	link.mu.Lock()
@@ -147,6 +148,14 @@ func (link *Link) projectTypingEventFor(queued queuedEvent, data *gmproto.Typing
 
 // SetTyping validates one core intent and performs at most one bounded libgm effect.
 func (link *Link) SetTyping(intentJSON string) string {
+	link.mu.Lock()
+	now := link.typingNow
+	link.mu.Unlock()
+	if now == nil {
+		now = time.Now
+	}
+	receivedAt := now()
+
 	var intent gatewayTypingIntent
 	if err := json.Unmarshal([]byte(intentJSON), &intent); err != nil {
 		return "typing_invalid"
@@ -170,25 +179,26 @@ func (link *Link) SetTyping(intentJSON string) string {
 	}
 	conversations := []*gmproto.Conversation{conversation}
 	simPayload := typingSIMPayload(intent.ConversationID, link.conversationRecords, link.settings)
-	now := link.typingNowMono
 	effect := link.setTyping
 	link.mu.Unlock()
-	if now == nil {
-		now = func() uint64 { return uint64(time.Since(typingMonotonicOrigin).Milliseconds()) }
-	}
-	arguments, code := typingSetArguments(intent, now(), conversations, simPayload)
+	arguments, code := typingSetArguments(intent, conversations, simPayload)
 	if code != "ok" {
 		return code
 	}
-	if !link.typingOwned(generation, streamEpoch) {
+	if !link.typingAdmissionCurrent(generation, streamEpoch, intent.ConversationID) {
 		return "typing_stale"
+	}
+	validity := time.Duration(intent.RemainingValidityMS) * time.Millisecond
+	remaining := validity - now().Sub(receivedAt)
+	if remaining <= 0 || remaining > validity {
+		return "typing_expired"
 	}
 	if effect == nil {
 		effect = func(ctx context.Context, conversationID string, payload *gmproto.SIMPayload) error {
 			return client.SetTyping(ctx, conversationID, payload)
 		}
 	}
-	ctx, cancel := typingContext(runCtx)
+	ctx, cancel := typingContext(runCtx, remaining)
 	err := effect(ctx, arguments.ConversationID, arguments.SIMPayload)
 	cancel()
 	if err != nil {
@@ -201,7 +211,7 @@ func (link *Link) SetTyping(intentJSON string) string {
 			return "typing_failed"
 		}
 	}
-	if !link.typingOwned(generation, streamEpoch) {
+	if !link.typingAdmissionCurrent(generation, streamEpoch, intent.ConversationID) {
 		return "typing_stale"
 	}
 	return "ok"
@@ -225,8 +235,9 @@ func typingSIMPayload(conversationID string, conversations map[string]*gmproto.C
 	return payload
 }
 
-func (link *Link) typingOwned(generation, streamEpoch uint64) bool {
+func (link *Link) typingAdmissionCurrent(generation, streamEpoch uint64, conversationID string) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	return !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasOwnerVerificationLocked()
+	return !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasOwnerVerificationLocked() &&
+		link.currentSupportedRcsConversationLocked(conversationID, generation, streamEpoch) != nil
 }

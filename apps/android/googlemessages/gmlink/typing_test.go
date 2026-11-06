@@ -57,21 +57,20 @@ func TestTypingProjectionRefusesOldUnknownAndInvisibleParticipants(t *testing.T)
 	}
 }
 
-func TestTypingArgumentsRefuseExpiredUnknownAndGroup(t *testing.T) {
-	intent := gatewayTypingIntent{ConversationID: "synthetic-conversation", State: typingStateStarted, DeadlineMono: 101}
+func TestTypingArgumentsRefuseInvalidUnknownAndGroup(t *testing.T) {
+	intent := gatewayTypingIntent{ConversationID: "synthetic-conversation", State: typingStateStarted, RemainingValidityMS: 101}
 	for _, test := range []struct {
 		name          string
 		intent        gatewayTypingIntent
 		conversations []*gmproto.Conversation
-		now           uint64
 		want          string
 	}{
-		{name: "expired", intent: intent, conversations: []*gmproto.Conversation{typingConversation("synthetic-conversation", true)}, now: 101, want: "typing_expired"},
-		{name: "unknown", intent: intent, conversations: []*gmproto.Conversation{typingConversation("other-conversation", true)}, now: 100, want: "typing_unknown_conversation"},
-		{name: "group", intent: intent, conversations: []*gmproto.Conversation{typingGroup("synthetic-conversation")}, now: 100, want: "typing_not_one_to_one"},
+		{name: "zero validity", intent: gatewayTypingIntent{ConversationID: "synthetic-conversation", State: typingStateStarted}, conversations: []*gmproto.Conversation{typingConversation("synthetic-conversation", true)}, want: "typing_invalid"},
+		{name: "unknown", intent: intent, conversations: []*gmproto.Conversation{typingConversation("other-conversation", true)}, want: "typing_unknown_conversation"},
+		{name: "group", intent: intent, conversations: []*gmproto.Conversation{typingGroup("synthetic-conversation")}, want: "typing_not_one_to_one"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			arguments, code := typingSetArguments(test.intent, test.now, test.conversations, &gmproto.SIMPayload{SIMNumber: 1})
+			arguments, code := typingSetArguments(test.intent, test.conversations, &gmproto.SIMPayload{SIMNumber: 1})
 			if arguments != nil || code != test.want {
 				t.Fatalf("arguments = %+v code = %q", arguments, code)
 			}
@@ -81,19 +80,19 @@ func TestTypingArgumentsRefuseExpiredUnknownAndGroup(t *testing.T) {
 
 func TestTypingArgumentsOnlyStartsAndContextIsBounded(t *testing.T) {
 	conversation := typingConversation("synthetic-conversation", true)
-	arguments, code := typingSetArguments(gatewayTypingIntent{ConversationID: "synthetic-conversation", State: typingStateStarted, DeadlineMono: 101}, 100, []*gmproto.Conversation{conversation}, &gmproto.SIMPayload{SIMNumber: 1})
+	arguments, code := typingSetArguments(gatewayTypingIntent{ConversationID: "synthetic-conversation", State: typingStateStarted, RemainingValidityMS: 101}, []*gmproto.Conversation{conversation}, &gmproto.SIMPayload{SIMNumber: 1})
 	if code != "ok" || arguments == nil || arguments.ConversationID != "synthetic-conversation" || arguments.SIMPayload == nil {
 		t.Fatalf("arguments = %+v code = %q", arguments, code)
 	}
-	arguments, code = typingSetArguments(gatewayTypingIntent{ConversationID: "synthetic-conversation", State: typingStateStopped, DeadlineMono: 101}, 100, []*gmproto.Conversation{conversation}, &gmproto.SIMPayload{SIMNumber: 1})
+	arguments, code = typingSetArguments(gatewayTypingIntent{ConversationID: "synthetic-conversation", State: typingStateStopped, RemainingValidityMS: 101}, []*gmproto.Conversation{conversation}, &gmproto.SIMPayload{SIMNumber: 1})
 	if arguments != nil || code != "typing_stopped" {
 		t.Fatalf("arguments = %+v code = %q", arguments, code)
 	}
 
-	ctx, cancel := typingContext(context.Background())
+	ctx, cancel := typingContext(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	deadline, ok := ctx.Deadline()
-	if !ok || time.Until(deadline) > typingRequestTimeout || time.Until(deadline) <= 0 {
+	if !ok || time.Until(deadline) > 250*time.Millisecond || time.Until(deadline) <= 0 {
 		t.Fatalf("deadline = %v bounded = %t", deadline, ok)
 	}
 }
@@ -187,15 +186,15 @@ func TestSetTypingRefusesExpiredAndOldGeneration(t *testing.T) {
 	conversation.DefaultOutgoingID = "self-sim"
 	link := typingLink(&ownedRecordHost{}, conversation)
 	link.settings = typingSettings()
-	link.typingNowMono = func() uint64 { return 100 }
+	link.typingNow = func() time.Time { return time.Unix(0, 0) }
 	calls := 0
 	link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
 
-	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":100,"link_generation":7}`); got != "typing_expired" {
+	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":0,"link_generation":7}`); got != "typing_invalid" {
 		t.Fatalf("expired = %q", got)
 	}
 	link.runGeneration = 6
-	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101,"link_generation":7}`); got != "typing_stale" {
+	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":101,"link_generation":7}`); got != "typing_stale" {
 		t.Fatalf("stale = %q", got)
 	}
 	if calls != 0 {
@@ -208,12 +207,12 @@ func TestSetTypingStartsWithBoundedContext(t *testing.T) {
 	conversation.DefaultOutgoingID = "self-sim"
 	link := typingLink(&ownedRecordHost{}, conversation)
 	link.settings = typingSettings()
-	link.typingNowMono = func() uint64 { return 100 }
+	link.typingNow = func() time.Time { return time.Unix(0, 0) }
 	called := false
 	link.setTyping = func(ctx context.Context, conversationID string, payload *gmproto.SIMPayload) error {
 		called = true
 		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > typingRequestTimeout {
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 250*time.Millisecond {
 			t.Fatalf("deadline = %v, bounded = %t", deadline, ok)
 		}
 		if conversationID != "synthetic-conversation" || payload.GetSIMNumber() != 1 {
@@ -222,7 +221,7 @@ func TestSetTypingStartsWithBoundedContext(t *testing.T) {
 		return nil
 	}
 
-	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101,"link_generation":7}`); got != "ok" || !called {
+	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":101,"link_generation":7}`); got != "ok" || !called {
 		t.Fatalf("result = %q, called = %t", got, called)
 	}
 }
@@ -240,11 +239,11 @@ func TestSetTypingRequiresCurrentLinkGeneration(t *testing.T) {
 	conversation.DefaultOutgoingID = "self-sim"
 	link := typingLink(&ownedRecordHost{}, conversation)
 	link.settings = typingSettings()
-	link.typingNowMono = func() uint64 { return 100 }
+	link.typingNow = func() time.Time { return time.Unix(0, 0) }
 	calls := 0
 	link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
 
-	got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101,"link_generation":6}`)
+	got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":101,"link_generation":6}`)
 
 	if got != "typing_stale" || calls != 0 {
 		t.Fatalf("result = %q, calls = %d", got, calls)
@@ -273,16 +272,92 @@ func TestSetTypingRequiresEligibleStage2Conversation(t *testing.T) {
 			conversation.DefaultOutgoingID = "self-sim"
 			link := typingLink(&ownedRecordHost{}, conversation)
 			link.settings = typingSettings()
-			link.typingNowMono = func() uint64 { return 100 }
+			link.typingNow = func() time.Time { return time.Unix(0, 0) }
 			test.configure(link, conversation)
 			calls := 0
 			link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
 
-			got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101,"link_generation":7}`)
+			got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":101,"link_generation":7}`)
 
 			if got != "typing_refused" || calls != 0 {
 				t.Fatalf("result = %q, calls = %d", got, calls)
 			}
 		})
 	}
+}
+
+func TestSetTypingExpiresAtFinalAdmission(t *testing.T) {
+	conversation := typingConversation("synthetic-conversation", true)
+	conversation.DefaultOutgoingID = "self-sim"
+	link := typingLink(&ownedRecordHost{}, conversation)
+	link.settings = typingSettings()
+	start := time.Now()
+	times := []time.Time{start, start.Add(2 * time.Millisecond)}
+	link.typingNow = func() time.Time {
+		next := times[0]
+		times = times[1:]
+		return next
+	}
+	calls := 0
+	link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
+
+	got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":1,"link_generation":7}`)
+
+	if got != "typing_expired" || calls != 0 {
+		t.Fatalf("result = %q, calls = %d", got, calls)
+	}
+}
+
+func TestSetTypingBoundsContextByRemainingValidity(t *testing.T) {
+	conversation := typingConversation("synthetic-conversation", true)
+	conversation.DefaultOutgoingID = "self-sim"
+	link := typingLink(&ownedRecordHost{}, conversation)
+	link.settings = typingSettings()
+	start := time.Now()
+	times := []time.Time{start, start.Add(10 * time.Millisecond)}
+	link.typingNow = func() time.Time {
+		next := times[0]
+		times = times[1:]
+		return next
+	}
+	called := false
+	link.setTyping = func(ctx context.Context, _ string, _ *gmproto.SIMPayload) error {
+		called = true
+		remaining := time.Until(mustDeadline(t, ctx))
+		if remaining <= 0 || remaining > 90*time.Millisecond {
+			t.Fatalf("remaining context = %v", remaining)
+		}
+		return nil
+	}
+
+	got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":100,"link_generation":7}`)
+
+	if got != "ok" || !called {
+		t.Fatalf("result = %q, called = %t", got, called)
+	}
+}
+
+func TestSetTypingRejectsValidityOverCap(t *testing.T) {
+	conversation := typingConversation("synthetic-conversation", true)
+	conversation.DefaultOutgoingID = "self-sim"
+	link := typingLink(&ownedRecordHost{}, conversation)
+	link.settings = typingSettings()
+	link.typingNow = time.Now
+	calls := 0
+	link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
+
+	got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":5001,"link_generation":7}`)
+
+	if got != "typing_invalid" || calls != 0 {
+		t.Fatalf("result = %q, calls = %d", got, calls)
+	}
+}
+
+func mustDeadline(t *testing.T, ctx context.Context) time.Time {
+	t.Helper()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("context has no deadline")
+	}
+	return deadline
 }

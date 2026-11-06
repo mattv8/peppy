@@ -72,7 +72,7 @@ type Link struct {
 	authSnapshot        func(*libgm.AuthData) (*libgm.AuthData, error)
 	fetchMessages       func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error)
 	setTyping           func(context.Context, string, *gmproto.SIMPayload) error
-	typingNowMono       func() uint64
+	typingNow           func() time.Time
 
 	outputMu              sync.Mutex
 	outputCond            *sync.Cond
