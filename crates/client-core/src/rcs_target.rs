@@ -6,6 +6,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Regions with supported short-code rules. NANP short codes are five or six digits beginning 2–9.
 const SHORT_CODE_REGIONS: &[&str] = &["US", "CA"];
+const SMS_CONVERSATION_TYPE: i32 = 1;
+const RCS_CONVERSATION_TYPE: i32 = 2;
+const ACTIVE_CONVERSATION_STATUS: i32 = 1;
+const PHONE_IDENTIFIER_TYPE: i32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedCarrierRouteContext {
@@ -15,6 +19,8 @@ pub struct ValidatedCarrierRouteContext {
     context_revision: u64,
     identity_region: String,
     canonicalizer_revision: u32,
+    // This stays absent until the route layer can supply current accepted native evidence.
+    confirmed_own_identity: Option<String>,
 }
 
 impl ValidatedCarrierRouteContext {
@@ -33,6 +39,7 @@ impl ValidatedCarrierRouteContext {
             context_revision,
             identity_region,
             canonicalizer_revision,
+            confirmed_own_identity: None,
         }
     }
 }
@@ -164,19 +171,13 @@ pub(crate) fn classify_rcs_target(
         }
     }
 
-    let mut matches = BTreeSet::new();
-    for record in records.values() {
-        match classify_record(record, &canonical_target, region.as_deref()) {
-            RecordClass::Match => {
-                matches.insert(record.google_conversation_id.clone());
-            }
-            RecordClass::Unsupported => {}
-            RecordClass::NonMatch => {}
-            RecordClass::Unknown => return unknown(token),
-        }
-    }
-    match matches.len() {
-        0 => RcsTargetClassification::NotFoundComplete {
+    match classify_records(
+        records.values(),
+        &canonical_target,
+        region.as_deref(),
+        route_context.confirmed_own_identity.as_deref(),
+    ) {
+        RecordSummary::Absent => RcsTargetClassification::NotFoundComplete {
             carrier_only_proof: CarrierOnlyProof {
                 conversation_id: peppy_conversation_id,
                 recipients: vec![canonical_target.clone()],
@@ -190,13 +191,14 @@ pub(crate) fn classify_rcs_target(
                 canonicalizer_revision: route_context.canonicalizer_revision,
             },
         },
-        1 => RcsTargetClassification::Found {
-            google_conversation_id: matches.into_iter().next().unwrap_or_default(),
+        RecordSummary::Found(google_conversation_id) => RcsTargetClassification::Found {
+            google_conversation_id,
             snapshot_token: token,
         },
-        _ => RcsTargetClassification::Ambiguous {
+        RecordSummary::Ambiguous => RcsTargetClassification::Ambiguous {
             snapshot_token: token,
         },
+        RecordSummary::Unknown => unknown(token),
     }
 }
 
@@ -228,6 +230,38 @@ enum RecordClass {
     NonMatch,
     Unsupported,
     Unknown,
+}
+
+enum RecordSummary {
+    Found(String),
+    Ambiguous,
+    Absent,
+    Unknown,
+}
+
+fn classify_records<'a>(
+    records: impl IntoIterator<Item = &'a ConversationCandidateRecord>,
+    target: &str,
+    region: Option<&str>,
+    confirmed_own_identity: Option<&str>,
+) -> RecordSummary {
+    let mut matches = BTreeSet::new();
+    let mut has_unknown = false;
+    for record in records {
+        match classify_record(record, target, region, confirmed_own_identity) {
+            RecordClass::Match => {
+                matches.insert(record.google_conversation_id.clone());
+            }
+            RecordClass::Unknown => has_unknown = true,
+            RecordClass::NonMatch | RecordClass::Unsupported => {}
+        }
+    }
+    match matches.len() {
+        0 if has_unknown => RecordSummary::Unknown,
+        0 => RecordSummary::Absent,
+        1 => RecordSummary::Found(matches.into_iter().next().unwrap_or_default()),
+        _ => RecordSummary::Ambiguous,
+    }
 }
 
 fn valid_snapshot(
@@ -287,9 +321,13 @@ fn classify_record(
     record: &ConversationCandidateRecord,
     target: &str,
     region: Option<&str>,
+    confirmed_own_identity: Option<&str>,
 ) -> RecordClass {
     if !participant_facts_consistent(record)
         || matches!(record.classification, CandidateClassification::Unknown)
+        || !known_conversation_type(record.conversation_type)
+        || !known_conversation_status(record.conversation_status)
+        || !self_participants_confirmed(record, region, confirmed_own_identity)
     {
         return RecordClass::Unknown;
     }
@@ -302,8 +340,8 @@ fn classify_record(
         return RecordClass::Unknown;
     }
     if matches!(record.classification, CandidateClassification::Eligible) {
-        if record.conversation_type != 2
-            || record.conversation_status != 1
+        if record.conversation_type != RCS_CONVERSATION_TYPE
+            || record.conversation_status != ACTIVE_CONVERSATION_STATUS
             || record.group
             || peers.len() != 1
             || !telephone_peer(peers[0], region)
@@ -318,8 +356,8 @@ fn classify_record(
     }
     if record.group
         || peers.is_empty()
-        || record.conversation_type != 2
-        || record.conversation_status != 1
+        || record.conversation_type != RCS_CONVERSATION_TYPE
+        || record.conversation_status != ACTIVE_CONVERSATION_STATUS
     {
         return RecordClass::Unsupported;
     }
@@ -330,13 +368,41 @@ fn participant_facts_consistent(record: &ConversationCandidateRecord) -> bool {
     record.participants.iter().all(|participant| {
         participant.participant_id_present == !participant.participant_id.is_empty()
             && participant.number_present == !participant.raw_number.is_empty()
-            && (!participant.number_present || participant.identifier_type == 1)
+            && participant.participant_id_present
+            && participant.number_present
+            && known_identifier_type(participant.identifier_type)
+    })
+}
+
+fn known_conversation_type(conversation_type: i32) -> bool {
+    matches!(conversation_type, SMS_CONVERSATION_TYPE | RCS_CONVERSATION_TYPE)
+}
+
+fn known_conversation_status(conversation_status: i32) -> bool {
+    matches!(conversation_status, 1 | 2 | 3 | 5..=8)
+}
+
+fn known_identifier_type(identifier_type: i32) -> bool {
+    (PHONE_IDENTIFIER_TYPE..=23).contains(&identifier_type)
+}
+
+fn self_participants_confirmed(
+    record: &ConversationCandidateRecord,
+    region: Option<&str>,
+    confirmed_own_identity: Option<&str>,
+) -> bool {
+    record.participants.iter().filter(|participant| participant.self_).all(|participant| {
+        participant.identifier_type == PHONE_IDENTIFIER_TYPE
+            && confirmed_own_identity.is_some_and(|own_identity| {
+                canonical_address(own_identity, region)
+                    == canonical_address(&participant.raw_number, region)
+            })
     })
 }
 
 fn telephone_peer(participant: &ConversationCandidateParticipant, region: Option<&str>) -> bool {
     participant.number_present
-        && participant.identifier_type == 1
+        && participant.identifier_type == PHONE_IDENTIFIER_TYPE
         && is_valid_phone(&canonical_address(&participant.raw_number, region))
 }
 
@@ -359,5 +425,265 @@ fn is_short_code(address: &str, region: Option<&str>, canonical: &str) -> bool {
 fn unknown(snapshot_token: String) -> RcsTargetClassification {
     RcsTargetClassification::Unknown {
         snapshot_token: Some(snapshot_token),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TARGET: &str = "+12025550123";
+
+    fn participant(number: &str, self_: bool) -> ConversationCandidateParticipant {
+        ConversationCandidateParticipant {
+            participant_id: "participant".into(),
+            identifier_type: 1,
+            raw_number: number.into(),
+            formatted_number: String::new(),
+            participant_id_present: true,
+            number_present: !number.is_empty(),
+            visible: true,
+            self_,
+        }
+    }
+
+    fn record(
+        id: &str,
+        classification: CandidateClassification,
+        participants: Vec<ConversationCandidateParticipant>,
+    ) -> ConversationCandidateRecord {
+        let visible_non_self_count = participants
+            .iter()
+            .filter(|participant| participant.visible && !participant.self_)
+            .count();
+        ConversationCandidateRecord {
+            google_conversation_id: id.into(),
+            conversation_type: 2,
+            conversation_status: 1,
+            classification,
+            group: visible_non_self_count > 1,
+            visible_non_self_count,
+            participants,
+        }
+    }
+
+    #[test]
+    fn unknown_records_do_not_hide_exact_matches() {
+        let exact = record(
+            "exact",
+            CandidateClassification::Eligible,
+            vec![participant(TARGET, false)],
+        );
+        let mut unknown = record(
+            "unknown",
+            CandidateClassification::Eligible,
+            vec![participant("+12025550124", false)],
+        );
+        unknown.conversation_type = 99;
+
+        assert!(matches!(
+            classify_records([&exact, &unknown], TARGET, None, None),
+            RecordSummary::Found(_)
+        ));
+    }
+
+    #[test]
+    fn numberless_or_forged_self_records_are_unknown() {
+        let numberless_peer = record(
+            "numberless-peer",
+            CandidateClassification::Eligible,
+            vec![participant("", false)],
+        );
+        let numberless_self = record(
+            "numberless-self",
+            CandidateClassification::Eligible,
+            vec![participant(TARGET, false), participant("", true)],
+        );
+        let forged_self = record(
+            "forged-self",
+            CandidateClassification::Eligible,
+            vec![participant("+12025550124", false), participant(TARGET, true)],
+        );
+
+        assert!(matches!(
+            classify_record(&numberless_peer, TARGET, None, None),
+            RecordClass::Unknown
+        ));
+        assert!(matches!(
+            classify_record(&numberless_self, TARGET, None, Some("+12025550999")),
+            RecordClass::Unknown
+        ));
+        assert!(matches!(
+            classify_record(&forged_self, TARGET, None, Some("+12025550999")),
+            RecordClass::Unknown
+        ));
+    }
+
+    #[test]
+    fn strict_enum_and_format_equivalence_rules_apply() {
+        let mut unknown_enum = record(
+            "unknown-enum",
+            CandidateClassification::Eligible,
+            vec![participant(TARGET, false)],
+        );
+        unknown_enum.conversation_status = 99;
+        let mut unknown_identifier = record(
+            "unknown-identifier",
+            CandidateClassification::Eligible,
+            vec![participant(TARGET, false)],
+        );
+        unknown_identifier.participants[0].identifier_type = 99;
+        let formatted = record(
+            "formatted",
+            CandidateClassification::Eligible,
+            vec![participant("(202) 555-0123", false)],
+        );
+        let unrelated_sms = ConversationCandidateRecord {
+            conversation_type: 1,
+            classification: CandidateClassification::Unsupported,
+            ..record(
+                "sms",
+                CandidateClassification::Unsupported,
+                vec![participant("+12025550124", false)],
+            )
+        };
+
+        assert!(matches!(
+            classify_record(&unknown_enum, TARGET, Some("US"), None),
+            RecordClass::Unknown
+        ));
+        assert!(matches!(
+            classify_record(&unknown_identifier, TARGET, Some("US"), None),
+            RecordClass::Unknown
+        ));
+        assert!(matches!(
+            classify_record(&formatted, TARGET, Some("US"), None),
+            RecordClass::Match
+        ));
+        assert!(matches!(
+            classify_record(&unrelated_sms, TARGET, Some("US"), None),
+            RecordClass::Unsupported
+        ));
+    }
+
+    #[test]
+    fn multiple_matches_remain_ambiguous() {
+        let first = record(
+            "first",
+            CandidateClassification::Eligible,
+            vec![participant(TARGET, false)],
+        );
+        let second = record(
+            "second",
+            CandidateClassification::Eligible,
+            vec![participant(TARGET, false)],
+        );
+
+        assert!(matches!(
+            classify_records([&first, &second], TARGET, None, None),
+            RecordSummary::Ambiguous
+        ));
+    }
+
+    #[test]
+    fn snapshot_binding_requires_exact_current_values() {
+        let route = ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1);
+        let snapshot = ConversationCandidateSnapshot {
+            code: "conversation_candidate_snapshot".into(),
+            snapshot_token: "1:2:3".into(),
+            generation: 1,
+            stream_epoch: 2,
+            revision: 3,
+            complete: true,
+            conversations: Vec::new(),
+        };
+
+        assert!(valid_snapshot(&snapshot, &route));
+        let stale = ConversationCandidateSnapshot {
+            revision: 4,
+            snapshot_token: "1:2:4".into(),
+            ..snapshot.clone()
+        };
+        assert!(!valid_snapshot(&stale, &route));
+        let malformed = ConversationCandidateSnapshot {
+            snapshot_token: "not-a-token".into(),
+            ..snapshot
+        };
+        assert!(!valid_snapshot(&malformed, &route));
+    }
+
+    #[test]
+    fn classifier_parses_a_trusted_fixture_and_sanitizes_malformed_json() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contact_books(body TEXT NOT NULL, forgotten INTEGER NOT NULL);
+             CREATE TABLE addresses(address TEXT NOT NULL, conversation_id TEXT NOT NULL);",
+        )
+        .unwrap();
+        let conversation_id = ConversationId::new();
+        conn.execute(
+            "INSERT INTO addresses(address, conversation_id) VALUES(?, ?)",
+            rusqlite::params![TARGET, conversation_id.to_string()],
+        )
+        .unwrap();
+        let route = ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1);
+        let snapshot = r#"{
+            "code":"conversation_candidate_snapshot",
+            "snapshot_token":"1:2:3",
+            "generation":1,
+            "stream_epoch":2,
+            "revision":3,
+            "complete":true,
+            "conversations":[{
+                "google_conversation_id":"google-id",
+                "conversation_type":2,
+                "conversation_status":1,
+                "classification":"eligible",
+                "group":false,
+                "visible_non_self_count":1,
+                "participants":[{
+                    "participant_id":"peer",
+                    "identifier_type":1,
+                    "raw_number":"+12025550123",
+                    "formatted_number":"(202) 555-0123",
+                    "participant_id_present":true,
+                    "number_present":true,
+                    "visible":true,
+                    "self":false
+                }]
+            }]
+        }"#;
+
+        assert!(matches!(
+            classify_rcs_target(&conn, conversation_id.clone(), TARGET, route, snapshot, 1_000),
+            RcsTargetClassification::Found { .. }
+        ));
+        assert!(matches!(
+            classify_rcs_target(
+                &conn,
+                conversation_id,
+                TARGET,
+                ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1),
+                "{not-json}",
+                1_000,
+            ),
+            RcsTargetClassification::Unknown {
+                snapshot_token: None
+            }
+        ));
+    }
+
+    #[test]
+    fn confirmed_own_identity_makes_a_self_record_unsupported() {
+        let self_record = record(
+            "self",
+            CandidateClassification::Unsupported,
+            vec![participant("+12025550999", true)],
+        );
+
+        assert!(matches!(
+            classify_record(&self_record, TARGET, None, Some("+12025550999")),
+            RecordClass::Unsupported
+        ));
     }
 }
