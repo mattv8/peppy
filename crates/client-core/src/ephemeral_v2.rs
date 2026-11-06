@@ -142,6 +142,17 @@ pub(crate) fn seal(
     if !store.ephemeral_v2.enabled {
         return Err(LiveError::Disabled);
     }
+    let mut clock_candidate = store
+        .ephemeral_v2
+        .clock
+        .clone()
+        .ok_or(LiveError::Disabled)?;
+    let effective_wall = clock_candidate
+        .advance(PolicyClock {
+            wall_ms: clock.wall_ms,
+            mono_ms: clock.mono_ms,
+        })
+        .map_err(policy_error)?;
     let context = store
         .ephemeral_v2
         .context
@@ -160,17 +171,6 @@ pub(crate) fn seal(
         }
         _ => {}
     }
-    let mut clock_candidate = store
-        .ephemeral_v2
-        .clock
-        .clone()
-        .ok_or(LiveError::Disabled)?;
-    let effective_wall = clock_candidate
-        .advance(PolicyClock {
-            wall_ms: clock.wall_ms,
-            mono_ms: clock.mono_ms,
-        })
-        .map_err(policy_error)?;
     let eligible = matches!(rcs_capability::projection(&store.conn, conversation_id, gateway_device_id, effective_wall).map_err(|_| LiveError::InvalidContext)?, Some(projection) if projection.eligibility == RcsEligibility::Eligible);
     if !eligible {
         return Ok(None);
@@ -182,8 +182,6 @@ pub(crate) fn seal(
     }
     .map_err(policy_error)?;
     if !admitted {
-        store.ephemeral_v2.clock = Some(clock_candidate);
-        store.ephemeral_v2.budget = budget_candidate;
         return Ok(None);
     }
     let sequence = store

@@ -1,10 +1,13 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use common::*;
 use peppy_crypto::{EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key, derive_root_key};
-use peppy_protocol::{TypingOriginV2, TypingStateV2};
+use peppy_protocol::{EphemeralSignalV2, TypingOriginV2, TypingStateV2};
 use std::collections::BTreeMap;
 
 fn publish_eligible(client: &Client, gateway: DeviceId, conversation_id: ConversationId) {
@@ -73,6 +76,21 @@ fn seal(
             LiveClock { wall_ms, mono_ms },
         )
         .unwrap()
+}
+
+fn expected_v2_aad(signal: &EphemeralSignalV2, vault_id: VaultId) -> Vec<u8> {
+    let mut aad = b"peppy-ephemeral-typing-v2\0".to_vec();
+    aad.extend_from_slice(vault_id.0.as_bytes());
+    aad.extend_from_slice(&2_u16.to_be_bytes());
+    aad.push(b"typing".len() as u8);
+    aad.extend_from_slice(b"typing");
+    aad.extend_from_slice(signal.sender_device_id.0.as_bytes());
+    aad.extend_from_slice(&signal.key_epoch.to_be_bytes());
+    aad.extend_from_slice(&URL_SAFE_NO_PAD.decode(&signal.session_id).unwrap());
+    aad.extend_from_slice(&signal.sent_at_ms.parse::<u64>().unwrap().to_be_bytes());
+    aad.extend_from_slice(&signal.expires_at_ms.parse::<u64>().unwrap().to_be_bytes());
+    aad.extend_from_slice(&signal.sequence.parse::<u64>().unwrap().to_be_bytes());
+    aad
 }
 
 fn persisted_rows(config: &ClientConfig) -> BTreeMap<String, Vec<Vec<String>>> {
@@ -373,6 +391,15 @@ fn frozen_wall_cannot_prolong_eligibility_and_clock_errors_precede_missing_gates
             mono_ms: 1_000,
         },
     );
+    seal(
+        &client,
+        conversation,
+        config.device_id,
+        TypingStateV2::Started,
+        1_001,
+        1_001,
+    )
+    .unwrap();
     assert_eq!(
         seal(
             &client,
@@ -394,6 +421,19 @@ fn frozen_wall_cannot_prolong_eligibility_and_clock_errors_precede_missing_gates
                 wall_ms: -1,
                 mono_ms: 1_801_002
             }
+        ),
+        Err(LiveError::Clock)
+    );
+    assert_eq!(
+        client.seal_typing_signal_v2(
+            ConversationId::new(),
+            config.device_id,
+            TypingOriginV2::VaultDevice,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
         ),
         Err(LiveError::Clock)
     );
@@ -436,8 +476,8 @@ fn global_reservations_keep_stops_available_without_consuming_suppressed_sequenc
             conversations[25],
             config.device_id,
             TypingStateV2::Started,
-            5_002,
-            5_002
+            5_001,
+            5_001
         ),
         None
     );
@@ -465,6 +505,79 @@ fn global_reservations_keep_stops_available_without_consuming_suppressed_sequenc
             5_003
         ),
         None
+    );
+}
+
+#[test]
+fn no_frame_admission_leaves_the_clock_and_sequence_candidate_uncommitted() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "v2-no-frame-candidate", &vault);
+    let client = unlocked(&config, &vault);
+    let first = ConversationId::new();
+    let second = ConversationId::new();
+    publish_eligible(&client, config.device_id, first);
+    publish_eligible(&client, config.device_id, second);
+    enable(
+        &client,
+        config.device_id,
+        LiveClock {
+            wall_ms: 1_000,
+            mono_ms: 1_000,
+        },
+    );
+    assert_eq!(
+        seal(
+            &client,
+            first,
+            config.device_id,
+            TypingStateV2::Started,
+            1_001,
+            1_001
+        )
+        .unwrap()
+        .signal
+        .sequence,
+        "1"
+    );
+    assert_eq!(
+        seal(
+            &client,
+            first,
+            config.device_id,
+            TypingStateV2::Stopped,
+            1_002,
+            1_002
+        )
+        .unwrap()
+        .signal
+        .sequence,
+        "2"
+    );
+    assert_eq!(
+        seal(
+            &client,
+            first,
+            config.device_id,
+            TypingStateV2::Stopped,
+            1_003,
+            1_003
+        ),
+        None
+    );
+    assert_eq!(
+        seal(
+            &client,
+            second,
+            config.device_id,
+            TypingStateV2::Started,
+            1_002,
+            1_002
+        )
+        .unwrap()
+        .signal
+        .sequence,
+        "3"
     );
 }
 
@@ -538,7 +651,7 @@ fn v2_frame_decrypts_with_its_independent_canonical_aad() {
     let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
     let plaintext = decrypt(
         &key,
-        &outbound.signal.aad_bytes(vault.id).unwrap(),
+        &expected_v2_aad(&outbound.signal, vault.id),
         &EncryptedEnvelope {
             nonce,
             ciphertext: bytes[24..].to_vec(),
@@ -671,7 +784,7 @@ fn remote_gateway_capability_reaches_an_ordinary_desktop_before_vault_sealing() 
     let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
     let plaintext = decrypt(
         &key,
-        &outbound.signal.aad_bytes(vault.id).unwrap(),
+        &expected_v2_aad(&outbound.signal, vault.id),
         &EncryptedEnvelope {
             nonce,
             ciphertext: bytes[24..].to_vec(),
