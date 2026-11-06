@@ -447,13 +447,46 @@ fn reported_facts_converge_for_outgoing_match_and_immutable_duplicate() {
         echo.tmp_id = Some("tmp".into());
         echo.rcs_reported = first_reported;
         echo.e2ee_reported = Some(first_reported);
+        let pre_match_send_state = only_message(&client, conversation).send_state;
         assert_eq!(
             client
                 .ingest_rcs_projected_record(conversation, owner.ownership_generation, echo.clone())
                 .unwrap(),
             RcsReceiveOutcome::OutgoingMatched
         );
-        let expected_send_state = only_message(&client, conversation).send_state;
+        assert_eq!(
+            client.rcs_message_reported(message_id).unwrap(),
+            Some(first_reported)
+        );
+        assert_eq!(
+            client
+                .rcs_conversation_metadata(conversation)
+                .unwrap()
+                .unwrap()
+                .rcs_encryption,
+            Some(first_reported)
+        );
+        assert_eq!(
+            only_message(&client, conversation).send_state,
+            pre_match_send_state
+        );
+        let peer_config = config(&directory, "peer", &vault);
+        let peer = unlocked(&peer_config, &vault);
+        let mut server = Server::default();
+        server.upload(&client);
+        server.sync(&peer);
+        assert_eq!(
+            peer.rcs_message_reported(message_id).unwrap(),
+            Some(first_reported)
+        );
+        assert_eq!(
+            peer.rcs_conversation_metadata(conversation)
+                .unwrap()
+                .unwrap()
+                .rcs_encryption,
+            Some(first_reported)
+        );
+        let expected_send_state = pre_match_send_state;
         let mut tmp_duplicate = echo.clone();
         tmp_duplicate.rcs_reported = !first_reported;
         tmp_duplicate.e2ee_reported = Some(!first_reported);
@@ -497,9 +530,6 @@ fn reported_facts_converge_for_outgoing_match_and_immutable_duplicate() {
                 .rcs_encryption,
             Some(first_reported)
         );
-        let peer_config = config(&directory, "peer", &vault);
-        let peer = unlocked(&peer_config, &vault);
-        let mut server = Server::default();
         server.upload(&client);
         server.sync(&peer);
         assert_eq!(client.rcs_message_reported(message_id).unwrap(), Some(true));
