@@ -35,6 +35,8 @@ mod conversation;
 mod media;
 mod notifications;
 mod rcs_receive;
+#[cfg(test)]
+mod rcs_receive_tests;
 mod search_history;
 mod sync;
 mod typing;
