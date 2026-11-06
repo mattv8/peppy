@@ -226,7 +226,19 @@ mod tests {
             }
         }
         assert_eq!(budget.ingress.minute.accepted_at.len(), 6_000);
-        assert!(!budget.admit(peer(1), 59_999));
+        assert_eq!(budget.peers.len(), MAX_PEER_RECORDS);
+
+        let mut minute_full = IngressBudget::default();
+        minute_full
+            .ingress
+            .minute
+            .accepted_at
+            .extend(std::iter::repeat_n(0, 6_000));
+        assert!(!minute_full.admit(peer(1), 59_999));
+        assert_eq!(minute_full.ingress.minute.accepted_at.len(), 6_000);
+        assert_eq!(minute_full.ingress.second.accepted_at.len(), 0);
+
+        assert_eq!(budget.peers[&peer(1)].minute.accepted_at.len(), 60);
     }
 
     #[test]
@@ -239,7 +251,9 @@ mod tests {
             }
         }
         assert_eq!(budget.peers[&sender].minute.accepted_at.len(), 120);
-        assert!(!budget.admit(sender, 29_001));
+        assert!(!budget.admit(sender, 30_000));
+        assert_eq!(budget.ingress.minute.accepted_at.len(), 120);
+        assert_eq!(budget.peers[&sender].minute.accepted_at.len(), 120);
         assert!(budget.admit(sender, MINUTE_MS));
     }
 
@@ -247,12 +261,16 @@ mod tests {
     fn ingress_refuses_new_peers_while_full_and_recovers_after_expiry() {
         let mut budget = IngressBudget::default();
         for id in 0..MAX_PEER_RECORDS as u128 {
-            assert!(budget.admit(peer(id), 0));
+            assert!(budget.admit(peer(id), id as u64 * 10));
         }
-        assert!(!budget.admit(peer(101), 0));
+        assert!(!budget.admit(peer(101), SECOND_MS));
+        assert_eq!(budget.ingress.minute.accepted_at.len(), MAX_PEER_RECORDS);
         assert_eq!(budget.peers.len(), MAX_PEER_RECORDS);
+        assert!(budget.peers.contains_key(&peer(0)));
         assert!(budget.admit(peer(101), MINUTE_MS));
-        assert_eq!(budget.peers.len(), 1);
+        assert_eq!(budget.peers.len(), MAX_PEER_RECORDS);
+        assert!(!budget.peers.contains_key(&peer(0)));
+        assert!(budget.peers.contains_key(&peer(101)));
     }
 
     #[test]
