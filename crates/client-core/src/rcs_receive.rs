@@ -415,7 +415,16 @@ impl Client {
                         tx.commit()?;
                         Ok(RcsReceiveOutcome::OutgoingMatched)
                     }
-                    RcsIdentityOutcome::Duplicate => Ok(RcsReceiveOutcome::Duplicate),
+                    RcsIdentityOutcome::Duplicate => {
+                        checkpoint_record(
+                            &tx,
+                            conversation_id,
+                            ownership_generation,
+                            record.history_token.as_deref(),
+                        )?;
+                        tx.commit()?;
+                        Ok(RcsReceiveOutcome::Duplicate)
+                    }
                     RcsIdentityOutcome::Rejected(code) => Ok(RcsReceiveOutcome::Rejected(code)),
                 };
         }
