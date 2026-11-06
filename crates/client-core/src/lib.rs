@@ -2125,6 +2125,16 @@ impl Client {
         ephemeral_v2::open(&mut store, signal, clock)
     }
 
+    /// Opens a serialized v2 live typing frame with the same admission semantics as typed input.
+    pub fn open_typing_signal_v2_json(
+        &self,
+        frame_json: &str,
+        clock: LiveClock,
+    ) -> Result<LiveOutcome, LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::open_json(&mut store, frame_json, clock)
+    }
+
     /// Exports both purpose keys of an unlocked epoch for OS secure storage. The root key and
     /// passphrase are never exported.
     pub fn export_native_key_cache(&self, epoch: u32) -> Result<NativeKeyCache, Error> {

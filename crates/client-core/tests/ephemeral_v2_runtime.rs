@@ -675,6 +675,69 @@ fn old_unlocked_epoch_frames_survive_cutover_and_unknown_epochs_do_not_mutate_re
 }
 
 #[test]
+fn json_receive_preserves_host_clock_errors_and_empty_outcome_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "v2-json-receive", &vault);
+    let client = unlocked(&config, &vault);
+    assert_eq!(
+        client.open_typing_signal_v2_json(
+            "{",
+            LiveClock {
+                wall_ms: 1,
+                mono_ms: 1
+            }
+        ),
+        Err(LiveError::Disabled)
+    );
+    enable(
+        &client,
+        config.device_id,
+        LiveClock {
+            wall_ms: 1_000,
+            mono_ms: 1_000,
+        },
+    );
+    assert_eq!(
+        client.open_typing_signal_v2_json(
+            "{",
+            LiveClock {
+                wall_ms: -1,
+                mono_ms: 1_001
+            }
+        ),
+        Err(LiveError::Clock)
+    );
+    client.disable_live_typing().unwrap();
+    let generation = enable(
+        &client,
+        config.device_id,
+        LiveClock {
+            wall_ms: 1_000,
+            mono_ms: 1_000,
+        },
+    );
+    for frame_json in [
+        "{",
+        &"x".repeat(peppy_protocol::POSTGRES_NOTIFY_PAYLOAD_BYTES + 1),
+    ] {
+        let outcome = client
+            .open_typing_signal_v2_json(
+                frame_json,
+                LiveClock {
+                    wall_ms: 1_001,
+                    mono_ms: 1_001,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.generation, generation);
+        assert!(
+            outcome.action.is_none() && outcome.reply.is_none() && outcome.session_update.is_none()
+        );
+    }
+}
+
+#[test]
 fn hostile_v2_headers_drop_without_retiring_a_valid_roster_receiver() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();

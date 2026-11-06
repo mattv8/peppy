@@ -6,7 +6,8 @@ use base64::{
 use peppy_crypto::encrypt;
 use peppy_protocol::{
     ChallengePlaintextV2, EPHEMERAL_V2_PROTOCOL_VERSION, EphemeralSignalV2, EphemeralSignalV2Kind,
-    SessionAckPlaintextV2, TypingOriginV2, TypingPlaintextV2, TypingStateV2,
+    POSTGRES_NOTIFY_PAYLOAD_BYTES, SessionAckPlaintextV2, TypingOriginV2, TypingPlaintextV2,
+    TypingStateV2,
 };
 
 use super::{
@@ -517,6 +518,36 @@ pub(crate) fn open(
         }),
         reply,
     })
+}
+
+pub(crate) fn open_json(
+    store: &mut Store,
+    frame_json: &str,
+    clock: LiveClock,
+) -> Result<LiveOutcome, LiveError> {
+    if !store.ephemeral_v2.enabled {
+        return Err(LiveError::Disabled);
+    }
+    let mut clock_candidate = store
+        .ephemeral_v2
+        .clock
+        .clone()
+        .ok_or(LiveError::Disabled)?;
+    clock_candidate
+        .advance(PolicyClock {
+            wall_ms: clock.wall_ms,
+            mono_ms: clock.mono_ms,
+        })
+        .map_err(policy_error)?;
+    if frame_json.len() > POSTGRES_NOTIFY_PAYLOAD_BYTES {
+        store.ephemeral_v2.clock = Some(clock_candidate);
+        return Ok(empty_outcome(store));
+    }
+    let Ok(frame) = serde_json::from_str::<EphemeralSignalV2>(frame_json) else {
+        store.ephemeral_v2.clock = Some(clock_candidate);
+        return Ok(empty_outcome(store));
+    };
+    open(store, &frame, clock)
 }
 
 fn empty_outcome(store: &Store) -> LiveOutcome {
