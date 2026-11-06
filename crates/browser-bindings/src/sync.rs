@@ -12,6 +12,14 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 const MAX_BATCH: usize = 1_000;
 const MAX_SNAPSHOT_PAGE: usize = 500;
 
+fn draft_send_failure(error: CoreError, expected_revision: u64) -> Failure {
+    let mut failure = core(error);
+    if failure.code == "draft-not-synced" {
+        failure.current_revision = Some(expected_revision.to_string());
+    }
+    failure
+}
+
 fn draft_id(args: &Value) -> Result<DraftId, Failure> {
     required_string(args, "draftId")?
         .parse()
@@ -319,7 +327,7 @@ impl BrowserCore {
                 let gate = self
                     .client()?
                     .begin_draft_send(draft_id(&args)?, expected_revision)
-                    .map_err(core)?;
+                    .map_err(|error| draft_send_failure(error, expected_revision))?;
                 Ok(
                     json!({"remote": gate.remote.map(|value| json!({"draftId": value.draft_id.to_string(), "revisionId": value.revision_id.to_string(), "commandId": value.command_id.to_string()}))}),
                 )
@@ -696,6 +704,13 @@ fn snapshot_progress_view(progress: SnapshotProgress) -> Value {
 mod tests {
     use super::*;
     use peppy_crypto::{create_vault_check_header, derive_root_key};
+
+    #[test]
+    fn unsynced_send_failure_includes_the_prepared_revision() {
+        let failure = draft_send_failure(CoreError::DraftNotSynced, 8);
+        assert_eq!(failure.code, "draft-not-synced");
+        assert_eq!(failure.current_revision.as_deref(), Some("8"));
+    }
 
     struct CoreFixture {
         _root: tempfile::TempDir,

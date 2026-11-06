@@ -151,6 +151,10 @@ pub(crate) fn core(error: CoreError) -> Failure {
             "draft-merge-overflow",
             "Combining these drafts would exceed a compose limit.",
         ),
+        CoreError::DraftNotSynced => Failure::new(
+            "draft-not-synced",
+            "The draft is still syncing. Wait for sync to finish, then send again.",
+        ),
         CoreError::InvalidMedia => Failure::new(
             "attachment-invalid",
             "The attachment could not be verified.",
@@ -1055,6 +1059,13 @@ mod tests {
 
     fn open(core: &mut BrowserCore, vault: VaultId, device: DeviceId, key: [u8; 32]) {
         value(&core.dispatch(&json!({"command":"open","args":{"vaultId":vault.to_string(),"deviceId":device.to_string(),"databaseKey":key,"origin":"https://peppy.test/","deviceRole":"device"}}).to_string()));
+    }
+
+    #[test]
+    fn draft_not_synced_has_a_retryable_browser_error() {
+        let failure = core(CoreError::DraftNotSynced);
+        assert_eq!(failure.code, "draft-not-synced");
+        assert!(failure.current_revision.is_none());
     }
 
     #[test]

@@ -234,6 +234,9 @@ function errorFor(error: unknown): RpcError {
   if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "draft-reconnect") {
     return { code: "unavailable", message: "Reconnect to send this synced draft." };
   }
+  if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "draft-not-synced") {
+    return { code: "draft-not-synced", message: "This draft is still syncing. Wait for sync to finish, then send again.", ...errorDetails(error) };
+  }
   if (typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string" && ["draft_expired", "draft_already_sent", "draft_revision_not_head"].includes((error as { code: string }).code)) {
     return { code: (error as { code: string }).code, message: "The synced draft changed on another device." };
   }
@@ -354,7 +357,9 @@ async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcReq
       const metadataOnly = args.metadataOnly === true;
       const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
       if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
-      const enriched = metadataOnly ? snapshot as Record<string, unknown> : await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT);
+      const enriched = metadataOnly
+        ? { ...(snapshot as Record<string, unknown>), draft: await addDraftPreviews(session, (snapshot as Record<string, unknown>).draft, { remaining: MAX_PREVIEWS_PER_SNAPSHOT }) }
+        : await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT);
       return { id, ok: true, value: { ...enriched, ...contacts as Record<string, unknown>, ...(syncProgress ? { syncProgress } : {}), ...(context?.sessionScopeId ? { sessionScopeId: context.sessionScopeId } : {}) } };
     }
     if (command === "load_history" || command === "load_message_window") {
@@ -438,6 +443,9 @@ async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcReq
     const value = invocation.mutation
       ? await session.mutate(invocation.coreCommand, invocationArgs)
       : await session.query(invocation.coreCommand, invocationArgs);
+    if (command === "save_draft") {
+      return { id, ok: true, value: await addDraftPreviews(session, value, { remaining: MAX_PREVIEWS_PER_SNAPSHOT }) };
+    }
     return { id, ok: true, value };
   } catch (error: unknown) {
     return { id, ok: false, error: errorFor(error) };
@@ -522,24 +530,39 @@ function contactAddresses(snapshot: Record<string, unknown>): Array<{ address: s
   return [...addresses.values()];
 }
 
-async function addVisiblePreviews(session: HostSession, snapshot: Record<string, unknown>, budget: number): Promise<Record<string, unknown>> {
-  if (!Array.isArray(snapshot.conversations)) return snapshot;
+type PreviewBudget = { remaining: number };
+
+async function addVisiblePreviews(session: HostSession, snapshot: Record<string, unknown>, limit: number): Promise<Record<string, unknown>> {
+  const budget = { remaining: limit };
+  const draft = await addDraftPreviews(session, snapshot.draft, budget);
+  const enrichedSnapshot = draft === snapshot.draft ? snapshot : { ...snapshot, draft };
+  if (!Array.isArray(snapshot.conversations)) return enrichedSnapshot;
   const activeId = typeof snapshot.activeConversationId === "string" ? snapshot.activeConversationId : undefined;
   const conversation = snapshot.conversations.find(value => typeof value === "object" && value !== null && (value as Record<string, unknown>).id === activeId);
-  if (!conversation || typeof conversation !== "object" || conversation === null) return snapshot;
+  if (!conversation || typeof conversation !== "object" || conversation === null) return enrichedSnapshot;
   const view = conversation as Record<string, unknown>;
-  if (!Array.isArray(view.messages)) return snapshot;
+  if (!Array.isArray(view.messages)) return enrichedSnapshot;
   const messages = await addMessagePreviews(session, view.messages, budget);
-  return { ...snapshot, conversations: snapshot.conversations.map(value => value === conversation ? { ...view, messages } : value) };
+  return { ...enrichedSnapshot, conversations: snapshot.conversations.map(value => value === conversation ? { ...view, messages } : value) };
 }
 
 async function addHistoryPreviews(session: HostSession, page: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (!Array.isArray(page.messages)) return page;
-  return { ...page, messages: await addMessagePreviews(session, page.messages, MAX_PREVIEWS_PER_HISTORY_PAGE) };
+  return { ...page, messages: await addMessagePreviews(session, page.messages, { remaining: MAX_PREVIEWS_PER_HISTORY_PAGE }) };
 }
 
-async function addMessagePreviews(session: HostSession, messages: unknown[], budget: number): Promise<unknown[]> {
-  let remainingPreviews = budget;
+async function addDraftPreviews(session: HostSession, draft: unknown, budget: PreviewBudget): Promise<unknown> {
+  const view = objectOrUndefined(draft);
+  if (!view || !Array.isArray(view.attachments)) return draft;
+  const attachments = await Promise.all(view.attachments.map(async attachment => {
+    if (budget.remaining <= 0 || !previewableAttachment(attachment)) return attachment;
+    budget.remaining -= 1;
+    return addAttachmentPreview(session, attachment);
+  }));
+  return { ...view, attachments };
+}
+
+async function addMessagePreviews(session: HostSession, messages: unknown[], budget: PreviewBudget): Promise<unknown[]> {
   const enrichRetention = attachmentRetentionEnricher(session);
   const previewedMessages = await Promise.all(messages.map(async message => {
     if (typeof message !== "object" || message === null) return message;
@@ -551,8 +574,8 @@ async function addMessagePreviews(session: HostSession, messages: unknown[], bud
       const mediaMeta = objectOrUndefined(view.mediaMeta);
       const thumbnail = mediaMeta?.thumbnail;
       const previewTarget = previewableAttachment(thumbnail) ? thumbnail : attachment;
-      const preview = remainingPreviews > 0 && previewableAttachment(previewTarget);
-      if (preview) remainingPreviews -= 1;
+      const preview = budget.remaining > 0 && previewableAttachment(previewTarget);
+      if (preview) budget.remaining -= 1;
       const enriched = await enrichRetention(attachment);
       if (!preview) return enriched;
       if (previewTarget === attachment) return addAttachmentPreview(session, enriched);
@@ -601,7 +624,7 @@ async function addAttachmentPreview(session: HostSession, attachment: unknown): 
 function previewableAttachment(attachment: unknown): boolean {
   if (typeof attachment !== "object" || attachment === null || Array.isArray(attachment)) return false;
   const view = attachment as Record<string, unknown>;
-  return typeof view.id === "string" && typeof view.mediaType === "string" && /^image\/(jpeg|png|webp|gif)$/.test(view.mediaType) && view.state === "ready";
+  return typeof view.id === "string" && typeof view.mediaType === "string" && /^image\/(jpeg|png|webp|gif)$/.test(view.mediaType) && (view.state === "uploading" || view.state === "ready");
 }
 function mediaPageArgs(args: Record<string, unknown>): Record<string, unknown> {
   const conversationId = args.conversationId;
@@ -1014,7 +1037,7 @@ export class BrowserWorkerHost {
     try {
       const identity = object(await session.query("_worker_identity_metadata", {}));
       if (typeof identity.vaultId !== "string" || identity.vaultId.length === 0 || typeof identity.deviceId !== "string" || identity.deviceId.length === 0) return undefined;
-      const binding = `${identity.vaultId} ${identity.deviceId}`;
+      const binding = `${identity.vaultId}\0${identity.deviceId}`;
       if (this.deviceSessionScope?.binding !== binding) this.deviceSessionScope = { binding, id: crypto.randomUUID() };
       return this.deviceSessionScope.id;
     } catch {
@@ -1435,6 +1458,46 @@ export function browserRememberedUnlock(fetchBase: string, fetchImpl: typeof fet
   return new RememberedUnlock(OWNER_NAME, { origin: fetchBase, fetch: fetchImpl });
 }
 
+export async function sendBrowserDraft(options: {
+  session: Pick<BrowserSession, "mutate" | "signal">;
+  transport: ConstructorParameters<typeof DraftTransport>[0];
+  synchronizeDraft(): Promise<void>;
+  args: Record<string, unknown>;
+}): Promise<unknown> {
+  const { session, transport, synchronizeDraft, args } = options;
+  const input = object(args.input);
+  const prepared = object(await session.mutate("_worker_draft_prepare_send", { input }));
+  const draftId = requiredId(prepared);
+  const expectedRevision = requiredString(prepared.expectedRevision);
+  const revisionChanged = expectedRevision !== requiredString(input.expectedRevision);
+  if (revisionChanged) await synchronizeDraft();
+  let gate: Record<string, unknown>;
+  try {
+    gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
+  } catch (error) {
+    if (!(revisionChanged && error instanceof CoreRejectedError && error.code === "draft-not-synced")) throw error;
+    await synchronizeDraft();
+    gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
+  }
+  if (gate.remote === null) return session.mutate("send_draft", prepared);
+  const remote = object(gate.remote);
+  try {
+    const accepted = await new DraftTransport(transport).acceptDraftSend({
+      draftId: requiredString(remote.draftId),
+      revisionId: requiredString(remote.revisionId),
+      commandId: requiredString(remote.commandId),
+    }, session.signal);
+    return session.mutate("_worker_draft_send_accepted", { input: prepared, commandId: accepted.commandId });
+  } catch (error) {
+    if (isTerminalDraftSendRejection(error)) {
+      await session.mutate("_worker_draft_abort_send_intent", { draftId, commandId: requiredString(remote.commandId) });
+      throw { code: error.code };
+    }
+    if (error instanceof TransportError && (error.kind === "offline" || error.kind === "cancelled" || error.kind === "status")) throw { code: "draft-reconnect" };
+    throw error;
+  }
+}
+
 export function browserHostDependencies(locks: OwnerLockManager | undefined, terminate: () => void): BrowserHostDependencies {
   let enrollment: BrowserEnrollment | undefined;
   let enrollmentAbort: AbortController | undefined;
@@ -1481,29 +1544,9 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   };
   const sendDraft = async (args: Record<string, unknown>): Promise<unknown> => {
     const session = activeSession;
-    if (!session || !publicTransport) throw { code: "draft-reconnect" };
-    const input = object(args.input);
-    const prepared = object(await session.mutate("_worker_draft_prepare_send", { input }));
-    const draftId = requiredId(prepared);
-    const expectedRevision = requiredString(prepared.expectedRevision);
-    const gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
-    if (gate.remote === null) return session.mutate("send_draft", prepared);
-    const remote = object(gate.remote);
-    try {
-      const accepted = await new DraftTransport(publicTransport).acceptDraftSend({
-        draftId: requiredString(remote.draftId),
-        revisionId: requiredString(remote.revisionId),
-        commandId: requiredString(remote.commandId),
-      }, session.signal);
-      return session.mutate("_worker_draft_send_accepted", { input: prepared, commandId: accepted.commandId });
-    } catch (error) {
-      if (isTerminalDraftSendRejection(error)) {
-        await session.mutate("_worker_draft_abort_send_intent", { draftId, commandId: requiredString(remote.commandId) });
-        throw { code: error.code };
-      }
-      if (error instanceof TransportError && (error.kind === "offline" || error.kind === "cancelled" || error.kind === "status")) throw { code: "draft-reconnect" };
-      throw error;
-    }
+    const sendScheduler = scheduler;
+    if (!session || !publicTransport || !sendScheduler) throw { code: "draft-reconnect" };
+    return sendBrowserDraft({ session, transport: publicTransport, synchronizeDraft: async () => { await sendScheduler.poll(); }, args });
   };
   return {
     locks,

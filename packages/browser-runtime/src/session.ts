@@ -42,6 +42,12 @@ function isReadyAttachment(value: CoreResult): value is Record<string, unknown> 
   return typeof value === "object" && value !== null && !Array.isArray(value) && (value as Record<string, unknown>).state === "ready";
 }
 
+function isLocallyPreviewableAttachment(value: CoreResult): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const state = (value as Record<string, unknown>).state;
+  return state === "uploading" || state === "ready";
+}
+
 function attachmentBytes(value: Record<string, unknown>): number {
   const size = value.plaintextBytes ?? value.byteSize;
   if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0 || size > MAX_PLAINTEXT_MEDIA_BYTES) throw new BrowserCoreError("core-error");
@@ -331,7 +337,7 @@ export class BrowserSession {
       previewUrl = await this.runtime.read(async () => {
         this.requireReady();
         const info = await this.options.core.invoke({ command: "attachment_info", args: { id } });
-        if (!isReadyAttachment(info)) throw new CoreRejectedError("media-pending");
+        if (!isLocallyPreviewableAttachment(info)) throw new CoreRejectedError("media-pending");
         attachmentBytes(info);
         await hydrateCipher(id, this.generationValue, this.options.checkpoint, this.options.filesystem);
         const value = await this.options.core.invoke({ command: "preview_attachment", args: { id } });

@@ -61,7 +61,7 @@ class TrustedCore {
 }
 
 class AttachmentCore extends TrustedCore {
-  public state: "ready" | "pending" = "ready";
+  public state: "ready" | "uploading" | "pending" = "ready";
   public readonly attachmentCommands: string[] = [];
   public attachmentInfoGate?: Promise<void>;
   public exportFailure?: CoreRejectedError;
@@ -78,7 +78,7 @@ class AttachmentCore extends TrustedCore {
     this.attachmentCommands.push(command);
     if (command === "attachment_info") {
       await this.attachmentInfoGate;
-      return this.state === "ready" ? { state: "ready", plaintextBytes: this.content.byteLength } : { state: "pending" };
+      return { state: this.state, plaintextBytes: this.content.byteLength };
     }
     if (command === "preview_attachment" && this.previewFailure) throw this.previewFailure;
     if (command === "retain_attachment_ciphertext") {
@@ -111,7 +111,7 @@ class AttachmentCore extends TrustedCore {
       return { file: `worker-output/${outputId}`, byteSize: 3, name: "public.png" };
     }
     if (command === "_worker_attachment_remote") return { remoteObjectId: "remote-object" };
-    if (command === "_worker_local_attachment_ids") return { attachmentIds: this.state === "ready" ? this.attachmentIds : [] };
+    if (command === "_worker_local_attachment_ids") return { attachmentIds: this.state === "pending" ? [] : this.attachmentIds };
     if (command === "_worker_draft_attachment_ids") return { attachmentIds: this.attachmentIds };
     if (command === "snapshot" && this.snapshotDraftMediaState) {
       return { drafts: [{ attachment: this.fs.readdir("/peppy/client.db.media/cipher").includes(`${id}.ppss`) ? "ready" : "unavailable" }] };
@@ -127,7 +127,7 @@ function deferred(): { promise: Promise<void>; release(): void } {
   return { promise: new Promise<void>(resolve => { release = resolve; }), release };
 }
 
-async function unlockedAttachmentSession(state: "ready" | "pending", files: CheckpointInput["files"], attachmentIds = [id]): Promise<{ core: AttachmentCore; fs: MemoryFs; session: BrowserSession; store: IndexedDbCheckpointStore }> {
+async function unlockedAttachmentSession(state: "ready" | "uploading" | "pending", files: CheckpointInput["files"], attachmentIds = [id]): Promise<{ core: AttachmentCore; fs: MemoryFs; session: BrowserSession; store: IndexedDbCheckpointStore }> {
   const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
   await store.commit(checkpoint(0, "envelope-1", files));
   const fs = new MemoryFs();
@@ -591,6 +591,16 @@ describe("BrowserSession", () => {
     await expect(session.previewAttachment(id)).resolves.toBe("data:image/png;base64,cHJldmlldw==");
     session.shutdown();
     await expect(session.previewAttachment(id)).rejects.toThrow(BrowserSessionError);
+  });
+
+  it("restores and previews a locally staged attachment while its upload is pending", async () => {
+    const { core, session } = await unlockedAttachmentSession("uploading", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ]);
+
+    await expect(session.previewAttachment(id)).resolves.toBe("data:image/png;base64,cHJldmlldw==");
+    expect(core.attachmentCommands).toContain("preview_attachment");
   });
 
   it("keeps ready-media availability, hydration, and export atomic when queued eviction races two callers", async () => {

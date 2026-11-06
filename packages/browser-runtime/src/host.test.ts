@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
-import { browserRememberedUnlock, BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort, type HostSession } from "./host.js";
+import { browserRememberedUnlock, BrowserWorkerHost, dispatchBrowserRpc, sendBrowserDraft, type BrowserPort, type HostSession } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
 import { TransportError } from "./transport.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
@@ -1181,6 +1181,60 @@ describe("browser host RPC", () => {
     expect(previews).toBe(32);
   });
 
+  it("enriches active draft image previews within the shared snapshot budget", async () => {
+    const session = new FakeSession();
+    const draftAttachments = Array.from({ length: 2 }, (_, index) => ({ id: `draft-image-${index}`, mediaType: "image/png", state: index === 0 ? "uploading" : "ready" }));
+    const messageAttachments = Array.from({ length: 32 }, (_, index) => ({ id: `message-image-${index}`, mediaType: "image/png", state: "ready" }));
+    session.snapshot = {
+      activeConversationId: "conversation",
+      draft: { id: "draft", attachments: draftAttachments },
+      conversations: [{ id: "conversation", messages: messageAttachments.map(attachment => ({ attachments: [attachment] })) }],
+    };
+    session.previewAttachment = vi.fn(async () => "data:image/png;base64,cHJldmlldw==");
+
+    const response = await dispatchBrowserRpc(session, { id: 1, command: "load_state", args: {} });
+
+    expect(response).toMatchObject({ ok: true, value: { draft: { attachments: [
+      { id: "draft-image-0", previewUrl: "data:image/png;base64,cHJldmlldw==" },
+      { id: "draft-image-1", previewUrl: "data:image/png;base64,cHJldmlldw==" },
+    ] } } });
+    expect(session.previewAttachment).toHaveBeenCalledTimes(32);
+  });
+
+  it("enriches saved draft image previews through the host dispatch", async () => {
+    const session = new FakeSession();
+    const attachment = { id: "00000000-0000-0000-0000-000000000001", mediaType: "image/png", state: "uploading" };
+    session.previewAttachment = vi.fn(async () => "data:image/png;base64,cHJldmlldw==");
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      return { id: "draft", attachments: [attachment] };
+    };
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "save_draft", args: { input: {} } })).resolves.toMatchObject({
+      ok: true,
+      value: { attachments: [{ id: attachment.id, previewUrl: "data:image/png;base64,cHJldmlldw==" }] },
+    });
+    expect(session.previewAttachment).toHaveBeenCalledWith(attachment.id);
+  });
+
+  it("enriches active draft previews but not messages in metadata-only snapshots", async () => {
+    const session = new FakeSession();
+    const draftId = "00000000-0000-0000-0000-000000000001";
+    const messageId = "00000000-0000-0000-0000-000000000002";
+    session.snapshot = {
+      draft: { attachments: [{ id: draftId, mediaType: "image/png", state: "ready" }] },
+      activeConversationId: "conversation",
+      conversations: [{ id: "conversation", messages: [{ attachments: [{ id: messageId, mediaType: "image/png", state: "ready" }] }] }],
+    };
+    session.previewAttachment = vi.fn(async id => `data:image/png;base64,${id}`);
+
+    const response = await dispatchBrowserRpc(session, { id: 1, command: "load_state", args: { metadataOnly: true } });
+
+    expect(response).toMatchObject({ ok: true, value: { draft: { attachments: [{ id: draftId, previewUrl: `data:image/png;base64,${draftId}` }] } } });
+    expect(session.previewAttachment).toHaveBeenCalledWith(draftId);
+    expect(session.previewAttachment).not.toHaveBeenCalledWith(messageId);
+  });
+
   it("uses the smaller preview budget for an older history page", async () => {
     const session = new FakeSession();
     const attachments = Array.from({ length: 13 }, (_, index) => ({ id: `image-${index}`, mediaType: "image/png", state: "ready" }));
@@ -1316,6 +1370,162 @@ describe("browser host RPC", () => {
     await eventually(() => blocked.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
     expect(blockedSend).not.toHaveBeenCalled();
     expect(blockedSession.calls).not.toContainEqual(expect.objectContaining({ command: "_worker_draft_prepare_send" }));
+  });
+
+  it("syncs a route-canonicalized revision before the production send flow accepts it", async () => {
+    const calls: string[] = [];
+    let syncAttempts = 0;
+    const session = {
+      signal: new AbortController().signal,
+      async mutate(command: string, args: Record<string, unknown>) {
+        calls.push(command);
+        if (command === "_worker_draft_prepare_send") {
+          return { ...(args.input as Record<string, unknown>), id: "00000000-0000-4000-8000-000000000001", expectedRevision: "8" };
+        }
+        if (command === "_worker_draft_begin_send") {
+          if (syncAttempts < 2) throw new CoreRejectedError("draft-not-synced");
+          expect(args).toEqual({ draftId: "00000000-0000-4000-8000-000000000001", expectedRevision: "8" });
+          return { remote: { draftId: "00000000-0000-4000-8000-000000000001", revisionId: "00000000-0000-4000-8000-000000000002", commandId: "00000000-0000-4000-8000-000000000003" } };
+        }
+        if (command === "_worker_draft_send_accepted") {
+          expect(args).toEqual({ input: expect.objectContaining({ expectedRevision: "8" }), commandId: "00000000-0000-4000-8000-000000000003" });
+          return { accepted: true };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    };
+    const transport = {
+      async json() {
+        calls.push("accept");
+        return { command_id: "00000000-0000-4000-8000-000000000003", duplicate: false };
+      },
+      async discard() { throw new Error("unexpected discard"); },
+    };
+
+    await expect(sendBrowserDraft({
+      session,
+      transport,
+      synchronizeDraft: async () => { calls.push("sync"); syncAttempts += 1; },
+      args: { input: { id: "00000000-0000-4000-8000-000000000001", expectedRevision: "7", gatewayId: "gateway", simId: "sim" } },
+    })).resolves.toEqual({ accepted: true });
+
+    expect(calls).toEqual([
+      "_worker_draft_prepare_send",
+      "sync",
+      "_worker_draft_begin_send",
+      "sync",
+      "_worker_draft_begin_send",
+      "accept",
+      "_worker_draft_send_accepted",
+    ]);
+  });
+
+  it("returns a sanitized synced-draft revision through the host without accepting", async () => {
+    const session = new FakeSession();
+    const sendSession = { mutate: (command: string, args: Record<string, unknown>) => session.mutate(command, args), signal: new AbortController().signal };
+    const accept = vi.fn();
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        producerReady: () => true,
+        sendDraft: async () => sendBrowserDraft({
+          session: sendSession,
+          transport: { json: accept, discard: vi.fn() },
+          synchronizeDraft: async () => undefined,
+          args: { input: { id: "00000000-0000-4000-8000-000000000001", expectedRevision: "8" } },
+        }),
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      if (command === "_worker_draft_prepare_send") return args.input as import("./core.js").CoreResult;
+      if (command === "_worker_draft_begin_send") throw new CoreRejectedError("draft-not-synced", { currentRevision: "8" });
+      throw new Error(`unexpected command ${command}`);
+    };
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "send_draft", args: { input: { id: "00000000-0000-4000-8000-000000000001", expectedRevision: "8" } } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: { code: "draft-not-synced", message: "This draft is still syncing. Wait for sync to finish, then send again.", currentRevision: "8" } });
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it("does not accept when content changes during the preflight sync", async () => {
+    const draftId = "00000000-0000-4000-8000-000000000001";
+    const accept = vi.fn();
+    const session = {
+      signal: new AbortController().signal,
+      async mutate(command: string, args: Record<string, unknown>) {
+        if (command === "_worker_draft_prepare_send") return { ...(args.input as Record<string, unknown>), id: draftId, expectedRevision: "8" };
+        if (command === "_worker_draft_begin_send") throw new CoreRejectedError("stale-draft", { currentRevision: "9" });
+        throw new Error(`unexpected command ${command}`);
+      },
+    };
+
+    await expect(sendBrowserDraft({
+      session,
+      transport: { json: accept, discard: vi.fn() },
+      synchronizeDraft: async () => undefined,
+      args: { input: { id: draftId, expectedRevision: "7" } },
+    })).rejects.toMatchObject({ code: "stale-draft", details: { currentRevision: "9" } });
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it("does not accept through the production send flow when route preflight rejects", async () => {
+    const accept = vi.fn();
+    const synchronizeDraft = vi.fn();
+    const session = {
+      signal: new AbortController().signal,
+      async mutate(command: string) {
+        if (command === "_worker_draft_prepare_send") throw new CoreRejectedError("invalid-route");
+        throw new Error(`unexpected command ${command}`);
+      },
+    };
+
+    await expect(sendBrowserDraft({
+      session,
+      transport: { json: accept, discard: vi.fn() },
+      synchronizeDraft,
+      args: { input: { expectedRevision: "7" } },
+    })).rejects.toMatchObject({ code: "invalid-route" });
+    expect(accept).not.toHaveBeenCalled();
+    expect(synchronizeDraft).not.toHaveBeenCalled();
+  });
+
+  it("reuses an existing send intent after ambiguous acceptance without auto-aborting it", async () => {
+    const draftId = "00000000-0000-4000-8000-000000000001";
+    const revisionId = "00000000-0000-4000-8000-000000000002";
+    const commandId = "00000000-0000-4000-8000-000000000003";
+    const calls: string[] = [];
+    const session = {
+      signal: new AbortController().signal,
+      async mutate(command: string, args: Record<string, unknown>) {
+        calls.push(command);
+        if (command === "_worker_draft_prepare_send") return { ...(args.input as Record<string, unknown>), id: draftId };
+        if (command === "_worker_draft_begin_send") return { remote: { draftId, revisionId, commandId } };
+        if (command === "_worker_draft_send_accepted") return { accepted: true };
+        throw new Error(`unexpected command ${command}`);
+      },
+    };
+    const accept = vi.fn()
+      .mockRejectedValueOnce(new TransportError("offline"))
+      .mockResolvedValueOnce({ command_id: commandId, duplicate: true });
+    const request = {
+      session,
+      transport: { json: accept, discard: vi.fn() },
+      synchronizeDraft: vi.fn(),
+      args: { input: { id: draftId, expectedRevision: "8" } },
+    };
+
+    await expect(sendBrowserDraft(request)).rejects.toMatchObject({ code: "draft-reconnect" });
+    await expect(sendBrowserDraft(request)).resolves.toEqual({ accepted: true });
+    expect(request.synchronizeDraft).not.toHaveBeenCalled();
+    expect(calls).not.toContain("_worker_draft_abort_send_intent");
+    expect(accept).toHaveBeenCalledTimes(2);
   });
 
   it("does not accept a draft send when its core preflight rejects it", async () => {
