@@ -1,5 +1,11 @@
-use crate::{Client, ConversationId, Error};
+use crate::{
+    Client, ConversationId, Ctx, Direction, EnvelopePurpose, Error, Inserted, MessageId,
+    MessagePayload, MessageRecord, PrivatePayload, Transport, enqueue, insert_message,
+    next_source_sequence,
+};
+use peppy_crypto::compaction_hmac;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use uuid::Uuid;
 
 const MAX_DETECTORS_PER_CONVERSATION: i64 = 1_024;
 
@@ -52,6 +58,27 @@ pub enum RcsReceiveCode {
     ConversationUnproven,
     IdentityConflict,
     CursorInvalid,
+    ProviderFloor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RcsProjectedRecord {
+    pub google_message_id: String,
+    pub google_conversation_id: String,
+    pub direction: Direction,
+    pub body: String,
+    pub sent_at_ms: Option<i64>,
+    pub tmp_id: Option<String>,
+    pub rcs_reported: bool,
+    pub e2ee_reported: Option<bool>,
+    pub history_token: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RcsReceiveOutcome {
+    Inserted,
+    Duplicate,
+    Rejected(RcsReceiveCode),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,24 +187,17 @@ impl Client {
         {
             return Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale));
         }
-        let existing: Option<String> = tx
-            .query_row(
-                "SELECT conversation_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=?",
-                params![google_message_id, google_conversation_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(existing) = existing {
-            return Ok(if existing == conversation_id.to_string() {
-                RcsIdentityOutcome::Duplicate
-            } else {
-                RcsIdentityOutcome::Rejected(RcsReceiveCode::IdentityConflict)
-            });
-        }
-        tx.execute(
-            "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation) VALUES(?,?,?,?)",
-            params![google_message_id, google_conversation_id, conversation_id.to_string(), ownership_generation],
+        let outcome = record_identity(
+            &tx,
+            conversation_id,
+            ownership_generation,
+            google_message_id,
+            google_conversation_id,
+            None,
         )?;
+        if outcome != RcsIdentityOutcome::Recorded {
+            return Ok(outcome);
+        }
         if let Some(token) = history_token {
             tx.execute(
                 "UPDATE rcs_lane_ownership SET history_token=? WHERE conversation_id=? AND ownership_generation=?",
@@ -186,6 +206,105 @@ impl Client {
         }
         tx.commit()?;
         Ok(RcsIdentityOutcome::Recorded)
+    }
+
+    pub fn ingest_rcs_projected_record(
+        &self,
+        conversation_id: ConversationId,
+        ownership_generation: u64,
+        record: RcsProjectedRecord,
+    ) -> Result<RcsReceiveOutcome, Error> {
+        if record.google_message_id.is_empty()
+            || record.google_conversation_id.is_empty()
+            || record.body.len() > 16_384
+            || record
+                .history_token
+                .as_deref()
+                .is_some_and(|token| !valid_token(token))
+        {
+            return Ok(RcsReceiveOutcome::Rejected(
+                RcsReceiveCode::IdentityConflict,
+            ));
+        }
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(ownership) = load_ownership(&tx, conversation_id)? else {
+            return Ok(RcsReceiveOutcome::Rejected(
+                RcsReceiveCode::ConversationUnproven,
+            ));
+        };
+        if ownership.owner != RcsReceiveOwner::Link
+            || ownership.ownership_generation != ownership_generation
+        {
+            return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::OwnershipStale));
+        }
+        if record.history_token.is_some()
+            && record
+                .sent_at_ms
+                .is_some_and(|sent_at_ms| sent_at_ms <= ownership.detector_floor)
+        {
+            return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor));
+        }
+        let message_id = deterministic_message_id(
+            &ctx,
+            &record.google_conversation_id,
+            &record.google_message_id,
+        )?;
+        let identity = record_identity(
+            &tx,
+            conversation_id,
+            ownership_generation,
+            &record.google_message_id,
+            &record.google_conversation_id,
+            Some(message_id),
+        )?;
+        let outcome = match identity {
+            RcsIdentityOutcome::Recorded => {
+                let payload = MessagePayload {
+                    record: MessageRecord {
+                        message_id,
+                        conversation_id,
+                        source_sequence: next_source_sequence(&tx, conversation_id, ctx.device_id)?,
+                        attachments: Vec::new(),
+                    },
+                    source_device_id: ctx.device_id,
+                    provider_message_id: None,
+                    sender_address: None,
+                    recipients: Vec::new(),
+                    subject: None,
+                    body: record.body,
+                    transport: Transport::Rcs,
+                    direction: record.direction,
+                    imported: record.history_token.is_some(),
+                    sent_at_ms: record.sent_at_ms,
+                    ordered_at_ms: None,
+                    mms_context: None,
+                };
+                if insert_message(&tx, &payload)? != Inserted::New {
+                    return Err(Error::Database);
+                }
+                enqueue(
+                    &tx,
+                    &ctx,
+                    EnvelopePurpose::Event,
+                    None,
+                    None,
+                    &PrivatePayload::Message(payload),
+                )?;
+                RcsReceiveOutcome::Inserted
+            }
+            RcsIdentityOutcome::Duplicate => RcsReceiveOutcome::Duplicate,
+            RcsIdentityOutcome::Rejected(code) => return Ok(RcsReceiveOutcome::Rejected(code)),
+        };
+        if let Some(token) = record.history_token {
+            tx.execute(
+                "UPDATE rcs_lane_ownership SET history_token=? WHERE conversation_id=? AND ownership_generation=?",
+                params![token, conversation_id.to_string(), ownership_generation],
+            )?;
+        }
+        tx.commit()?;
+        Ok(outcome)
     }
 
     pub fn checkpoint_rcs_history(
@@ -344,6 +463,56 @@ fn valid_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn record_identity(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    ownership_generation: u64,
+    google_message_id: &str,
+    google_conversation_id: &str,
+    message_id: Option<MessageId>,
+) -> Result<RcsIdentityOutcome, Error> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT conversation_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=?",
+            params![google_message_id, google_conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        return Ok(if existing == conversation_id.to_string() {
+            RcsIdentityOutcome::Duplicate
+        } else {
+            RcsIdentityOutcome::Rejected(RcsReceiveCode::IdentityConflict)
+        });
+    }
+    conn.execute(
+        "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES(?,?,?,?,?)",
+        params![google_message_id, google_conversation_id, conversation_id.to_string(), ownership_generation, message_id.map(|id| id.to_string())],
+    )?;
+    Ok(RcsIdentityOutcome::Recorded)
+}
+
+fn deterministic_message_id(
+    ctx: &Ctx<'_>,
+    google_conversation_id: &str,
+    google_message_id: &str,
+) -> Result<MessageId, Error> {
+    let epoch = ctx.active_epoch.ok_or(Error::Crypto)?;
+    let key = ctx.keys.get(&epoch).ok_or(Error::Crypto)?;
+    let mut bytes = compaction_hmac(
+        &key.event,
+        b"rcs-message-id-v1",
+        &[
+            google_conversation_id.as_bytes(),
+            google_message_id.as_bytes(),
+        ],
+    );
+    let mut uuid_bytes: [u8; 16] = bytes[..16].try_into().map_err(|_| Error::Crypto)?;
+    uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x80;
+    uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;
+    Ok(MessageId(Uuid::from_bytes(uuid_bytes)))
 }
 
 fn next_generation(conn: &Connection, conversation_id: ConversationId) -> Result<i64, Error> {

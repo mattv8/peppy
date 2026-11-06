@@ -25,6 +25,10 @@ path = "tests/ephemeral_v2_receive.rs"
 name = "rcs_receive"
 path = "tests/rcs_receive.rs"
 
+[[test]]
+name = "rcs_status"
+path = "tests/rcs_status.rs"
+
 [dependencies]
 base64.workspace = true
 peppy-crypto.workspace = true

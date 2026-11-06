@@ -147,8 +147,8 @@ pub use rcs_native::{
     NativeSettingsCurrentness, NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
 };
 pub use rcs_receive::{
-    RcsCutover, RcsIdentityOutcome, RcsOwnership, RcsProviderDetector, RcsReceiveAlert,
-    RcsReceiveCode, RcsReceiveOwner, RcsReceiveState,
+    RcsCutover, RcsIdentityOutcome, RcsOwnership, RcsProjectedRecord, RcsProviderDetector,
+    RcsReceiveAlert, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
@@ -1315,6 +1315,61 @@ impl Client {
         }
         tx.commit()?;
         Ok(published)
+    }
+
+    /// Durably records host link lifecycle before exposing its content-free capability status.
+    pub fn record_rcs_link_lifecycle(
+        &self,
+        state: RcsCapabilityState,
+        availability: bool,
+        health: bool,
+        phone_responsive: bool,
+        observed_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<(), Error> {
+        if observed_at_ms > now_ms {
+            return Err(Error::InvalidRequest("future RCS link lifecycle"));
+        }
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        rcs_mapping::record_link_lifecycle(&tx, state)?;
+        tx.execute(
+            "DELETE FROM metadata WHERE k LIKE 'rcs_carrier_only_proof_v1/%'",
+            [],
+        )?;
+        let identity = format!("status:{}", ctx.device_id);
+        let previous_revision = tx
+            .query_row(
+                "SELECT revision FROM rcs_capability_published WHERE identity=?",
+                [&identity],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let revision = previous_revision
+            .checked_add(1)
+            .ok_or(Error::InvalidRequest("RCS capability revision exhausted"))?;
+        let status = RcsLinkStatusEvent {
+            gateway_device_id: ctx.device_id,
+            state,
+            availability,
+            health,
+            phone_responsive,
+            observed_at_ms,
+            capability_revision: revision,
+            feature_bits: 0,
+        };
+        publish_rcs_capability_payload(
+            &tx,
+            &ctx,
+            &PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status }),
+            identity,
+            revision,
+            now_ms,
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Returns the current content-free capability gate for automatic RCS dispatch.
@@ -3767,29 +3822,7 @@ impl Client {
             return Err(Error::InvalidRequest("mapping unproven"));
         };
         require_exact_rcs_recipient(&message, &mapping)?;
-        let existing_tmp_id: Option<String> = tx
-            .query_row(
-                "SELECT tmp_id FROM rcs_send_ledger WHERE command_id=?",
-                [command_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let tmp_id = existing_tmp_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        rcs_send::record_rcs_target_identity(&tx, command_id, &mapping, observation)?;
-        record_finalized_attempt(&tx, command_id, "rcs", now_ms)?;
-        if existing_tmp_id.is_some() {
-            tx.execute(
-                "UPDATE rcs_send_ledger SET mapping_revision=?,proof_digest=?,google_conversation_id=?,attempted_at_ms=? WHERE command_id=?",
-                params![mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms, command_id.to_string()],
-            )?;
-        } else {
-            tx.execute(
-                "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,?,?,?,?)",
-                params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
-            )?;
-        }
+        let tmp_id = finalize_rcs_admission(&tx, command_id, &mapping, observation, now_ms)?;
         let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
         tx.commit()?;
         Ok(permit)
@@ -6545,6 +6578,7 @@ CREATE TABLE rcs_message_identities(
   google_conversation_id TEXT NOT NULL,
   conversation_id TEXT NOT NULL,
   ownership_generation INTEGER NOT NULL,
+  message_id TEXT,
   PRIMARY KEY(google_message_id,google_conversation_id)
 );
 CREATE TABLE rcs_provider_detectors(
@@ -7476,6 +7510,9 @@ fn classify(
             "UPDATE outbox SET state='acknowledged' WHERE envelope_id=?",
             params![id],
         )?;
+        if is_self_addressed_explicit_rcs_resend(conn, ctx, envelope)? {
+            return Ok(IngestResult::Journaled);
+        }
         return Ok(IngestResult::Duplicate);
     }
     let (same, any): (bool, bool) = conn.query_row(
@@ -7490,6 +7527,30 @@ fn classify(
     } else {
         Ok(IngestResult::Quarantined(Q::EnvelopeConflict))
     }
+}
+
+fn is_self_addressed_explicit_rcs_resend(
+    conn: &Connection,
+    ctx: &Ctx,
+    envelope: &Envelope,
+) -> Result<bool, Error> {
+    let (Some(command_id), Some(GatewayRoute::RcsLink { gateway_device_id })) =
+        (envelope.command_id, envelope.route.as_ref())
+    else {
+        return Ok(false);
+    };
+    if envelope.purpose != EnvelopePurpose::Command {
+        return Ok(false);
+    };
+    if *gateway_device_id != ctx.device_id {
+        return Ok(false);
+    }
+    let resend: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_send_ledger WHERE command_id=? AND retry_of_command_id IS NOT NULL)",
+        [command_id.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(resend)
 }
 
 /// Result of authenticating and decoding one stored envelope.
@@ -9948,6 +10009,17 @@ fn automatic_rcs_permit(
     let mapping = exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)?
         .ok_or(Error::InvalidRequest("mapping unproven"))?;
     require_exact_rcs_recipient(&message, &mapping)?;
+    let tmp_id = finalize_rcs_admission(tx, command_id, &mapping, observation, now_ms)?;
+    rcs_permit(command_id, message, tmp_id, &mapping, observation)
+}
+
+fn finalize_rcs_admission(
+    tx: &Connection,
+    command_id: CommandId,
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<String, Error> {
     let existing_tmp_id: Option<String> = tx
         .query_row(
             "SELECT tmp_id FROM rcs_send_ledger WHERE command_id=?",
@@ -9958,7 +10030,7 @@ fn automatic_rcs_permit(
     let tmp_id = existing_tmp_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    rcs_send::record_rcs_target_identity(tx, command_id, &mapping, observation)?;
+    rcs_send::record_rcs_target_identity(tx, command_id, mapping, observation)?;
     record_finalized_attempt(tx, command_id, "rcs", now_ms)?;
     if existing_tmp_id.is_some() {
         tx.execute(
@@ -9971,7 +10043,7 @@ fn automatic_rcs_permit(
             params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
         )?;
     }
-    rcs_permit(command_id, message, tmp_id, &mapping, observation)
+    Ok(tmp_id)
 }
 
 fn rcs_permit(
@@ -10038,7 +10110,7 @@ fn valid_message(message: &MessagePayload, producer: DeviceId) -> bool {
                 message.record.attachments.len() <= MAX_MMS_ATTACHMENTS
                     && (!message.body.is_empty() || !message.record.attachments.is_empty())
             }
-            Transport::Rcs => false,
+            Transport::Rcs => message.record.attachments.is_empty(),
         }
         && message.body.len() <= MAX_BODY_BYTES
         && message
@@ -10053,7 +10125,10 @@ fn valid_message(message: &MessagePayload, producer: DeviceId) -> bool {
             .as_ref()
             .is_none_or(|id| !id.is_empty() && id.len() <= MAX_PROVIDER_ID_BYTES)
         && match message.direction {
-            Direction::Incoming => message.sender_address.as_deref().is_some_and(address_ok),
+            Direction::Incoming => {
+                message.transport == Transport::Rcs
+                    || message.sender_address.as_deref().is_some_and(address_ok)
+            }
             Direction::Outgoing => {
                 let limit = match message.transport {
                     Transport::Mms => MAX_MMS_RECIPIENTS,
