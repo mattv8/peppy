@@ -29,7 +29,8 @@ export function useTypingDisplay(bridge: DesktopBridge, conversationId: string |
       const deadline = Math.min(Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + MAX_DISPLAY_MS, Date.now() + MAX_DISPLAY_MS);
       if (deadline <= Date.now()) return clear();
       if (displayTimer !== undefined) window.clearTimeout(displayTimer);
-      const announce = !localUserTyping && (announcements.current.get(conversationId) ?? 0) + TYPING_ANNOUNCE_COOLDOWN_MS <= Date.now();
+      const lastAnnouncement = announcements.current.get(conversationId);
+      const announce = !localUserTyping && (lastAnnouncement === undefined || lastAnnouncement + TYPING_ANNOUNCE_COOLDOWN_MS <= Date.now());
       if (announce) announcements.current.set(conversationId, Date.now());
       setState(previous => ({ visible: true, announcement: previous.announcement || announce }));
       if (announce) {
