@@ -18,7 +18,10 @@ func TestLateRotationAfterUnlinkWritesNothing(t *testing.T) {
 	link, host := openSafetyLink(t, nil)
 	setSafetyState(link, stateNeedsRelink, auth)
 	candidate := auth.CopyForRepair()
-	client := link.newClient(candidate, link.persistRotated(candidate, make(chan struct{})))
+	link.mu.Lock()
+	owner := link.generation
+	link.mu.Unlock()
+	client := link.newClient(candidate, link.persistRotatedFor(owner, candidate, make(chan struct{})), owner)
 	t.Cleanup(client.Disconnect)
 
 	if err := link.Unlink(); err != nil {

@@ -456,13 +456,16 @@ func TestRotationRace(t *testing.T) {
 	})
 	link, host := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
+	link.mu.Lock()
+	owner := link.generation
+	link.mu.Unlock()
 
 	var wait sync.WaitGroup
 	for range 4 {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			client := link.newClient(auth, link.persist)
+			client := link.newClient(auth, link.persist, owner)
 			defer client.Disconnect()
 			for range 8 {
 				if err := client.FetchConfig(t.Context()); err != nil {

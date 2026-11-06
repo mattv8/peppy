@@ -47,6 +47,9 @@ func TestOldPairCleanupKeepsNewPairOwnership(t *testing.T) {
 	go func() { newResult <- link.Pair(canaryCookieJSON(t)) }()
 	awaitEmoji(t, host)
 	newOwner := currentPairOwner(link)
+	link.mu.Lock()
+	newOperation := link.pairOwner
+	link.mu.Unlock()
 
 	close(release)
 	if err := awaitPairResult(t, link, oldResult, "old Pair"); err != nil {
@@ -58,7 +61,7 @@ func TestOldPairCleanupKeepsNewPairOwnership(t *testing.T) {
 	fixture.configure(func(knobs *fixtureKnobs) { knobs.rotateCookie = true })
 	candidate := libgm.NewAuthData()
 	candidate.SetCookies(syntheticCookies())
-	client := link.newClient(candidate, link.persistRotated(candidate, newOwner))
+	client := link.newClient(candidate, link.persistRotatedFor(newOperation, candidate, newOwner), newOperation)
 	t.Cleanup(client.Disconnect)
 	if err := client.FetchConfig(t.Context()); err != nil {
 		t.Fatalf("config fetch error = %v", err)

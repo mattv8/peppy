@@ -61,18 +61,22 @@ func TestUnlinkClosedBeforeUnpairSendsNothing(t *testing.T) {
 	})
 	link, host := openSafetyLink(t, nil)
 	setSafetyState(link, stateNeedsRelink, auth)
-	reached, release := host.holdNextPersist("needs_relink")
+	reached, release := host.holdNextPersist(statePairing)
 	relinkResult := make(chan error, 1)
 	go func() { relinkResult <- link.Relink() }()
-	awaitEmoji(t, host)
-
-	unlinkResult := make(chan error, 1)
-	go func() { unlinkResult <- link.Unlink() }()
 	select {
 	case <-reached:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the relink never began to unwind")
+		t.Fatal("the relink never reached pairing persistence")
 	}
+
+	unlinkResult := make(chan error, 1)
+	go func() { unlinkResult <- link.Unlink() }()
+	awaitSafety(t, "the unlink to own cancellation", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.unlinking
+	})
 	closed := make(chan struct{})
 	go func() {
 		link.Close()
@@ -121,8 +125,11 @@ func TestStaleRelinkRotationCannotWriteIntoNewPair(t *testing.T) {
 	go func() { first <- link.Relink() }()
 	awaitEmoji(t, host)
 	firstOwner := currentPairOwner(link)
+	link.mu.Lock()
+	firstOperation := link.pairOwner
+	link.mu.Unlock()
 	stale := auth.CopyForRepair()
-	staleClient := link.newClient(stale, link.persistRotated(stale, firstOwner))
+	staleClient := link.newClient(stale, link.persistRotatedFor(firstOperation, stale, firstOwner), firstOperation)
 	t.Cleanup(staleClient.Disconnect)
 	if err := awaitPairResult(t, link, first, "first Relink"); err == nil {
 		t.Fatal("first Relink succeeded, want pair_timeout")

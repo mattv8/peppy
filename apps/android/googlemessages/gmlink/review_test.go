@@ -45,9 +45,9 @@ func TestRunEndsAfterNeedsRelink(t *testing.T) {
 		t.Fatalf("Run error = %v, want nil after the link needs relink", err)
 	}
 	expectStatus(t, link, `"state":"needs_relink"`, `"running":false`, `"healthy":false`)
-	if !host.hasEvent("link", "relink_needed") {
-		t.Fatal("relink_needed was not reported to the host")
-	}
+	awaitSafety(t, "terminal completion report", func() bool {
+		return host.hasEvent("link", "relink_needed")
+	})
 }
 
 func TestEventsCannotChangeStateOutsideLinked(t *testing.T) {

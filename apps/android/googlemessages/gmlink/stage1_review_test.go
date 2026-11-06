@@ -204,6 +204,12 @@ func TestRunningClientDoesNotShareMutableAuthWithLinkState(t *testing.T) {
 
 func TestOldQueuedPhoneEventCannotMutateNewRunState(t *testing.T) {
 	link, host := openSafetyLink(t, nil)
+	link.mu.Lock()
+	link.generation = 1
+	link.running = true
+	link.runGeneration = link.generation
+	link.stopRun = func() {}
+	link.mu.Unlock()
 	reached, release := host.holdNextEvent("recovered")
 	link.queueEvent(&events.ListenRecovered{})
 	<-reached
@@ -316,7 +322,7 @@ func TestRetiredLookupResponseCannotPublishIntoReplacementIndex(t *testing.T) {
 		}},
 	}
 
-	if link.indexConversationsFor(19, []*gmproto.Conversation{oldConversation}) {
+	if link.indexConversationsFor(19, 0, []*gmproto.Conversation{oldConversation}) {
 		t.Fatal("retired lookup response reported successful publication")
 	}
 	link.mu.Lock()
@@ -351,5 +357,63 @@ func TestHealthFailureIngressFencesQueuedSettings(t *testing.T) {
 	link.mu.Unlock()
 	if settings != nil {
 		t.Fatal("pre-health-failure queued settings restored authority")
+	}
+}
+
+type reentrantCloseHost struct {
+	link   *Link
+	closed chan struct{}
+}
+
+func (*reentrantCloseHost) PersistState([]byte) error { return nil }
+
+func (host *reentrantCloseHost) Event(_, _ string, _ int64) {
+	host.link.Close()
+	close(host.closed)
+}
+
+func (*reentrantCloseHost) ShowEmoji(string) {}
+
+func TestHostEventCanReenterClose(t *testing.T) {
+	host := &reentrantCloseHost{closed: make(chan struct{})}
+	link, err := Open(nil, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.link = link
+
+	done := make(chan struct{})
+	go func() {
+		link.emit("conn", "recovered", 0)
+		close(done)
+	}()
+	select {
+	case <-host.closed:
+	case <-time.After(time.Second):
+		t.Fatal("Host.Event reentrant Close deadlocked")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("event callback did not return after reentrant Close")
+	}
+}
+
+func TestTerminalHostEventCanReenterClose(t *testing.T) {
+	host := &reentrantCloseHost{closed: make(chan struct{})}
+	link, err := Open(nil, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.link = link
+	link.mu.Lock()
+	link.state = stateLinked
+	link.mu.Unlock()
+
+	link.queueEvent(&events.GaiaLoggedOut{})
+	select {
+	case <-host.closed:
+	case <-time.After(time.Second):
+		t.Fatal("terminal Host.Event reentrant Close deadlocked")
 	}
 }
