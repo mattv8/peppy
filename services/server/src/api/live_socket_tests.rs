@@ -990,6 +990,32 @@ async fn live_ticket_request(
 }
 
 #[tokio::test]
+async fn expired_provisional_ticket_lease_becomes_terminal() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([19_u8; 16]);
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::POST, session_id.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+    sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()-interval '1 second' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&session_id).unwrap()).to_vec())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let rejected = live_ticket_request(&server, reqwest::Method::POST, session_id).await;
+    assert_eq!(rejected.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        rejected.json::<serde_json::Value>().await.unwrap()["code"],
+        "live_ticket_session_terminal"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn live_ticket_delete_before_issue_is_terminal_and_tickets_are_not_stored_raw() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let closed_id = URL_SAFE_NO_PAD.encode([9_u8; 16]);

@@ -2826,9 +2826,18 @@ async fn issue_live_ticket(
                     "live_ticket_rate_limited",
                 ));
             }
-            sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state) VALUES($1,$2,$3,'open')").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_insert"))?;
+            sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',now()+interval '90 seconds')").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_insert"))?;
         }
     }
+    let lease_active: bool = sqlx::query_scalar("SELECT lease_until > now() FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3").bind(p.vault).bind(p.device).bind(&session).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_lease"))?;
+    if !lease_active {
+        sqlx::query("UPDATE live_ticket_sessions SET state='terminal',closed_at=now() WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open'").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_terminal"))?;
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "live_ticket_session_terminal",
+        ));
+    }
+    sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()+interval '90 seconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open'").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_renew"))?;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND consumed_at IS NULL AND expires_at>now()").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_count"))?;
     if count >= 2 {
         return Err(ApiError(
