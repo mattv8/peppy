@@ -6,6 +6,13 @@ mobile_pin='v0.0.0-20261011034528-197770444867'
 libgm_version='v0.2610.1-0.20261103213626-d9140a5e807e'
 cd "$root"
 
+expected_safety_patch_sha256=$(awk 'NR == 1 { print $1 }' upstream-safety.patch.sha256)
+safety_patch_sha256=$(shasum -a 256 upstream-safety.patch | awk '{print $1}')
+if [ -z "$expected_safety_patch_sha256" ] || [ "$safety_patch_sha256" != "$expected_safety_patch_sha256" ]; then
+	printf '%s\n' 'upstream-safety.patch checksum does not match upstream-safety.patch.sha256' >&2
+	exit 1
+fi
+
 ./prepare-libgm.sh
 go vet ./...
 go test ./...
@@ -67,7 +74,6 @@ check_aar_alignment() {
 check_aar_alignment
 
 aar_sha256=$(shasum -a 256 build/gmlink.aar | awk '{print $1}')
-safety_patch_sha256=$(awk 'NR == 1 { print $1 }' upstream-safety.patch.sha256)
 inputs_sha256=$(
 	{
 		find gmlink -maxdepth 1 -type f -name '*.go' -print | LC_ALL=C sort

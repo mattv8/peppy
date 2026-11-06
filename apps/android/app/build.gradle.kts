@@ -154,8 +154,9 @@ fun sha256(file: File): String = file.inputStream().use { input ->
     digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }
 
-fun googleMessagesBuildInputsSha256(): String {
-    val googleMessagesDirectory = rootProject.projectDir.resolve("googlemessages")
+fun googleMessagesBuildInputsSha256(
+    googleMessagesDirectory: File = rootProject.projectDir.resolve("googlemessages"),
+): String {
     val inputs = googleMessagesDirectory.resolve("gmlink").listFiles()
         .orEmpty()
         .filter { it.isFile && it.extension == "go" }
@@ -168,37 +169,55 @@ fun googleMessagesBuildInputsSha256(): String {
     return MessageDigest.getInstance("SHA-256").digest(content.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }
 
-fun googleMessagesProvenanceInputs(): Map<String, String> {
-    val googleMessagesDirectory = rootProject.projectDir.resolve("googlemessages")
+fun googleMessagesSafetyPatchSha256(googleMessagesDirectory: File): String {
+    val patch = googleMessagesDirectory.resolve("upstream-safety.patch")
+    val checksum = googleMessagesDirectory.resolve("upstream-safety.patch.sha256").readText()
+        .trim()
+        .split(Regex("\\s+"), limit = 2)
+        .first()
+    require(Regex("[0-9a-f]{64}").matches(checksum)) {
+        "Google Messages safety patch checksum is malformed"
+    }
+    val actual = sha256(patch)
+    check(actual == checksum) {
+        "Google Messages safety patch checksum does not match upstream-safety.patch"
+    }
+    return actual
+}
+
+fun googleMessagesProvenanceInputs(
+    googleMessagesDirectory: File = rootProject.projectDir.resolve("googlemessages"),
+    aar: File = googleMessagesAar.asFile,
+): Map<String, String> {
     val moduleVersion = googleMessagesDirectory.resolve("go.mod").readLines()
         .firstOrNull { it.trimStart().startsWith("go.mau.fi/mautrix-gmessages ") }
         ?.trim()
         ?.substringAfter("go.mau.fi/mautrix-gmessages ")
         ?: throw GradleException("Google Messages link libgm version is missing")
-    val patchSha256 = googleMessagesDirectory.resolve("upstream-safety.patch.sha256").readText()
-        .trim()
-        .split(Regex("\\s+"), limit = 2)
-        .first()
     return mapOf(
-        "aar_sha256" to sha256(googleMessagesAar.asFile),
+        "aar_sha256" to sha256(aar),
         "libgm_version" to moduleVersion,
-        "safety_patch_sha256" to patchSha256,
-        "inputs_sha256" to googleMessagesBuildInputsSha256(),
+        "safety_patch_sha256" to googleMessagesSafetyPatchSha256(googleMessagesDirectory),
+        "inputs_sha256" to googleMessagesBuildInputsSha256(googleMessagesDirectory),
     )
 }
 
-fun verifyGoogleMessagesAarProvenance() {
-    check(googleMessagesProvenance.asFile.isFile) {
+fun verifyGoogleMessagesAarProvenance(
+    googleMessagesDirectory: File = rootProject.projectDir.resolve("googlemessages"),
+    aar: File = googleMessagesAar.asFile,
+    provenanceFile: File = googleMessagesProvenance.asFile,
+) {
+    check(provenanceFile.isFile) {
         "peppyGoogleMessagesLink=true needs AAR provenance from apps/android/googlemessages/build-aar.sh"
     }
-    val provenance = googleMessagesProvenance.asFile.readLines().associate { line ->
+    val provenance = provenanceFile.readLines().associate { line ->
         val (name, value) = line.split('=', limit = 2).let { fields ->
             require(fields.size == 2 && fields[0].matches(Regex("[a-z0-9_]+"))) { "Google Messages AAR provenance is malformed" }
             fields[0] to fields[1]
         }
         name to value
     }
-    val expected = googleMessagesProvenanceInputs()
+    val expected = googleMessagesProvenanceInputs(googleMessagesDirectory, aar)
     check(provenance == expected) { "Google Messages AAR provenance does not match current inputs" }
 }
 
@@ -1114,6 +1133,33 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
         val fixtureDirectory = layout.buildDirectory.dir("tmp/restricted-setup-exclusion-fixtures").get().asFile
         fixtureDirectory.deleteRecursively()
         fixtureDirectory.mkdirs()
+        val provenanceFixtureDirectory = fixtureDirectory.resolve("google-messages-provenance")
+        val provenanceFixtureGmlinkDirectory = provenanceFixtureDirectory.resolve("gmlink").apply { mkdirs() }
+        provenanceFixtureGmlinkDirectory.resolve("fixture.go").writeText("package gmlink\n")
+        provenanceFixtureDirectory.resolve("go.mod").writeText("go.mau.fi/mautrix-gmessages v0.0.0\n")
+        provenanceFixtureDirectory.resolve("go.sum").writeText("fixture\n")
+        val provenanceFixturePatch = provenanceFixtureDirectory.resolve("upstream-safety.patch")
+        val provenanceFixtureChecksum = provenanceFixtureDirectory.resolve("upstream-safety.patch.sha256")
+        val provenanceFixtureAar = provenanceFixtureDirectory.resolve("gmlink.aar").apply { writeText("old AAR") }
+        val provenanceFixtureFile = provenanceFixtureDirectory.resolve("gmlink.aar.provenance")
+        provenanceFixturePatch.writeText("original patch\n")
+        provenanceFixtureChecksum.writeText("${sha256(provenanceFixturePatch)}  upstream-safety.patch\n")
+        provenanceFixtureFile.writeText(
+            googleMessagesProvenanceInputs(provenanceFixtureDirectory, provenanceFixtureAar)
+                .entries.joinToString("\n") { (name, value) -> "$name=$value" } + "\n",
+        )
+        provenanceFixturePatch.appendText("changed without checksum\n")
+        check(runCatching {
+            googleMessagesProvenanceInputs(provenanceFixtureDirectory, provenanceFixtureAar)
+        }.isFailure) { "Changed safety patch must not trust an unchanged checksum file" }
+        provenanceFixtureChecksum.writeText("${sha256(provenanceFixturePatch)}  upstream-safety.patch\n")
+        check(runCatching {
+            verifyGoogleMessagesAarProvenance(
+                provenanceFixtureDirectory,
+                provenanceFixtureAar,
+                provenanceFixtureFile,
+            )
+        }.isFailure) { "Changed safety patch must reject stale AAR provenance" }
         val fixtureApk = fixtureDirectory.resolve("app-release-unsigned.apk")
         ZipOutputStream(fixtureApk.outputStream()).use { archive ->
             archive.putNextEntry(ZipEntry("classes.dex"))
