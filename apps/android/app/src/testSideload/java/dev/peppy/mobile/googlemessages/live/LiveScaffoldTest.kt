@@ -114,50 +114,64 @@ class LiveScaffoldTest {
         clock.now = 20_000
         assertTrue(oldConnection.issue(otherId))
         assertTrue(oldConnection.response(MembershipControl.Response(id, otherId, 2, roster)))
-        assertFalse(oldAdmission.publish(clock, 80_000) { fail("old incarnation action") })
+        assertFalse(oldAdmission.publish({}) { fail("old incarnation action") })
 
         val successorAdmission = oldConnection.admit(100_000)!!
         oldConnection.retire()
-        assertFalse(successorAdmission.publish(clock, 80_000) { fail("disconnected action") })
+        assertFalse(successorAdmission.publish({}) { fail("disconnected action") })
 
         val replacement = enabled(clock, Core(), coordinator)
         assertNotNull(replacement.admit(100_000))
-        assertFalse(successorAdmission.publish(clock, 80_000) { fail("credential-rotated action") })
+        assertFalse(successorAdmission.publish({}) { fail("credential-rotated action") })
     }
 
     @Test
-    fun `publication rechecks action and lease deadlines after runtime wait`() {
-        val clock = Clock()
-        val admission = enabled(clock).admit(10_000)!!
-        assertFalse(admission.publish(clock, 60_000) { clock.now = 10_000 })
+    fun `final publication guard prevents effects after action lease and operation deadlines`() {
+        fun assertNoEffectAfterWait(connection: LiveConnection, clock: Clock, deadline: Long, advanceTo: Long) {
+            var effects = 0
+            val admission = connection.admit(deadline)!!
+            assertFalse(admission.publish({ clock.now = advanceTo }) { effects++ })
+            assertEquals(0, effects)
+        }
+
+        val actionClock = Clock()
+        assertNoEffectAfterWait(enabled(actionClock), actionClock, 10_000, 10_000)
 
         val leaseClock = Clock()
-        val leaseAdmission = enabled(leaseClock).admit(100_000)!!
-        assertFalse(leaseAdmission.publish(leaseClock, 60_000) { leaseClock.now = 60_000 })
+        assertNoEffectAfterWait(enabled(leaseClock), leaseClock, 100_000, 60_000)
+
+        val operationClock = Clock()
+        val operationConnection = enabled(operationClock)
+        operationClock.now = 20_000
+        assertTrue(operationConnection.issue(otherId))
+        assertNoEffectAfterWait(operationConnection, operationClock, 100_000, 25_001)
     }
 
     @Test
-    fun `higher hint closes a blocked publication gate without waiting`() {
+    fun `retire racing a blocked runtime wait prevents the effect`() {
         val clock = Clock()
         val connection = enabled(clock)
-        val actionEntered = CountDownLatch(1)
-        val releaseAction = CountDownLatch(1)
+        val waitEntered = CountDownLatch(1)
+        val releaseWait = CountDownLatch(1)
+        var effects = 0
+        var published = true
         val worker = Thread {
-            connection.admit(100_000)!!.publish(clock, 80_000) {
-                actionEntered.countDown()
-                releaseAction.await(2, TimeUnit.SECONDS)
-            }
+            published = connection.admit(100_000)!!.publish({
+                waitEntered.countDown()
+                releaseWait.await(2, TimeUnit.SECONDS)
+            }) { effects++ }
         }
         worker.start()
         try {
-            assertTrue(actionEntered.await(1, TimeUnit.SECONDS))
-            assertTrue(connection.hint(MembershipControl.Hint(2)))
-            assertFalse(connection.enabled())
+            assertTrue(waitEntered.await(1, TimeUnit.SECONDS))
+            connection.retire()
         } finally {
-            releaseAction.countDown()
+            releaseWait.countDown()
             worker.join(1_000)
         }
         assertFalse(worker.isAlive)
+        assertFalse(published)
+        assertEquals(0, effects)
     }
 
     @Test
@@ -204,7 +218,7 @@ class LiveScaffoldTest {
         assertTrue(connection.issue(otherId))
         clock.now = 25_001
         assertFalse(connection.response(MembershipControl.Response(id, otherId, 1, roster)))
-        assertFalse(connection.admit(30_000)?.publish(clock, 80_000) { } ?: false)
+        assertFalse(connection.admit(30_000)?.publish({}) { } ?: false)
         assertTrue(core.awaitDisabled())
         assertEquals(listOf("enable", "disable"), core.events)
     }
@@ -254,7 +268,7 @@ class LiveScaffoldTest {
         assertTrue(connection.issue(otherId))
         assertTrue(connection.response(MembershipControl.Response(id, otherId, 2, roster)))
         assertFalse(connection.enabled())
-        assertFalse(oldAdmission.publish(clock, 80_000) { fail("old version action") })
+        assertFalse(oldAdmission.publish({}) { fail("old version action") })
         assertEquals(listOf("enable", "disable"), core.events)
 
         clock.now = 40_000
@@ -310,19 +324,42 @@ class LiveScaffoldTest {
         assertNull(MembershipControls.parse("{\"type\":\"membership_hint\",\"version\":1}"))
         assertNull(MembershipControls.parse("{\"type\":\"membership_hint\",\"version\":1,\"membership_version\":\"1\",\"extra\":false}"))
         val noncanonicalId = "AAAAAAAAAAAAAAAAAAAAAB"
-        assertNull(MembershipControls.parse("{\"type\":\"membership_bootstrap\",\"version\":1,\"connection_id\":\"$noncanonicalId\",\"membership_version\":\"1\",\"roster\":[]}"))
+        val device = "{\"device_id\":\"$local\",\"revoked\":false,\"key_epoch\":1,\"role\":\"gateway\"}"
+        assertNull(MembershipControls.parse("{\"type\":\"membership_bootstrap\",\"version\":1,\"connection_id\":\"$noncanonicalId\",\"membership_version\":\"1\",\"roster\":[$device]}"))
         assertNull(MembershipControls.parse(" ".repeat(32 * 1024 + 1)))
     }
 
     @Test
+    fun `wire parser strictly validates unicode escapes and propagates programming errors`() {
+        val slash = '\\'
+        fun hint(type: String) = "{\"type\":\"$type\",\"version\":1,\"membership_version\":\"2\"}"
+
+        assertEquals(MembershipControl.Hint(2), MembershipControls.parse(hint("membership_h${slash}u0069nt")))
+        assertNull(MembershipControls.parse(hint("membership_h${slash}u+069nt")))
+        assertNull(MembershipControls.parse(hint("membership_h${slash}u-069nt")))
+        assertNull(MembershipControls.parse(hint("membership_h${slash}u069nt")))
+        assertNull(MembershipControls.parse(hint("membership_h${slash}uD800nt")))
+        assertNotNull(StrictJsonParser("{\"value\":\"${slash}uD83D${slash}uDE00\"}").parseObject())
+        assertNull(StrictJsonParser("{\"value\":\"${slash}uDE00\"}").parseObject())
+        assertNull(StrictJsonParser("{\"value\":\"${slash}uD83D${slash}u0041\"}").parseObject())
+
+        val explodingInput = object : CharSequence {
+            override val length = 1
+            override fun get(index: Int): Char = throw IllegalStateException("programming failure")
+            override fun subSequence(startIndex: Int, endIndex: Int): CharSequence = ""
+        }
+        assertThrows(IllegalStateException::class.java) { StrictJsonParser(explodingInput).parseObject() }
+    }
+
+    @Test
     fun `handshake rejects late valid hello cancellation binary and closes exactly once`() {
-        fun rejected(frame: LiveSocketFrame, afterReceive: () -> Unit = {}): Int {
+        fun rejected(frame: LiveSocketFrame, afterReceive: (Cancellation) -> Unit = {}): Int {
             val clock = Clock()
             var closed = 0
-            val cancellation = Cancellation()
+            val requestCancellation = Cancellation()
             val socket = object : LiveSocket {
                 override fun receive(deadlineElapsedMs: Long, cancellation: LiveCancellation): LiveSocketFrame {
-                    afterReceive()
+                    afterReceive(requestCancellation)
                     return frame
                 }
                 override fun send(text: String, deadlineElapsedMs: Long, cancellation: LiveCancellation) = Unit
@@ -331,11 +368,13 @@ class LiveScaffoldTest {
             val lease = object : LiveLease {
                 override fun open(deadlineElapsedMs: Long, cancellation: LiveCancellation) = socket
             }
-            assertThrows(RuntimeException::class.java) { LiveTransport.open(lease, clock, cancellation) }
+            assertThrows(RuntimeException::class.java) { LiveTransport.open(lease, clock, requestCancellation) }
             return closed
         }
 
         assertEquals(1, rejected(LiveSocketFrame.Binary))
+        val hello = LiveSocketFrame.Text("{\"type\":\"hello\",\"protocol_version\":2,\"max_ttl_ms\":15000,\"max_ciphertext_bytes\":5400}")
+        assertEquals(1, rejected(hello) { it.cancelled = true })
         val lateClock = Clock()
         var lateClosed = 0
         val lateSocket = object : LiveSocket {
@@ -373,7 +412,14 @@ class LiveScaffoldTest {
         socket.frame = LiveSocketFrame.Text("x".repeat(LiveTransport.MAX_TEXT_BYTES + 1))
         assertThrows(RuntimeException::class.java) { LiveTransport.receiveText(socket, clock, 1_000, cancellation) }
         socket.frame = LiveSocketFrame.Text("ok")
-        assertEquals("ok", LiveTransport.receiveText(socket, clock, 1_000, cancellation))
+        assertEquals(LiveInboundFrame.Data("ok"), LiveTransport.receiveText(socket, clock, 1_000, cancellation))
+
+        val hint = "{\"type\":\"membership_hint\",\"version\":1,\"membership_version\":\"2\"}"
+        val controlAtLimit = hint + " ".repeat(LiveTransport.MAX_CONTROL_BYTES - hint.length)
+        socket.frame = LiveSocketFrame.Text(controlAtLimit)
+        assertEquals(MembershipControl.Hint(2), (LiveTransport.receiveText(socket, clock, 1_000, cancellation) as LiveInboundFrame.Control).control)
+        socket.frame = LiveSocketFrame.Text(controlAtLimit + " ")
+        assertThrows(RuntimeException::class.java) { LiveTransport.receiveText(socket, clock, 1_000, cancellation) }
         assertThrows(RuntimeException::class.java) { LiveTransport.write(socket, "ok", clock, 1_000, cancellation) }
         assertEquals(1, sent)
     }
@@ -386,12 +432,17 @@ class LiveScaffoldTest {
         assertEquals(id, connection.drive({ id }) { true })
         assertNull(connection.drive({ otherId }) { true })
         assertTrue(connection.response(MembershipControl.Response(id, id, 1, roster)))
+        clock.now = 1
+        assertFalse(connection.issue(otherId))
 
         clock.now = 19_999
         assertNull(connection.drive({ otherId }) { true })
         clock.now = 20_000
         assertEquals(otherId, connection.drive({ otherId }) { true })
         assertTrue(connection.response(MembershipControl.Response(id, otherId, 1, roster)))
+        assertTrue(connection.hint(MembershipControl.Hint(2)))
+        clock.now = 20_001
+        assertFalse(connection.issue(id))
         clock.now = 40_000
         assertNull(connection.drive({ otherId }) { true })
 

@@ -3,6 +3,7 @@ package dev.peppy.mobile.googlemessages.live
 import java.util.ArrayDeque
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /** Disabled sideload-only contracts. No production code constructs this scaffold. */
 internal interface LiveClock { fun elapsedRealtime(): Long }
@@ -14,6 +15,11 @@ internal sealed interface LiveSocketFrame {
     data class Text(val value: String) : LiveSocketFrame
     data object Binary : LiveSocketFrame
     data object Closed : LiveSocketFrame
+}
+
+internal sealed interface LiveInboundFrame {
+    data class Data(val value: String) : LiveInboundFrame
+    data class Control(val control: MembershipControl, val raw: String) : LiveInboundFrame
 }
 
 internal interface LiveSocket {
@@ -49,13 +55,16 @@ internal object LiveTransport {
         }
     }
 
-    fun receiveText(socket: LiveSocket, clock: LiveClock, deadlineElapsedMs: Long, cancellation: LiveCancellation): String {
+    fun receiveText(socket: LiveSocket, clock: LiveClock, deadlineElapsedMs: Long, cancellation: LiveCancellation): LiveInboundFrame {
         checkLive(clock, deadlineElapsedMs, cancellation)
         val frame = socket.receive(deadlineElapsedMs, cancellation)
         checkLive(clock, deadlineElapsedMs, cancellation)
         val text = (frame as? LiveSocketFrame.Text)?.value ?: throw LiveRejected()
-        if (bytes(text) > MAX_TEXT_BYTES) throw LiveRejected()
-        return text
+        val byteCount = bytes(text)
+        if (byteCount > MAX_CONTROL_BYTES) throw LiveRejected()
+        MembershipControls.parse(text)?.let { return LiveInboundFrame.Control(it, text) }
+        if (byteCount > MAX_TEXT_BYTES) throw LiveRejected()
+        return LiveInboundFrame.Data(text)
     }
 
     fun write(socket: LiveSocket, value: String, clock: LiveClock, deadlineElapsedMs: Long, cancellation: LiveCancellation) {
@@ -100,19 +109,17 @@ internal sealed interface MembershipControl {
 internal object MembershipControls {
     fun parse(raw: String): MembershipControl? {
         if (LiveTransport.bytes(raw) > LiveTransport.MAX_CONTROL_BYTES) return null
-        return try {
-            val fields = StrictJsonParser(raw).parseObject() ?: return null
-            if (fields.string("type") == null || fields.long("version") != 1L) return null
-            when (fields.string("type")) {
-                "membership_hint" -> fields.exact("type", "version", "membership_version")
-                    ?.let { fields.decimal("membership_version") }?.let(MembershipControl::Hint)
-                "membership_bootstrap" -> fields.exact("type", "version", "connection_id", "membership_version", "roster")
-                    ?.let { bootstrap(fields) }
-                "membership_response" -> fields.exact("type", "version", "connection_id", "challenge_id", "membership_version", "roster")
-                    ?.let { response(fields) }
-                else -> null
-            }
-        } catch (_: RuntimeException) { null }
+        val fields = StrictJsonParser(raw).parseObject() ?: return null
+        if (fields.string("type") == null || fields.long("version") != 1L) return null
+        return when (fields.string("type")) {
+            "membership_hint" -> fields.exact("type", "version", "membership_version")
+                ?.let { fields.decimal("membership_version") }?.let(MembershipControl::Hint)
+            "membership_bootstrap" -> fields.exact("type", "version", "connection_id", "membership_version", "roster")
+                ?.let { bootstrap(fields) }
+            "membership_response" -> fields.exact("type", "version", "connection_id", "challenge_id", "membership_version", "roster")
+                ?.let { response(fields) }
+            else -> null
+        }
     }
 
     fun bootstrap(connectionId: String, version: Long, roster: List<MembershipDevice>) = validId(connectionId) && validVersion(version) && validRoster(roster)
@@ -136,7 +143,7 @@ internal object MembershipControls {
 }
 
 private val UUID = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-private class Fields(private val values: Map<String, Any>) {
+internal class Fields(private val values: Map<String, Any>) {
     fun exact(vararg names: String) = takeIf { values.keys == names.toSet() }
     fun string(name: String) = values[name] as? String
     fun long(name: String) = values[name] as? Long
@@ -148,7 +155,7 @@ private class Fields(private val values: Map<String, Any>) {
             device.long("key_epoch") ?: return null, when (device.string("role")) { "owner" -> MembershipRole.OWNER; "gateway" -> MembershipRole.GATEWAY; "device" -> MembershipRole.DEVICE; else -> return null })
     }
 }
-private class StrictJsonParser(private val input: String) {
+internal class StrictJsonParser(private val input: CharSequence) {
     private var offset = 0
 
     fun parseObject(): Fields? {
@@ -219,21 +226,37 @@ private class StrictJsonParser(private val input: String) {
         return null
     }
 
-    private fun escapedCharacter(): Char? = when (val escaped = input.getOrNull(offset++)) {
-        '"', '\\', '/' -> escaped
-        'b' -> '\b'
-        'f' -> '\u000c'
-        'n' -> '\n'
-        'r' -> '\r'
-        't' -> '\t'
+    private fun escapedCharacter(): String? = when (val escaped = input.getOrNull(offset++)) {
+        '"', '\\', '/' -> escaped.toString()
+        'b' -> "\b"
+        'f' -> "\u000c"
+        'n' -> "\n"
+        'r' -> "\r"
+        't' -> "\t"
         'u' -> unicodeCharacter()
         else -> null
     }
 
-    private fun unicodeCharacter(): Char? {
-        if (offset + 4 > input.length) return null
-        return input.substring(offset, offset + 4).toIntOrNull(16)?.toChar().also { offset += 4 }
+    private fun unicodeCharacter(): String? {
+        val first = unicodeCodeUnit() ?: return null
+        if (!first.isSurrogate()) return first.toString()
+        if (!first.isHighSurrogate() || input.getOrNull(offset) != '\\' || input.getOrNull(offset + 1) != 'u') return null
+        offset += 2
+        val second = unicodeCodeUnit() ?: return null
+        if (!second.isLowSurrogate()) return null
+        return charArrayOf(first, second).concatToString()
     }
+
+    private fun unicodeCodeUnit(): Char? {
+        if (offset + 4 > input.length) return null
+        val digits = input.subSequence(offset, offset + 4)
+        if (!digits.all(::isAsciiHexDigit)) return null
+        offset += 4
+        return digits.toString().toInt(16).toChar()
+    }
+
+    private fun isAsciiHexDigit(character: Char) =
+        character in '0'..'9' || character in 'a'..'f' || character in 'A'..'F'
 
     private fun numberValue(): Long? {
         whitespace()
@@ -244,11 +267,11 @@ private class StrictJsonParser(private val input: String) {
         } else {
             while (input.getOrNull(offset) in '0'..'9') offset++
         }
-        return input.substring(start, offset).toLongOrNull()
+        return input.subSequence(start, offset).toString().toLongOrNull()
     }
 
     private fun literal(expected: String, value: Boolean): Boolean? {
-        if (!input.startsWith(expected, offset)) return null
+        if (offset + expected.length > input.length || expected.indices.any { input[offset + it] != expected[it] }) return null
         offset += expected.length
         return value
     }
@@ -281,14 +304,14 @@ internal class LiveIncarnationCoordinator {
     private var active: LivePublication? = null
 
     fun enable(publication: LivePublication) = synchronized(lock) {
-        if (!publication.gate.get()) return@synchronized false
+        if (!publication.isOpen()) return@synchronized false
         active?.takeIf { it !== publication }?.let { previous ->
-            previous.gate.set(false)
+            previous.closeGate()
             disable(previous)
         }
         publication.core.enable(publication.snapshot)
         publication.enabled.set(true)
-        if (!publication.gate.get()) {
+        if (!publication.isOpen()) {
             disable(publication)
             return@synchronized false
         }
@@ -306,21 +329,47 @@ internal class LiveIncarnationCoordinator {
     }
 }
 
-internal class LivePublication internal constructor(internal val core: LiveCore, internal val snapshot: LiveMembershipSnapshot) {
+internal class LivePublication internal constructor(
+    internal val core: LiveCore,
+    internal val snapshot: LiveMembershipSnapshot,
+    private val clock: LiveClock,
+    leaseDeadline: Long,
+) {
+    private val publicationLock = Any()
     internal val gate = AtomicBoolean(true)
     internal val enabled = AtomicBoolean(false)
-    fun close(coordinator: LiveIncarnationCoordinator) { gate.set(false); coordinator.retire(this) }
-    fun closeAsync(coordinator: LiveIncarnationCoordinator) { gate.set(false); Thread { coordinator.retire(this) }.start() }
+    private val membershipLeaseDeadline = AtomicLong(leaseDeadline)
+    private val operationDeadline = AtomicLong(Long.MAX_VALUE)
+
+    fun close(coordinator: LiveIncarnationCoordinator) {
+        closeGate()
+        coordinator.retire(this)
+    }
+
+    fun closeAsync(coordinator: LiveIncarnationCoordinator) {
+        closeGate()
+        Thread { coordinator.retire(this) }.start()
+    }
+
+    internal fun closeGate() = synchronized(publicationLock) { gate.set(false) }
+    internal fun isOpen() = synchronized(publicationLock) { gate.get() }
+    internal fun renew(deadline: Long) { membershipLeaseDeadline.set(deadline); operationDeadline.set(Long.MAX_VALUE) }
+    internal fun beginOperation(deadline: Long) { operationDeadline.set(deadline) }
     fun admit(actionDeadline: Long): LiveAdmission = LiveAdmission(this, actionDeadline)
+
+    internal fun publish(actionDeadline: Long, afterRuntimeWait: () -> Unit, effect: () -> Unit): Boolean {
+        afterRuntimeWait()
+        return synchronized(publicationLock) {
+            val now = clock.elapsedRealtime()
+            if (!gate.get() || !enabled.get() || now >= membershipLeaseDeadline.get() ||
+                now > operationDeadline.get() || now >= actionDeadline) return@synchronized false
+            effect()
+            true
+        }
+    }
 }
 internal class LiveAdmission internal constructor(private val publication: LivePublication, private val actionDeadline: Long) {
-    fun publish(clock: LiveClock, leaseDeadline: Long, action: () -> Unit): Boolean {
-        val now = clock.elapsedRealtime()
-        if (!publication.gate.get() || now >= leaseDeadline || now >= actionDeadline) return false
-        action()
-        val completedAt = clock.elapsedRealtime()
-        return publication.gate.get() && completedAt < leaseDeadline && completedAt < actionDeadline
-    }
+    fun publish(afterRuntimeWait: () -> Unit, effect: () -> Unit) = publication.publish(actionDeadline, afterRuntimeWait, effect)
 }
 
 /**
@@ -348,7 +397,7 @@ internal class LiveConnection(
     fun issue(nonce: String): Boolean = synchronized(state) { issueLocked(nonce, clock.elapsedRealtime()) }
 
     /** Deterministic owner driver: callers supply CSPRNG bytes and a bounded control enqueue. */
-    fun drive(nextNonce: () -> String, enqueue: (String) -> Boolean = { true }): String? {
+    fun drive(nextNonce: () -> String, enqueue: (String) -> Boolean): String? {
         val nonce = synchronized(state) {
             val now = clock.elapsedRealtime()
             if (!fresh(now) || pending != null || !cadenceElapsed(now)) return null
@@ -379,6 +428,7 @@ internal class LiveConnection(
             val current = publication
             if (current != null && control.membershipVersion == current.snapshot.version) {
                 leaseDeadline = deadline
+                current.renew(deadline)
                 return true
             }
             if (current != null) {
@@ -387,7 +437,7 @@ internal class LiveConnection(
                 publicationToRetire = current
             } else {
                 leaseDeadline = deadline
-                publicationToEnable = LivePublication(core, LiveMembershipSnapshot(control.connectionId, control.membershipVersion, roster))
+                publicationToEnable = LivePublication(core, LiveMembershipSnapshot(control.connectionId, control.membershipVersion, roster), clock, deadline)
                 publication = publicationToEnable
             }
         }
@@ -428,11 +478,12 @@ internal class LiveConnection(
     private fun fresh(now: Long) = !retired && connectionGate.get() && connectionId != null && (publication == null || now < leaseDeadline)
     private fun cadenceElapsed(now: Long) = lastIssue == Long.MIN_VALUE || (now >= lastIssue && now - lastIssue >= 20_000)
     private fun issueLocked(nonce: String, now: Long): Boolean {
-        if (!fresh(now) || pending != null || nonce == lastNonce || !validNonce(nonce)) return false
+        if (!fresh(now) || pending != null || !cadenceElapsed(now) || nonce == lastNonce || !validNonce(nonce)) return false
         val deadline = try { LiveTransport.add(now, 5_000) } catch (_: LiveRejected) { retireLocked(); return false }
         pending = Pending(nonce, now, deadline)
         lastIssue = now
         lastNonce = nonce
+        publication?.beginOperation(deadline)
         return true
     }
     private fun retireLocked() { if (retired) return; retired = true; connectionGate.set(false); pending = null; data.clear(); controls.clear(); controlBytes = 0; publication?.closeAsync(coordinator); publication = null }
