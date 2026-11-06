@@ -384,6 +384,54 @@ fn compacted_snapshot_restores_rcs_status_and_metadata_without_provider_identifi
 }
 
 #[test]
+fn compacted_snapshot_restores_fact_only_reported_values() {
+    for reported in [false, true] {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault = Vault::new();
+        let gateway = unlocked(&config(&directory, "gateway", &vault), &vault);
+        let restored = unlocked(&config(&directory, "restored", &vault), &vault);
+        let conversation = ConversationId::new();
+        let owner = gateway
+            .begin_rcs_link_ownership(conversation, "token", 0)
+            .unwrap();
+        let mut projected = record("body");
+        projected.rcs_reported = reported;
+        projected.e2ee_reported = None;
+        gateway
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, projected)
+            .unwrap();
+        let mut server = Server::default();
+        server.upload(&gateway);
+        let records: Vec<SnapshotRecord> = server
+            .log
+            .iter()
+            .enumerate()
+            .filter(|(_, envelope)| envelope.compaction.is_some())
+            .map(|(index, envelope)| SnapshotRecord {
+                cursor: Cursor(u64::try_from(index + 1).unwrap()),
+                envelope: envelope.clone(),
+            })
+            .collect();
+        let session = restored
+            .begin_snapshot_with_compaction(
+                Cursor(u64::try_from(server.log.len()).unwrap()),
+                u64::try_from(records.len()).unwrap(),
+                SnapshotPurpose::Resync,
+                Some(3),
+            )
+            .unwrap();
+        restored
+            .append_snapshot_page(session.generation, &records)
+            .unwrap();
+        restored.finish_snapshot(session.generation).unwrap();
+        while restored.apply_pending(100).unwrap().snapshot_remaining > 0 {}
+        let message_id = only_message(&gateway, conversation).payload.record.message_id;
+        assert_eq!(restored.rcs_message_status(message_id).unwrap(), None);
+        assert_eq!(restored.rcs_message_reported(message_id).unwrap(), Some(reported));
+    }
+}
+
+#[test]
 fn deterministic_rcs_message_ids_converge_without_exposing_provider_identity() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
