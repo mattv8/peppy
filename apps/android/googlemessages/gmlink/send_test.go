@@ -397,6 +397,75 @@ func TestPreparedRcsSuccessWithAccountSwitchIsUnknown(t *testing.T) {
 	}
 }
 
+func TestPreparedRcsAdmissionRejectsStopAndOwnerRetirement(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		revoke func(*Link)
+	}{
+		{name: "stop", revoke: func(link *Link) { link.Stop() }},
+		{name: "owner retirement", revoke: func(link *Link) {
+			link.mu.Lock()
+			link.revokeLocked()
+			link.mu.Unlock()
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			link, fixture, cleanup, token, tmpID := preparedRcsFixtureWithPhone(t)
+			ticket := prepareTicket(t, link, token, tmpID)
+			reached, release := make(chan struct{}), make(chan struct{})
+			link.mu.Lock()
+			link.beforeSendAdmission = func() { close(reached); <-release }
+			link.mu.Unlock()
+			result := make(chan string, 1)
+			go func() { result <- decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))) }()
+			select {
+			case <-reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("transport admission was not reached")
+			}
+			test.revoke(link)
+			close(release)
+			if got := <-result; got != "rejected" {
+				t.Fatalf("revoked admission = %s", got)
+			}
+			if got := fixture.countAction(gmproto.ActionType_SEND_MESSAGE.String()); got != 0 {
+				t.Fatalf("revoked send count = %d", got)
+			}
+			link.Close()
+			_ = cleanup
+		})
+	}
+}
+
+func TestPreparedRcsPostAdmissionStopIsUnknownAndSingleUse(t *testing.T) {
+	link, fixture, cleanup, token, tmpID := preparedRcsFixtureWithPhone(t)
+	defer func() {
+		link.Close()
+		_ = cleanup
+	}()
+	fixture.configure(func(knobs *fixtureKnobs) {
+		knobs.gateSend = true
+		knobs.gateAction = gmproto.ActionType_SEND_MESSAGE
+	})
+	ticket := prepareTicket(t, link, token, tmpID)
+	result := make(chan string, 1)
+	go func() { result <- decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))) }()
+	awaitSafety(t, "admitted send request", func() bool {
+		return fixture.countAction(gmproto.ActionType_SEND_MESSAGE.String()) == 1
+	})
+	link.Stop()
+	fixture.openGate()
+	if got := <-result; got != "outcome_unknown" {
+		t.Fatalf("post-admission stop = %s", got)
+	}
+	if got := fixture.countAction(gmproto.ActionType_SEND_MESSAGE.String()); got != 1 {
+		t.Fatalf("post-admission send count = %d", got)
+	}
+	if got := decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))); got != "rejected" {
+		t.Fatalf("post-admission replay = %s", got)
+	}
+}
+
 func TestPrepareRcsBindsOneTicketToTheCurrentStage2Target(t *testing.T) {
 	auth := linkedSafetyAuth()
 	fixture := newPhoneFixture(t, auth)
