@@ -414,3 +414,25 @@ func TestSelfChatIsUnsupportedWithoutCarrierProof(t *testing.T) {
 		t.Fatalf("self-chat facts were not preserved: %+v", summaries)
 	}
 }
+
+func TestConversationResyncRemainsStickyAcrossDrainsUntilReplacement(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	link.mu.Lock()
+	for index := 0; index <= conversationEventLimit; index++ {
+		link.recordConversationEventLocked(fmt.Sprintf("conversation-%d", index))
+	}
+	link.mu.Unlock()
+	for drain := 0; drain < 2; drain++ {
+		if got := link.DrainConversationEvents(); got != `[{"code":"conversation_resync","google_conversation_id":""}]` {
+			t.Fatalf("drain %d = %s", drain, got)
+		}
+	}
+	revision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok || !link.replaceConversationIndexFor(generation, streamEpoch, revision, nil) {
+		t.Fatal("replacement did not clear resync requirement")
+	}
+	if got := link.DrainConversationEvents(); got != `null` {
+		t.Fatalf("post-replacement drain = %s", got)
+	}
+}

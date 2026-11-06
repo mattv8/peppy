@@ -641,7 +641,9 @@ func (link *Link) ResolveExistingConversation(target string) string {
 func (link *Link) DrainConversationEvents() string {
 	link.mu.Lock()
 	events := append([]conversationEvent(nil), link.conversationEvents...)
-	link.conversationEvents = nil
+	if len(link.conversationEvents) != 1 || link.conversationEvents[0].Code != "conversation_resync" {
+		link.conversationEvents = nil
+	}
 	link.mu.Unlock()
 	encoded, _ := json.Marshal(events)
 	return string(encoded)
