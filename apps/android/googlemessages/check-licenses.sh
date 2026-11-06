@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 inventory=${LICENSE_INVENTORY:-"$root/license-inventory.json"}
+notice=${GOOGLE_MESSAGES_NOTICE:-"$root/../app/src/sideload/assets/third_party/NOTICE-google-messages.txt"}
 modules=$(mktemp)
 if [ ! -f "$root/build/gmlink.aar" ]; then
     printf '%s\n' 'build the AAR first' >&2
@@ -12,7 +13,7 @@ trap 'rm -f "$modules"' EXIT
 
 cd "$root"
 go list -m -json all > "$modules"
-python3 - "$inventory" "$modules" "$root/build/gmlink.aar" "$root/../app/src/sideload/assets/third_party" <<'PY'
+python3 - "$inventory" "$modules" "$root/build/gmlink.aar" "$root/../app/src/sideload/assets/third_party" "$notice" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -21,7 +22,7 @@ import sys
 import tempfile
 import zipfile
 
-inventory_path, modules_path, aar_path, assets_path = map(pathlib.Path, sys.argv[1:])
+inventory_path, modules_path, aar_path, assets_path, notice_path = map(pathlib.Path, sys.argv[1:])
 inventory = json.loads(inventory_path.read_text())
 decoder = json.JSONDecoder()
 modules_text = modules_path.read_text()
@@ -40,6 +41,30 @@ while position < len(modules_text):
 entries = {entry["path"]: entry for entry in inventory["modules"]}
 if set(entries) != set(resolved):
     raise SystemExit("license inventory does not match the resolved module graph")
+
+notice_modules = {}
+for line in notice_path.read_text().splitlines():
+    if not line.startswith("* "):
+        continue
+    parts = line[2:].split(" — ")
+    if len(parts) != 3:
+        raise SystemExit("Google Messages notice has an invalid module entry")
+    module_and_version, license_family, asset = parts
+    try:
+        path, version = module_and_version.rsplit(" ", 1)
+    except ValueError as error:
+        raise SystemExit("Google Messages notice has an invalid module entry") from error
+    if path in notice_modules:
+        raise SystemExit("Google Messages notice has duplicate module entries")
+    notice_modules[path] = (version, license_family, asset)
+
+distributed_modules = {
+    path: (entry["version"], entry["licenseFamily"], entry["asset"])
+    for path, entry in entries.items()
+    if entry["distributed"]
+}
+if notice_modules != distributed_modules:
+    raise SystemExit("Google Messages notice module list does not match distributed inventory")
 
 linked = {}
 with zipfile.ZipFile(aar_path) as aar, tempfile.TemporaryDirectory() as temporary_directory:

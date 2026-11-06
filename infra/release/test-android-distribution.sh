@@ -18,10 +18,19 @@ SH
 cat > "$bin/java" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+mode=
 for argument in "$@"; do
-  case "$argument" in --bundle=*) bundle=${argument#--bundle=} ;; esac
+  case "$argument" in
+    dump) mode=dump ;;
+    --bundle=*) bundle=${argument#--bundle=} ;;
+    --output=*) output=${argument#--output=} ;;
+  esac
 done
-cat "${bundle}.manifest.xml"
+if [ "$mode" = dump ]; then
+  cat "${bundle}.manifest.xml"
+else
+  cp "${bundle}.apks" "$output"
+fi
 SH
 cat > "$bin/llvm-nm" <<'SH'
 #!/usr/bin/env bash
@@ -55,6 +64,34 @@ write_missing_metadata_manifest() {
 XML
 }
 
+write_archive() {
+  local output=$1
+  shift
+  python3 - "$output" "$@" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+archive = pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(archive, "w") as output:
+    for item in sys.argv[2:]:
+        name, content = item.split("=", 1)
+        output.writestr(name, content.encode())
+PY
+}
+
+write_apks() {
+  local output=$1 apk=$2
+  python3 - "$output" "$apk" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1], "w") as output:
+    output.write(sys.argv[2], "universal.apk")
+PY
+}
+
 expect_failure_reason() {
   local expected=$1
   shift
@@ -72,7 +109,17 @@ expect_failure_reason() {
 direct="$root/direct.apk"
 play="$root/play.aab"
 symbols="$root/native-debug-symbols.zip"
-touch "$direct" "$play" "$root/bundletool.jar"
+touch "$root/bundletool.jar"
+write_archive "$direct" \
+  'lib/arm64-v8a/libgojni.so=fixture' \
+  'lib/x86_64/libgojni.so=fixture' \
+  'classes.dex=Ldev/peppy/gmlink/Gmlink;' \
+  'assets/third_party/AGPL-3.0.txt=GNU AFFERO GENERAL PUBLIC LICENSE' \
+  'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+write_archive "$play" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
+clean_play_apk="$root/clean-play.apk"
+write_archive "$clean_play_apk" 'lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
+write_apks "$play.apks" "$clean_play_apk"
 write_manifest "$direct.manifest.xml" direct
 write_manifest "$play.manifest.xml" play
 printf fixture > "$root/symbols/arm64-v8a/libpeppy_mobile_bindings.so.sym"
@@ -91,6 +138,86 @@ expect_failure_reason 'BUNDLETOOL_JAR must name the verified bundletool JAR' \
 
 env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play" "$symbols"
+
+missing_direct_library="$root/missing-direct-library.apk"
+write_archive "$missing_direct_library" \
+  'lib/arm64-v8a/libgojni.so=fixture' \
+  'classes.dex=Ldev/peppy/gmlink/Gmlink;' \
+  'assets/third_party/AGPL-3.0.txt=GNU AFFERO GENERAL PUBLIC LICENSE' \
+  'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+cp "$direct.manifest.xml" "$missing_direct_library.manifest.xml"
+expect_failure_reason 'direct APK is missing lib/x86_64/libgojni.so' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$missing_direct_library" "$play" "$symbols"
+
+direct_without_dex="$root/direct-without-dex.apk"
+write_archive "$direct_without_dex" \
+  'lib/arm64-v8a/libgojni.so=fixture' \
+  'lib/x86_64/libgojni.so=fixture' \
+  'assets/third_party/AGPL-3.0.txt=GNU AFFERO GENERAL PUBLIC LICENSE' \
+  'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+cp "$direct.manifest.xml" "$direct_without_dex.manifest.xml"
+expect_failure_reason 'direct APK is missing dev/peppy/gmlink/ dex classes' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct_without_dex" "$play" "$symbols"
+
+direct_without_agpl="$root/direct-without-agpl.apk"
+write_archive "$direct_without_agpl" \
+  'lib/arm64-v8a/libgojni.so=fixture' \
+  'lib/x86_64/libgojni.so=fixture' \
+  'classes.dex=Ldev/peppy/gmlink/Gmlink;' \
+  'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+cp "$direct.manifest.xml" "$direct_without_agpl.manifest.xml"
+expect_failure_reason 'direct APK is missing assets/third_party/AGPL-3.0.txt' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct_without_agpl" "$play" "$symbols"
+
+direct_without_notice="$root/direct-without-notice.apk"
+write_archive "$direct_without_notice" \
+  'lib/arm64-v8a/libgojni.so=fixture' \
+  'lib/x86_64/libgojni.so=fixture' \
+  'classes.dex=Ldev/peppy/gmlink/Gmlink;' \
+  'assets/third_party/AGPL-3.0.txt=GNU AFFERO GENERAL PUBLIC LICENSE'
+cp "$direct.manifest.xml" "$direct_without_notice.manifest.xml"
+expect_failure_reason 'direct APK is missing assets/third_party/NOTICE-google-messages.txt' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct_without_notice" "$play" "$symbols"
+
+play_with_link="$root/play-with-link.aab"
+write_archive "$play_with_link" 'base/lib/arm64-v8a/libgojni.so=fixture'
+cp "$play.manifest.xml" "$play_with_link.manifest.xml"
+cp "$play.apks" "$play_with_link.apks"
+expect_failure_reason 'Play AAB contains libgojni.so' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_link" "$symbols"
+
+play_with_dex="$root/play-with-dex.aab"
+write_archive "$play_with_dex" 'base/dex/classes.dex=Ldev/peppy/gmlink/Gmlink;'
+cp "$play.manifest.xml" "$play_with_dex.manifest.xml"
+cp "$play.apks" "$play_with_dex.apks"
+expect_failure_reason 'Play AAB contains dev/peppy/gmlink/ dex classes' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_dex" "$symbols"
+
+play_apk_with_notice="$root/play-with-notice.apk"
+write_archive "$play_apk_with_notice" 'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+play_with_notice="$root/play-with-notice.aab"
+write_archive "$play_with_notice" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
+cp "$play.manifest.xml" "$play_with_notice.manifest.xml"
+write_apks "$play_with_notice.apks" "$play_apk_with_notice"
+expect_failure_reason 'Play APK universal.apk contains Google Messages notice content' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_notice" "$symbols"
+
+play_apk_with_agpl="$root/play-with-agpl.apk"
+write_archive "$play_apk_with_agpl" 'assets/third_party/AGPL-3.0.txt=GNU AFFERO GENERAL PUBLIC LICENSE'
+play_with_agpl="$root/play-with-agpl.aab"
+write_archive "$play_with_agpl" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
+cp "$play.manifest.xml" "$play_with_agpl.manifest.xml"
+write_apks "$play_with_agpl.apks" "$play_apk_with_agpl"
+expect_failure_reason 'Play APK universal.apk contains AGPL text' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_agpl" "$symbols"
 
 write_manifest "$play.manifest.xml" direct
 expect_failure_reason "play manifest distribution metadata must be exactly 'play'" \

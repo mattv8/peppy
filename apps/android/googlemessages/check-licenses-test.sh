@@ -2,10 +2,20 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-"$root/check-licenses.sh"
+saved_aar=
+error_output=
+temporary_notice=
+cleanup() {
+    rm -f "$temporary_inventory" "$temporary_notice" "$error_output"
+    if [ -n "$saved_aar" ] && [ -f "$saved_aar" ]; then
+        mv "$saved_aar" "$root/build/gmlink.aar"
+    fi
+}
 
 temporary_inventory=$(mktemp)
-trap 'rm -f "$temporary_inventory"' EXIT
+trap cleanup EXIT INT TERM
+"$root/check-licenses.sh"
+
 python3 - "$root/license-inventory.json" "$temporary_inventory" <<'PY'
 import json
 import sys
@@ -17,6 +27,21 @@ PY
 
 if LICENSE_INVENTORY="$temporary_inventory" "$root/check-licenses.sh"; then
     printf '%s\n' 'expected missing inventory module to fail' >&2
+    exit 1
+fi
+
+temporary_notice=$(mktemp)
+python3 - "$root/../app/src/sideload/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
+import pathlib
+import sys
+
+notice = pathlib.Path(sys.argv[1]).read_text().splitlines()
+pathlib.Path(sys.argv[2]).write_text(
+    "\n".join(line for line in notice if not line.startswith("* google.golang.org/protobuf ")) + "\n"
+)
+PY
+if GOOGLE_MESSAGES_NOTICE="$temporary_notice" "$root/check-licenses.sh"; then
+    printf '%s\n' 'expected notice module list mismatch to fail' >&2
     exit 1
 fi
 
@@ -57,14 +82,13 @@ if LICENSE_INVENTORY="$temporary_inventory" "$root/check-licenses.sh"; then
     exit 1
 fi
 
-missing_aar=$(mktemp)
+saved_aar=$(mktemp)
 error_output=$(mktemp)
-mv "$root/build/gmlink.aar" "$missing_aar"
+mv "$root/build/gmlink.aar" "$saved_aar"
 if "$root/check-licenses.sh" 2>"$error_output"; then
-    mv "$missing_aar" "$root/build/gmlink.aar"
     printf '%s\n' 'expected missing AAR to fail' >&2
     exit 1
 fi
-mv "$missing_aar" "$root/build/gmlink.aar"
+mv "$saved_aar" "$root/build/gmlink.aar"
+saved_aar=
 grep -qx 'build the AAR first' "$error_output"
-rm -f "$error_output"
