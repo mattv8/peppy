@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -38,6 +38,11 @@ struct LiveHubInner {
 
 struct LiveSink {
     generation: u64,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "ticket upgrade wiring consumes the session fence")
+    )]
+    session_id: Option<[u8; 16]>,
     sender: mpsc::Sender<EphemeralSignalV2>,
     cancellation: watch::Sender<bool>,
 }
@@ -142,6 +147,31 @@ impl LiveHub {
     }
 
     pub(crate) fn register(&self, vault_id: VaultId, device_id: DeviceId) -> LiveRegistration {
+        self.register_with_session(vault_id, device_id, None)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "ticket upgrade wiring registers session-fenced sockets"
+        )
+    )]
+    pub(crate) fn register_ticket(
+        &self,
+        vault_id: VaultId,
+        device_id: DeviceId,
+        session_id: [u8; 16],
+    ) -> LiveRegistration {
+        self.register_with_session(vault_id, device_id, Some(session_id))
+    }
+
+    fn register_with_session(
+        &self,
+        vault_id: VaultId,
+        device_id: DeviceId,
+        session_id: Option<[u8; 16]>,
+    ) -> LiveRegistration {
         let (sender, receiver) = mpsc::channel(LIVE_CHANNEL_CAPACITY);
         let (cancellation_sender, cancellation) = watch::channel(false);
         let mut sinks = self.inner.sinks.lock().expect("live hub lock poisoned");
@@ -157,6 +187,7 @@ impl LiveHub {
             (vault_id, device_id),
             LiveSink {
                 generation,
+                session_id,
                 sender,
                 cancellation: cancellation_sender,
             },
@@ -167,6 +198,26 @@ impl LiveHub {
             generation,
             receiver,
             cancellation,
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "ticket close notifications cancel fenced sockets")
+    )]
+    pub(crate) fn cancel_exact(
+        &self,
+        vault_id: VaultId,
+        device_id: DeviceId,
+        session_id: [u8; 16],
+        socket_generation: u64,
+    ) {
+        let mut sinks = self.inner.sinks.lock().expect("live hub lock poisoned");
+        let key = (vault_id, device_id);
+        if sinks.get(&key).is_some_and(|sink| {
+            sink.session_id == Some(session_id) && sink.generation == socket_generation
+        }) {
+            sinks.remove(&key);
         }
     }
 
@@ -280,7 +331,7 @@ impl LiveHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use peppy_domain::{DeviceId, VaultId};
     use peppy_protocol::{EphemeralSignalV2, EphemeralSignalV2Kind};
     use tokio::sync::mpsc::error::TryRecvError;
@@ -502,5 +553,46 @@ mod tests {
         assert!(*old.cancellation.borrow_and_update());
         hub.unregister(vault(1), device(1), old.generation);
         assert!(current.generation > old.generation);
+    }
+
+    #[test]
+    fn exact_ticket_cancel_removes_matching_registration() {
+        let hub = LiveHub::new();
+        let mut registration = hub.register_ticket(vault(1), device(2), [1; 16]);
+        hub.cancel_exact(vault(1), device(2), [1; 16], registration.generation);
+        assert_eq!(hub.forward(vault(1), device(1), frame(), 100000), Ok(0));
+        assert_eq!(
+            registration.receiver.try_recv(),
+            Err(TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn stale_ticket_generation_cancels_nothing() {
+        let hub = LiveHub::new();
+        let old = hub.register_ticket(vault(1), device(2), [1; 16]);
+        let mut current = hub.register_ticket(vault(1), device(2), [1; 16]);
+        hub.cancel_exact(vault(1), device(2), [1; 16], old.generation);
+        assert_eq!(hub.forward(vault(1), device(1), frame(), 100000), Ok(1));
+        assert_eq!(current.receiver.try_recv(), Ok(frame()));
+    }
+
+    #[test]
+    fn ticket_cancel_leaves_different_session_untouched() {
+        let hub = LiveHub::new();
+        let old = hub.register_ticket(vault(1), device(2), [1; 16]);
+        let mut current = hub.register_ticket(vault(1), device(2), [2; 16]);
+        hub.cancel_exact(vault(1), device(2), [1; 16], old.generation);
+        assert_eq!(hub.forward(vault(1), device(1), frame(), 100000), Ok(1));
+        assert_eq!(current.receiver.try_recv(), Ok(frame()));
+    }
+
+    #[test]
+    fn ticket_cancel_does_not_remove_bearer_registration() {
+        let hub = LiveHub::new();
+        let mut registration = hub.register(vault(1), device(2));
+        hub.cancel_exact(vault(1), device(2), [1; 16], registration.generation);
+        assert_eq!(hub.forward(vault(1), device(1), frame(), 100000), Ok(1));
+        assert_eq!(registration.receiver.try_recv(), Ok(frame()));
     }
 }
