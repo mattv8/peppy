@@ -8,6 +8,8 @@ use thiserror::Error;
 pub const MEMBERSHIP_PROTOCOL_VERSION: u8 = 1;
 pub const MAX_MEMBERSHIP_CONTROL_BYTES: usize = 32 * 1024;
 pub const MAX_MEMBERSHIP_ROSTER_ENTRIES: usize = 100;
+const MAX_MEMBERSHIP_VERSION: u64 = i64::MAX as u64;
+const MEMBERSHIP_ID_BYTES: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MembershipVersionV1(String);
@@ -20,7 +22,7 @@ impl MembershipVersionV1 {
             || value
                 .parse::<u64>()
                 .ok()
-                .filter(|value| (1..=i64::MAX as u64).contains(value))
+                .filter(|value| (1..=MAX_MEMBERSHIP_VERSION).contains(value))
                 .is_none()
         {
             return Err(MembershipControlError::InvalidMembershipVersion);
@@ -40,7 +42,7 @@ impl JsonSchema for MembershipVersionV1 {
         "MembershipVersionV1".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"string","pattern":"^[1-9][0-9]*$","maxLength":19})
+        schema_from_value(membership_version_schema())
     }
 }
 
@@ -90,7 +92,7 @@ impl JsonSchema for MembershipDeviceV1 {
         "MembershipDeviceV1".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"object","additionalProperties":false,"properties":{"device_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},"revoked":{"type":"boolean"},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"role":{"enum":["owner","gateway","device"]}},"required":["device_id","revoked","key_epoch","role"]})
+        schema_from_value(membership_device_schema())
     }
 }
 
@@ -379,13 +381,56 @@ fn membership_schema(
     membership_version: bool,
     roster: bool,
 ) -> Schema {
-    serde_json::from_value(membership_schema_value(
+    schema_from_value(membership_schema_value(
         kind,
         challenge,
         membership_version,
         roster,
     ))
-    .expect("valid membership schema")
+}
+
+fn schema_from_value(value: serde_json::Value) -> Schema {
+    serde_json::from_value(value).expect("valid membership schema")
+}
+
+fn membership_version_schema() -> serde_json::Value {
+    let maximum = MAX_MEMBERSHIP_VERSION.to_string();
+    serde_json::json!({
+        "type":"string",
+        "pattern":canonical_decimal_pattern(&maximum),
+        "maxLength":maximum.len(),
+        "x-peppy-canonical-decimal-maximum":maximum,
+    })
+}
+
+fn membership_id_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type":"string",
+        "pattern":"^[A-Za-z0-9_-]{21}[AQgw]$",
+        "x-peppy-canonical-base64url-bytes":MEMBERSHIP_ID_BYTES,
+    })
+}
+
+fn membership_device_schema() -> serde_json::Value {
+    serde_json::json!({"type":"object","additionalProperties":false,"properties":{"device_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},"revoked":{"type":"boolean"},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"role":{"enum":["owner","gateway","device"]}},"required":["device_id","revoked","key_epoch","role"]})
+}
+
+fn canonical_decimal_pattern(maximum: &str) -> String {
+    let mut alternatives = vec![format!("[1-9][0-9]{{0,{}}}", maximum.len() - 2)];
+    for (index, digit) in maximum.bytes().enumerate() {
+        let minimum = if index == 0 { b'1' } else { b'0' };
+        if digit > minimum {
+            alternatives.push(format!(
+                "{}[{}-{}][0-9]{{{}}}",
+                &maximum[..index],
+                minimum as char,
+                (digit - 1) as char,
+                maximum.len() - index - 1
+            ));
+        }
+    }
+    alternatives.push(maximum.into());
+    format!("^(?:{})$", alternatives.join("|"))
 }
 
 fn membership_schema_value(
@@ -403,28 +448,19 @@ fn membership_schema_value(
     ]);
     let mut required = vec!["type", "version"];
     if challenge || roster {
-        properties.insert(
-            "connection_id".into(),
-            serde_json::json!({"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"}),
-        );
+        properties.insert("connection_id".into(), membership_id_schema());
         required.push("connection_id");
     }
     if challenge {
-        properties.insert(
-            "challenge_id".into(),
-            serde_json::json!({"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"}),
-        );
+        properties.insert("challenge_id".into(), membership_id_schema());
         required.push("challenge_id");
     }
     if membership_version {
-        properties.insert(
-            "membership_version".into(),
-            serde_json::json!({"type":"string","pattern":"^[1-9][0-9]*$","maxLength":19}),
-        );
+        properties.insert("membership_version".into(), membership_version_schema());
         required.push("membership_version");
     }
     if roster {
-        properties.insert("roster".into(), serde_json::json!({"type":"array","maxItems":MAX_MEMBERSHIP_ROSTER_ENTRIES,"items":{"type":"object","additionalProperties":false,"properties":{"device_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},"revoked":{"type":"boolean"},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"role":{"enum":["owner","gateway","device"]}},"required":["device_id","revoked","key_epoch","role"]}}));
+        properties.insert("roster".into(), serde_json::json!({"type":"array","maxItems":MAX_MEMBERSHIP_ROSTER_ENTRIES,"items":membership_device_schema()}));
         required.push("roster");
     }
     serde_json::json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
@@ -449,13 +485,10 @@ fn validate_response(wire: &MembershipResponseWire) -> Result<(), MembershipCont
 }
 
 fn validate_id(value: &str) -> Result<(), MembershipControlError> {
-    if value.len() != 22
-        || URL_SAFE_NO_PAD
-            .decode(value)
-            .ok()
-            .filter(|decoded| decoded.len() == 16)
-            .is_none()
-    {
+    let Ok(decoded) = URL_SAFE_NO_PAD.decode(value) else {
+        return Err(MembershipControlError::InvalidId);
+    };
+    if decoded.len() != MEMBERSHIP_ID_BYTES || URL_SAFE_NO_PAD.encode(decoded) != value {
         return Err(MembershipControlError::InvalidId);
     }
     Ok(())

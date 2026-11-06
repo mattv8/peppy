@@ -42,7 +42,121 @@ fn membership_controls_round_trip_with_distinct_provisional_bootstrap_and_respon
 #[test]
 fn membership_control_parsing_rejects_oversized_raw_input_before_json_decode() {
     let raw = vec![b' '; MAX_MEMBERSHIP_CONTROL_BYTES + 1];
-    assert!(MembershipControlV1::parse(&raw).is_err());
+    assert_eq!(
+        MembershipControlV1::parse(&raw),
+        Err(peppy_protocol::MembershipControlError::TooLarge)
+    );
+
+    let valid = serde_json::to_vec(&bootstrap()).unwrap();
+    let exact = [
+        valid.as_slice(),
+        &vec![b' '; MAX_MEMBERSHIP_CONTROL_BYTES - valid.len()],
+    ]
+    .concat();
+    assert_eq!(exact.len(), MAX_MEMBERSHIP_CONTROL_BYTES);
+    assert!(MembershipControlV1::parse(&exact).is_ok());
+    let oversized = [exact.as_slice(), b" "].concat();
+    assert_eq!(oversized.len(), MAX_MEMBERSHIP_CONTROL_BYTES + 1);
+    assert_eq!(
+        MembershipControlV1::parse(&oversized),
+        Err(peppy_protocol::MembershipControlError::TooLarge)
+    );
+}
+
+#[test]
+fn emitted_membership_schemas_match_runtime_version_and_id_boundaries() {
+    let schema: serde_json::Value =
+        serde_json::from_str(&peppy_protocol::generate_contracts().openapi).unwrap();
+    for version in ["1", "9223372036854775807"] {
+        let mut control = bootstrap();
+        control["membership_version"] = json!(version);
+        assert!(schema_accepts(&schema, &control));
+        assert!(serde_json::from_value::<MembershipControlV1>(control).is_ok());
+    }
+    for version in ["0", "01", "+1", "-1", "9223372036854775808"] {
+        let mut control = bootstrap();
+        control["membership_version"] = json!(version);
+        assert!(!schema_accepts(&schema, &control), "{version}");
+        assert!(
+            serde_json::from_value::<MembershipControlV1>(control).is_err(),
+            "{version}"
+        );
+    }
+    for connection_id in [CONNECTION_ID, CHALLENGE_ID] {
+        let mut control = bootstrap();
+        control["connection_id"] = json!(connection_id);
+        assert!(schema_accepts(&schema, &control));
+        assert!(serde_json::from_value::<MembershipControlV1>(control).is_ok());
+    }
+    for connection_id in [
+        "AQEBAQEBAQEBAQEBAQEBAQ=",
+        "AQEBAQEBAQEBAQEBAQEBA",
+        "AQEBAQEBAQEBAQEBAQEBAQB",
+    ] {
+        let mut control = bootstrap();
+        control["connection_id"] = json!(connection_id);
+        assert!(!schema_accepts(&schema, &control), "{connection_id}");
+        assert!(
+            serde_json::from_value::<MembershipControlV1>(control).is_err(),
+            "{connection_id}"
+        );
+    }
+}
+
+fn schema_accepts(schema: &serde_json::Value, control: &serde_json::Value) -> bool {
+    schema["components"]["schemas"]["MembershipControlV1"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|variant| {
+            let properties = &variant["properties"];
+            let Some(kind) = properties["type"]["const"].as_str() else {
+                return false;
+            };
+            if control["type"] != kind {
+                return false;
+            }
+            properties
+                .as_object()
+                .unwrap()
+                .iter()
+                .all(|(name, property)| match name.as_str() {
+                    "membership_version" => property["x-peppy-canonical-decimal-maximum"]
+                        .as_str()
+                        .is_some_and(|maximum| {
+                            canonical_decimal_in_range(
+                                control[name].as_str().unwrap_or_default(),
+                                maximum,
+                            )
+                        }),
+                    "connection_id" | "challenge_id" => {
+                        property["x-peppy-canonical-base64url-bytes"]
+                            .as_u64()
+                            .is_some_and(|length| {
+                                canonical_base64url(
+                                    control[name].as_str().unwrap_or_default(),
+                                    length as usize,
+                                )
+                            })
+                    }
+                    _ => true,
+                })
+        })
+}
+
+fn canonical_decimal_in_range(value: &str, maximum: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && !value.starts_with('0')
+        && (value.len() < maximum.len() || value.len() == maximum.len() && value <= maximum)
+}
+
+fn canonical_base64url(value: &str, length: usize) -> bool {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .filter(|decoded| decoded.len() == length)
+        .is_some_and(|decoded| URL_SAFE_NO_PAD.encode(decoded) == value)
 }
 
 #[test]
