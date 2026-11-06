@@ -9450,6 +9450,11 @@ fn compaction_group(
             vec![message_id.to_string().into_bytes()],
             false,
         ),
+        PrivatePayload::RcsMessageReported { message_id, .. } => (
+            b"rcs-message-reported",
+            vec![message_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::NotificationPosted { notification } => (
             b"notification" as &[u8],
             target(&notification.target),
@@ -9621,6 +9626,9 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
     match payload {
         PrivatePayload::RcsMessageStatus { message_id, .. } => {
             Some(format!("rcs-message-status:{message_id}"))
+        }
+        PrivatePayload::RcsMessageReported { message_id, .. } => {
+            Some(format!("rcs-message-reported:{message_id}"))
         }
         PrivatePayload::NotificationPosted { notification } => Some(format!(
             "notification:{}:{}",
