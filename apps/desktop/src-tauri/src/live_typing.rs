@@ -259,6 +259,10 @@ pub(crate) struct TypingDisplayState {
     pub expires_at_ms: Option<String>,
     #[serde(skip)]
     deadline_mono: u64,
+    #[serde(skip)]
+    peer_device_id: DeviceId,
+    #[serde(skip)]
+    session_token: u64,
 }
 
 #[derive(Default)]
@@ -286,15 +290,12 @@ impl InboundTyping {
     }
     fn clear(&mut self) {
         self.frames.clear();
-        for conversation_id in self.displays.keys().copied().collect::<Vec<_>>() {
-            self.events.push(TypingDisplayState {
-                conversation_id,
-                state: peppy_protocol::TypingStateV2::Stopped,
-                expires_at_ms: None,
-                deadline_mono: 0,
-            });
+        for (_, mut display) in self.displays.drain() {
+            display.state = peppy_protocol::TypingStateV2::Stopped;
+            display.expires_at_ms = None;
+            display.deadline_mono = 0;
+            self.events.push(display);
         }
-        self.displays.clear();
         self.peers.clear();
         self.sequences.clear();
     }
@@ -314,13 +315,12 @@ impl InboundTyping {
             })
             .collect::<Vec<_>>();
         for conversation_id in expired {
-            self.displays.remove(&conversation_id);
-            self.events.push(TypingDisplayState {
-                conversation_id,
-                state: peppy_protocol::TypingStateV2::Stopped,
-                expires_at_ms: None,
-                deadline_mono: 0,
-            });
+            if let Some(mut display) = self.displays.remove(&conversation_id) {
+                display.state = peppy_protocol::TypingStateV2::Stopped;
+                display.expires_at_ms = None;
+                display.deadline_mono = 0;
+                self.events.push(display);
+            }
         }
     }
     fn publish(
@@ -332,8 +332,11 @@ impl InboundTyping {
         if Some(outcome.generation) != generation {
             return None;
         }
-        if let Some(update) = outcome.session_update {
-            self.update_peer(update);
+        if outcome
+            .session_update
+            .is_some_and(|update| !self.update_peer(update))
+        {
+            return None;
         }
         let reply = outcome
             .reply
@@ -375,6 +378,8 @@ impl InboundTyping {
                             .to_string()
                     }),
                     deadline_mono,
+                    peer_device_id,
+                    session_token,
                 };
                 if state == peppy_protocol::TypingStateV2::Started {
                     self.displays.insert(conversation_id, display.clone());
@@ -391,15 +396,40 @@ impl InboundTyping {
         self.events.drain(..)
     }
 
-    fn update_peer(&mut self, update: PeerSessionUpdate) {
+    fn update_peer(&mut self, update: PeerSessionUpdate) -> bool {
+        if self
+            .peers
+            .get(&update.peer_device_id)
+            .is_some_and(|(_, revision)| update.validation_revision <= *revision)
+        {
+            return false;
+        }
         self.peers.insert(
             update.peer_device_id,
             (update.current_session_token, update.validation_revision),
         );
-        if update.replaced_session_token.is_some() {
+        if let Some(replaced_token) = update.replaced_session_token {
+            let replaced = self
+                .displays
+                .iter()
+                .filter_map(|(conversation_id, display)| {
+                    (display.peer_device_id == update.peer_device_id
+                        && display.session_token == replaced_token)
+                        .then_some(*conversation_id)
+                })
+                .collect::<Vec<_>>();
+            for conversation_id in replaced {
+                if let Some(mut display) = self.displays.remove(&conversation_id) {
+                    display.state = peppy_protocol::TypingStateV2::Stopped;
+                    display.expires_at_ms = None;
+                    display.deadline_mono = 0;
+                    self.events.push(display);
+                }
+            }
             self.sequences
                 .retain(|(peer, _), _| *peer != update.peer_device_id);
         }
+        true
     }
 }
 
@@ -1054,6 +1084,44 @@ mod tests {
                 "state": "stopped"
             })
         );
+    }
+
+    #[test]
+    fn peer_replacement_clears_owned_displays_and_rejects_stale_revisions() {
+        let peer = DeviceId::new();
+        let conversation = ConversationId::new();
+        let mut inbound = InboundTyping::default();
+        assert!(inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 2,
+        }));
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 1, 1, 20),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
+        inbound.events.clear();
+
+        assert!(inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: Some(1),
+            current_session_token: 2,
+            validation_revision: 3,
+        }));
+        assert!(!inbound.displays.contains_key(&conversation));
+        let stopped = inbound.drain_events().next().unwrap();
+        assert_eq!(stopped.conversation_id, conversation);
+        assert_eq!(stopped.state, peppy_protocol::TypingStateV2::Stopped);
+
+        assert!(!inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: Some(2),
+            current_session_token: 3,
+            validation_revision: 3,
+        }));
+        assert_eq!(inbound.peers[&peer], (2, 3));
     }
 
     #[test]
