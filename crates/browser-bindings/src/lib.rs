@@ -591,9 +591,9 @@ impl BrowserCore {
             &self.context.revoked_device_ids,
             dto::rcs_status::SnapshotAccess {
                 active_conversation: active,
-                active_is_existing: active.is_some_and(|id| {
-                    conversations.iter().any(|item| item.conversation_id == id)
-                }) && (!explicitly_requested || requested.is_some()),
+                active_is_existing: active
+                    .is_some_and(|id| conversations.iter().any(|item| item.conversation_id == id))
+                    && (!explicitly_requested || requested.is_some()),
                 roster_validated: self.context.rcs_roster_validated,
                 unlocked,
                 now_ms: now_ms(),
@@ -1017,7 +1017,7 @@ mod tests {
         )
         .unwrap();
         value(&core.dispatch(
-            &json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string(),
+            &json!({"command":"unlock","args":{"profile":profile.clone(),"header":header.clone(),"passphrase":"passphrase"}}).to_string(),
         ));
         let conversation = core
             .client()
@@ -1094,6 +1094,22 @@ mod tests {
         );
         assert!(snapshot["rcsStatus"]["gateways"][0]["featureBits"].is_null());
         assert!(snapshot["rcsStatus"]["eligibilities"][0]["featureBits"].is_null());
+        for connection in ["key-mismatch", "error"] {
+            value(&core.dispatch(
+                &json!({"command":"_worker_apply_server_context","args":{"connection":connection,"devices":null,"capabilities":null}}).to_string(),
+            ));
+            let unavailable_snapshot = value(&core.dispatch(
+                &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
+            ));
+            assert!(unavailable_snapshot["rcsStatus"].is_null());
+            value(&core.dispatch(
+                &json!({"command":"_worker_apply_server_context","args":{
+                    "connection":"connected",
+                    "devices":{"devices":[{"device_id":gateway,"role":"gateway","revoked":false}]},
+                    "capabilities":{"capabilities":[{"device_id":gateway,"simulator":false,"capabilities":{"sims":[{"subscription_id":"sim","sms":"available","mms":"unavailable"}]}}]}
+                }}).to_string(),
+            ));
+        }
         for invalid_conversation in [
             ConversationId::new().to_string(),
             "not-a-conversation".into(),
@@ -1131,6 +1147,15 @@ mod tests {
             core.client().unwrap().pending_outbox_count().unwrap(),
             outbox_before_snapshot
         );
+        value(&core.dispatch(r#"{"command":"close","args":{}}"#));
+        open(&mut core, vault, gateway, [7; 32]);
+        value(&core.dispatch(
+            &json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string(),
+        ));
+        let reopened_snapshot = value(&core.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
+        ));
+        assert!(reopened_snapshot["rcsStatus"].is_null());
     }
 
     #[test]
@@ -1152,7 +1177,8 @@ mod tests {
         let draft = value(&core.dispatch(
             &json!({"command":"save_draft","args":{"id":"new","conversationId":"","text":"draft","recipientIds":["+15555550101"],"attachmentIds":[],"gatewayId":gateway,"simId":"sim","expectedRevision":"0"}}).to_string(),
         ));
-        let conversation: ConversationId = draft["conversationId"].as_str().unwrap().parse().unwrap();
+        let conversation: ConversationId =
+            draft["conversationId"].as_str().unwrap().parse().unwrap();
         let now = now_ms();
         core.client()
             .unwrap()
@@ -1184,8 +1210,16 @@ mod tests {
         let outbox_before_snapshot = core.client().unwrap().pending_outbox_count().unwrap();
         let snapshot = value(&core.dispatch(r#"{"command":"snapshot","args":{}}"#));
 
-        assert!(snapshot["rcsStatus"]["eligibilities"].as_array().unwrap().is_empty());
-        assert_eq!(core.client().unwrap().pending_outbox_count().unwrap(), outbox_before_snapshot);
+        assert!(
+            snapshot["rcsStatus"]["eligibilities"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            core.client().unwrap().pending_outbox_count().unwrap(),
+            outbox_before_snapshot
+        );
     }
 
     #[test]
