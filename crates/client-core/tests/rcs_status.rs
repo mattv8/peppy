@@ -2,6 +2,33 @@
 mod common;
 
 use common::*;
+use rusqlite::{Connection, OptionalExtension};
+
+fn status_rank(config: &ClientConfig, message_id: MessageId) -> Option<i64> {
+    let connection = Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+        .query_row(
+            "SELECT status_rank FROM rcs_message_status WHERE message_id=?",
+            [message_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+fn status(status: RcsProjectedStatus) -> RcsStatusApplication {
+    RcsStatusApplication {
+        google_message_id: "provider-message".into(),
+        google_conversation_id: "provider-conversation".into(),
+        tmp_id: None,
+        status,
+    }
+}
 
 fn record(body: &str) -> RcsProjectedRecord {
     RcsProjectedRecord {
@@ -223,7 +250,7 @@ fn rcs_status_lattice_is_monotonic() {
     client
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("live"))
         .unwrap();
-    for status in [
+    for projected_status in [
         RcsProjectedStatus::Sending,
         RcsProjectedStatus::Sent,
         RcsProjectedStatus::Failed,
@@ -235,12 +262,7 @@ fn rcs_status_lattice_is_monotonic() {
                 .apply_rcs_projected_status(
                     conversation,
                     owner.ownership_generation,
-                    RcsStatusApplication {
-                        google_message_id: "provider-message".into(),
-                        google_conversation_id: "provider-conversation".into(),
-                        tmp_id: None,
-                        status,
-                    },
+                    status(projected_status),
                 )
                 .unwrap(),
             RcsReceiveOutcome::StatusApplied
@@ -251,14 +273,94 @@ fn rcs_status_lattice_is_monotonic() {
             .apply_rcs_projected_status(
                 conversation,
                 owner.ownership_generation,
-                RcsStatusApplication {
-                    google_message_id: "provider-message".into(),
-                    google_conversation_id: "provider-conversation".into(),
-                    tmp_id: None,
-                    status: RcsProjectedStatus::Failed,
-                },
+                status(RcsProjectedStatus::Failed),
             )
             .unwrap(),
         RcsReceiveOutcome::StatusUnchanged
     );
+}
+
+#[test]
+fn statuses_converge_and_rejections_leave_no_status_row() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let first_config = config(&directory, "first", &vault);
+    let second_config = config(&directory, "second", &vault);
+    let first = unlocked(&first_config, &vault);
+    let second = unlocked(&second_config, &vault);
+    let conversation = ConversationId::new();
+    let first_owner = first
+        .begin_rcs_link_ownership(conversation, "first", 0)
+        .unwrap();
+    let second_owner = second
+        .begin_rcs_link_ownership(conversation, "second", 0)
+        .unwrap();
+    for (client, generation) in [
+        (&first, first_owner.ownership_generation),
+        (&second, second_owner.ownership_generation),
+    ] {
+        client
+            .ingest_rcs_projected_record(conversation, generation, record("body"))
+            .unwrap();
+    }
+    let message_id = only_message(&first, conversation).payload.record.message_id;
+    first
+        .apply_rcs_projected_status(
+            conversation,
+            first_owner.ownership_generation,
+            status(RcsProjectedStatus::Failed),
+        )
+        .unwrap();
+    first
+        .apply_rcs_projected_status(
+            conversation,
+            first_owner.ownership_generation,
+            status(RcsProjectedStatus::Read),
+        )
+        .unwrap();
+    second
+        .apply_rcs_projected_status(
+            conversation,
+            second_owner.ownership_generation,
+            status(RcsProjectedStatus::Delivered),
+        )
+        .unwrap();
+    second
+        .apply_rcs_projected_status(
+            conversation,
+            second_owner.ownership_generation,
+            status(RcsProjectedStatus::Sent),
+        )
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&first);
+    server.upload(&second);
+    server.sync(&first);
+    server.sync(&second);
+    assert_eq!(status_rank(&first_config, message_id), Some(5));
+    assert_eq!(status_rank(&second_config, message_id), Some(5));
+    assert_eq!(
+        first
+            .apply_rcs_projected_status(
+                conversation,
+                first_owner.ownership_generation + 1,
+                status(RcsProjectedStatus::Read)
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+    assert_eq!(
+        first
+            .apply_rcs_projected_status(
+                conversation,
+                first_owner.ownership_generation,
+                RcsStatusApplication {
+                    google_message_id: "unknown".into(),
+                    ..status(RcsProjectedStatus::Read)
+                }
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::IdentityConflict)
+    );
+    assert_eq!(status_rank(&first_config, message_id), Some(5));
 }
