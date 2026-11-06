@@ -616,7 +616,7 @@ func (link *Link) ResolveExistingConversation(target string) string {
 		return conversationJSON("conversation_lookup_unknown")
 	}
 	for _, conversation := range link.conversationRecords {
-		if classifyConversation(conversation) == conversationClassificationUnknown {
+		if conversationBlocksCompleteAbsence(conversation) {
 			return conversationJSON("conversation_lookup_unknown")
 		}
 	}

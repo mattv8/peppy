@@ -572,3 +572,20 @@ func TestConversationCandidateSnapshotRequiresCurrentCompleteness(t *testing.T) 
 		t.Fatalf("incomplete snapshot export = %s", got)
 	}
 }
+
+func TestNumberlessSelfOnlyRecordBlocksCompleteAbsence(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link, &gmproto.Conversation{
+		ConversationID: "numberless-self",
+		Type:           gmproto.ConversationType_RCS,
+		Status:         gmproto.ConversationStatus_ACTIVE,
+		Participants: []*gmproto.Participant{{
+			IsVisible: true,
+			IsMe:      true,
+			ID:        &gmproto.SmallInfo{ParticipantID: "self-without-number", Type: gmproto.IdentifierType_PHONE},
+		}},
+	})
+	if code := stage2Code(t, link.ResolveExistingConversation("own-number")); code != "conversation_lookup_unknown" {
+		t.Fatalf("numberless self lookup code = %s", code)
+	}
+}

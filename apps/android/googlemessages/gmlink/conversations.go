@@ -345,6 +345,22 @@ func visibleOtherParticipants(conversation *gmproto.Conversation) []*gmproto.Par
 	return participants
 }
 
+func conversationBlocksCompleteAbsence(conversation *gmproto.Conversation) bool {
+	classification := classifyConversation(conversation)
+	if classification == conversationClassificationUnknown {
+		return true
+	}
+	if classification != conversationClassificationUnsupported {
+		return false
+	}
+	for _, participant := range conversation.GetParticipants() {
+		if participant.GetIsVisible() && participant.GetID().GetNumber() == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func classifyConversation(conversation *gmproto.Conversation) string {
 	visibleOthers := visibleOtherParticipants(conversation)
 	for _, participant := range visibleOthers {
