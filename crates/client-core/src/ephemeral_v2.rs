@@ -24,6 +24,7 @@ pub struct LiveEnableContext {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiveExecutor {
+    None,
     CurrentGateway,
 }
 
@@ -59,6 +60,7 @@ pub(crate) struct EphemeralV2State {
     last_sequence: u64,
     clock: Option<ClockState>,
     budget: SenderBudget,
+    context: Option<LiveEnableContext>,
 }
 
 impl Default for EphemeralV2State {
@@ -70,6 +72,7 @@ impl Default for EphemeralV2State {
             last_sequence: 0,
             clock: None,
             budget: SenderBudget::new(),
+            context: None,
         }
     }
 }
@@ -80,6 +83,7 @@ impl EphemeralV2State {
         self.last_sequence = 0;
         self.clock = None;
         self.budget = SenderBudget::new();
+        self.context = None;
         self.generation = self.generation.saturating_add(1);
         self.session_id = [0; 16];
     }
@@ -94,8 +98,6 @@ pub(crate) fn enable(
         .active_epoch
         .is_some_and(|epoch| store.keys.contains_key(&epoch));
     if !active_epoch_available
-        || context.local_executor != LiveExecutor::CurrentGateway
-        || context.local_gateway_device_id != store.config.device_id
         || context.trusted_roster.is_empty()
         || context.trusted_roster.len() > MAX_ROSTER
         || !context.trusted_roster.contains(&store.config.device_id)
@@ -124,6 +126,7 @@ pub(crate) fn enable(
         last_sequence: 0,
         clock: Some(clock),
         budget: SenderBudget::new(),
+        context: Some(context),
     };
     Ok(LiveEnableGeneration(generation))
 }
@@ -139,12 +142,23 @@ pub(crate) fn seal(
     if !store.ephemeral_v2.enabled {
         return Err(LiveError::Disabled);
     }
-    if gateway_device_id != store.config.device_id {
-        return Err(LiveError::InvalidContext);
-    }
-    let eligible = matches!(rcs_capability::projection(&store.conn, conversation_id, gateway_device_id, clock.wall_ms).map_err(|_| LiveError::InvalidContext)?, Some(projection) if projection.eligibility == RcsEligibility::Eligible);
-    if !eligible {
-        return Ok(None);
+    let context = store
+        .ephemeral_v2
+        .context
+        .as_ref()
+        .ok_or(LiveError::Disabled)?;
+    let local_gateway = context.local_gateway_device_id == store.config.device_id
+        && context.local_executor == LiveExecutor::CurrentGateway;
+    match origin {
+        TypingOriginV2::VaultDevice if !context.trusted_roster.contains(&gateway_device_id) => {
+            return Err(LiveError::InvalidContext);
+        }
+        TypingOriginV2::GoogleContact
+            if gateway_device_id != store.config.device_id || !local_gateway =>
+        {
+            return Err(LiveError::InvalidContext);
+        }
+        _ => {}
     }
     let mut clock_candidate = store
         .ephemeral_v2
@@ -157,6 +171,10 @@ pub(crate) fn seal(
             mono_ms: clock.mono_ms,
         })
         .map_err(policy_error)?;
+    let eligible = matches!(rcs_capability::projection(&store.conn, conversation_id, gateway_device_id, effective_wall).map_err(|_| LiveError::InvalidContext)?, Some(projection) if projection.eligibility == RcsEligibility::Eligible);
+    if !eligible {
+        return Ok(None);
+    }
     let mut budget_candidate = store.ephemeral_v2.budget.clone();
     let admitted = match state {
         TypingStateV2::Started => budget_candidate.admit_start(conversation_id, clock.mono_ms),

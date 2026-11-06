@@ -2081,7 +2081,9 @@ impl Client {
         Ok(())
     }
 
-    /// Seals v2 typing only after checking fresh eligibility under the Store lock.
+    /// Seals v2 typing only after checking fresh eligibility under the Store lock. The returned
+    /// frame is an opaque detached copy: hosts must recheck its generation before transmit; it is
+    /// not itself single-use authority or a host publication fence.
     pub fn seal_typing_signal_v2(
         &self,
         conversation_id: ConversationId,
