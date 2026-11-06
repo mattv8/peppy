@@ -9,6 +9,8 @@ use peppy_client_core::{
 pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Preview};
 use serde::{Deserialize, Serialize};
 pub mod rcs_receive;
+#[cfg(test)]
+mod rcs_receive_privacy_tests;
 use std::collections::BTreeMap;
 
 pub mod account_access;
