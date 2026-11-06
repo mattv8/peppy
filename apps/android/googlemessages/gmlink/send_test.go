@@ -227,8 +227,34 @@ func TestPreparedRcsMapsDeadlineAndLibgmRejection(t *testing.T) {
 		return &gmproto.SendMessageResponse{Status: gmproto.SendMessageResponse_FAILURE_4}, nil
 	}
 	link.mu.Unlock()
-	if got := decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))); got != "rejected" {
+	if got := decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))); got != "outcome_unknown" {
 		t.Fatalf("libgm rejection = %s", got)
+	}
+}
+
+func TestPreparedRcsMapsEveryLibgmStatusConservatively(t *testing.T) {
+	link, cleanup, token, tmpID := preparedRcsFixture(t)
+	defer cleanup()
+	for _, test := range []struct {
+		status gmproto.SendMessageResponse_Status
+		code   string
+	}{
+		{gmproto.SendMessageResponse_UNKNOWN, "outcome_unknown"},
+		{gmproto.SendMessageResponse_SUCCESS, "accepted"},
+		{gmproto.SendMessageResponse_FAILURE_2, "outcome_unknown"},
+		{gmproto.SendMessageResponse_FAILURE_3, "outcome_unknown"},
+		{gmproto.SendMessageResponse_FAILURE_4, "outcome_unknown"},
+		{gmproto.SendMessageResponse_Status(99), "outcome_unknown"},
+	} {
+		ticket := prepareTicket(t, link, token, tmpID)
+		link.mu.Lock()
+		link.sendMessage = func(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
+			return &gmproto.SendMessageResponse{Status: test.status}, nil
+		}
+		link.mu.Unlock()
+		if got := decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))); got != test.code {
+			t.Fatalf("status %d = %s", test.status, got)
+		}
 	}
 }
 

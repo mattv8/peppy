@@ -192,11 +192,11 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 	if err != nil || response == nil {
 		return sendJSON(rcsSendResult{Code: "outcome_unknown"})
 	}
+	if response.GetGoogleAccountSwitch() != nil {
+		return sendJSON(rcsSendResult{Code: "outcome_unknown"})
+	}
 	if response.GetStatus() == gmproto.SendMessageResponse_SUCCESS {
 		return sendJSON(rcsSendResult{Code: "accepted"})
-	}
-	if response.GetStatus() == gmproto.SendMessageResponse_FAILURE_2 || response.GetStatus() == gmproto.SendMessageResponse_FAILURE_3 || response.GetStatus() == gmproto.SendMessageResponse_FAILURE_4 {
-		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
 	return sendJSON(rcsSendResult{Code: "outcome_unknown"})
 }
