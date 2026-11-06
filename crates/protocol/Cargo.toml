@@ -16,6 +16,7 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+jsonschema = "0.30"
 serde_json.workspace = true
 
 [[bin]]

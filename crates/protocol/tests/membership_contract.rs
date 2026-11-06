@@ -22,6 +22,14 @@ fn response() -> serde_json::Value {
     json!({"type":"membership_response","version":1,"connection_id":CONNECTION_ID,"challenge_id":CHALLENGE_ID,"membership_version":"1","roster":roster()})
 }
 
+fn challenge() -> serde_json::Value {
+    json!({"type":"membership_challenge","version":1,"connection_id":CONNECTION_ID,"challenge_id":CHALLENGE_ID})
+}
+
+fn hint() -> serde_json::Value {
+    json!({"type":"membership_hint","version":1,"membership_version":"1"})
+}
+
 #[test]
 fn membership_controls_round_trip_with_distinct_provisional_bootstrap_and_response() {
     let bootstrap_control: MembershipControlV1 = serde_json::from_value(bootstrap()).unwrap();
@@ -67,96 +75,104 @@ fn membership_control_parsing_rejects_oversized_raw_input_before_json_decode() {
 fn emitted_membership_schemas_match_runtime_version_and_id_boundaries() {
     let schema: serde_json::Value =
         serde_json::from_str(&peppy_protocol::generate_contracts().openapi).unwrap();
+    for control in [bootstrap(), challenge(), response(), hint()] {
+        assert_schema_and_union_accept(&schema, &control);
+    }
     for version in ["1", "9223372036854775807"] {
-        let mut control = bootstrap();
-        control["membership_version"] = json!(version);
-        assert!(schema_accepts(&schema, &control));
-        assert!(serde_json::from_value::<MembershipControlV1>(control).is_ok());
+        for mut control in [bootstrap(), response(), hint()] {
+            control["membership_version"] = json!(version);
+            assert_schema_and_union_accept(&schema, &control);
+        }
     }
     for version in ["0", "01", "+1", "-1", "9223372036854775808"] {
-        let mut control = bootstrap();
-        control["membership_version"] = json!(version);
-        assert!(!schema_accepts(&schema, &control), "{version}");
-        assert!(
-            serde_json::from_value::<MembershipControlV1>(control).is_err(),
-            "{version}"
-        );
+        for mut control in [bootstrap(), response(), hint()] {
+            control["membership_version"] = json!(version);
+            assert_schema_and_union_reject(&schema, &control, version);
+        }
     }
-    for connection_id in [CONNECTION_ID, CHALLENGE_ID] {
-        let mut control = bootstrap();
-        control["connection_id"] = json!(connection_id);
-        assert!(schema_accepts(&schema, &control));
-        assert!(serde_json::from_value::<MembershipControlV1>(control).is_ok());
-    }
-    for connection_id in [
-        "AQEBAQEBAQEBAQEBAQEBAQ=",
-        "AQEBAQEBAQEBAQEBAQEBA",
-        "AQEBAQEBAQEBAQEBAQEBAQB",
+    for (id, expected_length) in [
+        ("AAAAAAAAAAAAAAAAAAAAAB", 22),
+        ("AAAAAAAAAAAAAAAAAAAAA", 21),
+        ("AAAAAAAAAAAAAAAAAAAAAA=", 23),
     ] {
-        let mut control = bootstrap();
-        control["connection_id"] = json!(connection_id);
-        assert!(!schema_accepts(&schema, &control), "{connection_id}");
-        assert!(
-            serde_json::from_value::<MembershipControlV1>(control).is_err(),
-            "{connection_id}"
-        );
+        assert_eq!(id.len(), expected_length);
+        for mut control in [bootstrap(), challenge(), response()] {
+            control["connection_id"] = json!(id);
+            assert_schema_and_union_reject(&schema, &control, id);
+        }
+        for mut control in [challenge(), response()] {
+            control["challenge_id"] = json!(id);
+            assert_schema_and_union_reject(&schema, &control, id);
+        }
     }
 }
 
-fn schema_accepts(schema: &serde_json::Value, control: &serde_json::Value) -> bool {
-    schema["components"]["schemas"]["MembershipControlV1"]["oneOf"]
-        .as_array()
+fn assert_schema_and_union_accept(schema: &serde_json::Value, control: &serde_json::Value) {
+    assert!(schema_validates(
+        schema_for_control(schema, control),
+        control
+    ));
+    assert!(schema_validates(
+        schema_for_control(schema, &json!({})),
+        control
+    ));
+    assert!(MembershipControlV1::parse(&serde_json::to_vec(control).unwrap()).is_ok());
+}
+
+fn assert_schema_and_union_reject(
+    schema: &serde_json::Value,
+    control: &serde_json::Value,
+    case: &str,
+) {
+    assert!(
+        !schema_validates(schema_for_control(schema, control), control),
+        "standalone: {case}"
+    );
+    assert!(
+        !schema_validates(schema_for_control(schema, &json!({})), control),
+        "union: {case}"
+    );
+    assert!(
+        MembershipControlV1::parse(&serde_json::to_vec(control).unwrap()).is_err(),
+        "runtime: {case}"
+    );
+}
+
+fn schema_for_control<'a>(
+    schema: &'a serde_json::Value,
+    control: &serde_json::Value,
+) -> &'a serde_json::Value {
+    let name = match control["type"].as_str() {
+        Some("membership_bootstrap") => "MembershipBootstrapV1",
+        Some("membership_challenge") => "MembershipChallengeV1",
+        Some("membership_response") => "MembershipResponseV1",
+        Some("membership_hint") => "MembershipHintV1",
+        _ => "MembershipControlV1",
+    };
+    &schema["components"]["schemas"][name]
+}
+
+fn schema_validates(schema: &serde_json::Value, instance: &serde_json::Value) -> bool {
+    jsonschema::validator_for(schema)
         .unwrap()
-        .iter()
-        .any(|variant| {
-            let properties = &variant["properties"];
-            let Some(kind) = properties["type"]["const"].as_str() else {
-                return false;
-            };
-            if control["type"] != kind {
-                return false;
-            }
-            properties
-                .as_object()
-                .unwrap()
-                .iter()
-                .all(|(name, property)| match name.as_str() {
-                    "membership_version" => property["x-peppy-canonical-decimal-maximum"]
-                        .as_str()
-                        .is_some_and(|maximum| {
-                            canonical_decimal_in_range(
-                                control[name].as_str().unwrap_or_default(),
-                                maximum,
-                            )
-                        }),
-                    "connection_id" | "challenge_id" => {
-                        property["x-peppy-canonical-base64url-bytes"]
-                            .as_u64()
-                            .is_some_and(|length| {
-                                canonical_base64url(
-                                    control[name].as_str().unwrap_or_default(),
-                                    length as usize,
-                                )
-                            })
-                    }
-                    _ => true,
-                })
-        })
+        .is_valid(instance)
 }
 
-fn canonical_decimal_in_range(value: &str, maximum: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-        && !value.starts_with('0')
-        && (value.len() < maximum.len() || value.len() == maximum.len() && value <= maximum)
-}
-
-fn canonical_base64url(value: &str, length: usize) -> bool {
-    URL_SAFE_NO_PAD
-        .decode(value)
-        .ok()
-        .filter(|decoded| decoded.len() == length)
-        .is_some_and(|decoded| URL_SAFE_NO_PAD.encode(decoded) == value)
+#[test]
+fn emitted_membership_schema_test_detects_a_weakened_pattern() {
+    let mut schema: serde_json::Value =
+        serde_json::from_str(&peppy_protocol::generate_contracts().openapi).unwrap();
+    let invalid = json!({"type":"membership_bootstrap","version":1,"connection_id":"AAAAAAAAAAAAAAAAAAAAAB","membership_version":"1","roster":roster()});
+    assert!(!schema_validates(
+        schema_for_control(&schema, &invalid),
+        &invalid
+    ));
+    schema["components"]["schemas"]["MembershipBootstrapV1"]["properties"]["connection_id"]["pattern"] =
+        json!(".*");
+    assert!(schema_validates(
+        schema_for_control(&schema, &invalid),
+        &invalid
+    ));
 }
 
 #[test]
