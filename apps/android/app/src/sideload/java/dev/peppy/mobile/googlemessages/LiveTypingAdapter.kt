@@ -82,17 +82,20 @@ internal class LiveTypingAdapter(
         }
     }
 
-    private fun publishIfCurrent(admitted: AdmittedIntent) = synchronized(this) {
-        if (!isCurrent(admitted) || admitted.deadlineMono <= clock.nowMs()) return
-        effect.setTyping(
+    private fun publishIfCurrent(admitted: AdmittedIntent) {
+        // Runtime admission takes its native-operation lock before querying this currency.
+        // Never call the effect under this monitor, so adapter updates cannot wait on that lock.
+        val intent = synchronized(this) {
+            if (!isCurrent(admitted) || admitted.deadlineMono <= clock.nowMs()) return
             LiveTypingEffectIntent(
                 admitted.key.conversationId,
                 NativeTypingState.STARTED,
                 admitted.deadlineMono,
                 clock,
                 LiveTypingCurrency { isCurrent(admitted) },
-            ),
-        )
+            )
+        }
+        effect.setTyping(intent)
     }
 
     private fun isCurrent(admitted: AdmittedIntent): Boolean = synchronized(this) {

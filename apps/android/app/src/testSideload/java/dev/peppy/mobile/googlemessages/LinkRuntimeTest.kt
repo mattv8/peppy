@@ -17,6 +17,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.NativeLiveAction
+import uniffi.peppy_mobile_bindings.NativeLiveOutcome
+import uniffi.peppy_mobile_bindings.NativeLiveSessionUpdate
 import uniffi.peppy_mobile_bindings.NativeTypingState
 
 @RunWith(RobolectricTestRunner::class)
@@ -97,6 +100,27 @@ class LinkRuntimeTest {
     }
 
     @Test
+    fun `typing bridge sends the Go owner generation separately from its Kotlin lease`() {
+        val handle = FakeHandle().apply { ownerGeneration = 73 }
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        val lease = requireNotNull(LinkRuntime.handleLease(context))
+
+        assertEquals("ok", LinkRuntime.setTyping(lease, typingIntent()))
+        assertEquals(73, handle.typingRequests.single().linkGeneration)
+    }
+
+    @Test
+    fun `typing bridge fails closed when Go owner generation is unavailable`() {
+        val handle = FakeHandle().apply { ownerGeneration = null }
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+
+        assertEquals("typing_unavailable", LinkRuntime.setTyping(context, typingIntent()))
+        assertTrue(handle.typingRequests.isEmpty())
+    }
+
+    @Test
     fun `typing bridge is unavailable without the gmlink flavor`() {
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = false
@@ -145,28 +169,81 @@ class LinkRuntimeTest {
         var firstResult: String? = null
         var secondResult: String? = null
 
-        Thread {
-            firstResult = LinkRuntime.setTyping(lease, typingIntent(deadlineMono = 500UL, clock = clock))
-            firstDone.countDown()
-        }.start()
-        assertTrue(handle.typingEntered.await(1, TimeUnit.SECONDS))
-        clock.now = 200UL
-        Thread {
-            secondStarted.countDown()
-            secondResult = LinkRuntime.setTyping(lease, typingIntent(deadlineMono = 500UL, clock = clock))
-            secondDone.countDown()
-        }.start()
-        assertTrue(secondStarted.await(1, TimeUnit.SECONDS))
-        assertFalse(secondDone.await(50, TimeUnit.MILLISECONDS))
-
-        handle.allowTyping.countDown()
+        try {
+            Thread {
+                firstResult = LinkRuntime.setTyping(lease, typingIntent(deadlineMono = 500UL, clock = clock))
+                firstDone.countDown()
+            }.start()
+            assertTrue(handle.typingEntered.await(1, TimeUnit.SECONDS))
+            Thread {
+                secondStarted.countDown()
+                secondResult = LinkRuntime.setTyping(lease, typingIntent(deadlineMono = 500UL, clock = clock))
+                secondDone.countDown()
+            }.start()
+            assertTrue(secondStarted.await(1, TimeUnit.SECONDS))
+            assertFalse(secondDone.await(50, TimeUnit.MILLISECONDS))
+            clock.now = 500UL
+        } finally {
+            handle.allowTyping.countDown()
+        }
 
         assertTrue(firstDone.await(1, TimeUnit.SECONDS))
         assertTrue(secondDone.await(1, TimeUnit.SECONDS))
         assertEquals("ok", firstResult)
-        assertEquals("ok", secondResult)
-        assertEquals(2, handle.typingRequests.size)
-        assertEquals(300UL, handle.typingRequests.last().remainingValidityMs)
+        assertEquals("typing_expired", secondResult)
+        assertEquals(1, handle.typingRequests.size)
+    }
+
+    @Test
+    fun `adapter retires authority while runtime waits on the native lock`() {
+        val handle = BlockingTypingHandle()
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        val lease = requireNotNull(LinkRuntime.handleLease(context))
+        val firstDone = CountDownLatch(1)
+        val adapterEffectStarted = CountDownLatch(1)
+        val adapterDone = CountDownLatch(1)
+        val retirementDone = CountDownLatch(1)
+        val executor = QueueExecutor()
+        val adapter = LiveTypingAdapter(FakeClock(100UL), executor) { intent ->
+            adapterEffectStarted.countDown()
+            LinkRuntime.setTyping(context, intent)
+            adapterDone.countDown()
+        }
+        adapter.activate(7UL)
+        adapter.consume(NativeLiveOutcome(7UL, NativeLiveSessionUpdate("peer", null, 8UL, 1UL), null, null))
+        adapter.consume(
+            NativeLiveOutcome(
+                7UL,
+                null,
+                NativeLiveAction.GatewayTypingIntent(
+                    "peer", 8UL, 1UL, "conversation", NativeTypingState.STARTED, 200UL,
+                ),
+                null,
+            ),
+        )
+
+        try {
+            Thread {
+                LinkRuntime.setTyping(lease, typingIntent(deadlineMono = 200UL))
+                firstDone.countDown()
+            }.start()
+            assertTrue(handle.typingEntered.await(1, TimeUnit.SECONDS))
+            Thread { executor.runAll() }.start()
+            assertTrue(adapterEffectStarted.await(1, TimeUnit.SECONDS))
+            Thread {
+                adapter.consume(NativeLiveOutcome(7UL, NativeLiveSessionUpdate("peer", null, 9UL, 2UL), null, null))
+                retirementDone.countDown()
+            }.start()
+
+            assertTrue(retirementDone.await(1, TimeUnit.SECONDS))
+        } finally {
+            handle.allowTyping.countDown()
+        }
+
+        assertTrue(firstDone.await(1, TimeUnit.SECONDS))
+        assertTrue(adapterDone.await(1, TimeUnit.SECONDS))
+        assertEquals(1, handle.typingRequests.size)
     }
 
     @Test
@@ -597,6 +674,7 @@ class LinkRuntimeTest {
         var closed = false
         var typingFailure: Throwable? = null
         var typingResult = "ok"
+        var ownerGeneration: Long? = 1
         val typingRequests = mutableListOf<LinkTypingRequest>()
         override fun pair(cookiesJson: ByteArray) = Unit
         override fun relink() = Unit
@@ -606,6 +684,7 @@ class LinkRuntimeTest {
         override fun stop() = Unit
         override fun close() { closed = true }
         override fun status(): String = """{\"state\":\"unlinked\"}"""
+        override fun ownerGeneration(): Long? = ownerGeneration
         open override fun setTyping(request: LinkTypingRequest): String {
             typingRequests += request
             typingFailure?.let { throw it }

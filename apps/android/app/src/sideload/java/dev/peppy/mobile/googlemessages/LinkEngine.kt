@@ -25,6 +25,8 @@ interface LinkHandle {
     fun stop()
     fun close()
     fun status(): String
+    /** The current Go Link owner generation, when the native binding exposes it. */
+    fun ownerGeneration(): Long? = null
     fun setTyping(request: LinkTypingRequest): String = "typing_unavailable"
     fun acceptsOutput(generation: Long, revision: Long): Boolean = true
     fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
