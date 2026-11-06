@@ -354,3 +354,78 @@ fn mobile_rcs_status_and_metadata_mapping_is_sanitized() {
         .unwrap();
     assert!(conversation.rcs_history_gap);
 }
+
+fn detector(provider_row_id: i64, observed_generation: u64) -> String {
+    json!({
+        "providerRowId": provider_row_id,
+        "providerThreadId": 1,
+        "providerType": 1,
+        "observedAtMs": 1,
+        "observedGeneration": observed_generation,
+    })
+    .to_string()
+}
+
+#[test]
+fn gateway_detector_wrapper_rejects_invalid_input_without_mutation() {
+    let fixture = fixture();
+    let before = reads(&fixture);
+    let invalid_detectors = [
+        "{".to_owned(),
+        json!({"providerRowId": 1}).to_string(),
+        json!({
+            "providerRowId": 1, "providerThreadId": 1, "providerType": 1,
+            "observedAtMs": 1, "observedGeneration": fixture.generation, "unexpected": true
+        })
+        .to_string(),
+        detector(-1, fixture.generation),
+        detector(1, fixture.generation) + &" ".repeat(65_536),
+    ];
+    for input in invalid_detectors {
+        invalid(fixture.client.gateway_record_rcs_provider_detector_json(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            input,
+        ));
+        assert_eq!(reads(&fixture), before);
+    }
+    invalid(fixture.client.gateway_record_rcs_provider_detector_json(
+        "c".repeat(65_537),
+        fixture.generation,
+        detector(1, fixture.generation),
+    ));
+    assert_eq!(reads(&fixture), before);
+    assert_eq!(
+        outcome(fixture.client.gateway_record_rcs_provider_detector_json(
+            fixture.conversation_id.clone(),
+            fixture.generation + 1,
+            detector(1, fixture.generation),
+        )),
+        "rejected:ownership_stale"
+    );
+    assert_eq!(reads(&fixture), before);
+    // Rejected attempts must not have inserted provider row 1: a fresh record still reports Recorded.
+    assert_eq!(
+        outcome(fixture.client.gateway_record_rcs_provider_detector_json(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            detector(1, fixture.generation),
+        )),
+        "recorded"
+    );
+}
+
+#[test]
+fn gateway_detector_wrapper_accepts_valid_detector_with_closed_outcomes() {
+    let fixture = fixture();
+    for (provider_row_id, expected) in [(1, "recorded"), (1, "duplicate"), (2, "recorded")] {
+        assert_eq!(
+            outcome(fixture.client.gateway_record_rcs_provider_detector_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                detector(provider_row_id, fixture.generation),
+            )),
+            expected
+        );
+    }
+}

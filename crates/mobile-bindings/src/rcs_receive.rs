@@ -1,7 +1,8 @@
 use crate::{MobileBindingsError, NativeClient, NativeConversation, NativeMessage, with_client};
 use peppy_client_core::{
     Client, Conversation, Direction, Message, RcsIdentityOutcome, RcsProjectedRecord,
-    RcsProjectedStatus, RcsReceiveCode, RcsReceiveOutcome, RcsStatusApplication, Transport,
+    RcsProjectedStatus, RcsProviderDetector, RcsReceiveCode, RcsReceiveOutcome,
+    RcsStatusApplication, Transport,
 };
 use serde::Deserialize;
 
@@ -88,6 +89,15 @@ struct StatusRecord {
     google_conversation_id: String,
     tmp_id: Option<String>,
     status: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderDetector {
+    provider_row_id: i64,
+    provider_thread_id: i64,
+    provider_type: i64,
+    observed_at_ms: i64,
+    observed_generation: u64,
 }
 
 fn receive_code(value: RcsReceiveCode) -> &'static str {
@@ -213,6 +223,34 @@ impl NativeClient {
                 })?,
                 ownership_generation,
                 &history_token,
+            )
+        })
+        .map(identity_outcome)
+    }
+    pub fn gateway_record_rcs_provider_detector_json(
+        &self,
+        conversation_id: String,
+        ownership_generation: u64,
+        detector_json: String,
+    ) -> Result<String, MobileBindingsError> {
+        if detector_json.len() > 65_536 {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
+        let detector: ProviderDetector = serde_json::from_str(&detector_json)
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.record_rcs_provider_detector(
+                conversation_id.parse().map_err(|_| {
+                    peppy_client_core::Error::InvalidRequest("invalid conversation")
+                })?,
+                ownership_generation,
+                RcsProviderDetector {
+                    provider_row_id: detector.provider_row_id,
+                    provider_thread_id: detector.provider_thread_id,
+                    provider_type: detector.provider_type,
+                    observed_at_ms: detector.observed_at_ms,
+                    observed_generation: detector.observed_generation,
+                },
             )
         })
         .map(identity_outcome)

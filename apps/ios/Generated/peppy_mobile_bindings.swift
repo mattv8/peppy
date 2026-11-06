@@ -1171,6 +1171,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
 
     func gatewayIngestRcsRecordJson(conversationId: String, ownershipGeneration: UInt64, recordJson: String) throws  -> String
 
+    func gatewayRecordRcsProviderDetectorJson(conversationId: String, ownershipGeneration: UInt64, detectorJson: String) throws  -> String
+
 }
 open class NativeClient: NativeClientProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -3364,6 +3366,18 @@ open func gatewayIngestRcsRecordJson(conversationId: String, ownershipGeneration
         FfiConverterString.lower(conversationId),
         FfiConverterUInt64.lower(ownershipGeneration),
         FfiConverterString.lower(recordJson),uniffiCallStatus
+    )
+})
+}
+
+open func gatewayRecordRcsProviderDetectorJson(conversationId: String, ownershipGeneration: UInt64, detectorJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_record_rcs_provider_detector_json(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterUInt64.lower(ownershipGeneration),
+        FfiConverterString.lower(detectorJson),uniffiCallStatus
     )
 })
 }
@@ -16321,6 +16335,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_record_json() != 37536) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_record_rcs_provider_detector_json() != 34724) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeplaintexthandle_dispose() != 40845) {
