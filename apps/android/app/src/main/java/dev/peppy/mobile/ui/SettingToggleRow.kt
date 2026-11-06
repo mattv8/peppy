@@ -30,6 +30,7 @@ internal fun SettingToggleRow(
     subtitle: String? = null,
     onClickLabel: String? = null,
     stateDescription: String? = null,
+    titleTrailing: (@Composable () -> Unit)? = null,
 ) {
     val settingsStateDescription = stateDescription
     Row(
@@ -53,7 +54,14 @@ internal fun SettingToggleRow(
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Column(Modifier.weight(1f).padding(end = 16.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
+            if (titleTrailing == null) {
+                Text(title, style = MaterialTheme.typography.bodyLarge)
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.bodyLarge)
+                    titleTrailing()
+                }
+            }
             subtitle?.let { Text(it, Modifier.testTag("$tag-subtitle"), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium) }
         }
         Switch(checked, onCheckedChange = null, enabled = enabled, modifier = Modifier.testTag("$tag-switch"))
