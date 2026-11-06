@@ -76,7 +76,7 @@ fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
         "{outcome:?}"
     );
     client.apply_pending(100).unwrap();
-    let message_id = client
+    let first_message_id = client
         .messages(conversation_id)
         .unwrap()
         .pop()
@@ -96,6 +96,46 @@ fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
             },
         )
         .unwrap();
+    client
+        .ingest_rcs_projected_record(
+            conversation_id,
+            ownership.ownership_generation,
+            RcsProjectedRecord {
+                google_message_id: "google-message-latest".into(),
+                google_conversation_id: SENTINELS[0].into(),
+                direction: Direction::Incoming,
+                body: "RCS latest payload".into(),
+                sent_at_ms: Some(now + 2_000),
+                tmp_id: None,
+                rcs_reported: false,
+                e2ee_reported: None,
+                history_token: None,
+            },
+        )
+        .unwrap();
+    client.apply_pending(100).unwrap();
+    client
+        .apply_rcs_projected_status(
+            conversation_id,
+            ownership.ownership_generation,
+            RcsStatusApplication {
+                google_message_id: "google-message-latest".into(),
+                google_conversation_id: SENTINELS[0].into(),
+                tmp_id: None,
+                status: RcsProjectedStatus::Delivered,
+            },
+        )
+        .unwrap();
+    let message_id = client
+        .messages_page(conversation_id, None, 1)
+        .unwrap()
+        .messages
+        .pop()
+        .unwrap()
+        .payload
+        .record
+        .message_id;
+    assert_ne!(message_id, first_message_id);
     (
         directory,
         client,
@@ -130,13 +170,18 @@ fn assert_no_sentinels(value: &Value) {
 }
 
 #[test]
-fn rcs_snapshot_and_window_project_status_without_leaking_identity() {
+fn rcs_snapshot_history_and_window_project_status_without_leaking_identity() {
     let (_directory, client, conversation_id, _, message_id) = core();
     let mut browser = browser(client);
     let snapshot = dispatch(
         &mut browser,
         "snapshot",
         json!({"conversationId": conversation_id}),
+    );
+    let history = dispatch(
+        &mut browser,
+        "load_history",
+        json!({"conversationId": conversation_id, "beforeMessageId": message_id}),
     );
     let window = dispatch(
         &mut browser,
@@ -145,13 +190,14 @@ fn rcs_snapshot_and_window_project_status_without_leaking_identity() {
     );
     for (path, message) in [
         ("snapshot", &snapshot["conversations"][0]["messages"][0]),
+        ("history", &history["messages"][0]),
         ("window", &window["messages"][0]),
     ] {
         assert_eq!(message["transport"], "rcs", "{path}: {message}");
         assert_eq!(message["status"], "delivery-confirmed");
         assert_eq!(message["rcsReported"], true);
     }
-    for value in [&snapshot, &window] {
+    for value in [&snapshot, &history, &window] {
         assert_no_sentinels(value);
     }
 }
