@@ -660,10 +660,16 @@ describe("desktop UI controls", () => {
   });
 
   it("hides the SMS counter without adding transport controls", () => {
-    render(<Composer draft={"a".repeat(161)} attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} hideSmsCounter />);
+    render(<Composer draft={"a".repeat(161)} attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} gatewaySlot={<span id="gateway-slot" />} hideSmsCounter />);
 
     expect(document.querySelector("#sms-counter")).toBeNull();
-    expect(document.querySelectorAll("#composer-toolbar button")).toHaveLength(2);
+    const toolbar = document.getElementById("composer-toolbar")!;
+    expect(toolbar.children).toHaveLength(5);
+    expect(toolbar.children[0]).toHaveAttribute("aria-label", "Add attachment");
+    expect(toolbar.children[1]).toHaveAttribute("id", "gateway-slot");
+    expect(toolbar.children[2]).toHaveClass("composer-toolbar-spacer");
+    expect(toolbar.children[3]).toHaveAttribute("id", "shift-enter-hint");
+    expect(toolbar.children[4]).toHaveAttribute("aria-label", "Send");
     expect(screen.queryByRole("button", { name: /route|transport|send as/i })).toBeNull();
   });
 
