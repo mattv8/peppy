@@ -10839,6 +10839,27 @@ mod tests {
         .unwrap();
     }
 
+    type RcsMappingRow = (
+        String,
+        String,
+        i64,
+        Vec<u8>,
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+    );
+    type RcsSendLedgerRow = (
+        String,
+        i64,
+        Vec<u8>,
+        String,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+
     #[test]
     fn version_48_upgrade_preserves_rows_and_rejects_downgrade() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -10848,28 +10869,140 @@ mod tests {
             device_id: DeviceId::new(),
         };
         let client = Client::open(config.clone(), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
+        let mapping_conversation = ConversationId::new().to_string();
+        let command_id = CommandId::new().to_string();
+        let gateway_device_id = DeviceId::new().to_string();
         {
             let store = client.lock().unwrap();
-            store.conn.execute_batch(
-                "INSERT INTO rcs_link_status_projection VALUES('gateway','linked',1,1,1,1,1,1,1);
-                 DROP TABLE rcs_lane_ownership;
+            store.conn.execute(
+                "INSERT INTO rcs_conversation_mappings VALUES(?1,'google-conversation','one_to_one',2,?2,7,10,NULL,NULL)",
+                params![mapping_conversation.as_str(), vec![1_u8; 32]],
+            ).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_mapping_proofs VALUES(?1,7,'participant','region','self')",
+                    [mapping_conversation.as_str()],
+                )
+                .unwrap();
+            store.conn.execute(
+                "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,historical) VALUES(?1,0,'sim','{}',0)",
+                [command_id.as_str()],
+            ).unwrap();
+            store.conn.execute(
+                "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?1,'attempt_recorded',11,'rcs')",
+                [command_id.as_str()],
+            ).unwrap();
+            store.conn.execute(
+                "INSERT INTO rcs_send_ledger VALUES(?1,'tmp',7,?2,'google-conversation',12,13,'ack',NULL)",
+                params![command_id.as_str(), vec![1_u8; 32]],
+            ).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_link_status_projection VALUES(?1,'linked',1,1,1,14,15,16,17)",
+                    [gateway_device_id.as_str()],
+                )
+                .unwrap();
+            store.conn.execute(
+                "INSERT INTO rcs_link_eligibility_projection VALUES(?1,?2,'eligible',18,7,19,20)",
+                params![gateway_device_id.as_str(), mapping_conversation.as_str()],
+            ).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_capability_published VALUES('identity',21,'{}',22)",
+                    [],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "DROP TABLE rcs_lane_ownership;
                  DROP TABLE rcs_message_identities;
                  DROP TABLE rcs_provider_detectors;
                  UPDATE schema_meta SET version=48;",
-            ).unwrap();
+                )
+                .unwrap();
         }
         drop(client);
         let upgraded = Client::open(config.clone(), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
         let store = upgraded.lock().unwrap();
-        let state: String = store
+        let mapping: RcsMappingRow = store
             .conn
             .query_row(
-                "SELECT state FROM rcs_link_status_projection WHERE gateway_device_id='gateway'",
-                [],
+                "SELECT google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms,invalidated_at_ms,invalidation_code FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+                [mapping_conversation.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            mapping,
+            (
+                "google-conversation".into(),
+                "one_to_one".into(),
+                2,
+                vec![1; 32],
+                7,
+                10,
+                None,
+                None
+            )
+        );
+        let proof: (i64, String, String, String) = store.conn.query_row(
+            "SELECT mapping_revision,canonical_participant,identity_region,own_identity FROM rcs_mapping_proofs WHERE peppy_conversation_id=?",
+            [mapping_conversation.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).unwrap();
+        assert_eq!(
+            proof,
+            (7, "participant".into(), "region".into(), "self".into())
+        );
+        let ledger: RcsSendLedgerRow = store.conn.query_row(
+            "SELECT tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms,transport_ack_at_ms,transport_ack_code,retry_of_command_id FROM rcs_send_ledger WHERE command_id=?",
+            [command_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        ).unwrap();
+        assert_eq!(
+            ledger,
+            (
+                "tmp".into(),
+                7,
+                vec![1; 32],
+                "google-conversation".into(),
+                12,
+                Some(13),
+                Some("ack".into()),
+                None
+            )
+        );
+        let status: (String, i64, i64, i64, i64, i64, i64, i64) = store.conn.query_row(
+            "SELECT state,availability,health,phone_responsive,observed_at_ms,capability_revision,feature_bits,producer_sequence FROM rcs_link_status_projection WHERE gateway_device_id=?",
+            [gateway_device_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        ).unwrap();
+        assert_eq!(status, ("linked".into(), 1, 1, 1, 14, 15, 16, 17));
+        let eligibility: (String, i64, i64, i64, i64) = store.conn.query_row(
+            "SELECT eligibility,feature_bits,mapping_revision,observed_at_ms,producer_sequence FROM rcs_link_eligibility_projection WHERE gateway_device_id=? AND conversation_id=?",
+            params![gateway_device_id, mapping_conversation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).unwrap();
+        assert_eq!(eligibility, ("eligible".into(), 18, 7, 19, 20));
+        let published: (i64, String, i64) = store.conn.query_row(
+            "SELECT revision,body,published_at_ms FROM rcs_capability_published WHERE identity='identity'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(published, (21, "{}".into(), 22));
+        let finalized_transport: String = store
+            .conn
+            .query_row(
+                "SELECT finalized_transport FROM attempts WHERE command_id=?",
+                [command_id.as_str()],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(state, "linked");
+        assert_eq!(finalized_transport, "rcs");
         let table: String = store
             .conn
             .query_row(
