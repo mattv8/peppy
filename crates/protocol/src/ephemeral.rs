@@ -128,7 +128,7 @@ pub struct EphemeralSignalV2 {
 struct EphemeralSignalV2Wire {
     protocol_version: u16,
     kind: EphemeralSignalV2Kind,
-    sender_device_id: DeviceId,
+    sender_device_id: String,
     key_epoch: u32,
     session_id: String,
     sent_at_ms: String,
@@ -143,7 +143,7 @@ impl<'de> Deserialize<'de> for EphemeralSignalV2 {
         let signal = Self {
             protocol_version: wire.protocol_version,
             kind: wire.kind,
-            sender_device_id: wire.sender_device_id,
+            sender_device_id: parse_device_id(&wire.sender_device_id).map_err(de::Error::custom)?,
             key_epoch: wire.key_epoch,
             session_id: wire.session_id,
             sent_at_ms: wire.sent_at_ms,
@@ -213,8 +213,41 @@ impl JsonSchema for EphemeralSignalV2 {
         "EphemeralSignalV2".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"object","additionalProperties":false,"properties":{"protocol_version":{"const":2},"kind":{"enum":["typing","challenge","session_ack"]},"sender_device_id":{"type":"string","format":"uuid"},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"sent_at_ms":{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},"expires_at_ms":{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},"sequence":{"type":"string","pattern":"^[1-9][0-9]*$"},"ciphertext_b64":{"type":"string","maxLength":7200}},"required":["protocol_version","kind","sender_device_id","key_epoch","session_id","sent_at_ms","expires_at_ms","sequence","ciphertext_b64"]})
+        serde_json::from_value(serde_json::json!({"oneOf":[v2_header_schema("typing",7200),v2_header_schema("challenge",684),v2_header_schema("session_ack",684)]})).expect("valid v2 header schema")
     }
+}
+
+const CANONICAL_UUID_PATTERN: &str =
+    "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+
+fn v2_header_schema(kind: &str, ciphertext_max_length: usize) -> serde_json::Value {
+    serde_json::json!({"type":"object","additionalProperties":false,"properties":{"protocol_version":{"const":2},"kind":{"const":kind},"sender_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"sent_at_ms":{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},"expires_at_ms":{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},"sequence":{"type":"string","pattern":"^[1-9][0-9]*$"},"ciphertext_b64":{"type":"string","maxLength":ciphertext_max_length}},"required":["protocol_version","kind","sender_device_id","key_epoch","session_id","sent_at_ms","expires_at_ms","sequence","ciphertext_b64"]})
+}
+
+fn typing_plaintext_schema(origin: &str, includes_gateway: bool) -> serde_json::Value {
+    let mut required = vec!["version", "origin", "conversation_id", "state"];
+    if includes_gateway {
+        required.push("gateway_device_id");
+    }
+    let mut properties = serde_json::Map::from_iter([
+        ("version".into(), serde_json::json!({"const":2})),
+        ("origin".into(), serde_json::json!({"const":origin})),
+        (
+            "conversation_id".into(),
+            serde_json::json!({"type":"string","pattern":CANONICAL_UUID_PATTERN}),
+        ),
+        (
+            "state".into(),
+            serde_json::json!({"enum":["started","stopped"]}),
+        ),
+    ]);
+    if includes_gateway {
+        properties.insert(
+            "gateway_device_id".into(),
+            serde_json::json!({"type":"string","pattern":CANONICAL_UUID_PATTERN}),
+        );
+    }
+    serde_json::json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +449,53 @@ fn validate_nonce(value: &str) -> Result<(), EphemeralSignalError> {
     Ok(())
 }
 
+fn parse_uuid(value: &str) -> Result<uuid::Uuid, EphemeralSignalError> {
+    let parsed: uuid::Uuid = value
+        .parse()
+        .map_err(|_| EphemeralSignalError::InvalidCanonicalEncoding)?;
+    if parsed.to_string() != value {
+        return Err(EphemeralSignalError::InvalidCanonicalEncoding);
+    }
+    Ok(parsed)
+}
+
+fn parse_device_id(value: &str) -> Result<DeviceId, EphemeralSignalError> {
+    Ok(DeviceId(parse_uuid(value)?))
+}
+
+#[derive(Default)]
+enum Presence<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Presence<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> de::Visitor<'de> for Visitor<T> {
+            type Value = Presence<T>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a nullable value")
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Presence::Null)
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Presence::Null)
+            }
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                T::deserialize(deserializer).map(Presence::Value)
+            }
+        }
+        deserializer.deserialize_option(Visitor(std::marker::PhantomData))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TypingOriginV2 {
@@ -445,20 +525,28 @@ pub struct TypingPlaintextV2 {
 struct TypingPlaintextV2Wire {
     version: u16,
     origin: TypingOriginV2,
-    conversation_id: uuid::Uuid,
+    conversation_id: String,
     state: TypingStateV2,
-    gateway_device_id: Option<DeviceId>,
+    #[serde(default)]
+    gateway_device_id: Presence<String>,
 }
 
 impl<'de> Deserialize<'de> for TypingPlaintextV2 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = TypingPlaintextV2Wire::deserialize(deserializer)?;
+        let gateway_device_id = match (wire.origin, wire.gateway_device_id) {
+            (TypingOriginV2::VaultDevice, Presence::Value(value)) => {
+                Some(parse_device_id(&value).map_err(de::Error::custom)?)
+            }
+            (TypingOriginV2::GoogleContact, Presence::Missing) => None,
+            _ => return Err(de::Error::custom("invalid v2 typing gateway_device_id")),
+        };
         let value = Self {
             version: wire.version,
             origin: wire.origin,
-            conversation_id: wire.conversation_id,
+            conversation_id: parse_uuid(&wire.conversation_id).map_err(de::Error::custom)?,
             state: wire.state,
-            gateway_device_id: wire.gateway_device_id,
+            gateway_device_id,
         };
         value.validate().map_err(de::Error::custom)?;
         Ok(value)
@@ -482,7 +570,7 @@ impl JsonSchema for TypingPlaintextV2 {
         "TypingPlaintextV2".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"origin":{"enum":["vault_device","google_contact"]},"conversation_id":{"type":"string","format":"uuid"},"state":{"enum":["started","stopped"]},"gateway_device_id":{"type":"string","format":"uuid"}},"required":["version","origin","conversation_id","state"],"allOf":[{"if":{"properties":{"origin":{"const":"vault_device"}}},"then":{"required":["gateway_device_id"]}},{"if":{"properties":{"origin":{"const":"google_contact"}}},"then":{"not":{"required":["gateway_device_id"]}}}]})
+        serde_json::from_value(serde_json::json!({"oneOf":[typing_plaintext_schema("vault_device",true),typing_plaintext_schema("google_contact",false)]})).expect("valid v2 typing schema")
     }
 }
 
@@ -499,9 +587,9 @@ pub struct ChallengePlaintextV2 {
 #[serde(deny_unknown_fields)]
 struct ChallengePlaintextV2Wire {
     version: u16,
-    challenger_device_id: DeviceId,
+    challenger_device_id: String,
     challenger_session_id: String,
-    responder_device_id: DeviceId,
+    responder_device_id: String,
     nonce_b64: String,
 }
 
@@ -510,9 +598,11 @@ impl<'de> Deserialize<'de> for ChallengePlaintextV2 {
         let wire = ChallengePlaintextV2Wire::deserialize(deserializer)?;
         let value = Self {
             version: wire.version,
-            challenger_device_id: wire.challenger_device_id,
+            challenger_device_id: parse_device_id(&wire.challenger_device_id)
+                .map_err(de::Error::custom)?,
             challenger_session_id: wire.challenger_session_id,
-            responder_device_id: wire.responder_device_id,
+            responder_device_id: parse_device_id(&wire.responder_device_id)
+                .map_err(de::Error::custom)?,
             nonce_b64: wire.nonce_b64,
         };
         value.validate().map_err(de::Error::custom)?;
@@ -535,7 +625,7 @@ impl JsonSchema for ChallengePlaintextV2 {
         "ChallengePlaintextV2".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"challenger_device_id":{"type":"string","format":"uuid"},"challenger_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"responder_device_id":{"type":"string","format":"uuid"},"nonce_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{22}==$"}},"required":["version","challenger_device_id","challenger_session_id","responder_device_id","nonce_b64"]})
+        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"challenger_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"challenger_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"responder_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"nonce_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{22}==$"}},"required":["version","challenger_device_id","challenger_session_id","responder_device_id","nonce_b64"]})
     }
 }
 
@@ -554,9 +644,9 @@ pub struct SessionAckPlaintextV2 {
 #[serde(deny_unknown_fields)]
 struct SessionAckPlaintextV2Wire {
     version: u16,
-    responder_device_id: DeviceId,
+    responder_device_id: String,
     responder_session_id: String,
-    challenger_device_id: DeviceId,
+    challenger_device_id: String,
     challenger_session_id: String,
     echoed_nonce_b64: String,
     sequence_floor: String,
@@ -567,9 +657,11 @@ impl<'de> Deserialize<'de> for SessionAckPlaintextV2 {
         let wire = SessionAckPlaintextV2Wire::deserialize(deserializer)?;
         let value = Self {
             version: wire.version,
-            responder_device_id: wire.responder_device_id,
+            responder_device_id: parse_device_id(&wire.responder_device_id)
+                .map_err(de::Error::custom)?,
             responder_session_id: wire.responder_session_id,
-            challenger_device_id: wire.challenger_device_id,
+            challenger_device_id: parse_device_id(&wire.challenger_device_id)
+                .map_err(de::Error::custom)?,
             challenger_session_id: wire.challenger_session_id,
             echoed_nonce_b64: wire.echoed_nonce_b64,
             sequence_floor: wire.sequence_floor,
@@ -599,7 +691,7 @@ impl JsonSchema for SessionAckPlaintextV2 {
         "SessionAckPlaintextV2".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"responder_device_id":{"type":"string","format":"uuid"},"responder_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"challenger_device_id":{"type":"string","format":"uuid"},"challenger_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"echoed_nonce_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{22}==$"},"sequence_floor":{"type":"string","pattern":"^[1-9][0-9]*$"}},"required":["version","responder_device_id","responder_session_id","challenger_device_id","challenger_session_id","echoed_nonce_b64","sequence_floor"]})
+        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"responder_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"responder_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"challenger_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"challenger_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"echoed_nonce_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{22}==$"},"sequence_floor":{"type":"string","pattern":"^[1-9][0-9]*$"}},"required":["version","responder_device_id","responder_session_id","challenger_device_id","challenger_session_id","echoed_nonce_b64","sequence_floor"]})
     }
 }
 

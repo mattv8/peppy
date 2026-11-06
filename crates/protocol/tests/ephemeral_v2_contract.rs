@@ -60,6 +60,7 @@ fn v2_rejects_invalid_headers_unknown_fields_and_v1_shapes() {
         ("session_id", serde_json::json!("AAAAAAAAAAAAAAAAAAAAAA==")),
         ("sequence", serde_json::json!("0")),
         ("sent_at_ms", serde_json::json!("01")),
+        ("sent_at_ms", serde_json::json!("18446744073709551616")),
         ("expires_at_ms", serde_json::json!("1000")),
         ("expires_at_ms", serde_json::json!("16001")),
         ("ciphertext_b64", serde_json::json!("%%%")),
@@ -193,6 +194,135 @@ fn v2_plaintext_gateway_condition_and_control_lengths_are_exact() {
     );
     assert_eq!(224 + 24 + 16, 264);
     assert_eq!(319 + 24 + 16, 359);
+}
+
+#[test]
+fn v2_wire_rejects_noncanonical_identifiers_and_strict_gateway_presence() {
+    let valid = serde_json::to_value(signal(EphemeralSignalV2Kind::Typing)).unwrap();
+    for field in ["sender_device_id"] {
+        for invalid in [
+            "00000000000000000000000000000001",
+            "00000000-0000-0000-0000-00000000000A",
+        ] {
+            let mut value = valid.clone();
+            value[field] = serde_json::json!(invalid);
+            assert!(
+                serde_json::from_value::<EphemeralSignalV2>(value).is_err(),
+                "{field}: {invalid}"
+            );
+        }
+    }
+
+    let typing = serde_json::json!({
+        "version":2,"origin":"google_contact","conversation_id":"00000000-0000-0000-0000-000000000003","state":"started"
+    });
+    assert!(serde_json::from_value::<TypingPlaintextV2>(typing.clone()).is_ok());
+    for invalid_gateway in [
+        serde_json::Value::Null,
+        serde_json::json!("00000000-0000-0000-0000-000000000004"),
+    ] {
+        let mut value = typing.clone();
+        value["gateway_device_id"] = invalid_gateway;
+        assert!(serde_json::from_value::<TypingPlaintextV2>(value).is_err());
+    }
+    let mut vault = typing;
+    vault["origin"] = serde_json::json!("vault_device");
+    assert!(serde_json::from_value::<TypingPlaintextV2>(vault.clone()).is_err());
+    vault["gateway_device_id"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<TypingPlaintextV2>(vault).is_err());
+}
+
+#[test]
+fn v2_generated_types_are_discriminated_without_unknown_compositions() {
+    let contracts = peppy_protocol::generate_contracts();
+    let schema: serde_json::Value = serde_json::from_str(&contracts.openapi).unwrap();
+    assert!(schema["components"]["schemas"]["TypingPlaintextV2"]["oneOf"].is_array());
+    assert_eq!(
+        schema["components"]["schemas"]["EphemeralSignalV2"]["oneOf"][1]["properties"]["ciphertext_b64"]
+            ["maxLength"],
+        684
+    );
+    let declaration = contracts
+        .typescript
+        .lines()
+        .find(|line| line.starts_with("export type TypingPlaintextV2"))
+        .unwrap();
+    assert!(
+        declaration.contains("conversation_id")
+            && declaration.contains("gateway_device_id")
+            && !declaration.contains("unknown")
+    );
+}
+
+#[test]
+fn v2_plaintext_variants_and_canonical_boundaries_are_exhaustively_strict() {
+    let session = URL_SAFE_NO_PAD.encode([7_u8; 16]);
+    let nonce = STANDARD.encode([8_u8; 16]);
+    for (origin, gateway, accepted) in [
+        ("google_contact", None, true),
+        ("google_contact", Some(serde_json::Value::Null), false),
+        (
+            "google_contact",
+            Some(serde_json::json!("00000000-0000-0000-0000-000000000004")),
+            false,
+        ),
+        ("vault_device", None, false),
+        ("vault_device", Some(serde_json::Value::Null), false),
+        (
+            "vault_device",
+            Some(serde_json::json!("00000000-0000-0000-0000-000000000004")),
+            true,
+        ),
+    ] {
+        let mut value = serde_json::json!({"version":2,"origin":origin,"conversation_id":"00000000-0000-0000-0000-000000000003","state":"started"});
+        if let Some(gateway) = gateway {
+            value["gateway_device_id"] = gateway;
+        }
+        assert_eq!(
+            serde_json::from_value::<TypingPlaintextV2>(value).is_ok(),
+            accepted,
+            "{origin}"
+        );
+    }
+    let mut invalid_origin = serde_json::json!({"version":2,"origin":"other","conversation_id":"00000000-0000-0000-0000-000000000003","state":"started"});
+    invalid_origin["extra"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<TypingPlaintextV2>(invalid_origin).is_err());
+
+    let challenge = serde_json::json!({"version":2,"challenger_device_id":"00000000-0000-0000-0000-000000000001","challenger_session_id":session,"responder_device_id":"00000000-0000-0000-0000-000000000002","nonce_b64":nonce});
+    let ack = serde_json::json!({"version":2,"responder_device_id":"00000000-0000-0000-0000-000000000001","responder_session_id":session,"challenger_device_id":"00000000-0000-0000-0000-000000000002","challenger_session_id":session,"echoed_nonce_b64":nonce,"sequence_floor":"1"});
+    for invalid in [
+        "00000000000000000000000000000001",
+        "00000000-0000-0000-0000-00000000000A",
+    ] {
+        let mut value = serde_json::json!({"version":2,"origin":"vault_device","conversation_id":"00000000-0000-0000-0000-000000000003","state":"started","gateway_device_id":"00000000-0000-0000-0000-000000000004"});
+        value["conversation_id"] = serde_json::json!(invalid);
+        assert!(serde_json::from_value::<TypingPlaintextV2>(value).is_err());
+        let mut value = serde_json::json!({"version":2,"origin":"vault_device","conversation_id":"00000000-0000-0000-0000-000000000003","state":"started","gateway_device_id":"00000000-0000-0000-0000-000000000004"});
+        value["gateway_device_id"] = serde_json::json!(invalid);
+        assert!(serde_json::from_value::<TypingPlaintextV2>(value).is_err());
+        for field in ["challenger_device_id", "responder_device_id"] {
+            let mut value = challenge.clone();
+            value[field] = serde_json::json!(invalid);
+            assert!(serde_json::from_value::<ChallengePlaintextV2>(value).is_err());
+        }
+        for field in ["responder_device_id", "challenger_device_id"] {
+            let mut value = ack.clone();
+            value[field] = serde_json::json!(invalid);
+            assert!(serde_json::from_value::<SessionAckPlaintextV2>(value).is_err());
+        }
+    }
+    for malformed in ["AAAAAAAAAAAAAAAAAAAAAB", "AAAAAAAAAAAAAAAAAAAAAA=="] {
+        let mut value = ack.clone();
+        value["responder_session_id"] = serde_json::json!(malformed);
+        assert!(serde_json::from_value::<SessionAckPlaintextV2>(value).is_err());
+    }
+    for field in ["sequence_floor"] {
+        for invalid in ["0", "18446744073709551616"] {
+            let mut value = ack.clone();
+            value[field] = serde_json::json!(invalid);
+            assert!(serde_json::from_value::<SessionAckPlaintextV2>(value).is_err());
+        }
+    }
 }
 
 #[test]
