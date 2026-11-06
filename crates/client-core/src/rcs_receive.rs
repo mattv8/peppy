@@ -45,7 +45,6 @@ pub struct RcsOwnership {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RcsProviderDetector {
-    pub conversation_id: ConversationId,
     pub provider_row_id: i64,
     pub provider_thread_id: i64,
     pub provider_type: i64,
@@ -379,6 +378,7 @@ impl Client {
                 "UPDATE rcs_lane_ownership SET alert_code='gateway_unavailable' WHERE conversation_id=?",
                 [conversation_id.to_string()],
             )?;
+            publish_metadata(&tx, &ctx, conversation_id, None, true)?;
             tx.commit()?;
             return Ok(RcsReceiveOutcome::Rejected(
                 RcsReceiveCode::GatewayUnavailable,
@@ -554,6 +554,11 @@ impl Client {
         {
             return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::OwnershipStale));
         }
+        if !unique_current_gateway(&tx, ctx.device_id)? {
+            return Ok(RcsReceiveOutcome::Rejected(
+                RcsReceiveCode::GatewayUnavailable,
+            ));
+        }
         let mut identity_recorded = false;
         let mut message_id: Option<String> = tx.query_row(
             "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=? AND conversation_id=?",
@@ -632,9 +637,8 @@ impl Client {
             return Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::CursorInvalid));
         }
         let mut store = self.lock()?;
-        let tx = store
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(ownership) = load_ownership(&tx, conversation_id)? else {
             return Ok(RcsIdentityOutcome::Rejected(
                 RcsReceiveCode::ConversationUnproven,
@@ -644,6 +648,11 @@ impl Client {
             || ownership.ownership_generation != ownership_generation
         {
             return Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale));
+        }
+        if !unique_current_gateway(&tx, ctx.device_id)? {
+            return Ok(RcsIdentityOutcome::Rejected(
+                RcsReceiveCode::GatewayUnavailable,
+            ));
         }
         tx.execute(
             "UPDATE rcs_lane_ownership SET history_token=? WHERE conversation_id=? AND ownership_generation=?",
@@ -661,7 +670,12 @@ impl Client {
     }
 
     /// Records detector metadata only; this method never writes a vault message.
-    pub fn record_rcs_provider_detector(&self, detector: RcsProviderDetector) -> Result<(), Error> {
+    pub fn record_rcs_provider_detector(
+        &self,
+        conversation_id: ConversationId,
+        ownership_generation: u64,
+        detector: RcsProviderDetector,
+    ) -> Result<RcsIdentityOutcome, Error> {
         if detector.provider_row_id < 0
             || detector.provider_thread_id < 0
             || detector.provider_type < 0
@@ -671,19 +685,34 @@ impl Client {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let conversation_id = detector.conversation_id.to_string();
+        let Some(ownership) = load_ownership(&tx, conversation_id)? else {
+            return Ok(RcsIdentityOutcome::Rejected(
+                RcsReceiveCode::ConversationUnproven,
+            ));
+        };
+        if ownership.owner != RcsReceiveOwner::Link
+            || ownership.ownership_generation != ownership_generation
+        {
+            return Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale));
+        }
+        if !unique_current_gateway(&tx, ctx.device_id)? {
+            return Ok(RcsIdentityOutcome::Rejected(
+                RcsReceiveCode::GatewayUnavailable,
+            ));
+        }
+        let conversation_key = conversation_id.to_string();
         tx.execute(
             "UPDATE rcs_lane_ownership SET observed_detector_high_water=MAX(observed_detector_high_water,?) WHERE conversation_id=?",
-            params![detector.provider_row_id, conversation_id],
+            params![detector.provider_row_id, conversation_key],
         )?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM rcs_provider_detectors WHERE conversation_id=? AND provider_row_id=?)",
-            params![conversation_id, detector.provider_row_id],
+            params![conversation_key, detector.provider_row_id],
             |row| row.get(0),
         )?;
         if exists {
             tx.commit()?;
-            return Ok(());
+            return Ok(RcsIdentityOutcome::Duplicate);
         }
         tx.execute(
             "DELETE FROM rcs_provider_detectors WHERE conversation_id=? AND provider_row_id IN (
@@ -694,32 +723,32 @@ impl Client {
                 LIMIT 1
             )",
             params![
-                conversation_id,
-                conversation_id,
-                conversation_id,
+                conversation_key,
+                conversation_key,
+                conversation_key,
                 MAX_DETECTORS_PER_CONVERSATION
             ],
         )?;
         let count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?",
-            [conversation_id.as_str()],
+            [conversation_key.as_str()],
             |row| row.get(0),
         )?;
         if count >= MAX_DETECTORS_PER_CONVERSATION {
             tx.execute(
                 "UPDATE rcs_lane_ownership SET alert_code='detector_overflow' WHERE conversation_id=?",
-                [conversation_id.as_str()],
+                [conversation_key.as_str()],
             )?;
-            publish_metadata(&tx, &ctx, detector.conversation_id, None, true)?;
+            publish_metadata(&tx, &ctx, conversation_id, None, true)?;
             tx.commit()?;
-            return Ok(());
+            return Ok(RcsIdentityOutcome::Recorded);
         }
         tx.execute(
             "INSERT INTO rcs_provider_detectors(conversation_id,provider_row_id,provider_thread_id,provider_type,observed_at_ms,observed_generation,resolved) VALUES(?,?,?,?,?,?,0)",
-            params![conversation_id, detector.provider_row_id, detector.provider_thread_id, detector.provider_type, detector.observed_at_ms, detector.observed_generation],
+            params![conversation_key, detector.provider_row_id, detector.provider_thread_id, detector.provider_type, detector.observed_at_ms, detector.observed_generation],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(RcsIdentityOutcome::Recorded)
     }
 
     /// Freezes link writing and makes provider ownership effective for rows after this floor.
