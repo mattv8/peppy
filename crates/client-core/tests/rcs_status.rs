@@ -425,9 +425,15 @@ fn compacted_snapshot_restores_fact_only_reported_values() {
             .unwrap();
         restored.finish_snapshot(session.generation).unwrap();
         while restored.apply_pending(100).unwrap().snapshot_remaining > 0 {}
-        let message_id = only_message(&gateway, conversation).payload.record.message_id;
+        let message_id = only_message(&gateway, conversation)
+            .payload
+            .record
+            .message_id;
         assert_eq!(restored.rcs_message_status(message_id).unwrap(), None);
-        assert_eq!(restored.rcs_message_reported(message_id).unwrap(), Some(reported));
+        assert_eq!(
+            restored.rcs_message_reported(message_id).unwrap(),
+            Some(reported)
+        );
     }
 }
 
