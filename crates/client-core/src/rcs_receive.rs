@@ -79,6 +79,7 @@ pub enum RcsReceiveOutcome {
     Inserted,
     Duplicate,
     UnmatchedOutgoing,
+    OutgoingMatched,
     StatusApplied,
     StatusUnchanged,
     Rejected(RcsReceiveCode),
@@ -265,6 +266,33 @@ impl Client {
                 .is_some_and(|sent_at_ms| sent_at_ms <= ownership.detector_floor)
         {
             return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor));
+        }
+        if record.direction == Direction::Outgoing
+            && let Some(tmp_id) = record.tmp_id.as_deref()
+            && let Some(message_id) = tx
+                    .query_row(
+                        "SELECT c.message_id FROM rcs_send_ledger l JOIN commands c ON c.command_id=l.command_id WHERE l.tmp_id=? AND l.google_conversation_id=?",
+                        params![tmp_id, record.google_conversation_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+        {
+                let message_id = message_id.parse().map_err(|_| Error::Database)?;
+                return match record_identity(
+                    &tx,
+                    conversation_id,
+                    ownership_generation,
+                    &record.google_message_id,
+                    &record.google_conversation_id,
+                    Some(message_id),
+                )? {
+                    RcsIdentityOutcome::Recorded => {
+                        tx.commit()?;
+                        Ok(RcsReceiveOutcome::OutgoingMatched)
+                    }
+                    RcsIdentityOutcome::Duplicate => Ok(RcsReceiveOutcome::Duplicate),
+                    RcsIdentityOutcome::Rejected(code) => Ok(RcsReceiveOutcome::Rejected(code)),
+                };
         }
         let message_id = deterministic_message_id(
             &ctx,
