@@ -975,6 +975,134 @@ async fn live_ticket_issue_hashes_ticket_and_delete_terminalizes_session() {
     server.shutdown().await;
 }
 
+async fn live_ticket_request(
+    server: &LiveTestServer,
+    method: reqwest::Method,
+    session_id: String,
+) -> reqwest::Response {
+    reqwest::Client::new()
+        .request(method, format!("{}/v1/live/tickets", server.base_url))
+        .bearer_auth(&server.owner_token)
+        .json(&serde_json::json!({"session_id": session_id}))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn live_ticket_delete_before_issue_is_terminal_and_tickets_are_not_stored_raw() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let closed_id = URL_SAFE_NO_PAD.encode([9_u8; 16]);
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::DELETE, closed_id.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    let rejected = live_ticket_request(&server, reqwest::Method::POST, closed_id).await;
+    assert_eq!(rejected.status(), reqwest::StatusCode::CONFLICT);
+
+    let active_id = URL_SAFE_NO_PAD.encode([10_u8; 16]);
+    let issued = live_ticket_request(&server, reqwest::Method::POST, active_id).await;
+    assert_eq!(issued.status(), reqwest::StatusCode::CREATED);
+    let ticket = issued.json::<serde_json::Value>().await.unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let raw = URL_SAFE_NO_PAD.decode(ticket).unwrap();
+    let stored_raw: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE ticket_digest=$1")
+            .bind(&raw)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored_raw, 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_ticket_caps_bound_fresh_session_creation_and_tombstones() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let first = URL_SAFE_NO_PAD.encode([11_u8; 16]);
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::POST, first.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::POST, first.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::POST, first.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        live_ticket_request(
+            &server,
+            reqwest::Method::POST,
+            URL_SAFE_NO_PAD.encode([12_u8; 16])
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::DELETE, first)
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+
+    for byte in 13_u8..18 {
+        assert_eq!(
+            live_ticket_request(
+                &server,
+                reqwest::Method::DELETE,
+                URL_SAFE_NO_PAD.encode([byte; 16])
+            )
+            .await
+            .status(),
+            reqwest::StatusCode::NO_CONTENT
+        );
+    }
+    assert_eq!(
+        live_ticket_request(
+            &server,
+            reqwest::Method::DELETE,
+            URL_SAFE_NO_PAD.encode([18_u8; 16])
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    let sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert!(sessions <= 6);
+    assert_eq!(
+        live_ticket_request(
+            &server,
+            reqwest::Method::DELETE,
+            URL_SAFE_NO_PAD.encode([11_u8; 16])
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn readiness_loss_disconnects_established_socket_as_unavailable() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
