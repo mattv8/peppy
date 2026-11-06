@@ -570,6 +570,7 @@ fn session_error(error: super::ephemeral_v2_session::SessionError) -> LiveError 
     match error {
         super::ephemeral_v2_session::SessionError::Capacity => LiveError::InvalidContext,
         super::ephemeral_v2_session::SessionError::CounterExhausted => LiveError::CounterExhausted,
+        super::ephemeral_v2_session::SessionError::InstallExhausted => LiveError::InvalidContext,
     }
 }
 

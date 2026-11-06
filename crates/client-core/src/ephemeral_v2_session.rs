@@ -103,6 +103,7 @@ pub(crate) struct SessionTransition {
 pub(crate) enum SessionError {
     Capacity,
     CounterExhausted,
+    InstallExhausted,
 }
 
 #[derive(Clone, Debug)]
@@ -135,7 +136,6 @@ struct ValidatedSession {
     floor: u64,
     lease_deadline_mono_ms: u64,
     token: u64,
-    revision: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -311,11 +311,11 @@ impl EphemeralV2SessionState {
             let token = self
                 .next_session_token
                 .checked_add(1)
-                .ok_or(SessionError::CounterExhausted)?;
+                .ok_or(SessionError::InstallExhausted)?;
             let revision = self
                 .next_validation_revision
                 .checked_add(1)
-                .ok_or(SessionError::CounterExhausted)?;
+                .ok_or(SessionError::InstallExhausted)?;
             self.next_session_token = token;
             self.next_validation_revision = revision;
             self.validated.insert(
@@ -325,7 +325,6 @@ impl EphemeralV2SessionState {
                     floor: input.sequence_floor.0,
                     lease_deadline_mono_ms,
                     token,
-                    revision,
                 },
             );
             for ((peer, _), record) in &mut self.records {
@@ -549,18 +548,20 @@ mod tests {
             .challenge
             .unwrap();
         state.record_challenge(renewal, nonce(2)).unwrap();
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                peer_session,
-                conversation(1),
-                103,
-                SessionTypingState::Stopped,
-                10_001
-            ))
-            .unwrap()
-            .action
-            .is_some());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(1),
+                    103,
+                    SessionTypingState::Stopped,
+                    10_001
+                ))
+                .unwrap()
+                .action
+                .is_some()
+        );
         state
             .accept_ack(AuthenticatedAck {
                 peer,
@@ -605,18 +606,20 @@ mod tests {
             .challenge
             .unwrap();
         state.record_challenge(renewal, nonce(2)).unwrap();
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                peer_session,
-                conversation(1),
-                102,
-                SessionTypingState::Started,
-                LEASE_MS
-            ))
-            .unwrap()
-            .challenge
-            .is_none());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(1),
+                    102,
+                    SessionTypingState::Started,
+                    LEASE_MS
+                ))
+                .unwrap()
+                .challenge
+                .is_none()
+        );
     }
 
     #[test]
@@ -640,42 +643,48 @@ mod tests {
                 .record_challenge(intent, nonce((at / 10_000 + 1) as u8))
                 .unwrap();
         }
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                session(2),
-                conversation(1),
-                1,
-                SessionTypingState::Started,
-                30_000
-            ))
-            .unwrap()
-            .challenge
-            .is_none());
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                session(2),
-                conversation(1),
-                1,
-                SessionTypingState::Started,
-                89_999
-            ))
-            .unwrap()
-            .challenge
-            .is_none());
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                session(2),
-                conversation(1),
-                1,
-                SessionTypingState::Started,
-                90_000
-            ))
-            .unwrap()
-            .challenge
-            .is_some());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    session(2),
+                    conversation(1),
+                    1,
+                    SessionTypingState::Started,
+                    30_000
+                ))
+                .unwrap()
+                .challenge
+                .is_none()
+        );
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    session(2),
+                    conversation(1),
+                    1,
+                    SessionTypingState::Started,
+                    89_999
+                ))
+                .unwrap()
+                .challenge
+                .is_none()
+        );
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    session(2),
+                    conversation(1),
+                    1,
+                    SessionTypingState::Started,
+                    90_000
+                ))
+                .unwrap()
+                .challenge
+                .is_some()
+        );
     }
 
     #[test]
@@ -711,6 +720,37 @@ mod tests {
         assert_eq!(update.replaced_session_token, Some(1));
         assert_eq!(update.current_session_token, 2);
         assert_eq!(update.validation_revision, 2);
+    }
+
+    #[test]
+    fn installation_counter_exhaustion_is_distinct_from_sender_exhaustion() {
+        let peer = device(1);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        state.next_session_token = u64::MAX;
+        let challenge = state
+            .observe_typing(typing(
+                peer,
+                session(2),
+                conversation(1),
+                1,
+                SessionTypingState::Started,
+                0,
+            ))
+            .unwrap()
+            .challenge
+            .unwrap();
+        state.record_challenge(challenge, nonce(1)).unwrap();
+        assert_eq!(
+            state.accept_ack(AuthenticatedAck {
+                peer,
+                session: session(2),
+                challenger_session: session(9),
+                nonce: nonce(1),
+                sequence_floor: AuthenticatedSequence(1),
+                received_mono_ms: MonoTime(1),
+            }),
+            Err(SessionError::InstallExhausted)
+        );
     }
 
     #[test]
@@ -758,18 +798,20 @@ mod tests {
         ] {
             assert_eq!(state.accept_ack(ack).unwrap(), SessionTransition::default());
         }
-        assert!(state
-            .accept_ack(AuthenticatedAck {
-                peer,
-                session: session(3),
-                challenger_session: session(9),
-                nonce: nonce(1),
-                sequence_floor: AuthenticatedSequence(1),
-                received_mono_ms: MonoTime(1)
-            })
-            .unwrap()
-            .session_update
-            .is_some());
+        assert!(
+            state
+                .accept_ack(AuthenticatedAck {
+                    peer,
+                    session: session(3),
+                    challenger_session: session(9),
+                    nonce: nonce(1),
+                    sequence_floor: AuthenticatedSequence(1),
+                    received_mono_ms: MonoTime(1)
+                })
+                .unwrap()
+                .session_update
+                .is_some()
+        );
     }
 
     #[test]
@@ -778,54 +820,62 @@ mod tests {
         let peer_session = session(2);
         let mut state = EphemeralV2SessionState::new(session(9));
         validate(&mut state, peer, peer_session, 0);
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                peer_session,
-                conversation(1),
-                101,
-                SessionTypingState::Started,
-                1
-            ))
-            .unwrap()
-            .action
-            .is_some());
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                peer_session,
-                conversation(2),
-                101,
-                SessionTypingState::Started,
-                1
-            ))
-            .unwrap()
-            .action
-            .is_some());
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                peer_session,
-                conversation(1),
-                102,
-                SessionTypingState::Started,
-                2
-            ))
-            .unwrap()
-            .action
-            .is_none());
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                peer_session,
-                conversation(1),
-                102,
-                SessionTypingState::Started,
-                3_001
-            ))
-            .unwrap()
-            .action
-            .is_none());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(1),
+                    101,
+                    SessionTypingState::Started,
+                    1
+                ))
+                .unwrap()
+                .action
+                .is_some()
+        );
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(2),
+                    101,
+                    SessionTypingState::Started,
+                    1
+                ))
+                .unwrap()
+                .action
+                .is_some()
+        );
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(1),
+                    102,
+                    SessionTypingState::Started,
+                    2
+                ))
+                .unwrap()
+                .action
+                .is_none()
+        );
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(1),
+                    102,
+                    SessionTypingState::Started,
+                    3_001
+                ))
+                .unwrap()
+                .action
+                .is_none()
+        );
     }
 
     #[test]
@@ -871,31 +921,35 @@ mod tests {
                 .unwrap();
         }
         let records_before = state.records.len();
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                peer_session,
-                conversation(999),
-                101,
-                SessionTypingState::Started,
-                1
-            ))
-            .unwrap()
-            .action
-            .is_none());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(999),
+                    101,
+                    SessionTypingState::Started,
+                    1
+                ))
+                .unwrap()
+                .action
+                .is_none()
+        );
         assert_eq!(state.records.len(), records_before);
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                peer_session,
-                conversation(0),
-                102,
-                SessionTypingState::Started,
-                3_001
-            ))
-            .unwrap()
-            .action
-            .is_some());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(0),
+                    102,
+                    SessionTypingState::Started,
+                    3_001
+                ))
+                .unwrap()
+                .action
+                .is_some()
+        );
     }
 
     #[test]
@@ -954,33 +1008,37 @@ mod tests {
             }
         }
         let peer_sixteen = device(16);
-        assert!(state
-            .observe_typing(typing(
-                peer_sixteen,
-                session(16),
-                conversation(999),
-                101,
-                SessionTypingState::Started,
-                1
-            ))
-            .unwrap()
-            .action
-            .is_some());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer_sixteen,
+                    session(16),
+                    conversation(999),
+                    101,
+                    SessionTypingState::Started,
+                    1
+                ))
+                .unwrap()
+                .action
+                .is_some()
+        );
         let records_before = state.records.len();
         let peer_seventeen = device(17);
         validate(&mut state, peer_seventeen, session(17), 0);
-        assert!(state
-            .observe_typing(typing(
-                peer_seventeen,
-                session(17),
-                conversation(0),
-                101,
-                SessionTypingState::Started,
-                1
-            ))
-            .unwrap()
-            .action
-            .is_none());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer_seventeen,
+                    session(17),
+                    conversation(0),
+                    101,
+                    SessionTypingState::Started,
+                    1
+                ))
+                .unwrap()
+                .action
+                .is_none()
+        );
         assert_eq!(state.records.len(), records_before);
         let peer = device(1);
         let intent = state
@@ -1006,18 +1064,20 @@ mod tests {
                 received_mono_ms: MonoTime(QUOTA_WINDOW_MS + 2),
             })
             .unwrap();
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                session(1),
-                conversation(999),
-                101,
-                SessionTypingState::Started,
-                QUOTA_WINDOW_MS + 3
-            ))
-            .unwrap()
-            .action
-            .is_some());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    session(1),
+                    conversation(999),
+                    101,
+                    SessionTypingState::Started,
+                    QUOTA_WINDOW_MS + 3
+                ))
+                .unwrap()
+                .action
+                .is_some()
+        );
     }
 
     #[test]
@@ -1093,22 +1153,21 @@ mod tests {
             .unwrap();
         assert_eq!(renewal_ack.session_update, None);
         let validated = state.validated[&peer];
-        assert_eq!(
-            (validated.token, validated.revision, validated.floor),
-            (1, 1, 100)
-        );
+        assert_eq!((validated.token, validated.floor), (1, 100));
         assert_eq!(state.records[&(peer, conversation(1))].high_water, 103);
-        assert!(state
-            .observe_typing(typing(
-                peer,
-                peer_session,
-                conversation(1),
-                102,
-                SessionTypingState::Started,
-                16_001
-            ))
-            .unwrap()
-            .action
-            .is_none());
+        assert!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(1),
+                    102,
+                    SessionTypingState::Started,
+                    16_001
+                ))
+                .unwrap()
+                .action
+                .is_none()
+        );
     }
 }
