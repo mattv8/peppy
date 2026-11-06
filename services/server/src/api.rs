@@ -2944,6 +2944,23 @@ async fn issue_live_ticket(
     headers: HeaderMap,
     Json(request): Json<LiveTicketRequest>,
 ) -> ApiResult<(StatusCode, Json<LiveTicketResponse>)> {
+    if state.live_trusted_origin.is_none() {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live_ticket_unsupported",
+        ));
+    }
+    let ready = if cfg!(test) {
+        *state.live_readiness.borrow()
+    } else {
+        state.live_backend.is_ready()
+    };
+    if !ready {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live_unavailable",
+        ));
+    }
     let p = authenticated(&state, &headers, Operation::Sync).await?;
     let session = live_ticket_session_hash(&request.session_id)?;
     let mut tx = live_ticket_tx(&state, &p).await?;

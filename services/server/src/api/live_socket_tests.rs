@@ -122,6 +122,14 @@ struct LiveTestServer {
     peer_device: Uuid,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct LiveTicketWriteCounts {
+    presence: i64,
+    tickets: i64,
+    sessions: i64,
+    admissions: i64,
+}
+
 impl LiveTestServer {
     async fn start(backend: FakeLiveBackend, ready: bool) -> Self {
         Self::start_with_trusted_origin(backend, ready, LIVE_PUBLISH_TIMEOUT, true).await
@@ -1121,6 +1129,43 @@ async fn issue_ticket(server: &LiveTestServer, session_id: String) -> String {
         .to_owned()
 }
 
+async fn live_ticket_write_counts(server: &LiveTestServer) -> LiveTicketWriteCounts {
+    LiveTicketWriteCounts {
+        presence: sqlx::query_scalar(
+            "SELECT count(*) FROM device_presence WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap(),
+        tickets: sqlx::query_scalar(
+            "SELECT count(*) FROM live_tickets WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap(),
+        sessions: sqlx::query_scalar(
+            "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap(),
+        admissions: sqlx::query_scalar(
+            "SELECT count(*) FROM device_admissions WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap(),
+    }
+}
+
 fn live_ticket_protocol(session_id: &str, ticket: &str) -> String {
     format!("peppy-live-v2.{session_id}.{ticket}")
 }
@@ -1137,10 +1182,13 @@ async fn ticket_live_upgrade_echoes_protocol_and_sends_hello() {
 
 #[tokio::test]
 async fn ticket_upgrade_without_trusted_origin_returns_fixed_unsupported_code() {
+    let session_id = URL_SAFE_NO_PAD.encode([30_u8; 16]);
+    let configured = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let ticket = issue_ticket(&configured, session_id.clone()).await;
+    configured.shutdown().await;
+
     let server =
         LiveTestServer::start_without_trusted_origin(FakeLiveBackend::immediate(), true).await;
-    let session_id = URL_SAFE_NO_PAD.encode([30_u8; 16]);
-    let ticket = issue_ticket(&server, session_id.clone()).await;
     let protocol = live_ticket_protocol(&session_id, &ticket);
     let mut headers = HeaderMap::new();
     headers.insert("origin", "https://web.peppy.test".parse().unwrap());
@@ -1155,6 +1203,63 @@ async fn ticket_upgrade_without_trusted_origin_returns_fixed_unsupported_code() 
         StatusCode::SERVICE_UNAVAILABLE
     );
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn ticket_issuance_rejects_unconfigured_or_unready_without_writes() {
+    let unconfigured =
+        LiveTestServer::start_without_trusted_origin(FakeLiveBackend::immediate(), true).await;
+    let before = live_ticket_write_counts(&unconfigured).await;
+    let response = live_ticket_request(
+        &unconfigured,
+        reqwest::Method::POST,
+        URL_SAFE_NO_PAD.encode([31_u8; 16]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["code"],
+        "live_ticket_unsupported"
+    );
+    assert_eq!(live_ticket_write_counts(&unconfigured).await, before);
+    unconfigured.shutdown().await;
+
+    let unready = LiveTestServer::start(FakeLiveBackend::immediate(), false).await;
+    let before = live_ticket_write_counts(&unready).await;
+    let response = live_ticket_request(
+        &unready,
+        reqwest::Method::POST,
+        URL_SAFE_NO_PAD.encode([32_u8; 16]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["code"],
+        "live_unavailable"
+    );
+    assert_eq!(live_ticket_write_counts(&unready).await, before);
+    unready.shutdown().await;
+
+    let ready = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let before = live_ticket_write_counts(&ready).await;
+    let response = live_ticket_request(
+        &ready,
+        reqwest::Method::POST,
+        URL_SAFE_NO_PAD.encode([33_u8; 16]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(response.json::<serde_json::Value>().await.unwrap()["ticket"].is_string());
+    assert_eq!(
+        live_ticket_write_counts(&ready).await,
+        LiveTicketWriteCounts {
+            presence: before.presence + 1,
+            tickets: before.tickets + 1,
+            sessions: before.sessions + 1,
+            admissions: before.admissions,
+        }
+    );
+    ready.shutdown().await;
 }
 
 #[tokio::test]
