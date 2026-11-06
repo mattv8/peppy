@@ -3174,6 +3174,7 @@ async fn live_session(
             peer,
             backend,
             generation,
+            ticket_session,
             outgoing: registration.receiver,
             cancellation: registration.cancellation,
             readiness,
@@ -3204,6 +3205,7 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
         peer,
         backend,
         generation,
+        ticket_session,
         mut outgoing,
         mut cancellation,
         mut readiness,
@@ -3225,7 +3227,7 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
     ) {
         return;
     }
-    let mut recheck = tokio::time::interval(Duration::from_secs(20));
+    let mut recheck = tokio::time::interval(live_recheck_interval());
     let mut challenge: Option<Vec<u8>> = None;
     loop {
         tokio::select! {
@@ -3240,7 +3242,19 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
                     return live_close(&mut socket, 1011, "live_unavailable").await;
                 }
             }
-            _ = recheck.tick() => match live_revalidate(&state, &principal, &mut cancellation, &mut readiness).await {
+            _ = recheck.tick() => {
+                let revalidation = match ticket_session {
+                    Some(session_id) => live_ticket_revalidate(
+                        &state,
+                        &principal,
+                        session_id,
+                        generation,
+                        &mut cancellation,
+                        &mut readiness,
+                    ).await,
+                    None => live_revalidate(&state, &principal, &mut cancellation, &mut readiness).await,
+                };
+                match revalidation {
                 LiveRevalidation::Authorized => {
                     if challenge.is_some() {
                         return;
@@ -3253,8 +3267,9 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
                 }
                 LiveRevalidation::Unauthorized => return live_close(&mut socket, 1008, "live_unauthorized").await,
                 LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
-                LiveRevalidation::Cancelled => return,
-            },
+                    LiveRevalidation::Cancelled => return,
+                }
+            }
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_))) | None => return,
                 Some(Err(_)) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
@@ -3334,6 +3349,7 @@ struct LiveSession {
     peer: Option<IpAddr>,
     backend: Arc<dyn crate::live::LiveBackend>,
     generation: u64,
+    ticket_session: Option<[u8; 16]>,
     outgoing: tokio::sync::mpsc::Receiver<LiveFrameV2>,
     cancellation: tokio::sync::watch::Receiver<bool>,
     readiness: tokio::sync::watch::Receiver<bool>,
@@ -3429,6 +3445,52 @@ enum LiveRevalidation {
     Unauthorized,
     Unavailable,
     Cancelled,
+}
+
+#[cfg(test)]
+const LIVE_RECHECK_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const LIVE_RECHECK_INTERVAL: Duration = Duration::from_secs(20);
+
+fn live_recheck_interval() -> Duration {
+    LIVE_RECHECK_INTERVAL
+}
+
+async fn live_ticket_revalidate(
+    state: &ApiState,
+    principal: &Principal,
+    session_id: [u8; 16],
+    generation: u64,
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+) -> LiveRevalidation {
+    if state.live_hub.ticket_generation(
+        VaultId(principal.vault),
+        DeviceId(principal.device),
+        session_id,
+    ) != Some(generation)
+    {
+        return LiveRevalidation::Unauthorized;
+    }
+    let session_hash = Sha256::digest(session_id);
+    let renewed = match scope::begin(&state.db, principal.vault).await {
+        Ok(mut tx) => match sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()+interval '90 seconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open' AND lease_until>now()")
+            .bind(principal.vault)
+            .bind(principal.device)
+            .bind(session_hash.as_slice())
+            .execute(&mut *tx)
+            .await
+        {
+            Ok(result) => tx.commit().await.map(|_| result.rows_affected() == 1),
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    };
+    match renewed {
+        Ok(true) => live_revalidate(state, principal, cancellation, readiness).await,
+        Ok(false) => LiveRevalidation::Unauthorized,
+        Err(_) => LiveRevalidation::Unavailable,
+    }
 }
 
 async fn live_revalidate(

@@ -1215,6 +1215,74 @@ async fn deleting_ticket_session_closes_its_open_socket() {
 }
 
 #[tokio::test]
+async fn ticket_socket_recheck_renews_its_open_lease() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([38_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let session_hash = Sha256::digest(URL_SAFE_NO_PAD.decode(&session_id).unwrap()).to_vec();
+    let before: i64 = sqlx::query_scalar("SELECT (extract(epoch FROM lease_until)*1000000)::bigint FROM live_ticket_sessions WHERE session_id_hash=$1")
+        .bind(&session_hash)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
+    expect_strict_hello(&mut socket).await;
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    let after: i64 = sqlx::query_scalar("SELECT (extract(epoch FROM lease_until)*1000000)::bigint FROM live_ticket_sessions WHERE session_id_hash=$1")
+        .bind(session_hash)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert!(after > before);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn ticket_socket_recheck_closes_revoked_device() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([39_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
+    expect_strict_hello(&mut socket).await;
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let close = next_close(&mut socket).await;
+    assert_eq!(close.code, CloseCode::Policy);
+    assert_eq!(close.reason, "live_unauthorized");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn ticket_socket_recheck_closes_closed_or_expired_lease() {
+    for (value, update) in [
+        (40_u8, "state='closed', closed_at=now(), lease_until=NULL"),
+        (41_u8, "lease_until=now()-interval '1 second'"),
+    ] {
+        let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+        let session_id = URL_SAFE_NO_PAD.encode([value; 16]);
+        let ticket = issue_ticket(&server, session_id.clone()).await;
+        let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
+        expect_strict_hello(&mut socket).await;
+        sqlx::query(&format!(
+            "UPDATE live_ticket_sessions SET {update} WHERE vault_id=$1 AND device_id=$2"
+        ))
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+        let close = next_close(&mut socket).await;
+        assert_eq!(close.code, CloseCode::Policy);
+        assert_eq!(close.reason, "live_unauthorized");
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn delayed_ticket_cancel_for_g1_leaves_g2_open() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let session_id = URL_SAFE_NO_PAD.encode([37_u8; 16]);
