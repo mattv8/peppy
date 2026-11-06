@@ -345,6 +345,124 @@ fn disabled_sharing_preserves_outbound_clock_and_sequence_state() {
 }
 
 #[test]
+fn hostile_v2_headers_drop_without_retiring_a_valid_roster_receiver() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&directory, "v2-hostile-sender", &vault);
+    let receiver_config = config(&directory, "v2-hostile-receiver", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let receiver = unlocked(&receiver_config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&receiver, receiver_config.device_id, conversation);
+    let mut server = Server::default();
+    server.upload(&receiver);
+    server.sync(&sender);
+    let altered_sender = DeviceId::new();
+    let roster = vec![
+        sender_config.device_id,
+        receiver_config.device_id,
+        altered_sender,
+    ];
+    sender
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster.clone(),
+                local_gateway_device_id: sender_config.device_id,
+                local_executor: LiveExecutor::None,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+    receiver
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster,
+                local_gateway_device_id: receiver_config.device_id,
+                local_executor: LiveExecutor::CurrentGateway,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+    let valid = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        1_001,
+        1_001,
+    )
+    .unwrap()
+    .signal;
+
+    let mut aad_tampered = valid.clone();
+    aad_tampered.sender_device_id = altered_sender;
+    assert_eq!(
+        receiver
+            .open_typing_signal_v2(
+                &aad_tampered,
+                LiveClock {
+                    wall_ms: 1_001,
+                    mono_ms: 1_001
+                }
+            )
+            .unwrap()
+            .reply,
+        None
+    );
+    for (sent_at_ms, expires_at_ms) in [
+        ("0", "1"),
+        ("2000", "2001"),
+        ("18446744073709551614", "18446744073709551615"),
+    ] {
+        let mut malformed = valid.clone();
+        malformed.sent_at_ms = sent_at_ms.into();
+        malformed.expires_at_ms = expires_at_ms.into();
+        assert_eq!(
+            receiver
+                .open_typing_signal_v2(
+                    &malformed,
+                    LiveClock {
+                        wall_ms: 1_001,
+                        mono_ms: 1_002
+                    }
+                )
+                .unwrap()
+                .reply,
+            None
+        );
+    }
+    assert_eq!(
+        receiver.open_typing_signal_v2(
+            &valid,
+            LiveClock {
+                wall_ms: -1,
+                mono_ms: 1_003
+            }
+        ),
+        Err(LiveError::Clock)
+    );
+    assert!(
+        receiver
+            .open_typing_signal_v2(
+                &valid,
+                LiveClock {
+                    wall_ms: 1_001,
+                    mono_ms: 1_004
+                }
+            )
+            .unwrap()
+            .reply
+            .is_some()
+    );
+}
+
+#[test]
 fn v2_rejects_empty_host_roster() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
