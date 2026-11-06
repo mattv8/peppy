@@ -4,6 +4,7 @@ mod common;
 use common::*;
 use rusqlite::Connection;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type DetectorRow = (String, i64, i64, i64, i64, i64, i64);
 type IdentityRow = (String, String, String, i64);
@@ -21,7 +22,33 @@ fn client() -> (tempfile::TempDir, Client, ConversationId, ClientConfig) {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "rcs-receive", &vault);
-    (directory, open(&config), ConversationId::new(), config)
+    let client = common::unlocked(&config, &vault);
+    publish_current_gateway(&client, &config);
+    (directory, client, ConversationId::new(), config)
+}
+
+fn publish_current_gateway(client: &Client, config: &ClientConfig) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id: config.device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms: now_ms,
+                capability_revision: 1,
+                feature_bits: 1,
+                linked_since_ms: Some(now_ms),
+            },
+            &[],
+            now_ms,
+        )
+        .unwrap();
 }
 
 fn sqlcipher(path: &Path) -> Connection {
@@ -138,25 +165,34 @@ fn unlink_freezes_link_and_marks_ambiguous_detectors_for_alert() {
         .begin_rcs_link_ownership(conversation_id, "opaque-page-token", 10)
         .unwrap();
     client
-        .record_rcs_provider_detector(RcsProviderDetector {
+        .record_rcs_provider_detector(
             conversation_id,
-            provider_row_id: 10,
-            provider_thread_id: 2,
-            provider_type: 132,
-            observed_at_ms: 100,
-            observed_generation: link.ownership_generation,
-        })
+            link.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 10,
+                provider_thread_id: 2,
+                provider_type: 132,
+                observed_at_ms: 100,
+                observed_generation: link.ownership_generation,
+            },
+        )
         .unwrap();
-    client
-        .record_rcs_provider_detector(RcsProviderDetector {
-            conversation_id,
-            provider_row_id: 11,
-            provider_thread_id: 2,
-            provider_type: 132,
-            observed_at_ms: 101,
-            observed_generation: link.ownership_generation,
-        })
-        .unwrap();
+    assert_eq!(
+        client
+            .record_rcs_provider_detector(
+                conversation_id,
+                link.ownership_generation,
+                RcsProviderDetector {
+                    provider_row_id: 11,
+                    provider_thread_id: 2,
+                    provider_type: 132,
+                    observed_at_ms: 101,
+                    observed_generation: link.ownership_generation,
+                }
+            )
+            .unwrap(),
+        RcsIdentityOutcome::Recorded
+    );
 
     let cutover = client.begin_rcs_unlink_cutover(conversation_id).unwrap();
     assert_eq!(cutover.owner, RcsReceiveOwner::Provider);
@@ -255,14 +291,17 @@ fn proof_handover_cutover_and_relink_preserve_generations() {
     assert_eq!(relink.owner, RcsReceiveOwner::Link);
     assert_eq!(relink.ownership_generation, link.ownership_generation + 2);
     client
-        .record_rcs_provider_detector(RcsProviderDetector {
+        .record_rcs_provider_detector(
             conversation_id,
-            provider_row_id: 31,
-            provider_thread_id: 4,
-            provider_type: 132,
-            observed_at_ms: 1,
-            observed_generation: relink.ownership_generation.saturating_sub(1),
-        })
+            relink.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 31,
+                provider_thread_id: 4,
+                provider_type: 132,
+                observed_at_ms: 1,
+                observed_generation: relink.ownership_generation.saturating_sub(1),
+            },
+        )
         .unwrap();
     let alert = client.begin_rcs_unlink_cutover(conversation_id).unwrap();
     assert!(alert.ambiguous_detector_alert);
@@ -278,16 +317,40 @@ fn detector_records_never_create_messages_or_link_identities() {
     let connection = sqlcipher(&config.database_path);
     let before = receive_rows(&connection);
 
-    client
-        .record_rcs_provider_detector(RcsProviderDetector {
-            conversation_id,
-            provider_row_id: 11,
-            provider_thread_id: 2,
-            provider_type: 132,
-            observed_at_ms: 100,
-            observed_generation: link.ownership_generation.saturating_sub(1),
-        })
-        .unwrap();
+    assert_eq!(
+        client
+            .record_rcs_provider_detector(
+                conversation_id,
+                link.ownership_generation + 1,
+                RcsProviderDetector {
+                    provider_row_id: 11,
+                    provider_thread_id: 2,
+                    provider_type: 132,
+                    observed_at_ms: 100,
+                    observed_generation: link.ownership_generation.saturating_sub(1),
+                }
+            )
+            .unwrap(),
+        RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+    assert_eq!(receive_rows(&connection), before);
+
+    assert_eq!(
+        client
+            .record_rcs_provider_detector(
+                conversation_id,
+                link.ownership_generation,
+                RcsProviderDetector {
+                    provider_row_id: 11,
+                    provider_thread_id: 2,
+                    provider_type: 132,
+                    observed_at_ms: 100,
+                    observed_generation: link.ownership_generation.saturating_sub(1),
+                }
+            )
+            .unwrap(),
+        RcsIdentityOutcome::Recorded
+    );
     let mut expected = before.clone();
     expected
         .detectors
@@ -296,14 +359,17 @@ fn detector_records_never_create_messages_or_link_identities() {
     assert_eq!(receive_rows(&connection), expected);
 
     client
-        .record_rcs_provider_detector(RcsProviderDetector {
+        .record_rcs_provider_detector(
             conversation_id,
-            provider_row_id: 12,
-            provider_thread_id: 3,
-            provider_type: 133,
-            observed_at_ms: 101,
-            observed_generation: link.ownership_generation,
-        })
+            link.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 12,
+                provider_thread_id: 3,
+                provider_type: 133,
+                observed_at_ms: 101,
+                observed_generation: link.ownership_generation,
+            },
+        )
         .unwrap();
     expected.detectors.push((
         conversation_id.to_string(),
@@ -330,14 +396,17 @@ fn detector_pruning_keeps_unresolved_ambiguous_window_rows() {
         .unwrap();
     for provider_row_id in 0..1_024 {
         client
-            .record_rcs_provider_detector(RcsProviderDetector {
+            .record_rcs_provider_detector(
                 conversation_id,
-                provider_row_id,
-                provider_thread_id: 2,
-                provider_type: 132,
-                observed_at_ms: provider_row_id,
-                observed_generation: link.ownership_generation,
-            })
+                link.ownership_generation,
+                RcsProviderDetector {
+                    provider_row_id,
+                    provider_thread_id: 2,
+                    provider_type: 132,
+                    observed_at_ms: provider_row_id,
+                    observed_generation: link.ownership_generation,
+                },
+            )
             .unwrap();
     }
     let connection = sqlcipher(&config.database_path);
@@ -349,14 +418,17 @@ fn detector_pruning_keeps_unresolved_ambiguous_window_rows() {
         .unwrap();
 
     client
-        .record_rcs_provider_detector(RcsProviderDetector {
+        .record_rcs_provider_detector(
             conversation_id,
-            provider_row_id: 1_024,
-            provider_thread_id: 2,
-            provider_type: 132,
-            observed_at_ms: 1_024,
-            observed_generation: link.ownership_generation,
-        })
+            link.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 1_024,
+                provider_thread_id: 2,
+                provider_type: 132,
+                observed_at_ms: 1_024,
+                observed_generation: link.ownership_generation,
+            },
+        )
         .unwrap();
 
     let unresolved_oldest: i64 = connection
@@ -385,26 +457,32 @@ fn detector_overflow_sets_alert_without_dropping_unresolved_rows() {
         .unwrap();
     for provider_row_id in 0..1_024 {
         client
-            .record_rcs_provider_detector(RcsProviderDetector {
+            .record_rcs_provider_detector(
                 conversation_id,
-                provider_row_id,
-                provider_thread_id: 2,
-                provider_type: 132,
-                observed_at_ms: provider_row_id,
-                observed_generation: link.ownership_generation,
-            })
+                link.ownership_generation,
+                RcsProviderDetector {
+                    provider_row_id,
+                    provider_thread_id: 2,
+                    provider_type: 132,
+                    observed_at_ms: provider_row_id,
+                    observed_generation: link.ownership_generation,
+                },
+            )
             .unwrap();
     }
 
     client
-        .record_rcs_provider_detector(RcsProviderDetector {
+        .record_rcs_provider_detector(
             conversation_id,
-            provider_row_id: 1_024,
-            provider_thread_id: 2,
-            provider_type: 132,
-            observed_at_ms: 1_024,
-            observed_generation: link.ownership_generation,
-        })
+            link.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 1_024,
+                provider_thread_id: 2,
+                provider_type: 132,
+                observed_at_ms: 1_024,
+                observed_generation: link.ownership_generation,
+            },
+        )
         .unwrap();
 
     let connection = sqlcipher(&config.database_path);
@@ -435,14 +513,17 @@ fn overflow_cutover_keeps_high_water_and_stronger_alert() {
         .unwrap();
     for provider_row_id in 0..=1_024 {
         client
-            .record_rcs_provider_detector(RcsProviderDetector {
+            .record_rcs_provider_detector(
                 conversation_id,
-                provider_row_id,
-                provider_thread_id: 2,
-                provider_type: 132,
-                observed_at_ms: provider_row_id,
-                observed_generation: link.ownership_generation,
-            })
+                link.ownership_generation,
+                RcsProviderDetector {
+                    provider_row_id,
+                    provider_thread_id: 2,
+                    provider_type: 132,
+                    observed_at_ms: provider_row_id,
+                    observed_generation: link.ownership_generation,
+                },
+            )
             .unwrap();
     }
     let cutover = client.begin_rcs_unlink_cutover(conversation_id).unwrap();
@@ -464,14 +545,17 @@ fn cutover_never_moves_the_detector_floor_backwards() {
         .begin_rcs_link_ownership(conversation_id, "first", 100)
         .unwrap();
     client
-        .record_rcs_provider_detector(RcsProviderDetector {
+        .record_rcs_provider_detector(
             conversation_id,
-            provider_row_id: 50,
-            provider_thread_id: 2,
-            provider_type: 132,
-            observed_at_ms: 50,
-            observed_generation: first.ownership_generation,
-        })
+            first.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 50,
+                provider_thread_id: 2,
+                provider_type: 132,
+                observed_at_ms: 50,
+                observed_generation: first.ownership_generation,
+            },
+        )
         .unwrap();
     client.begin_rcs_unlink_cutover(conversation_id).unwrap();
     let relink = client
@@ -538,14 +622,17 @@ fn receive_state_survives_reopen() {
         .begin_rcs_link_ownership(conversation_id, "token", 7)
         .unwrap();
     client
-        .record_rcs_provider_detector(RcsProviderDetector {
+        .record_rcs_provider_detector(
             conversation_id,
-            provider_row_id: 8,
-            provider_thread_id: 2,
-            provider_type: 132,
-            observed_at_ms: 8,
-            observed_generation: ownership.ownership_generation,
-        })
+            ownership.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 8,
+                provider_thread_id: 2,
+                provider_type: 132,
+                observed_at_ms: 8,
+                observed_generation: ownership.ownership_generation,
+            },
+        )
         .unwrap();
     drop(client);
     let reopened = open(&config);

@@ -273,14 +273,17 @@ fn rcs_metadata_replicates_a_history_gap_through_cutover_and_relink() {
         .publish_rcs_conversation_metadata(conversation, owner.ownership_generation, None)
         .unwrap();
     first
-        .record_rcs_provider_detector(RcsProviderDetector {
-            conversation_id: conversation,
-            provider_row_id: 1,
-            provider_thread_id: 1,
-            provider_type: 1,
-            observed_at_ms: 1,
-            observed_generation: owner.ownership_generation,
-        })
+        .record_rcs_provider_detector(
+            conversation,
+            owner.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 1,
+                provider_thread_id: 1,
+                provider_type: 1,
+                observed_at_ms: 1,
+                observed_generation: owner.ownership_generation,
+            },
+        )
         .unwrap();
     first.begin_rcs_unlink_cutover(conversation).unwrap();
 
@@ -767,7 +770,7 @@ fn statuses_converge_and_rejections_leave_no_status_row() {
                 }
             )
             .unwrap(),
-        RcsReceiveOutcome::Rejected(RcsReceiveCode::IdentityConflict)
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::GatewayUnavailable)
     );
     assert_eq!(status_rank(&first_config, message_id), Some(5));
 }
