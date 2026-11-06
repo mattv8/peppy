@@ -1824,26 +1824,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_negotiation_failure_observes_backoff_before_retry() {
+    async fn supervisor_negotiation_failures_escalate_backoff_without_resetting() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (_, session, _) = real_supervisor_session(&origin);
         let supervisor = tokio::spawn(supervise(session.clone()));
+        let mut peer = accept_live_peer(&listener).await;
+        let mut observed_delays = Vec::new();
 
-        let mut first = accept_live_peer(&listener).await;
-        first.send(Message::Text("{}".into())).await.unwrap();
-        assert!(timeout(Duration::from_millis(750), listener.accept())
-            .await
-            .is_err());
+        for base in [
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        ] {
+            peer.send(Message::Text("{}".into())).await.unwrap();
+            let rejected_at = Instant::now();
+            let (stream, _) = timeout(base * 2 + Duration::from_secs(1), listener.accept())
+                .await
+                .expect("supervisor did not retry after rejected hello")
+                .unwrap();
+            let delay = rejected_at.elapsed();
+            assert!(
+                delay >= base.saturating_sub(Duration::from_millis(50)),
+                "retry {delay:?} was below the {base:?} backoff"
+            );
+            assert!(
+                delay <= base + base / 4 + Duration::from_millis(500),
+                "retry {delay:?} exceeded the 25% jitter bound for {base:?}"
+            );
+            observed_delays.push(delay);
+            peer = tokio_tungstenite::accept_async(stream).await.unwrap();
+        }
+        assert!(observed_delays.windows(2).all(|pair| pair[1] > pair[0]));
 
-        let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
-            .await
-            .expect("supervisor did not retry after negotiation backoff")
-            .unwrap();
-        let mut second = tokio_tungstenite::accept_async(stream).await.unwrap();
-        send_server_hello(&mut second).await;
+        send_server_hello(&mut peer).await;
         wait_for_live_enabled(&session, true).await;
-
         session.cancel.cancel();
         supervisor.await.unwrap();
     }
@@ -1898,21 +1913,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_session_drain_completes_while_tcp_peer_stalls_io() {
+    async fn supervisor_session_drain_cancels_a_stalled_tcp_write() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let (_, session, _) = real_supervisor_session(&origin);
-        let supervisor = tokio::spawn(supervise(session.clone()));
+        let (fixture, session, conversation_id) = real_supervisor_session(&origin);
+        session.track_worker(tokio::spawn(supervise(session.clone())));
 
         let mut stalled_peer = accept_live_peer(&listener).await;
         send_server_hello(&mut stalled_peer).await;
         wait_for_live_enabled(&session, true).await;
 
-        session.cancel.cancel();
-        timeout(Duration::from_millis(300), supervisor)
-            .await
-            .expect("supervisor drain blocked on stalled TCP peer")
+        let outbound = session
+            .client
+            .seal_typing_signal_v2(
+                conversation_id,
+                fixture.binding.device_id.parse().unwrap(),
+                peppy_protocol::TypingOriginV2::VaultDevice,
+                peppy_protocol::TypingStateV2::Started,
+                session.live_typing.clock(),
+            )
+            .unwrap()
             .unwrap();
+        let mut payload = serde_json::to_string(&outbound.signal).unwrap();
+        payload.push_str(&" ".repeat(LIVE_MAX_FRAME - payload.len()));
+        let accepted = timeout(Duration::from_secs(5), async {
+            let mut accepted = 0usize;
+            loop {
+                if session.live_typing.send_with(|| Some(payload.clone())) {
+                    accepted += 1;
+                    assert!(accepted < 1_024, "TCP peer never applied backpressure");
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                sleep(Duration::from_millis(100)).await;
+                if session.live_typing.send_with(|| Some(payload.clone())) {
+                    accepted += 1;
+                    continue;
+                }
+                if accepted >= 4 {
+                    return accepted;
+                }
+            }
+        })
+        .await
+        .expect("failed to fill the stalled peer receive window");
+        assert!(accepted >= 4);
+        assert!(session.client.set_typing_sharing(true).is_ok());
+
+        assert!(crate::sync::drain(&session, Duration::from_millis(300)).await);
+        assert_eq!(
+            session.client.set_typing_sharing(true),
+            Err(LiveError::Disabled)
+        );
         drop(stalled_peer);
     }
 
