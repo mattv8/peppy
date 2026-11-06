@@ -501,6 +501,25 @@ func TestFetchRcsGapDropsPageAfterGenerationChanges(t *testing.T) {
 	}
 }
 
+func TestFetchRcsGapRejectsConversationThatBecomesUnsupportedDuringRPC(t *testing.T) {
+	var link *Link
+	link = fetchGapTestLink(func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+		link.mu.Lock()
+		link.conversationRecords["conversation-1"].Status = gmproto.ConversationStatus_ARCHIVED
+		link.mu.Unlock()
+		return &gmproto.ListMessagesResponse{
+			Messages: []*gmproto.Message{textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message},
+			Cursor:   &gmproto.Cursor{LastItemID: "next", LastItemTimestamp: 1},
+		}, nil
+	})
+
+	got := decodeGapResult(t, link.FetchRcsGap("conversation-1", ""))
+
+	if got.Code != "conversation_unsupported" || len(got.Records) != 0 || len(got.Signals) != 0 {
+		t.Fatalf("result = %#v", got)
+	}
+}
+
 func TestFetchRcsGapUsesPerPageDeadline(t *testing.T) {
 	previous := rcsGapPageTimeout
 	rcsGapPageTimeout = time.Millisecond

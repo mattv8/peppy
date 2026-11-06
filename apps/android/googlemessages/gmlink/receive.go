@@ -286,16 +286,17 @@ func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
 			return encodeRcsPage(rcsPageFailure("gap_failed"))
 		}
 	}
-	if !link.rcsGapOwned(generation, streamEpoch) {
+	link.mu.Lock()
+	owned = !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasOwnerVerificationLocked()
+	conversation = link.currentSupportedRcsConversationLocked(googleConversationID, generation, streamEpoch)
+	link.mu.Unlock()
+	if !owned {
 		return encodeRcsPage(rcsPageFailure("stale_generation"))
 	}
+	if conversation == nil {
+		return encodeRcsPage(rcsPageFailure("conversation_unsupported"))
+	}
 	return encodeRcsPage(projectRcsPage(page, conversation))
-}
-
-func (link *Link) rcsGapOwned(generation, streamEpoch uint64) bool {
-	link.mu.Lock()
-	defer link.mu.Unlock()
-	return !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasOwnerVerificationLocked()
 }
 
 func rcsPageFailure(code string) rcsPageProjection {
