@@ -614,8 +614,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
                                 }
                             },
                             signInError = when (subscriptionRouteState.feedback) {
-                                SubscriptionRouteFeedback.STORAGE -> context.getString(R.string.peppy_play_session_storage_failed)
-                                SubscriptionRouteFeedback.SIGN_IN -> context.getString(R.string.peppy_production_signin_failed)
+                                SubscriptionRouteFeedback.STORAGE -> stringResource(R.string.peppy_play_session_storage_failed)
+                                SubscriptionRouteFeedback.SIGN_IN -> stringResource(R.string.peppy_production_signin_failed)
                                 null -> null
                             },
                         )

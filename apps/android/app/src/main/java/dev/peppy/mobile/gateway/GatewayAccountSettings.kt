@@ -41,6 +41,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -109,6 +110,7 @@ internal fun GatewayAccountSettings(
     onRouteChanged: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val resources = LocalResources.current
     var state by remember { mutableStateOf<GatewayAccountState?>(null) }
     var gatewayStatus by remember { mutableStateOf<GatewayStatus?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
@@ -461,7 +463,7 @@ internal fun GatewayAccountSettings(
             HostedAccountDeletionEntry(
                 tag = "account-delete-row",
                 includeVaultDistinction = account?.self?.role == "owner",
-                onOpenFailed = { failure = context.getString(R.string.peppy_toggle_android_link_unavailable) },
+                onOpenFailed = { failure = resources.getString(R.string.peppy_toggle_android_link_unavailable) },
                 onViewSubscription = onOpenSubscription,
             )
         }
