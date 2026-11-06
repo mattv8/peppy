@@ -246,6 +246,7 @@ impl LiveTypingState {
 
 const LIVE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 const LIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LIVE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const LIVE_MAX_FRAME: usize = 64 * 1024;
 const INBOUND_QUEUE_LIMIT: usize = 64;
 
@@ -591,7 +592,7 @@ async fn supervise(session: Arc<Session>) {
         }
         let mut outbound = None;
         reevaluate_context(&mut state, &mut inbound, &session, &mut outbound);
-        loop {
+        'socket: loop {
             let elapsed_mono = session.live_typing.mono_ms();
             let expiry_delay = inbound
                 .next_deadline()
@@ -602,7 +603,7 @@ async fn supervise(session: Arc<Session>) {
                     disable(&mut state, &session);
                     inbound.clear();
                     emit_events(&mut inbound);
-                    let _ = socket.close(None).await;
+                    let _ = bounded_close(&mut socket, &session.cancel).await;
                     return;
                 }
                 _ = session.live_context_wake.notified() => {
@@ -615,8 +616,12 @@ async fn supervise(session: Arc<Session>) {
                     }
                 } => match frame {
                     Some(frame) => {
-                        if socket.send(Message::Text(frame.into())).await.is_err() {
-                            break;
+                        if !bounded_send(
+                            &mut socket,
+                            &session.cancel,
+                            Message::Text(frame.into()),
+                        ).await {
+                            break 'socket;
                         }
                     }
                     None => break,
@@ -636,7 +641,13 @@ async fn supervise(session: Arc<Session>) {
                         inbound.push(frame.to_string());
                         while let Some(frame) = inbound.take() {
                             if let Some(reply) = process_inbound_frame(&session.client, &mut inbound, &frame, state.generation(), session.live_typing.clock()) {
-                                let _ = socket.send(Message::Text(reply.into())).await;
+                                if !bounded_send(
+                                    &mut socket,
+                                    &session.cancel,
+                                    Message::Text(reply.into()),
+                                ).await {
+                                    break 'socket;
+                                }
                             }
                             inbound.expire(session.live_typing.mono_ms());
                             emit_events(&mut inbound);
@@ -668,6 +679,33 @@ fn process_inbound_frame(
     let reply = inbound.publish(outcome, generation, clock);
     inbound.expire(clock.mono_ms);
     reply
+}
+
+async fn bounded_send<S>(
+    socket: &mut WebSocketStream<S>,
+    cancel: &tokio_util::sync::CancellationToken,
+    message: Message,
+) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        result = timeout(LIVE_IO_TIMEOUT, socket.send(message)) => matches!(result, Ok(Ok(()))),
+    }
+}
+
+async fn bounded_close<S>(
+    socket: &mut WebSocketStream<S>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        result = timeout(LIVE_IO_TIMEOUT, socket.close(None)) => matches!(result, Ok(Ok(()))),
+    }
 }
 
 async fn connect(
@@ -1329,6 +1367,36 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for live typing enabled={expected}"));
+    }
+
+    #[tokio::test]
+    async fn stalled_transport_io_yields_to_cancel_and_drains() {
+        let (stream, _peer_that_stops_reading) = tokio::io::duplex(1);
+        let socket =
+            WebSocketStream::from_raw_socket(stream, tungstenite::protocol::Role::Client, None)
+                .await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let mut socket = socket;
+            let sent = bounded_send(
+                &mut socket,
+                &task_cancel,
+                Message::Text("x".repeat(LIVE_MAX_FRAME).into()),
+            )
+            .await;
+            let closed = bounded_close(&mut socket, &task_cancel).await;
+            (sent, closed)
+        });
+
+        sleep(Duration::from_millis(10)).await;
+        cancel.cancel();
+        let (sent, closed) = timeout(Duration::from_millis(200), task)
+            .await
+            .expect("stalled transport did not drain after cancellation")
+            .unwrap();
+        assert!(!sent);
+        assert!(!closed);
     }
 
     #[tokio::test]
