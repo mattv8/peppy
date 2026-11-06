@@ -1474,6 +1474,52 @@ async fn ticket_upgrade_trace_logs_do_not_contain_ticket_or_protocol() {
 }
 
 #[tokio::test]
+async fn live_ticket_issue_and_delete_trace_logs_do_not_contain_request_or_response_secrets() {
+    const SAFE_MARKER: &str = "live_ticket_issue_delete_trace_control";
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+    tracing::trace!(
+        safe_marker = SAFE_MARKER,
+        "live ticket trace collector control"
+    );
+
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([69_u8; 16]);
+    let issued = live_ticket_request(&server, reqwest::Method::POST, session_id.clone())
+        .await
+        .error_for_status()
+        .unwrap();
+    let ticket = issued.json::<serde_json::Value>().await.unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let protocol = live_ticket_protocol(&session_id, &ticket);
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::DELETE, session_id)
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+
+    let captured = logs.text();
+    assert!(captured.contains(SAFE_MARKER));
+    for secret in [&ticket, &protocol, &server.owner_token] {
+        assert!(
+            !captured.contains(secret),
+            "live ticket request or response secret reached tracing output"
+        );
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn ticket_live_upgrade_rejects_replay_origin_mixed_revoked_and_closed_sessions() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
 
