@@ -342,6 +342,20 @@ test("Google Messages link copy avoids protocol and maturity claims", () => {
   }
 });
 
+test("RCS-adjacent shared copy stays neutral about link availability", () => {
+  const keys = [
+    "mms_restricted_help",
+    "advanced_features_restricted_desc",
+    "restricted_setup_consent_p_scope",
+    "help_android_phone_read",
+    "phone_read_disclosure",
+    "help_ios_carrier_unavailable",
+  ];
+  const prohibited = /cannot send RCS|does not add RCS sending|Replies still use SMS or MMS|cannot be read by Peppy|RCS is unavailable|not available in this build/i;
+
+  for (const key of keys) assert.doesNotMatch(catalog[key], prohibited, `${key} must not deny RCS outside link settings`);
+});
+
 test("Google Messages link device status help is generated for the Peppy table", () => {
   const copy = {
     google_messages_link_remote_help_attention: "Open Peppy on that phone, find Google Messages link, and follow the steps there.",
