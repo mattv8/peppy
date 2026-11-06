@@ -1,6 +1,8 @@
 use crate::{
     ChallengePlaintextV2, Envelope, EphemeralSignalV1, EphemeralSignalV2, LiveHelloV1, LiveHelloV2,
-    PairingQrRecord, SessionAckPlaintextV2, TypingPlaintextV2,
+    MembershipBootstrapV1, MembershipChallengeV1, MembershipControlV1, MembershipDeviceV1,
+    MembershipHintV1, MembershipResponseV1, PairingQrRecord, SessionAckPlaintextV2,
+    TypingPlaintextV2,
 };
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
@@ -28,6 +30,18 @@ pub fn generate_contracts() -> GeneratedContracts {
         .expect("challenge plaintext v2 schema serializes");
     let session_ack_plaintext_v2 = serde_json::to_value(schema_for!(SessionAckPlaintextV2))
         .expect("session ack plaintext v2 schema serializes");
+    let membership_device = serde_json::to_value(schema_for!(MembershipDeviceV1))
+        .expect("membership device schema serializes");
+    let membership_bootstrap = serde_json::to_value(schema_for!(MembershipBootstrapV1))
+        .expect("membership bootstrap schema serializes");
+    let membership_challenge = serde_json::to_value(schema_for!(MembershipChallengeV1))
+        .expect("membership challenge schema serializes");
+    let membership_response = serde_json::to_value(schema_for!(MembershipResponseV1))
+        .expect("membership response schema serializes");
+    let membership_hint = serde_json::to_value(schema_for!(MembershipHintV1))
+        .expect("membership hint schema serializes");
+    let membership_control = serde_json::to_value(schema_for!(MembershipControlV1))
+        .expect("membership control schema serializes");
     let mut components = BTreeMap::new();
     components.extend(extract_components("Envelope", envelope));
     components.extend(extract_components("PairingQrRecord", pairing));
@@ -45,6 +59,24 @@ pub fn generate_contracts() -> GeneratedContracts {
     components.extend(extract_components(
         "SessionAckPlaintextV2",
         session_ack_plaintext_v2,
+    ));
+    components.extend(extract_components("MembershipDeviceV1", membership_device));
+    components.extend(extract_components(
+        "MembershipBootstrapV1",
+        membership_bootstrap,
+    ));
+    components.extend(extract_components(
+        "MembershipChallengeV1",
+        membership_challenge,
+    ));
+    components.extend(extract_components(
+        "MembershipResponseV1",
+        membership_response,
+    ));
+    components.extend(extract_components("MembershipHintV1", membership_hint));
+    components.extend(extract_components(
+        "MembershipControlV1",
+        membership_control,
     ));
     components.insert(
         "LiveFrameV1".into(),

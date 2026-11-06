@@ -1,6 +1,7 @@
 mod envelope;
 mod ephemeral;
 mod generate;
+mod membership;
 mod v1;
 
 pub use envelope::{
@@ -18,4 +19,10 @@ pub use ephemeral::{
 };
 pub use generate::{
     GeneratedContracts, all_schema_references_resolve, generate_contracts, write_contracts,
+};
+pub use membership::{
+    MAX_MEMBERSHIP_CONTROL_BYTES, MAX_MEMBERSHIP_ROSTER_ENTRIES, MEMBERSHIP_PROTOCOL_VERSION,
+    MembershipBootstrapV1, MembershipChallengeV1, MembershipControlError, MembershipControlV1,
+    MembershipDeviceV1, MembershipHintV1, MembershipResponseV1, MembershipRoleV1,
+    MembershipVersionV1,
 };

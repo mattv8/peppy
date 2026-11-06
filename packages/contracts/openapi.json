@@ -483,6 +483,405 @@
         "title": "LiveHelloV2",
         "type": "object"
       },
+      "MembershipBootstrapV1": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "pattern": "^[A-Za-z0-9_-]{22}$",
+            "type": "string"
+          },
+          "membership_version": {
+            "maxLength": 19,
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "roster": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "device_id": {
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "key_epoch": {
+                  "format": "uint32",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "revoked": {
+                  "type": "boolean"
+                },
+                "role": {
+                  "enum": [
+                    "owner",
+                    "gateway",
+                    "device"
+                  ]
+                }
+              },
+              "required": [
+                "device_id",
+                "revoked",
+                "key_epoch",
+                "role"
+              ],
+              "type": "object"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "type": {
+            "const": "membership_bootstrap"
+          },
+          "version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "type",
+          "version",
+          "connection_id",
+          "membership_version",
+          "roster"
+        ],
+        "title": "MembershipBootstrapV1",
+        "type": "object"
+      },
+      "MembershipChallengeV1": {
+        "additionalProperties": false,
+        "properties": {
+          "challenge_id": {
+            "pattern": "^[A-Za-z0-9_-]{22}$",
+            "type": "string"
+          },
+          "connection_id": {
+            "pattern": "^[A-Za-z0-9_-]{22}$",
+            "type": "string"
+          },
+          "type": {
+            "const": "membership_challenge"
+          },
+          "version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "type",
+          "version",
+          "connection_id",
+          "challenge_id"
+        ],
+        "title": "MembershipChallengeV1",
+        "type": "object"
+      },
+      "MembershipControlV1": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "connection_id": {
+                "pattern": "^[A-Za-z0-9_-]{22}$",
+                "type": "string"
+              },
+              "membership_version": {
+                "maxLength": 19,
+                "pattern": "^[1-9][0-9]*$",
+                "type": "string"
+              },
+              "roster": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device_id": {
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "key_epoch": {
+                      "format": "uint32",
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "revoked": {
+                      "type": "boolean"
+                    },
+                    "role": {
+                      "enum": [
+                        "owner",
+                        "gateway",
+                        "device"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "revoked",
+                    "key_epoch",
+                    "role"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 100,
+                "type": "array"
+              },
+              "type": {
+                "const": "membership_bootstrap"
+              },
+              "version": {
+                "const": 1
+              }
+            },
+            "required": [
+              "type",
+              "version",
+              "connection_id",
+              "membership_version",
+              "roster"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "challenge_id": {
+                "pattern": "^[A-Za-z0-9_-]{22}$",
+                "type": "string"
+              },
+              "connection_id": {
+                "pattern": "^[A-Za-z0-9_-]{22}$",
+                "type": "string"
+              },
+              "type": {
+                "const": "membership_challenge"
+              },
+              "version": {
+                "const": 1
+              }
+            },
+            "required": [
+              "type",
+              "version",
+              "connection_id",
+              "challenge_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "challenge_id": {
+                "pattern": "^[A-Za-z0-9_-]{22}$",
+                "type": "string"
+              },
+              "connection_id": {
+                "pattern": "^[A-Za-z0-9_-]{22}$",
+                "type": "string"
+              },
+              "membership_version": {
+                "maxLength": 19,
+                "pattern": "^[1-9][0-9]*$",
+                "type": "string"
+              },
+              "roster": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device_id": {
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "key_epoch": {
+                      "format": "uint32",
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "revoked": {
+                      "type": "boolean"
+                    },
+                    "role": {
+                      "enum": [
+                        "owner",
+                        "gateway",
+                        "device"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "revoked",
+                    "key_epoch",
+                    "role"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 100,
+                "type": "array"
+              },
+              "type": {
+                "const": "membership_response"
+              },
+              "version": {
+                "const": 1
+              }
+            },
+            "required": [
+              "type",
+              "version",
+              "connection_id",
+              "challenge_id",
+              "membership_version",
+              "roster"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "membership_version": {
+                "maxLength": 19,
+                "pattern": "^[1-9][0-9]*$",
+                "type": "string"
+              },
+              "type": {
+                "const": "membership_hint"
+              },
+              "version": {
+                "const": 1
+              }
+            },
+            "required": [
+              "type",
+              "version",
+              "membership_version"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "MembershipControlV1"
+      },
+      "MembershipDeviceV1": {
+        "additionalProperties": false,
+        "properties": {
+          "device_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "key_epoch": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "gateway",
+              "device"
+            ]
+          }
+        },
+        "required": [
+          "device_id",
+          "revoked",
+          "key_epoch",
+          "role"
+        ],
+        "title": "MembershipDeviceV1",
+        "type": "object"
+      },
+      "MembershipHintV1": {
+        "additionalProperties": false,
+        "properties": {
+          "membership_version": {
+            "maxLength": 19,
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "type": {
+            "const": "membership_hint"
+          },
+          "version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "type",
+          "version",
+          "membership_version"
+        ],
+        "title": "MembershipHintV1",
+        "type": "object"
+      },
+      "MembershipResponseV1": {
+        "additionalProperties": false,
+        "properties": {
+          "challenge_id": {
+            "pattern": "^[A-Za-z0-9_-]{22}$",
+            "type": "string"
+          },
+          "connection_id": {
+            "pattern": "^[A-Za-z0-9_-]{22}$",
+            "type": "string"
+          },
+          "membership_version": {
+            "maxLength": 19,
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "roster": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "device_id": {
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "key_epoch": {
+                  "format": "uint32",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "revoked": {
+                  "type": "boolean"
+                },
+                "role": {
+                  "enum": [
+                    "owner",
+                    "gateway",
+                    "device"
+                  ]
+                }
+              },
+              "required": [
+                "device_id",
+                "revoked",
+                "key_epoch",
+                "role"
+              ],
+              "type": "object"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "type": {
+            "const": "membership_response"
+          },
+          "version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "type",
+          "version",
+          "connection_id",
+          "challenge_id",
+          "membership_version",
+          "roster"
+        ],
+        "title": "MembershipResponseV1",
+        "type": "object"
+      },
       "PairingQrRecord": {
         "properties": {
           "challenge_token": {
