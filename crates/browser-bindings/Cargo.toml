@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 peppy-client-core.workspace = true
+peppy-protocol.workspace = true
 peppy-desktop-api.workspace = true
 peppy-crypto.workspace = true
 peppy-hosted-client = { path = "../hosted-client", version = "0.1.0" }

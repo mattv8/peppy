@@ -36,6 +36,7 @@ mod media;
 mod notifications;
 mod search_history;
 mod sync;
+mod typing;
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const HISTORY_PAGE_SIZE: usize = 50;
@@ -336,6 +337,7 @@ impl BrowserCore {
             _ if notifications::handles(command) => {
                 self.notifications_command(command, args_value(raw_args)?)
             }
+            _ if typing::handles(command) => self.typing_command(command, args_value(raw_args)?),
             _ => Err(unknown_command()),
         }
     }
