@@ -223,10 +223,10 @@ fn stale_wrong_sim_wrong_context_and_proven_rcs_never_fall_back_to_carrier() {
     changed.context_revision = 2;
     changed.observed_at_ms = 1_001;
     gateway.verify_rcs_mapping(&changed, 1_001).unwrap();
-    assert!(matches!(
+    assert_eq!(
         gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
-        PermitDecision::Permit(_)
-    ));
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
     let mut mapped = observation("peer-local", 2);
     mapped.context_revision = 3;
     mapped.observed_at_ms = 1_002;
@@ -1272,10 +1272,10 @@ fn explicit_unlink_restores_regular_carrier_but_never_a_historically_proven_rcs_
     unlinked.observed_at_ms = 1_001;
     unlinked.link_state = RcsLinkState::Unlinked;
     gateway.update_rcs_context(&unlinked, 1_001).unwrap();
-    assert_eq!(
+    assert!(matches!(
         gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
-        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
-    );
+        PermitDecision::Permit(_)
+    ));
 }
 
 #[test]
