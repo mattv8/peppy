@@ -260,6 +260,13 @@ func TestFetchRcsGapKeepsProtocolSwitchSignalsAndText(t *testing.T) {
 	}
 }
 
+func protocolSwitchMessage(status gmproto.MessageStatusType) *libgm.WrappedMessage {
+	return &libgm.WrappedMessage{Message: &gmproto.Message{
+		ConversationID: "conversation-1",
+		MessageStatus:  &gmproto.MessageStatus{Status: status},
+	}}
+}
+
 func textMessage(status gmproto.MessageStatusType) *libgm.WrappedMessage {
 	return &libgm.WrappedMessage{Message: &gmproto.Message{
 		MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1735689600123456,
@@ -367,6 +374,65 @@ func TestLinkProjectsUnsupportedAndTombstoneWithoutContent(t *testing.T) {
 		drainQueuedEvents(link)
 	}
 	if len(host.rcsRecords) != 2 || host.rcsRecords[0] != `{"code":"unsupported_message"}` || host.rcsRecords[1] != `{"code":"protocol_switch","google_conversation_id":"conversation-1"}` {
+		t.Fatalf("records = %v", host.rcsRecords)
+	}
+}
+
+func TestLinkProjectsProtocolSwitchAfterConversationBecomesSMS(t *testing.T) {
+	host := &ownedRecordHost{}
+	link := receiveWiringLink(host)
+	link.conversationRecords["conversation-1"].Type = gmproto.ConversationType_SMS
+
+	link.queueEventFor(7, protocolSwitchMessage(gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_TEXT))
+	drainQueuedEvents(link)
+
+	if len(host.rcsRecords) != 1 || host.rcsRecords[0] != `{"code":"protocol_switch","google_conversation_id":"conversation-1"}` {
+		t.Fatalf("records = %v", host.rcsRecords)
+	}
+}
+
+func TestLinkProjectsE2EEProtocolSwitchWithoutCompleteIndex(t *testing.T) {
+	for _, status := range []gmproto.MessageStatusType{
+		gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_ENCRYPTED_RCS,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT,
+	} {
+		t.Run(status.String(), func(t *testing.T) {
+			host := &ownedRecordHost{}
+			link := receiveWiringLink(host)
+			link.conversationIndexComplete = false
+
+			link.queueEventFor(7, protocolSwitchMessage(status))
+			drainQueuedEvents(link)
+
+			if len(host.rcsRecords) != 1 || host.rcsRecords[0] != `{"code":"protocol_switch","google_conversation_id":"conversation-1"}` {
+				t.Fatalf("records = %v", host.rcsRecords)
+			}
+		})
+	}
+}
+
+func TestLinkDropsStaleStreamSignalsAndBodies(t *testing.T) {
+	host := &ownedRecordHost{}
+	link := receiveWiringLink(host)
+	stale := queuedEvent{generation: 7, streamEpoch: 2}
+
+	link.projectRcsEventFor(stale, protocolSwitchMessage(gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_TEXT))
+	link.projectRcsEventFor(stale, textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE))
+
+	if len(host.rcsRecords) != 0 {
+		t.Fatalf("records = %v", host.rcsRecords)
+	}
+}
+
+func TestLinkDoesNotLeakUnsupportedBody(t *testing.T) {
+	host := &ownedRecordHost{}
+	link := receiveWiringLink(host)
+	link.conversationRecords["conversation-1"].Type = gmproto.ConversationType_SMS
+
+	link.queueEventFor(7, textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE))
+	drainQueuedEvents(link)
+
+	if len(host.rcsRecords) != 1 || host.rcsRecords[0] != `{"code":"conversation_unsupported"}` || strings.Contains(host.rcsRecords[0], "synthetic body") {
 		t.Fatalf("records = %v", host.rcsRecords)
 	}
 }

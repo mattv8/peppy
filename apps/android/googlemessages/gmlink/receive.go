@@ -44,16 +44,24 @@ type rcsPageSignal struct {
 	GoogleConversationID string `json:"google_conversation_id"`
 }
 
+func projectRcsControlSignal(message *gmproto.Message) (rcsProjection, bool) {
+	code := protocolSwitchCode(message.GetMessageStatus().GetStatus())
+	if code == "" {
+		return rcsProjection{}, false
+	}
+	if message.GetConversationID() == "" {
+		return rcsProjection{Code: "conversation_missing"}, true
+	}
+	return rcsProjection{Code: code, GoogleConversationID: message.GetConversationID()}, true
+}
+
 func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conversation) rcsProjection {
 	if wrapped == nil || wrapped.Message == nil {
 		return rcsProjection{Code: "message_missing"}
 	}
 	message := wrapped.Message
-	if code := protocolSwitchCode(message.GetMessageStatus().GetStatus()); code != "" {
-		if message.GetConversationID() == "" {
-			return rcsProjection{Code: "conversation_missing"}
-		}
-		return rcsProjection{Code: code, GoogleConversationID: message.GetConversationID()}
+	if signal, ok := projectRcsControlSignal(message); ok {
+		return signal
 	}
 	if message.GetMessageID() == "" || message.GetConversationID() == "" {
 		return rcsProjection{Code: "identity_missing"}
@@ -196,17 +204,24 @@ func (link *Link) projectRcsEventFor(queued queuedEvent, wrapped *libgm.WrappedM
 	if wrapped == nil || wrapped.Message == nil {
 		return
 	}
+	signal, isControlSignal := projectRcsControlSignal(wrapped.Message)
 	link.mu.Lock()
 	if link.closed || queued.generation != link.generation || queued.streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(queued.streamSource) || !link.hasOwnerVerificationLocked() {
 		link.mu.Unlock()
 		return
 	}
-	conversation := link.currentSupportedRcsConversationLocked(wrapped.Message.GetConversationID(), queued.generation, queued.streamEpoch)
+	var conversation *gmproto.Conversation
+	if !isControlSignal {
+		conversation = link.currentSupportedRcsConversationLocked(wrapped.Message.GetConversationID(), queued.generation, queued.streamEpoch)
+	}
 	revision := link.stateRevision
 	link.mu.Unlock()
-	projection := rcsProjection{Code: "conversation_unsupported"}
-	if conversation != nil {
-		projection = projectRcsMessage(wrapped, conversation)
+	projection := signal
+	if !isControlSignal {
+		projection = rcsProjection{Code: "conversation_unsupported"}
+		if conversation != nil {
+			projection = projectRcsMessage(wrapped, conversation)
+		}
 	}
 	encoded, _ := json.Marshal(projection)
 	link.enqueueOutput(hostOutput{
