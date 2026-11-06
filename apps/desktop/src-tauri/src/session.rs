@@ -2,11 +2,11 @@
 //! supervisor. All functions here are synchronous (they call into client-core / the filesystem)
 //! and are invoked from `spawn_blocking`, never directly on an async worker or the UI thread.
 use crate::{
-    credentials::{Binding, ensure_database_key, prepare_data_dir, stored_credential},
+    credentials::{ensure_database_key, prepare_data_dir, stored_credential, Binding},
     dto::{
         self, AttachmentView, ConversationView, DraftView, GatewayView, Head, HistoryPage, Snapshot,
     },
-    error::{BridgeError, BridgeResult, core_error},
+    error::{core_error, BridgeError, BridgeResult},
     media,
     net::Api,
     notifications::{NotificationPreferences, NotificationSettings, PreferenceRead},
@@ -25,8 +25,8 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
-        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock, Weak,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -1857,11 +1857,11 @@ mod tests {
     use crate::{
         credentials::{
             parse_credential, store_credential,
-            tests::{TOKEN, credential_json},
+            tests::{credential_json, TOKEN},
         },
         media::tests::sample_png,
         notifications::NotificationSettings,
-        tests::{PHRASE, fixture_at, gateway, input, routed},
+        tests::{fixture_at, gateway, input, routed, PHRASE},
     };
     use peppy_client_core::IncomingSms;
     use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
@@ -1893,13 +1893,11 @@ mod tests {
         let settings = NotificationSettings::load(fixture.dir.path());
 
         assert_eq!(session.notification_preferences(&settings).unwrap(), legacy);
-        assert!(
-            !fixture
-                .dir
-                .path()
-                .join("notification-preferences.json")
-                .exists()
-        );
+        assert!(!fixture
+            .dir
+            .path()
+            .join("notification-preferences.json")
+            .exists());
         assert!(!settings.claim_path(&session.binding).exists());
 
         let remote = NotificationPreferences {
@@ -1976,11 +1974,9 @@ mod tests {
             session.notification_preferences(&settings).unwrap(),
             NotificationPreferences::default()
         );
-        assert!(
-            session
-                .delivery_notification_preferences(&settings)
-                .is_err()
-        );
+        assert!(session
+            .delivery_notification_preferences(&settings)
+            .is_err());
     }
 
     #[cfg(unix)]
@@ -2089,20 +2085,18 @@ mod tests {
             Arc::new(|| {}),
         )
         .unwrap();
-        assert!(
-            session
-                .snapshot(
-                    None,
-                    None,
-                    crate::head(),
-                    None,
-                    NotificationPreferences::default(),
-                )
-                .unwrap()
-                .0
-                .tone_overrides
-                .is_none()
-        );
+        assert!(session
+            .snapshot(
+                None,
+                None,
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap()
+            .0
+            .tone_overrides
+            .is_none());
 
         session
             .client
@@ -2136,20 +2130,18 @@ mod tests {
             Arc::new(|| {}),
         )
         .unwrap();
-        assert!(
-            locked
-                .snapshot(
-                    None,
-                    None,
-                    crate::head(),
-                    None,
-                    NotificationPreferences::default(),
-                )
-                .unwrap()
-                .0
-                .tone_overrides
-                .is_none()
-        );
+        assert!(locked
+            .snapshot(
+                None,
+                None,
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap()
+            .0
+            .tone_overrides
+            .is_none());
     }
 
     #[test]
@@ -2422,11 +2414,9 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(refreshed.conversations[0].has_older_messages, Some(true));
-        assert!(
-            session
-                .history_page(&conversation.to_string(), &uuid::Uuid::new_v4().to_string())
-                .is_err()
-        );
+        assert!(session
+            .history_page(&conversation.to_string(), &uuid::Uuid::new_v4().to_string())
+            .is_err());
         let other = session
             .client
             .capture_incoming(IncomingSms {
@@ -2442,11 +2432,9 @@ mod tests {
             .record
             .message_id
             .to_string();
-        assert!(
-            session
-                .history_page(&conversation.to_string(), &other_id)
-                .is_err()
-        );
+        assert!(session
+            .history_page(&conversation.to_string(), &other_id)
+            .is_err());
     }
 
     #[test]
@@ -2456,16 +2444,12 @@ mod tests {
             .collect::<Vec<_>>();
         let eligible = bounded_preview_ids(ids.iter().copied());
         assert_eq!(eligible.len(), MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT);
-        assert!(
-            ids[..MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT]
-                .iter()
-                .all(|id| eligible.contains(id))
-        );
-        assert!(
-            ids[MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT..]
-                .iter()
-                .all(|id| !eligible.contains(id))
-        );
+        assert!(ids[..MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT]
+            .iter()
+            .all(|id| eligible.contains(id)));
+        assert!(ids[MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT..]
+            .iter()
+            .all(|id| !eligible.contains(id)));
     }
 
     #[test]

@@ -556,7 +556,11 @@ mod tests {
         for (key, distribution, storefront) in [
             ("direct", Distribution::Direct, None),
             ("appStoreUnitedStates", Distribution::AppStore, Some("USA")),
-            ("appStoreOtherStorefront", Distribution::AppStore, Some("CAN")),
+            (
+                "appStoreOtherStorefront",
+                Distribution::AppStore,
+                Some("CAN"),
+            ),
             ("appStoreUnknownStorefront", Distribution::AppStore, None),
         ] {
             assert_eq!(
