@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 
 use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use peppy_crypto::{decrypt, EncryptedEnvelope};
+use peppy_crypto::{EncryptedEnvelope, decrypt};
 use peppy_protocol::{
     ChallengePlaintextV2, EphemeralSignalV2, EphemeralSignalV2Kind, SessionAckPlaintextV2,
     TypingOriginV2, TypingPlaintextV2,
@@ -129,8 +129,8 @@ fn deserialize_and_check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peppy_crypto::{derive_purpose_key, derive_root_key, encrypt, KeyProfile, KeyPurpose};
-    use peppy_protocol::{TypingStateV2, EPHEMERAL_V2_PROTOCOL_VERSION};
+    use peppy_crypto::{KeyProfile, KeyPurpose, derive_purpose_key, derive_root_key, encrypt};
+    use peppy_protocol::{EPHEMERAL_V2_PROTOCOL_VERSION, TypingStateV2};
     use uuid::Uuid;
 
     fn device(value: u128) -> DeviceId {
@@ -331,49 +331,41 @@ mod tests {
             vault_id,
             &keys,
         );
-        assert!(decode_authenticated_frame(
-            100,
-            vault_id,
-            local,
-            [16; 16],
-            &[sender],
-            &frame,
-            &keys
-        )
-        .is_some());
-        assert!(decode_authenticated_frame(
-            100,
-            vault(99),
-            local,
-            [16; 16],
-            &[sender],
-            &frame,
-            &keys
-        )
-        .is_none());
+        assert!(
+            decode_authenticated_frame(100, vault_id, local, [16; 16], &[sender], &frame, &keys)
+                .is_some()
+        );
+        assert!(
+            decode_authenticated_frame(100, vault(99), local, [16; 16], &[sender], &frame, &keys)
+                .is_none()
+        );
         let wrong_keys = key_map(vault_id, 1, "another correct horse battery staple");
-        assert!(decode_authenticated_frame(
-            100,
-            vault_id,
-            local,
-            [16; 16],
-            &[sender],
-            &frame,
-            &wrong_keys
-        )
-        .is_none());
+        assert!(
+            decode_authenticated_frame(
+                100,
+                vault_id,
+                local,
+                [16; 16],
+                &[sender],
+                &frame,
+                &wrong_keys
+            )
+            .is_none()
+        );
         let mut tampered = frame.clone();
         tampered.sender_device_id = other_sender;
-        assert!(decode_authenticated_frame(
-            100,
-            vault_id,
-            local,
-            [16; 16],
-            &[sender, other_sender],
-            &tampered,
-            &keys
-        )
-        .is_none());
+        assert!(
+            decode_authenticated_frame(
+                100,
+                vault_id,
+                local,
+                [16; 16],
+                &[sender, other_sender],
+                &tampered,
+                &keys
+            )
+            .is_none()
+        );
         let old = seal_frame(
             EphemeralSignalV2Kind::Typing,
             sender,
@@ -389,16 +381,10 @@ mod tests {
         );
         let mut unknown = frame;
         unknown.key_epoch = 3;
-        assert!(decode_authenticated_frame(
-            100,
-            vault_id,
-            local,
-            [16; 16],
-            &[sender],
-            &unknown,
-            &keys
-        )
-        .is_none());
+        assert!(
+            decode_authenticated_frame(100, vault_id, local, [16; 16], &[sender], &unknown, &keys)
+                .is_none()
+        );
     }
 
     #[test]
@@ -424,16 +410,10 @@ mod tests {
             vault_id,
             &keys,
         );
-        assert!(decode_authenticated_frame(
-            100,
-            vault_id,
-            local,
-            [26; 16],
-            &[sender],
-            &frame,
-            &keys
-        )
-        .is_none());
+        assert!(
+            decode_authenticated_frame(100, vault_id, local, [26; 16], &[sender], &frame, &keys)
+                .is_none()
+        );
 
         let challenge = ChallengePlaintextV2 {
             version: 2,
@@ -451,16 +431,18 @@ mod tests {
             vault_id,
             &keys,
         );
-        assert!(decode_authenticated_frame(
-            100,
-            vault_id,
-            local,
-            [26; 16],
-            &[sender],
-            &wrong_session,
-            &keys
-        )
-        .is_none());
+        assert!(
+            decode_authenticated_frame(
+                100,
+                vault_id,
+                local,
+                [26; 16],
+                &[sender],
+                &wrong_session,
+                &keys
+            )
+            .is_none()
+        );
         let kind_mismatch = seal_frame(
             EphemeralSignalV2Kind::Typing,
             sender,
@@ -470,29 +452,33 @@ mod tests {
             vault_id,
             &keys,
         );
-        assert!(decode_authenticated_frame(
-            100,
-            vault_id,
-            local,
-            [26; 16],
-            &[sender],
-            &kind_mismatch,
-            &keys
-        )
-        .is_none());
+        assert!(
+            decode_authenticated_frame(
+                100,
+                vault_id,
+                local,
+                [26; 16],
+                &[sender],
+                &kind_mismatch,
+                &keys
+            )
+            .is_none()
+        );
 
         let mut malformed = frame.clone();
         malformed.ciphertext_b64 = STANDARD.encode([0; 23]);
-        assert!(decode_authenticated_frame(
-            100,
-            vault_id,
-            local,
-            [26; 16],
-            &[sender],
-            &malformed,
-            &keys
-        )
-        .is_none());
+        assert!(
+            decode_authenticated_frame(
+                100,
+                vault_id,
+                local,
+                [26; 16],
+                &[sender],
+                &malformed,
+                &keys
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -528,16 +514,18 @@ mod tests {
             seal_ack(sender, device(38), local_session),
             seal_ack(sender, local, [39; 16]),
         ] {
-            assert!(decode_authenticated_frame(
-                100,
-                vault_id,
-                local,
-                local_session,
-                &[sender],
-                &frame,
-                &keys
-            )
-            .is_none());
+            assert!(
+                decode_authenticated_frame(
+                    100,
+                    vault_id,
+                    local,
+                    local_session,
+                    &[sender],
+                    &frame,
+                    &keys
+                )
+                .is_none()
+            );
         }
     }
 
@@ -583,25 +571,29 @@ mod tests {
         assert_eq!(decoded.session_id, [44; 16]);
         assert_eq!(decoded.sequence, 45);
         assert_eq!(decoded.remaining_ttl_ms, 15_000);
-        assert!(decode_authenticated_frame(
-            sent_at_ms - 1,
-            vault_id,
-            local,
-            [46; 16],
-            &[sender],
-            &frame,
-            &keys
-        )
-        .is_none());
-        assert!(decode_authenticated_frame(
-            expires_at_ms,
-            vault_id,
-            local,
-            [46; 16],
-            &[sender],
-            &frame,
-            &keys
-        )
-        .is_none());
+        assert!(
+            decode_authenticated_frame(
+                sent_at_ms - 1,
+                vault_id,
+                local,
+                [46; 16],
+                &[sender],
+                &frame,
+                &keys
+            )
+            .is_none()
+        );
+        assert!(
+            decode_authenticated_frame(
+                expires_at_ms,
+                vault_id,
+                local,
+                [46; 16],
+                &[sender],
+                &frame,
+                &keys
+            )
+            .is_none()
+        );
     }
 }
