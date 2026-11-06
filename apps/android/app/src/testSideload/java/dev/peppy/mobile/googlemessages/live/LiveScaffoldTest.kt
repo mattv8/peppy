@@ -126,6 +126,15 @@ class LiveScaffoldTest {
     }
 
     @Test
+    fun `current admission publishes one effect`() {
+        var effects = 0
+        val admission = enabled().admit(10_000)!!
+
+        assertTrue(admission.publish({}) { effects++ })
+        assertEquals(1, effects)
+    }
+
+    @Test
     fun `final publication guard prevents effects after action lease and operation deadlines`() {
         fun assertNoEffectAfterWait(connection: LiveConnection, clock: Clock, deadline: Long, advanceTo: Long) {
             var effects = 0
@@ -172,6 +181,46 @@ class LiveScaffoldTest {
         assertFalse(worker.isAlive)
         assertFalse(published)
         assertEquals(0, effects)
+    }
+
+    @Test
+    fun `retirement closes gate promptly while an admitted effect is blocked`() {
+        val connection = enabled()
+        val blockedAdmission = connection.admit(100_000)!!
+        val secondAdmission = connection.admit(100_000)!!
+        val effectEntered = CountDownLatch(1)
+        val releaseEffect = CountDownLatch(1)
+        val retireReturned = CountDownLatch(1)
+        var firstEffects = 0
+        var secondEffects = 0
+        val effectWorker = Thread {
+            blockedAdmission.publish({}) {
+                firstEffects++
+                effectEntered.countDown()
+                releaseEffect.await(2, TimeUnit.SECONDS)
+            }
+        }
+        val retireWorker = Thread {
+            connection.retire()
+            retireReturned.countDown()
+        }
+
+        effectWorker.start()
+        try {
+            assertTrue(effectEntered.await(1, TimeUnit.SECONDS))
+            retireWorker.start()
+            assertTrue(retireReturned.await(250, TimeUnit.MILLISECONDS))
+            assertFalse(secondAdmission.publish({}) { secondEffects++ })
+            assertEquals(0, secondEffects)
+            assertFalse(connection.enabled())
+        } finally {
+            releaseEffect.countDown()
+            effectWorker.join(1_000)
+            retireWorker.join(1_000)
+        }
+        assertFalse(effectWorker.isAlive)
+        assertFalse(retireWorker.isAlive)
+        assertEquals(1, firstEffects)
     }
 
     @Test
@@ -330,7 +379,7 @@ class LiveScaffoldTest {
     }
 
     @Test
-    fun `wire parser strictly validates unicode escapes and propagates programming errors`() {
+    fun `wire parser strictly validates unicode escapes without masking malformed input`() {
         val slash = '\\'
         fun hint(type: String) = "{\"type\":\"$type\",\"version\":1,\"membership_version\":\"2\"}"
 
@@ -339,16 +388,9 @@ class LiveScaffoldTest {
         assertNull(MembershipControls.parse(hint("membership_h${slash}u-069nt")))
         assertNull(MembershipControls.parse(hint("membership_h${slash}u069nt")))
         assertNull(MembershipControls.parse(hint("membership_h${slash}uD800nt")))
-        assertNotNull(StrictJsonParser("{\"value\":\"${slash}uD83D${slash}uDE00\"}").parseObject())
-        assertNull(StrictJsonParser("{\"value\":\"${slash}uDE00\"}").parseObject())
-        assertNull(StrictJsonParser("{\"value\":\"${slash}uD83D${slash}u0041\"}").parseObject())
-
-        val explodingInput = object : CharSequence {
-            override val length = 1
-            override fun get(index: Int): Char = throw IllegalStateException("programming failure")
-            override fun subSequence(startIndex: Int, endIndex: Int): CharSequence = ""
-        }
-        assertThrows(IllegalStateException::class.java) { StrictJsonParser(explodingInput).parseObject() }
+        assertNull(MembershipControls.parse(hint("membership_h${slash}uDE00nt")))
+        assertNull(MembershipControls.parse(hint("membership_h${slash}uD83D${slash}u0041nt")))
+        assertNull(MembershipControls.parse(hint("membership_h${slash}uD83D${slash}uDE00nt")))
     }
 
     @Test

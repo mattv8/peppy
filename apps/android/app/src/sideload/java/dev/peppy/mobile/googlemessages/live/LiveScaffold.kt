@@ -143,7 +143,7 @@ internal object MembershipControls {
 }
 
 private val UUID = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-internal class Fields(private val values: Map<String, Any>) {
+private class Fields(private val values: Map<String, Any>) {
     fun exact(vararg names: String) = takeIf { values.keys == names.toSet() }
     fun string(name: String) = values[name] as? String
     fun long(name: String) = values[name] as? Long
@@ -155,7 +155,7 @@ internal class Fields(private val values: Map<String, Any>) {
             device.long("key_epoch") ?: return null, when (device.string("role")) { "owner" -> MembershipRole.OWNER; "gateway" -> MembershipRole.GATEWAY; "device" -> MembershipRole.DEVICE; else -> return null })
     }
 }
-internal class StrictJsonParser(private val input: CharSequence) {
+private class StrictJsonParser(private val input: String) {
     private var offset = 0
 
     fun parseObject(): Fields? {
@@ -267,11 +267,11 @@ internal class StrictJsonParser(private val input: CharSequence) {
         } else {
             while (input.getOrNull(offset) in '0'..'9') offset++
         }
-        return input.subSequence(start, offset).toString().toLongOrNull()
+        return input.substring(start, offset).toLongOrNull()
     }
 
     private fun literal(expected: String, value: Boolean): Boolean? {
-        if (offset + expected.length > input.length || expected.indices.any { input[offset + it] != expected[it] }) return null
+        if (!input.startsWith(expected, offset)) return null
         offset += expected.length
         return value
     }
@@ -335,7 +335,6 @@ internal class LivePublication internal constructor(
     private val clock: LiveClock,
     leaseDeadline: Long,
 ) {
-    private val publicationLock = Any()
     internal val gate = AtomicBoolean(true)
     internal val enabled = AtomicBoolean(false)
     private val membershipLeaseDeadline = AtomicLong(leaseDeadline)
@@ -351,21 +350,19 @@ internal class LivePublication internal constructor(
         Thread { coordinator.retire(this) }.start()
     }
 
-    internal fun closeGate() = synchronized(publicationLock) { gate.set(false) }
-    internal fun isOpen() = synchronized(publicationLock) { gate.get() }
+    internal fun closeGate() { gate.set(false) }
+    internal fun isOpen() = gate.get()
     internal fun renew(deadline: Long) { membershipLeaseDeadline.set(deadline); operationDeadline.set(Long.MAX_VALUE) }
     internal fun beginOperation(deadline: Long) { operationDeadline.set(deadline) }
     fun admit(actionDeadline: Long): LiveAdmission = LiveAdmission(this, actionDeadline)
 
     internal fun publish(actionDeadline: Long, afterRuntimeWait: () -> Unit, effect: () -> Unit): Boolean {
         afterRuntimeWait()
-        return synchronized(publicationLock) {
-            val now = clock.elapsedRealtime()
-            if (!gate.get() || !enabled.get() || now >= membershipLeaseDeadline.get() ||
-                now > operationDeadline.get() || now >= actionDeadline) return@synchronized false
-            effect()
-            true
-        }
+        if (!enabled.get() || !gate.compareAndSet(true, true)) return false
+        val admittedAt = clock.elapsedRealtime()
+        if (admittedAt >= membershipLeaseDeadline.get() || admittedAt > operationDeadline.get() || admittedAt >= actionDeadline) return false
+        effect()
+        return true
     }
 }
 internal class LiveAdmission internal constructor(private val publication: LivePublication, private val actionDeadline: Long) {
