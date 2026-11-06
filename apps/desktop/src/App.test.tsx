@@ -3480,14 +3480,18 @@ describe("draft durability", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     const moved = (await screen.findByText("Draft added to your existing conversation with River.")).closest("[data-draft-notice]") as HTMLElement;
     const writeText = stubClipboard();
-    writeText.mockRejectedValueOnce(new Error("clipboard denied"));
+    const firstCopy = deferred<void>();
+    writeText.mockImplementationOnce(() => firstCopy.promise);
 
-    fireEvent.click(within(moved).getByRole("button", { name: "Copy text of retained draft" }));
+    const copyButton = within(moved).getByRole("button", { name: "Copy text of retained draft" });
+    fireEvent.click(copyButton);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("send only after review"));
+    expect(copyButton).toHaveAttribute("aria-disabled", "true");
+    await act(async () => firstCopy.reject(new Error("clipboard denied")));
+    await waitFor(() => expect(copyButton).not.toHaveAttribute("aria-disabled"));
     expect(moved).toBeInTheDocument();
-    expect(within(moved).getByRole("button", { name: "Copy text of retained draft" })).toBeEnabled();
 
-    fireEvent.click(within(moved).getByRole("button", { name: "Copy text of retained draft" }));
+    fireEvent.click(copyButton);
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
     expect(writeText).toHaveBeenLastCalledWith("send only after review");
     expect(host.drafts.get("river")?.text).toBe("destination hello");
@@ -4770,10 +4774,11 @@ describe("gateway routes", () => {
     const firstAttachment = host.conversations[0].messages[0].attachments[0];
     host.conversations[0].messages[0].attachments.push({ ...firstAttachment, id: "photo-2", name: "photo-two.png" });
     const resolveSave = deferred<boolean>();
+    const rejectSecondSave = deferred<boolean>();
     vi.mocked(bridge.save_attachment)
       .mockRejectedValueOnce({ code: "media-pending" })
       .mockImplementationOnce(() => resolveSave.promise)
-      .mockRejectedValueOnce({ code: "media-pending" })
+      .mockImplementationOnce(() => rejectSecondSave.promise)
       .mockResolvedValue(true);
     render(<App />);
     await screen.findByRole("button", { name: "Save photo.png" });
@@ -4787,11 +4792,14 @@ describe("gateway routes", () => {
       hint?.();
     });
     fireEvent.click(screen.getByRole("button", { name: "Save photo-two.png" }));
-    expect(await screen.findByTestId("app-notice-action")).toHaveTextContent("Downloading photo-two.png before saving.");
+    await act(async () => rejectSecondSave.reject({ code: "media-pending" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("app-notice-action").querySelector("bdi")?.textContent).toBe("photo-two.png"),
+    );
     expect(bridge.save_attachment).toHaveBeenCalledTimes(3);
     await act(async () => resolveSave.resolve(true));
-    await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledWith("photo-2"));
-    expect(bridge.save_attachment).toHaveBeenCalledTimes(4);
+    await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledTimes(4));
+    expect(bridge.save_attachment).toHaveBeenLastCalledWith("photo-2");
   });
 
   it("stops pending attachment saves after unmount", async () => {
