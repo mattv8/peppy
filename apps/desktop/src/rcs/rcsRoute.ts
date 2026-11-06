@@ -11,6 +11,7 @@ export type RcsRouteInput = {
 export type RcsRoute = { current: true; expiresAtMs: number } | { current: false };
 
 function expiry(value: string | undefined): number | undefined {
+  if (!value || !/^\d+$/.test(value)) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }

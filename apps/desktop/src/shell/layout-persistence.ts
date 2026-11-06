@@ -53,7 +53,7 @@ function readLayoutBoolean(key: string): boolean {
   }
 }
 
-function updateLayout(update: (layout: StoredLayout) => StoredLayout): void {
+function updateLayout(update: (layout: StoredLayout) => StoredLayout): boolean {
   try {
     const stored = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
     const layout =
@@ -61,13 +61,15 @@ function updateLayout(update: (layout: StoredLayout) => StoredLayout): void {
         ? stored
         : {};
     localStorage.setItem(LAYOUT_KEY, JSON.stringify(update(layout)));
+    return true;
   } catch {
     /* Storage is optional in embedded previews. */
+    return false;
   }
 }
 
-export function persistLayoutPatch(patch: LayoutPatch = {}): void {
-  updateLayout((layout) => ({ ...layout, ...patch }));
+export function persistLayoutPatch(patch: LayoutPatch = {}): boolean {
+  return updateLayout((layout) => ({ ...layout, ...patch }));
 }
 
 export function persistRecipientPosition(position: RecipientPosition): void {

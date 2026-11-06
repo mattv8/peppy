@@ -10,5 +10,6 @@ it("exposes the current route through visible and accessible badge text", () => 
   expect(badge).toHaveAttribute("data-rcs-badge", "current");
   expect(badge).toHaveAttribute("title", "New messages in this chat are sent through Google Messages as RCS.");
   expect(badge).toHaveTextContent("RCS. New messages in this chat are sent through Google Messages as RCS.");
+  expect(badge.querySelector(".visually-hidden")).toHaveTextContent("RCS. New messages in this chat are sent through Google Messages as RCS.");
   expect(badge.closest("[role=status], [aria-live]")).toBeNull();
 });

@@ -136,8 +136,7 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 
 import { GatewayPicker } from "./setup/GatewayPicker";
 import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
-import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars } from "./shell/layout-persistence";
-import { readShareTyping } from "./shell/layout-persistence";
+import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars, readShareTyping } from "./shell/layout-persistence";
 import { RcsBadge } from "./rcs/RcsBadge";
 import { useRcsRoute } from "./rcs/useRcsRoute";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
@@ -1097,6 +1096,7 @@ function SettingsView({
   serverOffline = false,
   accountReadOnly = false,
   typingShare,
+  typingShareError = false,
   onTypingShare,
   requestedSection,
   onRequestedSectionConsumed,
@@ -1143,6 +1143,7 @@ function SettingsView({
   serverOffline?: boolean;
   accountReadOnly?: boolean;
   typingShare?: boolean;
+  typingShareError?: boolean;
   onTypingShare(enabled: boolean): void;
   requestedSection?: string;
   onRequestedSectionConsumed?(): void;
@@ -1481,7 +1482,7 @@ function SettingsView({
         {browserHost && accountUrl && <a id="settings-account-portal-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">{peppyCopy.account_portal_cta}<span className="visually-hidden"> (opens in a new tab)</span></a>}
         {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
       </section>}
-      <PrivacySettings browserHost={browserHost} typingShare={typingShare === undefined ? undefined : { enabled: typingShare, onChange: onTypingShare }} />
+      <PrivacySettings browserHost={browserHost} typingShare={typingShare === undefined ? undefined : { enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />
       </div>
       </div>
     </section>
@@ -1703,6 +1704,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   });
   const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
   const [shareTyping, setShareTyping] = useState(readShareTyping);
+  const [typingShareError, setTypingShareError] = useState(false);
   const [groupSenderAvatars, setGroupSenderAvatars] = useState(readGroupSenderAvatars);
   const [showReactions, setShowReactions] = useShowReactions();
   const [pendingReactionId, setPendingReactionId] = useState<string>();
@@ -2051,8 +2053,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     persistLayout({ compactTimestamps: enabled });
   };
   const changeTypingShare = (enabled: boolean) => {
+    const previous = shareTyping;
     setShareTyping(enabled);
-    persistLayout({ shareTyping: enabled });
+    setTypingShareError(false);
+    if (!persistLayout({ shareTyping: enabled })) {
+      setShareTyping(previous);
+      setTypingShareError(true);
+    }
   };
   const changeGroupSenderAvatars = (enabled: boolean) => {
     setGroupSenderAvatars(enabled);
@@ -5051,7 +5058,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
                serverOffline={serverOffline}
                accountReadOnly={accountReadOnly}
-               typingShare={snapshot?.rcsStatus?.gateways.some((gateway) => gateway.state !== "unlinked") ? shareTyping : undefined}
+               typingShare={snapshot?.rcsStatus?.gateways.some((gateway) => gateway.state !== "unlinked") && typeof (bridge as Record<string, unknown>).send_typing === "function" ? shareTyping : undefined}
+               typingShareError={typingShareError}
                onTypingShare={changeTypingShare}
                 requestedSection={notificationSettingsRequested ? "notifications" : undefined}
                 onRequestedSectionConsumed={() => setNotificationSettingsRequested(false)}

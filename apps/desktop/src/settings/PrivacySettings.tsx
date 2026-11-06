@@ -39,7 +39,7 @@ export function PrivacySettings({ browserHost, typingShare }: { browserHost: boo
         {peppyCopy.typing_share_label}
       </label>
       <p id="settings-share-typing-hint" className="settings-field-hint">{peppyCopy.typing_share_hint}</p>
-      {typingShare.error && <p id="settings-share-typing-error" className="settings-error" role="alert">Something went wrong. Try again.</p>}
+      {typingShare.error && <p id="settings-share-typing-error" className="settings-error" role="alert">{peppyCopy.account_delete_error}</p>}
     </div>}
   </section>;
 }
