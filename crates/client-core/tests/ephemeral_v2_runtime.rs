@@ -204,6 +204,9 @@ fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
     let receiver = unlocked(&receiver_config, &vault);
     let conversation = ConversationId::new();
     publish_eligible(&receiver, receiver_config.device_id, conversation);
+    let mut server = Server::default();
+    server.upload(&receiver);
+    server.sync(&sender);
     let roster = vec![sender_config.device_id, receiver_config.device_id];
     sender
         .enable_live_typing(
@@ -282,13 +285,13 @@ fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
         conversation,
         receiver_config.device_id,
         TypingStateV2::Started,
-        1_004,
-        1_004,
+        4_001,
+        4_001,
     )
     .unwrap();
     assert!(matches!(
         receiver
-            .open_typing_signal_v2(&typing.signal, LiveClock { wall_ms: 1_004, mono_ms: 1_004 })
+            .open_typing_signal_v2(&typing.signal, LiveClock { wall_ms: 4_001, mono_ms: 4_001 })
             .unwrap()
             .action,
         Some(LiveAction::GatewayTypingIntent { conversation_id, state: TypingStateV2::Started, .. }) if conversation_id == conversation
