@@ -27,14 +27,18 @@ func TestConversationIndexRefusesAmbiguousOrIneligibleCandidates(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			stage2SeedCompleteIndex(t, link, conversation)
 			target := conversation.GetParticipants()[0].GetID().GetNumber()
-			if result := link.ResolveExistingConversation(target); !strings.Contains(result, `"code":"conversation_not_found_complete"`) {
+			want := `"code":"conversation_not_found_complete"`
+			if name == "group" {
+				want = `"code":"conversation_lookup_unknown"`
+			}
+			if result := link.ResolveExistingConversation(target); !strings.Contains(result, want) {
 				t.Fatalf("ineligible conversation result: %s", result)
 			}
 		})
 	}
 	stage2SeedCompleteIndex(t, link, &gmproto.Conversation{ConversationID: "synthetic-replaced", Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE, Participants: []*gmproto.Participant{{IsVisible: true, ID: &gmproto.SmallInfo{Number: "synthetic-old"}}}})
 	link.indexConversations([]*gmproto.Conversation{{ConversationID: "synthetic-replaced", Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE, Participants: []*gmproto.Participant{{IsVisible: true, ID: &gmproto.SmallInfo{Number: "synthetic-new"}}}}})
-	if result := link.ResolveExistingConversation("synthetic-old"); !strings.Contains(result, `"code":"conversation_not_found_complete"`) {
+	if result := link.ResolveExistingConversation("synthetic-old"); !strings.Contains(result, `"code":"conversation_lookup_unknown"`) {
 		t.Fatalf("replaced association survived: %s", result)
 	}
 	stage2SeedCompleteIndex(t, link, &gmproto.Conversation{ConversationID: "synthetic-hidden-extra", Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE, Participants: []*gmproto.Participant{{IsVisible: true, ID: &gmproto.SmallInfo{Number: "synthetic-visible"}}, {IsVisible: false, ID: &gmproto.SmallInfo{Number: "synthetic-hidden"}}}})

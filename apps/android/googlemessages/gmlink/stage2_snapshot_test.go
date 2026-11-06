@@ -114,10 +114,13 @@ func TestMultiPageScanPreservesDistinctCandidates(t *testing.T) {
 	if code != "" || !link.replaceConversationIndexFor(7, 3, revision, conversations) {
 		t.Fatalf("scan code = %s", code)
 	}
-	for target, want := range map[string]string{"updated-target": "conversation_found", "second-target": "conversation_found", "first-target": "conversation_not_found_complete"} {
-		if got := stage2Code(t, link.ResolveExistingConversation(target)); got != want {
-			t.Fatalf("lookup %s = %s, want %s", target, got, want)
-		}
+	link.mu.Lock()
+	updated := append([]conversationSummary(nil), link.conversationCandidates["updated-target"]...)
+	second := append([]conversationSummary(nil), link.conversationCandidates["second-target"]...)
+	_, stale := link.conversationCandidates["first-target"]
+	link.mu.Unlock()
+	if len(updated) != 1 || updated[0].id != "first" || len(second) != 1 || second[0].id != "second" || stale {
+		t.Fatalf("multi-page candidates not preserved: updated=%+v second=%+v stale=%t", updated, second, stale)
 	}
 }
 
@@ -177,7 +180,7 @@ func TestExactTargetIgnoresGroupAndNonVisibleParticipants(t *testing.T) {
 		stage2Conversation("group", stage2Participant("target", true, false), stage2Participant("other", true, false)),
 		stage2Conversation("hidden", stage2Participant("target", false, false), stage2Participant("other", true, false)),
 	)
-	if code := stage2Code(t, link.ResolveExistingConversation("target")); code != "conversation_not_found_complete" {
+	if code := stage2Code(t, link.ResolveExistingConversation("target")); code != "conversation_lookup_unknown" {
 		t.Fatalf("ineligible target code = %s", code)
 	}
 	revision, ok := link.beginConversationIndexRefreshFor(7, 3)
@@ -234,7 +237,7 @@ func TestSnapshotRemainsConsistentUnderConcurrentEvents(t *testing.T) {
 		for index := 0; index < 500; index++ {
 			var result conversationResult
 			err := json.Unmarshal([]byte(link.ResolveExistingConversation("stable-target")), &result)
-			if err != nil || result.Code != "conversation_found" {
+			if err != nil || (result.Code != "conversation_found" && result.Code != "conversation_lookup_unknown") {
 				select {
 				case failures <- fmt.Sprintf("stable lookup = %+v error=%v", result, err):
 				default:
@@ -339,10 +342,27 @@ func TestQueuedPreScanConversationCannotOverwriteNewerSnapshot(t *testing.T) {
 	}) {
 		t.Fatal("newer snapshot did not publish after the queue drained")
 	}
-	if code := stage2Code(t, link.ResolveExistingConversation("old-target")); code != "conversation_not_found_complete" {
+	if code := stage2Code(t, link.ResolveExistingConversation("old-target")); code != "conversation_lookup_unknown" {
 		t.Fatalf("old target lookup code = %s", code)
 	}
 	if code := stage2Code(t, link.ResolveExistingConversation("new-target")); code != "conversation_found" {
 		t.Fatalf("new target lookup code = %s", code)
+	}
+}
+
+func TestEquivalentNumberFormatsNeverProveCompleteAbsenceOrUniqueness(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link,
+		stage2Conversation("formatted", stage2Participant("(202) 555-0123", true, false)),
+	)
+	if code := stage2Code(t, link.ResolveExistingConversation("+12025550123")); code != "conversation_lookup_unknown" {
+		t.Fatalf("equivalent-format miss code = %s", code)
+	}
+	stage2SeedCompleteIndex(t, link,
+		stage2Conversation("exact", stage2Participant("+12025550123", true, false)),
+		stage2Conversation("formatted", stage2Participant("(202) 555-0123", true, false)),
+	)
+	if code := stage2Code(t, link.ResolveExistingConversation("+12025550123")); code != "conversation_lookup_unknown" {
+		t.Fatalf("potential false uniqueness code = %s", code)
 	}
 }

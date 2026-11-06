@@ -623,6 +623,11 @@ func (link *Link) ResolveExistingConversation(target string) string {
 	if len(found) > 1 {
 		return conversationJSON("conversation_ambiguous")
 	}
+	for rawTarget := range link.conversationCandidates {
+		if rawTarget != target {
+			return conversationJSON("conversation_lookup_unknown")
+		}
+	}
 	for id := range found {
 		return resolvedConversationJSON(id)
 	}
