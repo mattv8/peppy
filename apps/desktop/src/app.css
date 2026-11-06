@@ -19,6 +19,26 @@ body,
 body {
   color: var(--peppy-text-primary);
 }
+
+#draft-sync-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 4px 8px;
+  color: var(--peppy-text-secondary);
+}
+#draft-sync-status [data-draft-expiry-warning] { color: var(--peppy-warning); }
+#draft-sync-status [data-draft-conflict] {
+  flex-basis: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--peppy-warning);
+  color: var(--peppy-text-primary);
+}
+#draft-sync-status details ul { max-height: 144px; overflow: auto; margin: 4px 0; padding-left: 20px; }
+#draft-sync-status dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; margin: 4px 0; }
+#draft-sync-status dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+#draft-sync-status dd ul { margin: 0; padding-left: 16px; }
+#draft-sync-status [data-draft-conflict-actions] { display: flex; flex-wrap: wrap; gap: 4px; }
 #desktop-shell,
 #composer-shell {
   height: 100%;

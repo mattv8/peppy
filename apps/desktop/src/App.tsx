@@ -13,7 +13,7 @@ import {
   type WheelEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import type { ConversationFolder, GatewayAvailability, LocalSearchHit, LocalSearchRequest } from "@peppy/desktop-ui/bridge-contracts";
+import { MAX_DRAFT_ATTACHMENTS, type ConversationFolder, type GatewayAvailability, type LocalSearchHit, type LocalSearchRequest } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
   attachmentStorageRemovalText,
@@ -53,6 +53,7 @@ import {
   UserPlus,
   X,
   type Attachment,
+  type AttachmentLayout,
   type AvatarIdentity,
   type Conversation,
   conversationAvatar,
@@ -136,7 +137,7 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 
 import { GatewayPicker } from "./setup/GatewayPicker";
 import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
-import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars } from "./shell/layout-persistence";
+import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readComposerAttachmentLayout, readGroupSenderAvatars } from "./shell/layout-persistence";
 import { CORAL_ACCENT_INDEX, accentAttribute, accentSwatchColor } from "./shell/accent-color";
 import { useAccentColor } from "./shell/useAccentColor";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
@@ -157,6 +158,7 @@ import {
   type DraftNoticeEvent,
 } from "./drafts/DraftStore";
 import { DraftNotice } from "./drafts/DraftNotice";
+import { DraftSyncStatus } from "./drafts/DraftSyncStatus";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
 import { measureComposerChrome } from "./conversation/composerChrome";
 import { IsolatedText } from "./notices/IsolatedText";
@@ -168,7 +170,7 @@ type RefreshRequest = {
 };
 
 type ActionNotice = Omit<AppNotice, "source">;
-type ComposerFeedback = { key: string; message: string; severity: AppNotice["severity"] };
+type ComposerFeedback = { key: string; message: string; severity: AppNotice["severity"]; kind?: "attachment-feedback" };
 type DraftNoticeState = { key: string; event: DraftNoticeEvent | "stale-send" | "send-failed" | "loading"; sequence: number; detail?: string; persistent?: boolean };
 type PinFocusRestoreIntent = {
   conversationId: string;
@@ -1074,6 +1076,8 @@ function SettingsView({
   onPopoutMode,
   compactTimestamps,
   onCompactTimestamps,
+  attachmentLayout,
+  onAttachmentLayout,
   groupSenderAvatars,
   onGroupSenderAvatars,
   showReactions,
@@ -1121,6 +1125,8 @@ function SettingsView({
   onPopoutMode(mode: PopoutMode): void;
   compactTimestamps: boolean;
   onCompactTimestamps(enabled: boolean): void;
+  attachmentLayout: AttachmentLayout;
+  onAttachmentLayout(layout: AttachmentLayout): void;
   groupSenderAvatars: boolean;
   onGroupSenderAvatars(enabled: boolean): void;
   showReactions: boolean;
@@ -1451,6 +1457,17 @@ function SettingsView({
           </label>
           <p id="settings-compact-timestamps-hint" className="settings-field-hint">Hides times on messages sent within an hour of the next one.</p>
         </div>
+        <fieldset id="settings-attachment-layout">
+          <legend>Attachment previews</legend>
+          <label className="settings-check">
+            <input type="radio" name="attachment-layout" value="tiles" checked={attachmentLayout === "tiles"} onChange={() => onAttachmentLayout("tiles")} />
+            Preview tiles
+          </label>
+          <label className="settings-check">
+            <input type="radio" name="attachment-layout" value="rows" checked={attachmentLayout === "rows"} onChange={() => onAttachmentLayout("rows")} />
+            Compact rows
+          </label>
+        </fieldset>
         <div id="settings-group-sender-avatars-group">
           <label className="settings-check">
             <input id="settings-group-sender-avatars" type="checkbox" checked={groupSenderAvatars} aria-describedby="settings-group-sender-avatars-hint" onChange={(event) => onGroupSenderAvatars(event.target.checked)} />
@@ -1589,6 +1606,17 @@ function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "d
 
 /* ------------------------------------------------------------------ app */
 
+export function hasInFlightAttachmentPreparation(
+  preparations: ReadonlyMap<string, ReadonlySet<unknown>>,
+  key: string,
+  resolve: (key: string) => string,
+) {
+  const resolvedKey = resolve(key);
+  return Array.from(preparations.keys()).some((preparingKey) =>
+    resolve(preparingKey) === resolvedKey && (preparations.get(preparingKey)?.size ?? 0) > 0,
+  );
+}
+
 export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind?: "native" | "browser"; fixedOrigin?: string; accountUrl?: string } = {}) {
   const platform = detectPlatform();
   const browserHost = hostKind === "browser";
@@ -1639,6 +1667,34 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [attachmentViews, setAttachmentViews] = useState<
     Record<string, AttachmentView>
   >({});
+  const [draftViews, setDraftViews] = useState<Record<string, Draft>>({});
+  const [resolvingDraftConflict, setResolvingDraftConflict] = useState(false);
+  const resolutionRef = useRef<number | undefined>(undefined);
+  const draftSessionGenerationRef = useRef(0);
+  const attachmentSessionRef = useRef<string | undefined>(undefined);
+  const mergeDraftAttachmentViews = (draft: Draft) => {
+    if (!draft.attachments?.length) return;
+    setAttachmentViews((current) => ({
+      ...current,
+      ...Object.fromEntries(draft.attachments!.map((view) => [
+        view.id,
+        current[view.id] ? retainOriginalPreview(current[view.id], view) : view,
+      ])),
+    }));
+  };
+  const rememberHostDraft = (draft: Draft) => {
+    setDraftViews((current) => ({ ...current, [draft.id]: draft }));
+    mergeDraftAttachmentViews(draft);
+  };
+  const resetDraftAttachmentCache = (sessionScopeId?: string) => {
+    if (attachmentSessionRef.current === sessionScopeId) return;
+    attachmentSessionRef.current = sessionScopeId;
+    setAttachmentViews({});
+    setDraftViews({});
+  };
+  const pastedAttachmentInFlight = useRef(new Map<string, number>());
+  const attachmentPreparationInFlight = useRef(new Map<string, Set<symbol>>());
+  const draftStoreGeneration = useRef(0);
   const [publicCopies, setPublicCopies] = useState<Record<string, PublicCopy>>(
     {},
   );
@@ -1711,7 +1767,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   });
   const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
+  const [attachmentLayout, setAttachmentLayout] = useState<AttachmentLayout>(readComposerAttachmentLayout);
   const [groupSenderAvatars, setGroupSenderAvatars] = useState(readGroupSenderAvatars);
+  useEffect(() => {
+    const syncAttachmentLayout = (event: StorageEvent) => {
+      if (event.key !== "peppy.layout.v1" && event.key !== null) return;
+      setAttachmentLayout(readComposerAttachmentLayout(event.newValue));
+    };
+    window.addEventListener("storage", syncAttachmentLayout);
+    return () => window.removeEventListener("storage", syncAttachmentLayout);
+  }, []);
   const [showReactions, setShowReactions] = useShowReactions();
   const [pendingReactionId, setPendingReactionId] = useState<string>();
   const [reactionFeedback, setReactionFeedback] = useState<{ reactionId: string; message: string }>();
@@ -1919,7 +1984,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   });
   const storeRef = useRef<DraftStore | null>(null);
   if (!storeRef.current)
-    storeRef.current = new DraftStore((input) => bridge.save_draft(input), {
+    storeRef.current = new DraftStore(async (input) => {
+      const session = currentSearchSessionKey();
+      const generation = draftStoreGeneration.current;
+      const saved = await bridge.save_draft(input);
+      if (mountedRef.current && session === currentSearchSessionKey() && generation === draftStoreGeneration.current)
+        rememberHostDraft(saved);
+      return saved;
+    }, {
       changed: () => rerender(),
       rekeyed: (from, to) => handlers.current.rekeyed(from, to),
       notice: (key, event) => {
@@ -1979,7 +2051,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     searchReadGate.current = false;
   };
   const currentSearchSessionKey = () => createSearchSessionKey(snapshotRef.current, Boolean(appLockRef.current?.locked));
-  const applyAuthoritativeDraft = (draft: Draft) => store.applyAuthoritative(draft);
+  const applyAuthoritativeDraft = (draft: Draft) => {
+    rememberHostDraft(draft);
+    store.applyAuthoritative(draft);
+  };
+  const adoptHostDraft = (conversationId: string, draft?: Draft) => {
+    if (draft) rememberHostDraft(draft);
+    store.adopt(conversationId, draft);
+  };
 
   useEffect(() => {
     if (!draftNotice || reviewNoticeSequenceRef.current !== draftNotice.sequence) return;
@@ -2058,6 +2137,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const changeCompactTimestamps = (enabled: boolean) => {
     setCompactTimestamps(enabled);
     persistLayout({ compactTimestamps: enabled });
+  };
+  const changeAttachmentLayout = (layout: AttachmentLayout) => {
+    setAttachmentLayout(layout);
+    persistLayout({ composerAttachmentLayout: layout });
   };
   const changeGroupSenderAvatars = (enabled: boolean) => {
     setGroupSenderAvatars(enabled);
@@ -2247,8 +2330,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const setNotice = (message: ReactNode, severity: ActionNotice["severity"] = "error", persistent = false) =>
     setActionNotice(message ? { message, severity, persistent } : undefined);
-  const setComposerNotice = (key: string, message: string, severity: ComposerFeedback["severity"] = "error") =>
-    setComposerFeedback(message ? { key, message, severity } : undefined);
+  const setComposerNotice = (key: string, message: string, severity: ComposerFeedback["severity"] = "error", kind?: ComposerFeedback["kind"]) =>
+    setComposerFeedback(message ? { key, message, severity, kind } : undefined);
   const reportRefresh = (prefix: string) => (error: unknown) =>
     setRefreshNotice(`${prefix}${errorText(error)}`);
   const reportAction = (prefix: string) => (error: unknown) =>
@@ -2327,6 +2410,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       sessionKey !== currentSearchSessionKey() ||
       (detached && detachedHistoryRef.current !== detached)
     ) return;
+    resetDraftAttachmentCache(state.sessionScopeId);
 
     if (detached && (detached.pendingLoad || !detached.messageIds.length)) {
       setSnapshot((current) => {
@@ -2342,7 +2426,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       });
       if (state.activeConversationId) {
         if (state.draft && store.isHydrated(state.activeConversationId)) applyAuthoritativeDraft(state.draft);
-        else store.adopt(state.activeConversationId, state.draft);
+        else adoptHostDraft(state.activeConversationId, state.draft);
       }
       setRefreshNotice("");
       return;
@@ -2403,7 +2487,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
     if (state.activeConversationId) {
       if (state.draft && store.isHydrated(state.activeConversationId)) applyAuthoritativeDraft(state.draft);
-      else store.adopt(state.activeConversationId, state.draft);
+      else adoptHostDraft(state.activeConversationId, state.draft);
     }
     setRefreshNotice("");
     if (!composerConversation && !selectedRef.current && state.activeConversationId) choose(state.activeConversationId);
@@ -2477,7 +2561,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     latestRequiredConversationRef.current = undefined;
     nearBottom.current = true;
     setSnapshot(state);
-    if (state.activeConversationId === conversationId) store.adopt(conversationId, state.draft);
+    if (state.activeConversationId === conversationId) adoptHostDraft(conversationId, state.draft);
     setNewComposeKey(null);
     setNotice(unavailableNotice);
     const conversation = state.conversations.find(item => item.id === conversationId);
@@ -2568,7 +2652,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         setSnapshot({ ...metadata, activeConversationId: hit.conversationId, conversations: metadata.conversations.map(conversation => conversation.id === hit.conversationId ? { ...conversation, messages, hasOlderMessages: window.hasOlder } : conversation) });
         setSearchTargetId(hit.messageId);
       });
-      store.adopt(hit.conversationId, metadata.draft);
+      adoptHostDraft(hit.conversationId, metadata.draft);
       setNewComposeKey(null);
       hasOlderMessagesRef.current = window.hasOlder;
       setHasOlderMessages(window.hasOlder);
@@ -2696,12 +2780,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       historyAnchorRef.current = null;
       unsubscribe();
       unsubscribeDrafts();
-      store.reset();
+        draftStoreGeneration.current += 1;
+       draftSessionGenerationRef.current += 1;
+       resolutionRef.current = undefined;
+       setResolvingDraftConflict(false);
+       pastedAttachmentInFlight.current.clear();
+       attachmentSessionRef.current = undefined;
+       setAttachmentViews({});
+       setDraftViews({});
+       store.reset();
        draftNoticesRef.current.clear();
     };
   }, []);
   useEffect(() => {
     if (snapshot?.encryption.state !== "locked" && !appLock?.locked) return;
+    draftStoreGeneration.current += 1;
+    draftSessionGenerationRef.current += 1;
+    resolutionRef.current = undefined;
+    setResolvingDraftConflict(false);
+    pastedAttachmentInFlight.current.clear();
+    attachmentSessionRef.current = undefined;
+    setAttachmentViews({});
+    setDraftViews({});
     store.reset();
     saveFailedKeysRef.current.clear();
     draftNoticesRef.current.clear();
@@ -2789,7 +2889,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         setNewComposeKey(null);
         setNotice(found ? "" : "This conversation is no longer available.", "warning");
         if (found) {
-          store.adopt(destination.conversationId, state.draft);
+          adoptHostDraft(destination.conversationId, state.draft);
           const hasOlder = found.hasOlderMessages ?? false;
           hasOlderMessagesRef.current = hasOlder;
           setHasOlderMessages(hasOlder);
@@ -2861,6 +2961,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (previousSessionKey === renderedSearchSessionKey) return;
     previousSearchSessionKeyRef.current = renderedSearchSessionKey;
     if (!previousSessionKey.includes(":unavailable:")) {
+      draftStoreGeneration.current += 1;
+      draftSessionGenerationRef.current += 1;
+      resolutionRef.current = undefined;
+      setResolvingDraftConflict(false);
+      pastedAttachmentInFlight.current.clear();
       store.reset();
       saveFailedKeysRef.current.clear();
       draftNoticesRef.current.clear();
@@ -3306,13 +3411,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
 
   const edit = (patch: Partial<DraftContent>) => {
-    if (!slotKey || deletingId === slotKey) return;
+    if (!slotKey || deletingId === slotKey || resolvingDraftConflict) return;
     setDraftNotice((notice) => notice?.key === slotKey && notice.event === "stale-send" ? undefined : notice);
     draftNoticesRef.current.delete(slotKey);
     void store.edit(slotKey, patch);
   };
   const commitRecipients = (recipientIds: string[]) => {
-    if (!slotKey) return;
+    if (!slotKey || resolvingDraftConflict) return;
     const previous = content.recipientIds;
     void store.edit(slotKey, { recipientIds }).then(outcome => {
       const current = store.get(slotKey);
@@ -3486,7 +3591,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (!draftSlot && !localDraft) {
       try {
         const state = await bridge.load_state(conversationId);
-        if (state.activeConversationId === conversationId) store.adopt(conversationId, state.draft);
+        if (state.activeConversationId === conversationId) adoptHostDraft(conversationId, state.draft);
         draftSlot = store.get(conversationId);
       } catch (error) {
         setNotice(`Draft not deleted: ${errorText(error)}`);
@@ -3543,21 +3648,93 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setDeleteConfirmationId(null);
   };
 
+  const remainingAttachmentSlots = (draftKey: string) => {
+    const attachmentIds = store.get(draftKey)?.content.attachmentIds ?? [];
+    const inFlight = pastedAttachmentInFlight.current.get(draftKey) ?? 0;
+    return Math.max(0, MAX_DRAFT_ATTACHMENTS - attachmentIds.length - inFlight);
+  };
+  const beginAttachmentPreparation = (draftKey: string) => {
+    const operation = Symbol("attachment preparation");
+    const operations = attachmentPreparationInFlight.current.get(draftKey) ?? new Set<symbol>();
+    operations.add(operation);
+    attachmentPreparationInFlight.current.set(draftKey, operations);
+    return operation;
+  };
+  const finishAttachmentPreparation = (draftKey: string, operation: symbol) => {
+    const operations = attachmentPreparationInFlight.current.get(draftKey);
+    if (!operations) return;
+    operations.delete(operation);
+    if (!operations.size && attachmentPreparationInFlight.current.get(draftKey) === operations)
+      attachmentPreparationInFlight.current.delete(draftKey);
+  };
   const addAttachment = async () => {
-    if (!slotKey) return;
+    if (!slotKey || resolvingDraftConflict) return;
+    const draftKey = slotKey;
+    const session = currentSearchSessionKey();
+    const generation = draftStoreGeneration.current;
+    const operation = beginAttachmentPreparation(draftKey);
     try {
       const picked = await bridge.pick_attachments();
       if (!picked.length) return;
+      if (generation !== draftStoreGeneration.current || session !== currentSearchSessionKey()) return;
+      const selectedFiles = picked.slice(0, remainingAttachmentSlots(draftKey));
+      if (selectedFiles.length < picked.length)
+        setComposerNotice(draftKey, "You can attach up to 10 images.", "warning", "attachment-feedback");
+      if (!selectedFiles.length) return;
       setAttachmentViews((current) => ({
         ...current,
-        ...Object.fromEntries(picked.map((file) => [file.id, file])),
+        ...Object.fromEntries(selectedFiles.map((file) => [file.id, file])),
       }));
-      const existing = store.get(slotKey)?.content.attachmentIds ?? [];
-      void store.edit(slotKey, {
-        attachmentIds: [...existing, ...picked.map((file) => file.id)],
+      const resolvedKey = store.resolve(draftKey);
+      const existing = store.get(resolvedKey)?.content.attachmentIds ?? [];
+      const outcome = await store.edit(resolvedKey, {
+        attachmentIds: [...existing, ...selectedFiles.map((file) => file.id)],
       });
+      if (!outcome.ok) setComposerNotice(store.resolve(draftKey), `Couldn't add attachment: ${outcome.error}`, "error", "attachment-feedback");
     } catch (error) {
       setNotice(`Attachment picker: ${errorText(error)}`);
+    } finally {
+      finishAttachmentPreparation(draftKey, operation);
+    }
+  };
+  const addPastedAttachments = async (files: File[]) => {
+    if (!slotKey || !files.length || resolvingDraftConflict) return;
+    const draftKey = slotKey;
+    const inFlight = pastedAttachmentInFlight.current.get(draftKey) ?? 0;
+    const remaining = remainingAttachmentSlots(draftKey);
+    const selectedFiles = files.slice(0, remaining);
+    if (!selectedFiles.length) {
+      setComposerNotice(draftKey, "You can attach up to 10 images.", "warning", "attachment-feedback");
+      return;
+    }
+    if (selectedFiles.length < files.length)
+      setComposerNotice(draftKey, "You can attach up to 10 images.", "warning", "attachment-feedback");
+    const session = currentSearchSessionKey();
+    const generation = draftStoreGeneration.current;
+    const operation = beginAttachmentPreparation(draftKey);
+    pastedAttachmentInFlight.current.set(draftKey, inFlight + selectedFiles.length);
+    try {
+      const pasted = await Promise.all(selectedFiles.map(async (file) => ({
+        bytes: await file.arrayBuffer(),
+        name: file.name,
+        mediaType: file.type,
+      })));
+      const { views, failures } = await bridge.prepare_pasted_attachments(pasted);
+      if (generation !== draftStoreGeneration.current || session !== currentSearchSessionKey()) return;
+      const resolvedKey = store.resolve(draftKey);
+      setAttachmentViews((current) => ({ ...current, ...Object.fromEntries(views.map((file) => [file.id, file])) }));
+      const current = store.get(resolvedKey)?.content.attachmentIds ?? [];
+      const available = Math.max(0, MAX_DRAFT_ATTACHMENTS - current.length);
+      const outcome = await store.edit(resolvedKey, { attachmentIds: [...current, ...views.slice(0, available).map((file) => file.id)] });
+      if (!outcome.ok) setComposerNotice(store.resolve(draftKey), `Couldn't add pasted image: ${outcome.error}`, "error", "attachment-feedback");
+      else if (failures.length || views.length > available) setComposerNotice(resolvedKey, [...failures, ...(views.length > available ? ["You can attach up to 10 images."] : [])].join(" "), "warning", "attachment-feedback");
+    } catch (error) {
+      setComposerNotice(store.resolve(draftKey), `Couldn't add pasted image: ${errorText(error)}`, "error", "attachment-feedback");
+    } finally {
+      finishAttachmentPreparation(draftKey, operation);
+      const pending = pastedAttachmentInFlight.current.get(draftKey) ?? selectedFiles.length;
+      if (pending <= selectedFiles.length) pastedAttachmentInFlight.current.delete(draftKey);
+      else pastedAttachmentInFlight.current.set(draftKey, pending - selectedFiles.length);
     }
   };
 
@@ -3590,6 +3767,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       const current = store.get(resolvedKey);
       if (!current?.id)
         return setComposerNotice(resolvedKey, "Not sent: the draft has not been stored yet.");
+      if (draftSendBlock)
+        return setComposerNotice(resolvedKey, `Not sent: ${draftSendBlock}`);
       const latestSnapshot = snapshotRef.current;
       const latestConversation = latestSnapshot?.conversations.find(
         (conversation) => conversation.id === current.conversationId,
@@ -4189,6 +4368,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
   );
+  const activeDraftView = slot?.id ? draftViews[slot.id] : undefined;
+  const failedDraftAttachment = attachments.find((attachment) =>
+    attachment.state === "failed" || ["upload-failed", "download-failed", "unavailable"].includes(attachment.draftState ?? ""),
+  );
+  const draftConflict = Boolean(activeDraftView?.sync?.conflicts.length);
+  const syncedOffline = Boolean(serverOffline && activeDraftView?.sync?.sendRequiresConnection);
+  const draftSavePending = slotKey ? store.saveState(slotKey) === "saving" || store.saveState(slotKey) === "failed" : false;
+  const draftSendBlock = draftConflict ? "resolve the draft conflict before sending"
+    : failedDraftAttachment ? `image unavailable: ${failedDraftAttachment.name}`
+    : syncedOffline ? "Reconnect to send this synced draft."
+    : draftSavePending ? "the draft must be saved before sending"
+    : undefined;
   const activeDisplay = active
     ? displayConversation(active.name, active.participants, resolution, active.id, active.recipientlessDraft)
     : undefined;
@@ -4330,7 +4521,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     mmsRequired && route.kind === "route" && estimateBytes > 0;
   const pendingRecipientReason = "finish adding the recipient before sending";
   const effectivePendingRecipient = pendingRecipient && isNewConversation;
-  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : problem;
+  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : draftSendBlock ?? problem;
   const mainWindowRouteRecovery = headPanel && !effectivePendingRecipient && (
     (route.kind === "none" && gateways.length > 0) || route.kind === "stale"
   );
@@ -4375,9 +4566,73 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   } else if (retainedTextAvailable) {
     noticeCandidates.push({ kind: "remote-update", sequence: -1, retainedTextAvailable: true });
   }
-  if (composerFeedback?.key === slotKey) noticeCandidates.push({ kind: "send-failed", detail: composerFeedback.message, sequence: draftNoticeSequence.current + 1 });
+  if (composerFeedback?.key === slotKey) noticeCandidates.push({ kind: composerFeedback.kind ?? "send-failed", detail: composerFeedback.message, sequence: draftNoticeSequence.current + 1 });
   const visibleDraftNotice = selectDraftNotice(noticeCandidates);
-  const statusActive = Boolean(unavailableReason || mmsLimitShown || visibleDraftNotice);
+  const statusActive = Boolean(unavailableReason || mmsLimitShown || visibleDraftNotice || activeDraftView?.sync);
+  const resolveDraftConflict = async (branchId: string | null) => {
+    if (!activeDraftView?.id || !slotKey || resolutionRef.current !== undefined) return;
+    const resolvedKey = store.resolve(slotKey);
+    if (hasInFlightAttachmentPreparation(attachmentPreparationInFlight.current, resolvedKey, key => store.resolve(key))) {
+      setComposerNotice(resolvedKey, "Wait for images to finish preparing before choosing a draft version.", "warning", "attachment-feedback");
+      return;
+    }
+    const operation = Date.now();
+    resolutionRef.current = operation;
+    setResolvingDraftConflict(true);
+    const session = currentSearchSessionKey();
+    const sessionGeneration = draftSessionGenerationRef.current;
+    const before = store.get(resolvedKey);
+    const draftId = activeDraftView.id;
+    const revision = before?.revision;
+    const generation = before?.generation;
+    const flushed = await store.flush(resolvedKey);
+    const current = store.get(resolvedKey);
+    const valid = mountedRef.current && resolutionRef.current === operation
+      && sessionGeneration === draftSessionGenerationRef.current && session === currentSearchSessionKey()
+      && revision !== undefined && current?.id === draftId && current.generation === generation;
+    if (!valid || !flushed.ok) {
+      if (valid) setComposerNotice(resolvedKey, `Couldn't resolve draft conflict: ${flushed.ok ? "the draft changed while reviewing" : flushed.error}`);
+      if (resolutionRef.current === operation) {
+        resolutionRef.current = undefined;
+        setResolvingDraftConflict(false);
+      }
+      return;
+    }
+    try {
+      const resolved = await bridge.resolve_draft_conflict({ draftId, keepBranchId: branchId });
+      if (!mountedRef.current || resolutionRef.current !== operation || sessionGeneration !== draftSessionGenerationRef.current || session !== currentSearchSessionKey()) return;
+      applyAuthoritativeDraft(resolved);
+      if (store.resolve(selectedRef.current ?? "") === resolvedKey)
+        document.getElementById("composer-textarea")?.focus();
+    } catch (error) {
+      if (mountedRef.current && resolutionRef.current === operation && sessionGeneration === draftSessionGenerationRef.current && session === currentSearchSessionKey())
+        setComposerNotice(resolvedKey, `Couldn't resolve draft conflict: ${errorText(error)}`);
+    } finally {
+      if (resolutionRef.current === operation) {
+        resolutionRef.current = undefined;
+        if (mountedRef.current && sessionGeneration === draftSessionGenerationRef.current) setResolvingDraftConflict(false);
+      }
+    }
+  };
+  const acknowledgeDraftSyncNotice = () => {
+    if (!activeDraftView?.id || !slotKey) return;
+    const draftId = activeDraftView.id;
+    const key = slotKey;
+    const generation = draftSessionGenerationRef.current;
+    const session = currentSearchSessionKey();
+    void bridge.acknowledge_draft_notice(draftId)
+      .then(() => {
+        if (!mountedRef.current || generation !== draftSessionGenerationRef.current || session !== currentSearchSessionKey() || selectedRef.current !== key) return;
+        setDraftViews((current) => current[draftId]
+        ? { ...current, [draftId]: { ...current[draftId], sync: current[draftId].sync ? { ...current[draftId].sync!, notice: null } : undefined } }
+        : current);
+        document.getElementById("composer-textarea")?.focus();
+      })
+      .catch((error) => {
+        if (mountedRef.current && generation === draftSessionGenerationRef.current && session === currentSearchSessionKey() && selectedRef.current === key)
+          setComposerNotice(key, `Couldn't dismiss draft notice: ${errorText(error)}`);
+      });
+  };
   const onDraftNoticeAction = (action: "retry" | "save-new" | "discard-local" | "undo" | "copy") => {
     if (!slotKey || noticeActionBusyRef.current) return;
     noticeActionOwnedFocusRef.current = document.activeElement?.id === "draft-notice-action";
@@ -4434,14 +4689,33 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       <Composer
         draft={content.text}
         attachments={attachments}
-        sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending}
-        unavailableReason={sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
-        readOnly={composerReadOnly}
+        sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending && !resolvingDraftConflict}
+        unavailableReason={resolvingDraftConflict ? "resolving draft conflict…" : sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
+        readOnly={composerReadOnly || resolvingDraftConflict}
         placeholder={composerReadOnly ? "Loading draft…" : undefined}
         onDraftChange={(text) => edit({ text })}
         onSend={() => void send()}
-        onAddAttachment={slotKey && !composerReadOnly ? () => void addAttachment() : undefined}
-        onRemoveAttachment={slotKey && !composerReadOnly ? (id) => edit({ attachmentIds: content.attachmentIds.filter((attachmentId) => attachmentId !== id) }) : undefined}
+        onAddAttachment={slotKey && !composerReadOnly && !resolvingDraftConflict ? () => void addAttachment() : undefined}
+        onPasteImages={slotKey && !composerReadOnly && !resolvingDraftConflict ? files => void addPastedAttachments(files) : undefined}
+        onRemoveAttachment={slotKey && !composerReadOnly && !resolvingDraftConflict ? (id) => edit({ attachmentIds: content.attachmentIds.filter((attachmentId) => attachmentId !== id) }) : undefined}
+        onRetryAttachment={composerReadOnly || resolvingDraftConflict ? undefined : id => {
+          const session = currentSearchSessionKey();
+          const sessionGeneration = draftSessionGenerationRef.current;
+          const key = slotKey;
+          const previous = attachmentViews[id];
+          const retryState = previous?.transfer === "download" || previous?.draftState === "download-failed" ? "downloading" : "uploading";
+          setAttachmentViews(current => current[id] ? { ...current, [id]: { ...current[id], draftState: retryState } } : current);
+          void bridge.retry_attachment(id).then(() => {
+            if (mountedRef.current && key === selectedRef.current && sessionGeneration === draftSessionGenerationRef.current && session === currentSearchSessionKey()) void refresh();
+          }).catch(error => {
+            if (mountedRef.current && key === selectedRef.current && sessionGeneration === draftSessionGenerationRef.current && session === currentSearchSessionKey()) {
+              setAttachmentViews(current => previous ? { ...current, [id]: previous } : current);
+              setComposerNotice(store.resolve(slotKey ?? ""), `Couldn't retry attachment: ${errorText(error)}`, "error", "attachment-feedback");
+            }
+          });
+        }}
+        attachmentLayout={attachmentLayout}
+        maxAttachments={MAX_DRAFT_ATTACHMENTS}
         statusActive={statusActive}
         statusSlot={
           <>
@@ -4454,6 +4728,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               </span>
             )}
             <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
+            <DraftSyncStatus
+              draft={activeDraftView}
+              local={content}
+              attachments={attachmentViews}
+              offline={serverOffline}
+              localSaveState={slotKey ? store.saveState(slotKey) : "idle"}
+              resolving={resolvingDraftConflict}
+              onResolveConflict={resolveDraftConflict}
+              onAcknowledgeNotice={acknowledgeDraftSyncNotice}
+            />
           </>
         }
         composerName={title}
@@ -5030,6 +5314,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onPopoutMode={changePopoutMode}
               compactTimestamps={compactTimestamps}
               onCompactTimestamps={changeCompactTimestamps}
+              attachmentLayout={attachmentLayout}
+              onAttachmentLayout={changeAttachmentLayout}
               groupSenderAvatars={groupSenderAvatars}
               onGroupSenderAvatars={changeGroupSenderAvatars}
               showReactions={showReactions}

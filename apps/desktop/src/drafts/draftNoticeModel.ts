@@ -2,6 +2,7 @@ export type DraftNoticeKind =
   | "save-failed"
   | "stale-send"
   | "send-failed"
+  | "attachment-feedback"
   | "moved"
   | "remote-update"
   | "replaced"
@@ -34,11 +35,10 @@ type DraftNoticeBase = {
   retainedTextAvailable?: boolean;
 };
 
-export type DraftNoticeCandidate = DraftNoticeBase & (
-  | { kind: "send-failed"; detail: string }
-  | { kind: "moved"; detail: string }
-  | { kind: Exclude<DraftNoticeKind, "send-failed" | "moved"> }
-);
+type DetailedDraftNoticeKind = "send-failed" | "moved" | "attachment-feedback";
+export type DraftNoticeCandidate =
+  | (Omit<DraftNoticeBase, "detail"> & { kind: DetailedDraftNoticeKind; detail: string })
+  | (DraftNoticeBase & { kind: Exclude<DraftNoticeKind, DetailedDraftNoticeKind> });
 
 const SAVED_DURATION_MS = 2000;
 const REMOTE_UPDATE_DURATION_MS = 4000;
@@ -50,6 +50,7 @@ const PRIORITY_RANK: Record<DraftNoticeKind, number> = {
   "save-failed": 0,
   "stale-send": 1,
   "send-failed": 2,
+  "attachment-feedback": 2,
   moved: 3,
   "remote-update": 4,
   replaced: 4,
@@ -96,6 +97,8 @@ export function draftNoticeView(candidate: DraftNoticeCandidate): DraftNoticeVie
       };
     case "send-failed":
       return { kind: candidate.kind, message: `Not sent: ${candidate.detail}`, tone: "error", role: "alert" };
+    case "attachment-feedback":
+      return { kind: candidate.kind, message: candidate.detail ?? "Couldn’t add pasted image.", tone: "warning", role: "alert" };
     case "moved":
       return {
         kind: candidate.kind,

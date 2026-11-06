@@ -45,7 +45,9 @@ export type { AccountAccessResult, AccountNoticeDto, AccountNoticeKindDto, Accou
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
-export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
+export type DraftAttachmentState = "saving" | "local" | "waiting" | "uploading" | "uploaded" | "upload-failed" | "downloading" | "download-failed" | "unavailable";
+export const MAX_DRAFT_ATTACHMENTS = 10;
+export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; draftState?: DraftAttachmentState; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
 export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
@@ -63,7 +65,12 @@ export type HistoryPage = { conversationId: string; messages: MessageView[]; has
 export type GatewayAvailability = "unknown" | "connected" | "delayed" | "offline" | "never_connected" | "no_sms_sim" | "sms_permission_needed" | "sms_unavailable" | "capabilities_unknown" | "unsupported_platform";
 export type GatewayPresence = { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null };
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
-export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
+export type DraftConflictView = { branchId: string; text: string; attachmentIds: string[]; recipientIds: string[]; gatewayId?: string; simId?: string };
+export type DraftSyncView = { state: "local-only" | "saving" | "saved-local" | "syncing" | "synced" | "paused" | "failed"; expiresAt: string | null; conflicts: DraftConflictView[]; notice: "restored-after-expiry" | "kept-after-sent" | null; sendRequiresConnection: boolean };
+export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string; /** Authoritative host views for the draft's attachments. */ attachments?: AttachmentView[]; sync?: DraftSyncView };
+export type PastedImage = { bytes: ArrayBuffer; name: string; mediaType: string };
+/** Successful pasted attachments plus per-file failures. Hosts never discard successful files because another file failed. */
+export type PreparedPastedAttachments = { views: AttachmentView[]; failures: string[] };
 /** Exact durable cursors only; `targetHighWater` is a transient authenticated replay cut, not a percentage denominator. */
 export type SyncProgress = { phase: "receiving" | "applying" | "waitingForKeys" | "current"; receivedThrough: string; processedThrough: string; targetHighWater?: string; snapshotReceived?: string; snapshotExpected?: string; snapshotRemaining?: string };
 export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress };
@@ -206,6 +213,9 @@ export interface DesktopBridge {
   request_notification_permission(): Promise<NotificationCheck>;
   open_notification_settings(): Promise<void>;
   pick_attachments(): Promise<AttachmentView[]>;
+  prepare_pasted_attachments(files: PastedImage[]): Promise<PreparedPastedAttachments>;
+  resolve_draft_conflict(input: { draftId: string; keepBranchId: string | null }): Promise<Draft>;
+  acknowledge_draft_notice(draftId: string): Promise<void>;
   retry_attachment(id: string): Promise<void>;
   save_attachment(id: string): Promise<boolean>;
   request_attachment_download(id: string): Promise<void>;

@@ -1,4 +1,4 @@
-import type { KeyboardEvent, PointerEvent, ReactElement, ReactNode } from "react";
+import type { ClipboardEvent, KeyboardEvent, PointerEvent, ReactElement, ReactNode } from "react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
   Archive,
@@ -37,6 +37,12 @@ import {
 } from "./phone";
 import { conversationAvatar, seedKey, type AvatarIdentity } from "./avatar";
 import { ContactAvatar } from "./ContactAvatar";
+import { ComposerAttachmentTray, type Attachment, type AttachmentLayout } from "./ComposerAttachmentTray";
+import { extractComposerPaste } from "./composerPaste";
+import type { DraftAttachmentState } from "./bridge-contracts";
+export { ComposerAttachmentTray, type Attachment, type AttachmentLayout } from "./ComposerAttachmentTray";
+export { extractComposerPaste, type ComposerPaste, type ComposerPasteRejection } from "./composerPaste";
+export type { DraftAttachmentState };
 export { BusyIndicator } from "./BusyIndicator";
 import type { ConversationFolder } from "./bridge-contracts";
 export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
@@ -150,13 +156,6 @@ export type Conversation = {
   folderReason?: "marked" | "blocked";
   unblock?: "pending" | "failed";
   canUnblock?: boolean;
-};
-export type Attachment = {
-  id: string;
-  name: string;
-  state: "pending" | "ready" | "uploading" | "failed";
-  error?: string;
-  previewUrl?: string;
 };
 
 export type StatusTone = "neutral" | "ok" | "warning" | "error";
@@ -725,6 +724,16 @@ function smsCounter(text: string): string | null {
   const segments = Math.ceil(units / multi);
   const remaining = segments * multi - units;
   return `${segments} SMS · ${remaining} left`;
+}
+
+function formatPasteRejections(rejections: { name: string; reason: "type" | "size" | "limit" }[]): string | null {
+  if (!rejections.length) return null;
+  const copy = {
+    type: "Use PNG, JPEG, GIF or WebP.",
+    size: "Images must be under 32 MB.",
+    limit: "Up to 10 images per message.",
+  } as const;
+  return rejections.map((rejection) => `Couldn't add ${rejection.name}. ${copy[rejection.reason]}`).join(" ");
 }
 
 export function detectPlatform(): "macos" | "windows" | "linux" {
@@ -1315,6 +1324,10 @@ export function Composer({
   composerUserSized = false,
   maxAutoGrowHeight = 176,
   platform,
+  attachmentLayout = "tiles",
+  onPasteImages,
+  onRetryAttachment,
+  maxAttachments = 10,
 }: {
   draft: string;
   attachments: Attachment[];
@@ -1337,8 +1350,14 @@ export function Composer({
   /** CSS max-height: 176px remains the hard ceiling (8 lines); this can only lower auto-grow. */
   maxAutoGrowHeight?: number;
   platform?: "macos" | "windows" | "linux";
+  attachmentLayout?: AttachmentLayout;
+  onPasteImages?(files: File[]): void;
+  onRetryAttachment?(id: string): void;
+  maxAttachments?: number;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pastedCaretRef = useRef<{ draft: string; position: number } | null>(null);
+  const [pasteRejection, setPasteRejection] = useState<string | null>(null);
   const hasContent = Boolean(draft.trim()) || attachments.length > 0;
   const canSend = sendSupported && !readOnly && hasContent;
   const counter = !attachments.length ? smsCounter(draft) : null;
@@ -1349,6 +1368,12 @@ export function Composer({
     textarea.style.height = "0";
     textarea.style.height = `${Math.min(textarea.scrollHeight, maxAutoGrowHeight)}px`;
   }, [composerUserSized, draft, maxAutoGrowHeight]);
+  useLayoutEffect(() => {
+    const pastedCaret = pastedCaretRef.current;
+    if (!pastedCaret || pastedCaret.draft !== draft) return;
+    textareaRef.current?.setSelectionRange(pastedCaret.position, pastedCaret.position);
+    pastedCaretRef.current = null;
+  }, [draft]);
   const keydown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (
       event.key === "Enter" &&
@@ -1359,16 +1384,22 @@ export function Composer({
       if (canSend) onSend();
     }
   };
-  const icon = (state: Attachment["state"]) =>
-    state === "ready" ? (
-      <Check size={12} />
-    ) : state === "failed" ? (
-      <X size={12} />
-    ) : state === "uploading" ? (
-      <Loader size={12} />
-    ) : (
-      <Clock size={12} />
-    );
+  const pasteImages = (event: ClipboardEvent<HTMLTextAreaElement | HTMLUListElement>) => {
+    if (readOnly || !onPasteImages) return;
+    const pasted = extractComposerPaste(event.clipboardData, maxAttachments - attachments.length);
+    if (!pasted.images.length && !pasted.rejected.length) return;
+    event.preventDefault();
+    if (pasted.text) {
+      const textarea = textareaRef.current;
+      const selectionStart = textarea?.selectionStart ?? draft.length;
+      const selectionEnd = textarea?.selectionEnd ?? draft.length;
+      const nextDraft = `${draft.slice(0, selectionStart)}${pasted.text}${draft.slice(selectionEnd)}`;
+      pastedCaretRef.current = { draft: nextDraft, position: selectionStart + pasted.text.length };
+      onDraftChange(nextDraft);
+    }
+    if (pasted.images.length) onPasteImages(pasted.images);
+    setPasteRejection(formatPasteRejections(pasted.rejected));
+  };
   return (
     <section
       id="shared-composer"
@@ -1379,43 +1410,7 @@ export function Composer({
         <div id="composer-banner-row" hidden={!bannerSlot}>
           {bannerSlot}
         </div>
-        {attachments.length > 0 && (
-        <ul id="attachment-tray" aria-label="Attachments">
-          {attachments.map((a) => (
-            <li
-              key={a.id}
-              data-attachment-id={a.id}
-              className={`attachment-chip ${a.state}`}
-            >
-              {a.previewUrl && (
-                <img
-                  src={a.previewUrl}
-                  alt={a.name}
-                  onError={(e) => {
-                    e.currentTarget.hidden = true;
-                  }}
-                />
-              )}
-              <span>{a.name}</span>
-              <span className="attachment-state" aria-label={a.state}>
-                {icon(a.state)}
-              </span>
-               {a.error && <span role="alert">{a.error}</span>}
-               {onRemoveAttachment && (
-                 <button
-                   type="button"
-                   className="attachment-remove"
-                   aria-label={`Remove ${a.name}`}
-                   title={`Remove ${a.name}`}
-                   onClick={() => onRemoveAttachment(a.id)}
-                 >
-                   <X size={12} aria-hidden />
-                 </button>
-               )}
-            </li>
-          ))}
-        </ul>
-      )}
+        <ComposerAttachmentTray attachments={attachments} layout={attachmentLayout} onRemoveAttachment={onRemoveAttachment} onRetryAttachment={onRetryAttachment} onPaste={pasteImages} onFocusTextarea={() => textareaRef.current?.focus()} />
         <div id="composer-input-row">
         <label htmlFor="composer-textarea" className="sr-only">
           Message
@@ -1427,9 +1422,13 @@ export function Composer({
           value={draft}
           readOnly={readOnly}
           onChange={(e) => {
-            if (!readOnly) onDraftChange(e.target.value);
+            if (!readOnly) {
+              setPasteRejection(null);
+              onDraftChange(e.target.value);
+            }
           }}
           onKeyDown={keydown}
+          onPaste={pasteImages}
           placeholder={
             placeholder ??
             (composerName ? `Message ${composerName}` : "Type a message")
@@ -1439,7 +1438,7 @@ export function Composer({
       </div>
         <div
           id="composer-status-row"
-          hidden={!(statusActive || status || fallbackShown)}
+          hidden={!(statusActive || status || fallbackShown || pasteRejection)}
         >
           {statusSlot}
           {status && (
@@ -1447,6 +1446,7 @@ export function Composer({
               {status}
             </p>
           )}
+          {pasteRejection && <p className="composer-paste-rejection" role="alert">{pasteRejection}</p>}
            {fallbackShown && <span id="unavailable-hint">Sending unavailable: {unavailableReason ?? "phone is offline"}</span>}
         </div>
         <div id="composer-toolbar">

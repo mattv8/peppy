@@ -1,4 +1,4 @@
-import type { NavigationPosition, PopoutMode, RecipientPosition } from "@peppy/desktop-ui";
+import type { AttachmentLayout, NavigationPosition, PopoutMode, RecipientPosition } from "@peppy/desktop-ui";
 import { parseAccentColor } from "./accent-color";
 
 const LAYOUT_KEY = "peppy.layout.v1";
@@ -15,19 +15,24 @@ type LayoutPatch = {
   compactTimestamps?: boolean;
   theme?: "light" | "dark" | "system";
   groupSenderAvatars?: boolean;
+  composerAttachmentLayout?: AttachmentLayout;
 };
 
 type StoredLayout = Record<string, unknown>;
 
-export function readAccentColor(): number | null {
+function parseStoredLayout(value: string | null): StoredLayout | undefined {
   try {
-    const stored: unknown = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
+    const stored: unknown = JSON.parse(value ?? "{}");
     return typeof stored === "object" && stored !== null && !Array.isArray(stored)
-      ? parseAccentColor((stored as StoredLayout).accentColor)
-      : null;
+      ? stored as StoredLayout
+      : undefined;
   } catch {
-    return null;
+    return undefined;
   }
+}
+
+export function readAccentColor(): number | null {
+  return parseAccentColor(readStoredLayout()?.accentColor);
 }
 
 export function persistAccentColor(value: number | null): boolean {
@@ -47,15 +52,17 @@ export function persistAccentColor(value: number | null): boolean {
   }
 }
 
-export function readContactsDetailWidth(): number | undefined {
+function readStoredLayout(): StoredLayout | undefined {
   try {
-    const stored: unknown = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
-    if (typeof stored !== "object" || stored === null || Array.isArray(stored)) return undefined;
-    const value = (stored as StoredLayout).contactsDetailWidth;
-    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+    return parseStoredLayout(localStorage.getItem(LAYOUT_KEY));
   } catch {
     return undefined;
   }
+}
+
+export function readContactsDetailWidth(): number | undefined {
+  const value = readStoredLayout()?.contactsDetailWidth;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 export function readCompactTimestamps(): boolean {
@@ -66,15 +73,14 @@ export function readGroupSenderAvatars(): boolean {
   return readLayoutBoolean("groupSenderAvatars");
 }
 
+export function readComposerAttachmentLayout(value?: string | null): AttachmentLayout {
+  const layout = value === undefined ? readStoredLayout() : parseStoredLayout(value);
+  return layout?.composerAttachmentLayout === "rows" ? "rows" : "tiles";
+}
+
 function readLayoutBoolean(key: string): boolean {
-  try {
-    const stored: unknown = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
-    if (typeof stored !== "object" || stored === null || Array.isArray(stored)) return true;
-    const value = (stored as StoredLayout)[key];
-    return typeof value === "boolean" ? value : true;
-  } catch {
-    return true;
-  }
+  const value = readStoredLayout()?.[key];
+  return typeof value === "boolean" ? value : true;
 }
 
 function updateLayout(update: (layout: StoredLayout) => StoredLayout): void {
