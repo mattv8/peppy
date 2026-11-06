@@ -241,16 +241,16 @@ pub(crate) fn apply_gateway_refresh(
     let views = gateway_views(devices, capabilities);
     let device_role = extract_device_role(devices, &session.binding.device_id);
     let rcs_roster_validated = device_role.is_some();
-    let rcs_live_roster = rcs_roster_validated
-        .then(|| {
-            devices
-                .devices
-                .iter()
-                .filter(|device| !device.revoked)
-                .map(|device| device.device_id.clone())
-                .collect()
-        })
-        .unwrap_or_default();
+    let rcs_live_roster = if rcs_roster_validated {
+        devices
+            .devices
+            .iter()
+            .filter(|device| !device.revoked)
+            .map(|device| device.device_id.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let revoked_device_ids = devices
         .devices
         .iter()
@@ -1474,7 +1474,7 @@ fn revoke(session: &Arc<Session>) {
     session.notify();
 }
 
-fn jitter(base: Duration) -> Duration {
+pub(crate) fn jitter(base: Duration) -> Duration {
     let mut bytes = [0u8; 2];
     let _ = getrandom::fill(&mut bytes);
     base + base.mul_f64(f64::from(u16::from_le_bytes(bytes)) / f64::from(u16::MAX) / 4.0)
@@ -2322,6 +2322,7 @@ pub fn start(session: &Arc<Session>) {
     }));
     session.track_worker(tokio::spawn(worker(session.clone())));
     session.track_worker(tokio::spawn(live(session.clone())));
+    crate::live_typing::start(session.clone());
 }
 
 async fn join_workers(workers: &mut [tokio::task::JoinHandle<()>], duration: Duration) -> bool {
@@ -2429,12 +2430,16 @@ mod drain_tests {
             {"device_id": revoked_peer, "role": "device", "revoked": true}
         ]}))
         .unwrap();
-        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities": []})).unwrap();
+        let capabilities: CapabilitiesResponse =
+            serde_json::from_value(serde_json::json!({"capabilities": []})).unwrap();
 
         apply_gateway_refresh(&session, &devices, &capabilities);
 
         let status = session.status.lock().unwrap();
         assert!(status.rcs_roster_validated);
-        assert_eq!(status.rcs_live_roster, vec![fixture.binding.device_id, active_peer]);
+        assert_eq!(
+            status.rcs_live_roster,
+            vec![fixture.binding.device_id, active_peer]
+        );
     }
 }

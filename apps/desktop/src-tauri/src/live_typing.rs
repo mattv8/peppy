@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use peppy_client_core::{
     Client, ConversationId, DeviceId, LiveClock, LiveEnableContext, LiveEnableGeneration,
     LiveError, LiveExecutor,
@@ -5,8 +6,21 @@ use peppy_client_core::{
 use peppy_desktop_api::rcs_status::{
     snapshot_at, RcsEligibilityState, RcsGatewayState, RcsStatusSnapshot, SnapshotAccess,
 };
+use peppy_protocol::LiveHelloV2;
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::time::{sleep, timeout, Instant};
+use tokio_tungstenite::{
+    tungstenite::{self, client::IntoClientRequest, protocol::WebSocketConfig, Message},
+    WebSocketStream,
+};
 
-use crate::session::NetStatus;
+use crate::{
+    session::{NetStatus, Session},
+    sync::jitter,
+};
 
 pub(crate) type GatewayDeviceId = DeviceId;
 
@@ -147,6 +161,157 @@ impl LiveTypingState {
         self.generation = generation;
         Ok(generation)
     }
+}
+
+const LIVE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+const LIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LIVE_MAX_FRAME: usize = 64 * 1024;
+
+pub(crate) fn start(session: Arc<Session>) {
+    session.track_worker(tokio::spawn(supervise(session.clone())));
+}
+
+async fn supervise(session: Arc<Session>) {
+    let started = Instant::now();
+    let mut state = LiveTypingState::default();
+    let mut backoff = Duration::from_secs(1);
+    let mut probed = false;
+    loop {
+        let result = connect(&session).await;
+        let mut socket = match result {
+            Ok(socket) => socket,
+            Err(()) => {
+                if !probed {
+                    probed = true;
+                    let _ = session
+                        .api
+                        .get_json::<serde_json::Value>("/v1/live", 1024)
+                        .await;
+                }
+                disable(&mut state, &session);
+                if !wait_or_cancel(&session, jitter(backoff)).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(LIVE_MAX_BACKOFF);
+                continue;
+            }
+        };
+        probed = false;
+        backoff = Duration::from_secs(1);
+        if !server_hello(&mut socket, &session).await {
+            disable(&mut state, &session);
+            if !wait_or_cancel(&session, jitter(backoff)).await {
+                return;
+            }
+            backoff = (backoff * 2).min(LIVE_MAX_BACKOFF);
+            continue;
+        }
+        let context = {
+            let status = session
+                .status
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            enable_context(
+                &status,
+                RcsSnapshotInputs {
+                    client: &session.client,
+                    now_ms: wall_ms(),
+                },
+            )
+        };
+        if state
+            .apply(&session.client, context, clock(started))
+            .is_err()
+        {
+            disable(&mut state, &session);
+        }
+        loop {
+            tokio::select! {
+                _ = session.cancel.cancelled() => {
+                    disable(&mut state, &session);
+                    let _ = socket.close(None).await;
+                    return;
+                }
+                frame = socket.next() => match frame {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+        disable(&mut state, &session);
+        if !wait_or_cancel(&session, jitter(backoff)).await {
+            return;
+        }
+        backoff = (backoff * 2).min(LIVE_MAX_BACKOFF);
+    }
+}
+
+async fn connect(
+    session: &Session,
+) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, ()> {
+    let url = format!("{}/v1/live", session.api.origin())
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1);
+    let mut request = url.into_client_request().map_err(|_| ())?;
+    let mut bearer =
+        tungstenite::http::HeaderValue::from_str(&format!("Bearer {}", session.api.bearer()))
+            .map_err(|_| ())?;
+    bearer.set_sensitive(true);
+    request
+        .headers_mut()
+        .insert(tungstenite::http::header::AUTHORIZATION, bearer);
+    let connector = crate::tls::websocket_connector(session.api.origin()).map_err(|_| ())?;
+    timeout(
+        LIVE_CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            Some(
+                WebSocketConfig::default()
+                    .max_message_size(Some(LIVE_MAX_FRAME))
+                    .max_frame_size(Some(LIVE_MAX_FRAME)),
+            ),
+            true,
+            connector,
+        ),
+    )
+    .await
+    .map_err(|_| ())?
+    .map(|(socket, _)| socket)
+    .map_err(|_| ())
+}
+
+async fn server_hello(
+    socket: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    session: &Session,
+) -> bool {
+    let next = tokio::select! {
+        _ = session.cancel.cancelled() => return false,
+        frame = socket.next() => frame,
+    };
+    matches!(next, Some(Ok(Message::Text(text))) if serde_json::from_str::<LiveHelloV2>(&text).ok() == Some(LiveHelloV2::new()))
+}
+
+fn clock(started: Instant) -> LiveClock {
+    LiveClock {
+        wall_ms: wall_ms(),
+        mono_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+    }
+}
+
+fn wall_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| duration.as_millis().try_into().ok())
+        .unwrap_or(0)
+}
+
+fn disable(state: &mut LiveTypingState, session: &Session) {
+    let _ = state.apply(&session.client, None, clock(Instant::now()));
+}
+
+async fn wait_or_cancel(session: &Session, delay: Duration) -> bool {
+    tokio::select! { _ = session.cancel.cancelled() => false, _ = sleep(delay) => true }
 }
 
 #[cfg(test)]
