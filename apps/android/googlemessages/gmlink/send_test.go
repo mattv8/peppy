@@ -327,6 +327,76 @@ func TestPreparedRcsAdmissionRejectsRevocationBeforeHTTPWrite(t *testing.T) {
 	}
 }
 
+func TestPreparedRcsRejectsChangedFetchedConversationWithoutIndexChange(t *testing.T) {
+	link, fixture, cleanup, token, tmpID := preparedRcsFixtureWithPhone(t)
+	defer cleanup()
+	ticket := prepareTicket(t, link, token, tmpID)
+	fixture.mu.Lock()
+	fixture.conversations[0] = cloneConversation(fixture.conversations[0])
+	fixture.conversations[0].Status = gmproto.ConversationStatus_INACTIVE
+	fixture.mu.Unlock()
+	if got := decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))); got != "rejected" {
+		t.Fatalf("changed fetched conversation = %s", got)
+	}
+	fixture.mu.Lock()
+	sends := len(fixture.sendRequests)
+	fixture.mu.Unlock()
+	if sends != 0 {
+		t.Fatalf("changed fetched conversation sent %d requests", sends)
+	}
+}
+
+func TestPreparedRcsExpiresWhileWaitingForRPCSlot(t *testing.T) {
+	link, fixture, cleanup, token, tmpID := preparedRcsFixtureWithPhone(t)
+	defer cleanup()
+	now := time.Now()
+	link.mu.Lock()
+	link.ticketNow = func() time.Time { return now }
+	link.mu.Unlock()
+	ticket := prepareTicket(t, link, token, tmpID)
+	link.rpcMu.Lock()
+	result := make(chan string, 1)
+	go func() { result <- decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))) }()
+	awaitSafety(t, "commit waiting for RPC slot", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.sendAdmissionInFlight
+	})
+	if got := decodeSendCode(t, link.PrepareRcs(`{"tmp_id":"11111111-1111-4111-8111-111111111111","google_conversation_id":"synthetic-conversation","snapshot_token":"`+token+`","content":"synthetic-content"}`)); got != "busy" {
+		t.Fatalf("prepare while admission in flight = %s", got)
+	}
+	now = now.Add(preparedRcsTicketTTL)
+	link.rpcMu.Unlock()
+	select {
+	case got := <-result:
+		if got != "rejected" {
+			t.Fatalf("expired RPC wait = %s", got)
+		}
+	case <-time.After(rcsSendDeadline + time.Second):
+		t.Fatal("commit did not respect admission budget")
+	}
+	fixture.mu.Lock()
+	sends := len(fixture.sendRequests)
+	fixture.mu.Unlock()
+	if sends != 0 {
+		t.Fatalf("expired RPC wait sent %d requests", sends)
+	}
+}
+
+func TestPreparedRcsSuccessWithAccountSwitchIsUnknown(t *testing.T) {
+	link, cleanup, token, tmpID := preparedRcsFixture(t)
+	defer cleanup()
+	ticket := prepareTicket(t, link, token, tmpID)
+	link.mu.Lock()
+	link.sendMessage = func(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
+		return &gmproto.SendMessageResponse{Status: gmproto.SendMessageResponse_SUCCESS, GoogleAccountSwitch: &gmproto.AccountChangeOrSomethingEvent{}}, nil
+	}
+	link.mu.Unlock()
+	if got := decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))); got != "outcome_unknown" {
+		t.Fatalf("account switch success = %s", got)
+	}
+}
+
 func TestPrepareRcsBindsOneTicketToTheCurrentStage2Target(t *testing.T) {
 	auth := linkedSafetyAuth()
 	fixture := newPhoneFixture(t, auth)
