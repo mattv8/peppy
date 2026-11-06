@@ -1319,20 +1319,13 @@ impl Session {
             .map_err(core_error)?;
         let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
         let mut hydration = DeferredHydration::default();
-        let mut retention_states = HashMap::new();
-        Ok(peppy_desktop_api::message_window_view(window, |message| {
-            dto::rcs_receive::message_view(
-                &self.client,
-                &message,
-                self.attachment_views(
-                    &message,
-                    &mut budget,
-                    &mut hydration,
-                    None,
-                    &mut retention_states,
-                ),
-            ).map_err(core_error)
-        }))
+        let messages = self.message_views(window.messages, &mut budget, &mut hydration, None)?;
+        Ok(peppy_desktop_api::MessageWindowView {
+            conversation_id: window.conversation_id,
+            messages,
+            has_older: window.has_older,
+            has_newer: window.has_newer,
+        })
     }
 
     pub fn media_page(
@@ -1566,6 +1559,10 @@ impl Session {
                 .client
                 .mms_reply_context(conversation.conversation_id)
                 .ok();
+            let rcs_metadata = self
+                .client
+                .rcs_conversation_metadata(conversation.conversation_id)
+                .map_err(core_error)?;
             views.push(ConversationView {
                 id: conversation.conversation_id.to_string(),
                 name,
@@ -1583,6 +1580,10 @@ impl Session {
                 folder_reason: conversation.folder_reason,
                 unblock: conversation.unblock,
                 can_unblock: conversation.can_unblock,
+                rcs_encryption: rcs_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.rcs_encryption),
+                rcs_history_gap: rcs_metadata.is_some_and(|metadata| metadata.rcs_history_gap),
             });
         }
         let listed: HashSet<ConversationId> =
@@ -1614,6 +1615,8 @@ impl Session {
                 folder_reason: None,
                 unblock: None,
                 can_unblock: false,
+                rcs_encryption: None,
+                rcs_history_gap: false,
             });
         }
         let draft = active

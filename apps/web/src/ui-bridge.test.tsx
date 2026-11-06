@@ -7,7 +7,7 @@ import { installBrowserBridge as installDesktopBrowserBridge } from "../../deskt
 import { BrowserBridge } from "./browser-bridge";
 import * as uiBridge from "./ui-bridge";
 import { renewHostedSession } from "./ui-bridge";
-import type { DesktopBridge, DesktopSnapshot } from "./ui-bridge";
+import type { DesktopBridge, DesktopRcsSnapshot } from "./ui-bridge";
 
 afterEach(() => cleanup());
 
@@ -35,8 +35,8 @@ describe("browser UI bridge", () => {
     await expect(renewHostedSession()).rejects.toThrow("unavailable in the browser");
   });
 
-  it("renders the current RCS badge from a browser bridge snapshot", async () => {
-    const snapshot: DesktopSnapshot = {
+  it("passes reported RCS fields from a browser bridge snapshot to the shared renderer", async () => {
+    const snapshot: DesktopRcsSnapshot = {
       version: "1",
       mode: "browser",
       connection: { state: "connected" },
@@ -56,6 +56,11 @@ describe("browser UI bridge", () => {
         eligibilities: [{ conversationId: "conversation-browser", gatewayId: "gateway-browser", eligibility: "eligible", observedAtMs: "0", mappingRevision: "1", expiresAtMs: String(Date.now() + 10_000) }],
       },
     };
+    Object.assign(snapshot.conversations[0], {
+      rcsEncryption: true,
+      rcsHistoryGap: true,
+      messages: [{ id: "message-browser", revision: "1", sender: "self", body: "", timestamp: "0", status: "unknown", transport: "rcs", rcsReported: false, attachments: [] }],
+    });
     const browserBridge = {
       load_state: async () => snapshot,
       subscribe: () => () => undefined,
@@ -73,7 +78,12 @@ describe("browser UI bridge", () => {
     try {
       render(<App hostKind="browser" />);
 
-      await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
+      await waitFor(() => {
+        expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument();
+        expect(document.getElementById("conversation-rcs-e2ee-badge")).toBeInTheDocument();
+        expect(document.querySelector('[data-message-route-hint="message-browser"]')).toHaveAttribute("data-hint", "unknown");
+        expect(document.getElementById("conversation-rcs-notice")).not.toBeEmptyDOMElement();
+      });
     } finally {
       uiBridge.installBrowserBridge(previousBridge);
       desktopBridge.installBrowserBridge(previousDesktopBridge);

@@ -3,7 +3,9 @@ import type { DesktopBridge } from "@peppy/desktop-ui/bridge-contracts";
 export type {
   AttachmentView,
   ConversationView,
+  RcsConversationMetadata,
   DesktopSnapshot,
+  DesktopRcsSnapshot,
   Draft,
   DraftInput,
   GatewayView,
