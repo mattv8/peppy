@@ -201,10 +201,13 @@ func (link *Link) projectRcsEventFor(queued queuedEvent, wrapped *libgm.WrappedM
 		link.mu.Unlock()
 		return
 	}
-	conversation := cloneConversation(link.conversationRecords[wrapped.Message.GetConversationID()])
+	conversation := link.currentSupportedRcsConversationLocked(wrapped.Message.GetConversationID(), queued.generation, queued.streamEpoch)
 	revision := link.stateRevision
 	link.mu.Unlock()
-	projection := projectRcsMessage(wrapped, conversation)
+	projection := rcsProjection{Code: "conversation_unsupported"}
+	if conversation != nil {
+		projection = projectRcsMessage(wrapped, conversation)
+	}
 	encoded, _ := json.Marshal(projection)
 	link.enqueueOutput(hostOutput{
 		rcsRecord:         string(encoded),
@@ -254,12 +257,15 @@ func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
 	}
 
 	link.mu.Lock()
-	conversation := cloneConversation(link.conversationRecords[googleConversationID])
-	owned := link.hasOwnerVerificationLocked() && conversation != nil && conversation.GetType() == gmproto.ConversationType_RCS
+	owned := link.hasOwnerVerificationLocked()
+	conversation := link.currentSupportedRcsConversationLocked(googleConversationID, generation, streamEpoch)
 	fetch := link.fetchMessages
 	link.mu.Unlock()
 	if !owned {
 		return encodeRcsPage(rcsPageFailure("conversation_unproven"))
+	}
+	if conversation == nil {
+		return encodeRcsPage(rcsPageFailure("conversation_unsupported"))
 	}
 	if fetch == nil {
 		fetch = func(ctx context.Context, conversationID string, count int64, cursor *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {

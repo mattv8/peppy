@@ -301,16 +301,19 @@ func (host *ownedRecordHost) TypingEvent(record string, _, _, streamEpoch int64)
 }
 
 func receiveWiringLink(host Host) *Link {
-	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE}
+	conversation := typingConversation("conversation-1", true)
 	return &Link{
-		host:                host,
-		generation:          7,
-		runGeneration:       7,
-		streamEpoch:         3,
-		stateRevision:       11,
-		ownerVerification:   &ownerVerification{generation: 7},
-		changes:             make(chan any, 8),
-		conversationRecords: map[string]*gmproto.Conversation{"conversation-1": conversation},
+		host:                         host,
+		generation:                   7,
+		runGeneration:                7,
+		streamEpoch:                  3,
+		stateRevision:                11,
+		ownerVerification:            &ownerVerification{generation: 7},
+		changes:                      make(chan any, 8),
+		conversationIndexComplete:    true,
+		conversationIndexGeneration:  7,
+		conversationIndexStreamEpoch: 3,
+		conversationRecords:          map[string]*gmproto.Conversation{"conversation-1": conversation},
 	}
 }
 
@@ -403,9 +406,12 @@ func fetchGapTestLink(fetch func(context.Context, string, int64, *gmproto.Cursor
 		streamEpoch:       3,
 		ownerVerification: &ownerVerification{generation: 7},
 		conversationRecords: map[string]*gmproto.Conversation{
-			"conversation-1": {ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS},
+			"conversation-1": typingConversation("conversation-1", true),
 		},
-		fetchMessages: fetch,
+		conversationIndexComplete:    true,
+		conversationIndexGeneration:  7,
+		conversationIndexStreamEpoch: 3,
+		fetchMessages:                fetch,
 	}
 }
 
@@ -535,5 +541,74 @@ func TestRcsOutputDropsRevokedStreamInsidePlatformDispatch(t *testing.T) {
 
 	if len(host.rcsRecords) != 0 {
 		t.Fatalf("records = %v", host.rcsRecords)
+	}
+}
+
+func TestLinkReceiveRejectsUnsupportedStage2Conversation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*Link, *gmproto.Conversation)
+	}{
+		{name: "sms", configure: func(_ *Link, conversation *gmproto.Conversation) { conversation.Type = gmproto.ConversationType_SMS }},
+		{name: "inactive", configure: func(_ *Link, conversation *gmproto.Conversation) {
+			conversation.Status = gmproto.ConversationStatus_ARCHIVED
+		}},
+		{name: "group", configure: func(_ *Link, conversation *gmproto.Conversation) {
+			conversation.Participants = typingGroup(conversation.ConversationID).Participants
+		}},
+		{name: "incomplete index", configure: func(link *Link, _ *gmproto.Conversation) { link.conversationIndexComplete = false }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := &ownedRecordHost{}
+			link := receiveWiringLink(host)
+			conversation := link.conversationRecords["conversation-1"]
+			test.configure(link, conversation)
+
+			link.queueEventFor(7, textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE))
+			drainQueuedEvents(link)
+
+			if len(host.rcsRecords) != 1 {
+				t.Fatalf("records = %v", host.rcsRecords)
+			}
+			var projection rcsProjection
+			if err := json.Unmarshal([]byte(host.rcsRecords[0]), &projection); err != nil {
+				t.Fatal(err)
+			}
+			if projection.Code != "conversation_unsupported" || projection.Record != nil {
+				t.Fatalf("projection = %#v", projection)
+			}
+		})
+	}
+}
+
+func TestFetchRcsGapRejectsUnsupportedStage2ConversationBeforeRPC(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*Link, *gmproto.Conversation)
+	}{
+		{name: "sms", configure: func(_ *Link, conversation *gmproto.Conversation) { conversation.Type = gmproto.ConversationType_SMS }},
+		{name: "inactive", configure: func(_ *Link, conversation *gmproto.Conversation) {
+			conversation.Status = gmproto.ConversationStatus_ARCHIVED
+		}},
+		{name: "group", configure: func(_ *Link, conversation *gmproto.Conversation) {
+			conversation.Participants = typingGroup(conversation.ConversationID).Participants
+		}},
+		{name: "incomplete index", configure: func(link *Link, _ *gmproto.Conversation) { link.conversationIndexComplete = false }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			link := fetchGapTestLink(func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+				calls++
+				return &gmproto.ListMessagesResponse{}, nil
+			})
+			conversation := link.conversationRecords["conversation-1"]
+			test.configure(link, conversation)
+
+			got := decodeGapResult(t, link.FetchRcsGap("conversation-1", ""))
+
+			if got.Code != "conversation_unsupported" || calls != 0 || len(got.Records) != 0 || len(got.Signals) != 0 {
+				t.Fatalf("result = %#v, calls = %d", got, calls)
+			}
+		})
 	}
 }
