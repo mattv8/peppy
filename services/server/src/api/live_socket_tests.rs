@@ -1127,10 +1127,19 @@ async fn live_ticket_body_request(
     method: reqwest::Method,
     body: serde_json::Value,
 ) -> reqwest::Response {
+    live_ticket_body_request_with_token(server, &server.owner_token, method, body).await
+}
+
+async fn live_ticket_body_request_with_token(
+    server: &LiveTestServer,
+    token: &str,
+    method: reqwest::Method,
+    body: serde_json::Value,
+) -> reqwest::Response {
     bounded(
         reqwest::Client::new()
             .request(method, format!("{}/v1/live/tickets", server.base_url))
-            .bearer_auth(&server.owner_token)
+            .bearer_auth(token)
             .json(&body)
             .send(),
     )
@@ -1270,6 +1279,10 @@ fn invalid_lifetime_bodies(
     vec![
         ("missing", serde_json::json!({"session_id": session_id})),
         ("null", body(serde_json::Value::Null)),
+        ("boolean", body(true.into())),
+        ("number", body(1.into())),
+        ("array", body(serde_json::json!([handle]))),
+        ("object", body(serde_json::json!({"handle": handle}))),
         ("empty", body("".into())),
         ("malformed", body("not a handle".into())),
         ("padded", body(format!("{handle}=").into())),
@@ -1290,6 +1303,24 @@ fn invalid_lifetime_bodies(
             body(URL_SAFE_NO_PAD.encode(999_999_i64.to_be_bytes()).into()),
         ),
     ]
+}
+
+/// All mutable rows whose refusal behavior is relevant to this vault, including presence.
+async fn live_ticket_refusal_snapshot(server: &LiveTestServer) -> String {
+    bounded(
+        sqlx::query_scalar::<_, String>(
+            "SELECT json_build_object(
+                'sessions', (SELECT coalesce(json_agg(s ORDER BY s.device_id, s.session_id_hash), '[]'::json) FROM live_ticket_sessions s WHERE s.vault_id=$1),
+                'tickets', (SELECT coalesce(json_agg(t ORDER BY t.device_id, t.ticket_digest), '[]'::json) FROM live_tickets t WHERE t.vault_id=$1),
+                'authority', (SELECT coalesce(json_agg(a ORDER BY a.device_id), '[]'::json) FROM live_ticket_device_authority a WHERE a.vault_id=$1),
+                'presence', (SELECT coalesce(json_agg(p ORDER BY p.device_id), '[]'::json) FROM device_presence p WHERE p.vault_id=$1)
+            )::text",
+        )
+        .bind(server.vault)
+        .fetch_one(&server.pool),
+    )
+    .await
+    .unwrap()
 }
 
 async fn live_ticket_write_counts(server: &LiveTestServer) -> LiveTicketWriteCounts {
@@ -2404,6 +2435,60 @@ async fn live_ticket_invalid_lifetime_handles_are_refused_without_writes() {
 }
 
 #[tokio::test]
+async fn live_ticket_refusals_do_not_touch_presence_for_a_fresh_bearer() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
+    let session_id = lifecycle_session(70);
+    let terminal = lifecycle_session(71);
+    let handle = URL_SAFE_NO_PAD.encode(1_i64.to_be_bytes());
+    let terminal_handle = URL_SAFE_NO_PAD.encode(2_i64.to_be_bytes());
+    for (id, incarnation, state, lease) in [
+        (&session_id, 1_i64, "open", "now()+interval '1 hour'"),
+        (&terminal, 2_i64, "terminal", "NULL"),
+    ] {
+        bounded(
+            sqlx::query(&format!("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,session_incarnation,state,lease_until,closed_at) VALUES($1,$2,$3,$4,'{state}',{lease},CASE WHEN '{state}'='terminal' THEN now() END)"))
+                .bind(server.vault)
+                .bind(server.peer_device)
+                .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(id).unwrap()).to_vec())
+                .bind(incarnation)
+                .execute(&server.pool),
+        )
+        .await
+        .unwrap();
+    }
+
+    let before = live_ticket_refusal_snapshot(&server).await;
+    let stale = URL_SAFE_NO_PAD.encode(999_999_i64.to_be_bytes());
+    for (case, body) in [
+        ("missing", serde_json::json!({"session_id": session_id})),
+        ("malformed", lifetime_body(&session_id, "not a handle")),
+        ("stale", lifetime_body(&session_id, &stale)),
+        ("absent", lifetime_body(&lifecycle_session(72), &handle)),
+        ("terminal", lifetime_body(&terminal, &terminal_handle)),
+    ] {
+        for method in [reqwest::Method::POST, reqwest::Method::DELETE] {
+            assert_lifetime_refused(
+                live_ticket_body_request_with_token(
+                    &server,
+                    &server.peer_token,
+                    method,
+                    body.clone(),
+                )
+                .await,
+                case,
+            )
+            .await;
+            assert_eq!(
+                live_ticket_refusal_snapshot(&server).await,
+                before,
+                "{case} fresh-bearer refusal wrote SQL state"
+            );
+        }
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn live_ticket_exact_handle_reconnects_then_closes_only_its_lifetime() {
     let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
     let session_id = lifecycle_session(58);
@@ -2526,6 +2611,85 @@ async fn live_ticket_stale_handle_after_reaping_never_touches_the_successor() {
 }
 
 #[tokio::test]
+async fn live_ticket_invalid_handles_cannot_terminalize_an_expired_successor() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
+    let session_id = lifecycle_session(73);
+    let (_ticket, stale) = issue_ticket_with_handle(&server, session_id.clone()).await;
+    assert_eq!(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            lifetime_body(&session_id, &stale),
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    bounded(
+        sqlx::query("UPDATE live_ticket_sessions SET closed_at=now()-interval '6 minutes' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&session_id).unwrap()).to_vec())
+            .execute(&server.pool),
+    )
+    .await
+    .unwrap();
+    bounded(crate::live_ticket_maintenance::reap_live_tickets(
+        &server.pool,
+        100,
+    ))
+    .await
+    .unwrap();
+    let (_ticket, successor) = issue_ticket_with_handle(&server, session_id.clone()).await;
+    bounded(
+        sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()-interval '1 second' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&session_id).unwrap()).to_vec())
+            .execute(&server.pool),
+    )
+    .await
+    .unwrap();
+
+    let before = live_ticket_refusal_snapshot(&server).await;
+    for (case, body) in [
+        ("missing", serde_json::json!({"session_id": session_id})),
+        ("malformed", lifetime_body(&session_id, "not a handle")),
+        ("stale", lifetime_body(&session_id, &stale)),
+    ] {
+        for method in [reqwest::Method::POST, reqwest::Method::DELETE] {
+            assert_lifetime_refused(
+                live_ticket_body_request(&server, method, body.clone()).await,
+                case,
+            )
+            .await;
+            assert_eq!(
+                live_ticket_refusal_snapshot(&server).await,
+                before,
+                "{case} touched the expired successor"
+            );
+        }
+    }
+    assert_lifetime_refused(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::POST,
+            lifetime_body(&session_id, &successor),
+        )
+        .await,
+        "exact expired successor",
+    )
+    .await;
+    assert_eq!(
+        live_ticket_session_state(&server, &session_id)
+            .await
+            .as_deref(),
+        Some("terminal")
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn live_ticket_exact_expired_handle_terminalizes_only_its_own_lifetime() {
     let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
     let expired = lifecycle_session(57);
@@ -2551,6 +2715,21 @@ async fn live_ticket_exact_expired_handle_terminalizes_only_its_own_lifetime() {
     .await
     .unwrap();
     let sibling_before = live_ticket_session_row(&server, &sibling).await;
+    let before = live_ticket_refusal_snapshot(&server).await;
+    for (case, body) in invalid_lifetime_bodies(&expired, &expired_handle) {
+        for method in [reqwest::Method::POST, reqwest::Method::DELETE] {
+            assert_lifetime_refused(
+                live_ticket_body_request(&server, method, body.clone()).await,
+                case,
+            )
+            .await;
+            assert_eq!(
+                live_ticket_refusal_snapshot(&server).await,
+                before,
+                "{case} terminalized the expired target before validation"
+            );
+        }
+    }
 
     assert_lifetime_refused(
         live_ticket_body_request(

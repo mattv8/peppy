@@ -1727,12 +1727,25 @@ async fn authenticated(
     headers: &HeaderMap,
     operation: Operation,
 ) -> ApiResult<Principal> {
+    let principal = authenticated_without_presence(s, headers, operation).await?;
+    touch_authenticated_presence(s, &principal).await;
+    Ok(principal)
+}
+
+async fn authenticated_without_presence(
+    s: &ApiState,
+    headers: &HeaderMap,
+    operation: Operation,
+) -> ApiResult<Principal> {
     let principal = auth_with_mode(s, headers).await?;
     authorize(s, &principal, operation).await?;
+    Ok(principal)
+}
+
+async fn touch_authenticated_presence(s: &ApiState, principal: &Principal) {
     if reserve_presence_touch(&s.presence_touches, principal.vault, principal.device) {
         crate::presence::touch_best_effort(&s.db, principal.vault, principal.device).await;
     }
-    Ok(principal)
 }
 
 const PRESENCE_TOUCH_CACHE_LIMIT: usize = 1_024;
@@ -2781,7 +2794,24 @@ const LIVE_TICKET_LIFETIME_REFUSED: &str = "live_ticket_lifetime_refused";
 #[derive(Deserialize)]
 struct LiveTicketRequest {
     session_id: String,
-    lifetime_handle: Option<String>,
+    #[serde(default)]
+    lifetime_handle: LifetimeHandleInput,
+}
+
+#[derive(Default)]
+enum LifetimeHandleInput {
+    #[default]
+    Missing,
+    Value(Value),
+}
+
+impl<'de> Deserialize<'de> for LifetimeHandleInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Value::deserialize(deserializer).map(Self::Value)
+    }
 }
 #[derive(Serialize)]
 struct LiveTicketResponse {
@@ -2794,8 +2824,7 @@ fn lifetime_refused() -> ApiError {
     ApiError(StatusCode::CONFLICT, LIVE_TICKET_LIFETIME_REFUSED)
 }
 
-fn live_ticket_lifetime_handle(value: Option<&str>) -> ApiResult<i64> {
-    let value = value.ok_or_else(lifetime_refused)?;
+fn live_ticket_lifetime_handle(value: &str) -> ApiResult<i64> {
     let bytes: [u8; 8] = URL_SAFE_NO_PAD
         .decode(value)
         .ok()
@@ -2805,6 +2834,20 @@ fn live_ticket_lifetime_handle(value: Option<&str>) -> ApiResult<i64> {
     (incarnation > 0 && URL_SAFE_NO_PAD.encode(bytes) == value)
         .then_some(incarnation)
         .ok_or_else(lifetime_refused)
+}
+
+fn requested_lifetime_handle(input: &LifetimeHandleInput) -> ApiResult<Option<i64>> {
+    match input {
+        LifetimeHandleInput::Missing => Ok(None),
+        LifetimeHandleInput::Value(Value::String(value)) => {
+            live_ticket_lifetime_handle(value).map(Some)
+        }
+        LifetimeHandleInput::Value(_) => Err(lifetime_refused()),
+    }
+}
+
+fn required_lifetime_handle(input: &LifetimeHandleInput) -> ApiResult<i64> {
+    requested_lifetime_handle(input)?.ok_or_else(lifetime_refused)
 }
 
 fn encode_live_ticket_lifetime_handle(incarnation: i64) -> String {
@@ -2985,12 +3028,8 @@ async fn issue_live_ticket(
         ));
     }
     let session = live_ticket_session_hash(&request.session_id)?;
-    let lifetime = request
-        .lifetime_handle
-        .as_deref()
-        .map(|value| live_ticket_lifetime_handle(Some(value)))
-        .transpose()?;
-    let p = authenticated(&state, &headers, Operation::Sync).await?;
+    let lifetime = requested_lifetime_handle(&request.lifetime_handle)?;
+    let p = authenticated_without_presence(&state, &headers, Operation::Sync).await?;
     let mut tx = live_ticket_tx(&state, &p).await?;
     let current: Option<(String, i64)> = sqlx::query_as("SELECT state,session_incarnation FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE").bind(p.vault).bind(p.device).bind(&session).fetch_optional(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_lock"))?;
     let incarnation = match (lifetime, current) {
@@ -3095,6 +3134,7 @@ async fn issue_live_ticket(
     tx.commit()
         .await
         .map_err(|e| database_unavailable(&e, "live_ticket_commit"))?;
+    touch_authenticated_presence(&state, &p).await;
     Ok((
         StatusCode::CREATED,
         Json(LiveTicketResponse {
@@ -3111,8 +3151,8 @@ async fn close_live_ticket_session(
     Json(request): Json<LiveTicketRequest>,
 ) -> ApiResult<StatusCode> {
     let session = live_ticket_session_hash(&request.session_id)?;
-    let incarnation = live_ticket_lifetime_handle(request.lifetime_handle.as_deref())?;
-    let p = authenticated(&state, &headers, Operation::Sync).await?;
+    let incarnation = required_lifetime_handle(&request.lifetime_handle)?;
+    let p = authenticated_without_presence(&state, &headers, Operation::Sync).await?;
     let session_id: [u8; 16] = URL_SAFE_NO_PAD
         .decode(&request.session_id)
         .expect("live_ticket_session_hash validated session ID")
@@ -3133,6 +3173,7 @@ async fn close_live_ticket_session(
     tx.commit()
         .await
         .map_err(|e| database_unavailable(&e, "live_ticket_commit"))?;
+    touch_authenticated_presence(&state, &p).await;
     if let Some(socket_generation) = socket_generation {
         state.live_hub.cancel_exact(
             VaultId(p.vault),
