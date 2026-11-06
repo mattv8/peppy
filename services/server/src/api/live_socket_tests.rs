@@ -1822,6 +1822,129 @@ async fn live_ticket_caps_bound_fresh_session_creation_and_tombstones() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn live_ticket_delete_flood_is_admission_bounded_and_reaper_preserves_recent_rows() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let existing_session = URL_SAFE_NO_PAD.encode([61_u8; 16]);
+    let live_session = URL_SAFE_NO_PAD.encode([68_u8; 16]);
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::POST, existing_session.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+    let absent_sessions: Vec<_> = (62_u8..67)
+        .map(|byte| URL_SAFE_NO_PAD.encode([byte; 16]))
+        .collect();
+    for session_id in &absent_sessions {
+        assert_eq!(
+            live_ticket_request(&server, reqwest::Method::DELETE, session_id.clone())
+                .await
+                .status(),
+            reqwest::StatusCode::NO_CONTENT
+        );
+    }
+    let tombstones: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state='closed'",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(tombstones, absent_sessions.len() as i64);
+
+    let rows_before_rejection: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        live_ticket_request(
+            &server,
+            reqwest::Method::DELETE,
+            URL_SAFE_NO_PAD.encode([67_u8; 16]),
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    let rows_after_rejection: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows_after_rejection, rows_before_rejection);
+
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::DELETE, existing_session.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',now()+interval '1 hour')")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&live_session).unwrap()).to_vec())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    for session_id in &absent_sessions {
+        sqlx::query("UPDATE live_ticket_sessions SET closed_at=now()-interval '6 minutes' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(session_id).unwrap()).to_vec())
+            .execute(&server.pool)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        crate::live_ticket_maintenance::reap_live_tickets(&server.pool, 100)
+            .await
+            .unwrap(),
+        absent_sessions.len() as u64
+    );
+    let old_tombstones: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state='closed' AND closed_at<now()-interval '5 minutes'",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(old_tombstones, 0);
+    for session_id in [&existing_session, &live_session] {
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(session_id).unwrap()).to_vec())
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, 1);
+    }
+    let unexpired_live_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open' AND lease_until>now()",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(live_session).unwrap()).to_vec())
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(unexpired_live_sessions, 1);
+    server.shutdown().await;
+}
+
 async fn live_ticket_replica_pool(schema: &str) -> PgPool {
     let database_url = std::env::var("TEST_DATABASE_URL").unwrap();
     let mut isolated: url::Url = database_url.parse().unwrap();
