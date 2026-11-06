@@ -244,7 +244,9 @@
       "version": "v0.0.0-20261011034528-197770444867",
       "licenseFile": "LICENSE",
       "licenseFamily": "BSD-3-Clause",
-      "distributed": false
+      "distributed": true,
+      "asset": "BSD-3-Clause-go-x-and-mobile.txt",
+      "licenseSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
     },
     {
       "path": "golang.org/x/mod",
