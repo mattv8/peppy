@@ -702,6 +702,271 @@ fn global_challenge_budget_spans_distinct_unknown_sessions() {
 }
 
 #[test]
+fn acknowledgement_emission_budgets_apply_to_real_challenge_frames() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let responder_config = config(&directory, "ack-budget-responder", &vault);
+    let challenger_config = config(&directory, "ack-budget-challenger", &vault);
+    let responder = unlocked(&responder_config, &vault);
+    let challenger = unlocked(&challenger_config, &vault);
+    let conversations: Vec<_> = (0..4).map(|_| ConversationId::new()).collect();
+    for conversation in &conversations {
+        publish_eligible(&challenger, challenger_config.device_id, *conversation);
+    }
+    let mut server = Server::default();
+    server.upload(&challenger);
+    server.sync(&responder);
+    enable_pair(
+        &responder,
+        &challenger,
+        responder_config.device_id,
+        challenger_config.device_id,
+    );
+
+    let mut acknowledgements = 0;
+    for (index, conversation) in conversations.iter().take(3).enumerate() {
+        let time = 1_001 + index as u64;
+        if index > 0 {
+            challenger.disable_live_typing().unwrap();
+            challenger
+                .enable_live_typing(
+                    LiveEnableContext {
+                        trusted_roster: vec![
+                            challenger_config.device_id,
+                            responder_config.device_id,
+                        ],
+                        local_gateway_device_id: challenger_config.device_id,
+                        local_executor: LiveExecutor::CurrentGateway,
+                    },
+                    LiveClock {
+                        wall_ms: time as i64,
+                        mono_ms: time,
+                    },
+                )
+                .unwrap();
+        }
+        let typing = seal(
+            &responder,
+            *conversation,
+            challenger_config.device_id,
+            TypingStateV2::Started,
+            time,
+        );
+        let challenge = challenger
+            .open_typing_signal_v2(
+                &typing.signal,
+                LiveClock {
+                    wall_ms: time as i64,
+                    mono_ms: time,
+                },
+            )
+            .unwrap()
+            .reply
+            .unwrap();
+        let outcome = responder
+            .open_typing_signal_v2(
+                &challenge,
+                LiveClock {
+                    wall_ms: time as i64,
+                    mono_ms: time,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.reply.is_some(), index < 2);
+        if let Some(acknowledgement) = outcome.reply {
+            assert_eq!(
+                acknowledgement.kind,
+                peppy_protocol::EphemeralSignalV2Kind::SessionAck
+            );
+            acknowledgements += 1;
+        }
+    }
+    assert_eq!(acknowledgements, 2);
+
+    challenger.disable_live_typing().unwrap();
+    challenger
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: vec![challenger_config.device_id, responder_config.device_id],
+                local_gateway_device_id: challenger_config.device_id,
+                local_executor: LiveExecutor::CurrentGateway,
+            },
+            LiveClock {
+                wall_ms: 2_001,
+                mono_ms: 2_001,
+            },
+        )
+        .unwrap();
+    let recovered_typing = seal(
+        &responder,
+        conversations[3],
+        challenger_config.device_id,
+        TypingStateV2::Started,
+        2_001,
+    );
+    let recovered_challenge = challenger
+        .open_typing_signal_v2(
+            &recovered_typing.signal,
+            LiveClock {
+                wall_ms: 2_001,
+                mono_ms: 2_001,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    let recovered_acknowledgement = responder
+        .open_typing_signal_v2(
+            &recovered_challenge,
+            LiveClock {
+                wall_ms: 2_001,
+                mono_ms: 2_001,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    assert_eq!(
+        recovered_acknowledgement.kind,
+        peppy_protocol::EphemeralSignalV2Kind::SessionAck
+    );
+
+    let global_directory = tempfile::tempdir().unwrap();
+    let global_vault = Vault::new();
+    let global_responder_config = config(
+        &global_directory,
+        "global-ack-budget-responder",
+        &global_vault,
+    );
+    let global_responder = unlocked(&global_responder_config, &global_vault);
+    let challengers: Vec<_> = (0..4)
+        .map(|index| {
+            let challenger_config = config(
+                &global_directory,
+                &format!("global-ack-budget-challenger-{index}"),
+                &global_vault,
+            );
+            let challenger = unlocked(&challenger_config, &global_vault);
+            (challenger_config, challenger)
+        })
+        .collect();
+    let global_conversations: Vec<_> = (0..8).map(|_| ConversationId::new()).collect();
+    let mut global_server = Server::default();
+    for (index, (challenger_config, challenger)) in challengers.iter().enumerate() {
+        for conversation in &global_conversations[index * 2..index * 2 + 2] {
+            publish_eligible(challenger, challenger_config.device_id, *conversation);
+        }
+        global_server.upload(challenger);
+    }
+    global_server.sync(&global_responder);
+    let global_roster: Vec<_> = std::iter::once(global_responder_config.device_id)
+        .chain(
+            challengers
+                .iter()
+                .map(|(challenger_config, _)| challenger_config.device_id),
+        )
+        .collect();
+    global_responder
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: global_roster,
+                local_gateway_device_id: global_responder_config.device_id,
+                local_executor: LiveExecutor::None,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+    for (challenger_config, challenger) in &challengers {
+        challenger
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: vec![
+                        challenger_config.device_id,
+                        global_responder_config.device_id,
+                    ],
+                    local_gateway_device_id: challenger_config.device_id,
+                    local_executor: LiveExecutor::CurrentGateway,
+                },
+                LiveClock {
+                    wall_ms: 1_000,
+                    mono_ms: 1_000,
+                },
+            )
+            .unwrap();
+    }
+    let global_typing_frames: Vec<_> = global_conversations
+        .iter()
+        .enumerate()
+        .map(|(index, conversation)| {
+            let challenger_config = &challengers[index / 2].0;
+            seal(
+                &global_responder,
+                *conversation,
+                challenger_config.device_id,
+                TypingStateV2::Started,
+                3_001 + (index / 4) as u64 * 1_000,
+            )
+        })
+        .collect();
+
+    let mut global_acknowledgements = 0;
+    for (index, (challenger_config, challenger)) in challengers.iter().enumerate() {
+        for offset in 0..2 {
+            if offset > 0 {
+                challenger.disable_live_typing().unwrap();
+                challenger
+                    .enable_live_typing(
+                        LiveEnableContext {
+                            trusted_roster: vec![
+                                challenger_config.device_id,
+                                global_responder_config.device_id,
+                            ],
+                            local_gateway_device_id: challenger_config.device_id,
+                            local_executor: LiveExecutor::CurrentGateway,
+                        },
+                        LiveClock {
+                            wall_ms: 10_000,
+                            mono_ms: 10_000,
+                        },
+                    )
+                    .unwrap();
+            }
+            let challenge = challenger
+                .open_typing_signal_v2(
+                    &global_typing_frames[index * 2 + offset].signal,
+                    LiveClock {
+                        wall_ms: 10_000,
+                        mono_ms: 10_000,
+                    },
+                )
+                .unwrap()
+                .reply
+                .unwrap();
+            let outcome = global_responder
+                .open_typing_signal_v2(
+                    &challenge,
+                    LiveClock {
+                        wall_ms: 10_000,
+                        mono_ms: 10_000,
+                    },
+                )
+                .unwrap();
+            if let Some(acknowledgement) = outcome.reply {
+                assert_eq!(
+                    acknowledgement.kind,
+                    peppy_protocol::EphemeralSignalV2Kind::SessionAck
+                );
+                global_acknowledgements += 1;
+            }
+        }
+    }
+    assert_eq!(global_acknowledgements, 6);
+}
+
+#[test]
 fn receive_handshake_and_disable_leave_every_sqlite_row_unchanged() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
