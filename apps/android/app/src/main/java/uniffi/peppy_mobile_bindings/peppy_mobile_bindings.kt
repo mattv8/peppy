@@ -1139,6 +1139,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_checkpoint_rcs_history(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_go_rcs_record_json(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_record_json(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_record_rcs_provider_detector_json(
@@ -1658,6 +1660,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_apply_rcs_status_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`statusJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_checkpoint_rcs_history(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`historyToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_go_rcs_record_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`goRecordJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_rcs_record_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`recordJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
@@ -2692,6 +2696,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_checkpoint_rcs_history() and 0xFFFF) != 17731) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_go_rcs_record_json() and 0xFFFF) != 18128) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_record_json() and 0xFFFF) != 37536) {
@@ -3864,6 +3871,13 @@ public interface NativeClientInterface {
     fun `gatewayApplyRcsStatusJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `statusJson`: kotlin.String): kotlin.String
 
     fun `gatewayCheckpointRcsHistory`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `historyToken`: kotlin.String): kotlin.String
+
+    /**
+     * Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
+     * checkpoint; an inline status is applied only after an accepted ingest. Retries are
+     * replay-safe: ingest reports `duplicate` and the status is idempotent.
+     */
+    fun `gatewayIngestGoRcsRecordJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `goRecordJson`: kotlin.String): NativeRcsIngestOutcome
 
     fun `gatewayIngestRcsRecordJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `recordJson`: kotlin.String): kotlin.String
 
@@ -7052,6 +7066,28 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`conversationId`),
         FfiConverterULong.lower(`ownershipGeneration`),
         FfiConverterString.lower(`historyToken`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
+     * checkpoint; an inline status is applied only after an accepted ingest. Retries are
+     * replay-safe: ingest reports `duplicate` and the status is idempotent.
+     */
+    @Throws(MobileBindingsException::class)override fun `gatewayIngestGoRcsRecordJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `goRecordJson`: kotlin.String): NativeRcsIngestOutcome {
+            return FfiConverterTypeNativeRcsIngestOutcome.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_go_rcs_record_json(
+        it,
+
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterULong.lower(`ownershipGeneration`),
+        FfiConverterString.lower(`goRecordJson`),_status)
 }
     }
     )
@@ -13145,6 +13181,54 @@ public object FfiConverterTypeNativeRcsEligibilityProjection: FfiConverterRustBu
             FfiConverterUInt.write(value.`featureBits`, buf)
             FfiConverterULong.write(value.`mappingRevision`, buf)
             FfiConverterLong.write(value.`observedAtMs`, buf)
+    }
+}
+
+
+
+/**
+ * Closed outcomes plus the opaque Google page cursor. The cursor is present only when the
+ * record was accepted (not rejected) and carried one; the caller hands it back to
+ * `gateway_checkpoint_rcs_history` only after this call has succeeded.
+ */
+data class NativeRcsIngestOutcome (
+    var `recordOutcome`: kotlin.String
+    ,
+    var `statusOutcome`: kotlin.String?
+    ,
+    var `cursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsIngestOutcome: FfiConverterRustBuffer<NativeRcsIngestOutcome> {
+    override fun read(buf: ByteBuffer): NativeRcsIngestOutcome {
+        return NativeRcsIngestOutcome(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsIngestOutcome) = (
+            FfiConverterString.allocationSize(value.`recordOutcome`) +
+            FfiConverterOptionalString.allocationSize(value.`statusOutcome`) +
+            FfiConverterOptionalString.allocationSize(value.`cursor`)
+    )
+
+    override fun write(value: NativeRcsIngestOutcome, buf: ByteBuffer) {
+            FfiConverterString.write(value.`recordOutcome`, buf)
+            FfiConverterOptionalString.write(value.`statusOutcome`, buf)
+            FfiConverterOptionalString.write(value.`cursor`, buf)
     }
 }
 

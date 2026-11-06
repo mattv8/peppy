@@ -1169,6 +1169,13 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
 
     func gatewayCheckpointRcsHistory(conversationId: String, ownershipGeneration: UInt64, historyToken: String) throws  -> String
 
+    /**
+     * Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
+     * checkpoint; an inline status is applied only after an accepted ingest. Retries are
+     * replay-safe: ingest reports `duplicate` and the status is idempotent.
+     */
+    func gatewayIngestGoRcsRecordJson(conversationId: String, ownershipGeneration: UInt64, goRecordJson: String) throws  -> NativeRcsIngestOutcome
+
     func gatewayIngestRcsRecordJson(conversationId: String, ownershipGeneration: UInt64, recordJson: String) throws  -> String
 
     func gatewayRecordRcsProviderDetectorJson(conversationId: String, ownershipGeneration: UInt64, detectorJson: String) throws  -> String
@@ -3354,6 +3361,23 @@ open func gatewayCheckpointRcsHistory(conversationId: String, ownershipGeneratio
         FfiConverterString.lower(conversationId),
         FfiConverterUInt64.lower(ownershipGeneration),
         FfiConverterString.lower(historyToken),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
+     * checkpoint; an inline status is applied only after an accepted ingest. Retries are
+     * replay-safe: ingest reports `duplicate` and the status is idempotent.
+     */
+open func gatewayIngestGoRcsRecordJson(conversationId: String, ownershipGeneration: UInt64, goRecordJson: String)throws  -> NativeRcsIngestOutcome  {
+    return try  FfiConverterTypeNativeRcsIngestOutcome_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_go_rcs_record_json(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterUInt64.lower(ownershipGeneration),
+        FfiConverterString.lower(goRecordJson),uniffiCallStatus
     )
 })
 }
@@ -9318,6 +9342,69 @@ public func FfiConverterTypeNativeRcsEligibilityProjection_lift(_ buf: RustBuffe
 #endif
 public func FfiConverterTypeNativeRcsEligibilityProjection_lower(_ value: NativeRcsEligibilityProjection) -> RustBuffer {
     return FfiConverterTypeNativeRcsEligibilityProjection.lower(value)
+}
+
+
+/**
+ * Closed outcomes plus the opaque Google page cursor. The cursor is present only when the
+ * record was accepted (not rejected) and carried one; the caller hands it back to
+ * `gateway_checkpoint_rcs_history` only after this call has succeeded.
+ */
+public struct NativeRcsIngestOutcome: Equatable, Hashable {
+    public var recordOutcome: String
+    public var statusOutcome: String?
+    public var cursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordOutcome: String, statusOutcome: String?, cursor: String?) {
+        self.recordOutcome = recordOutcome
+        self.statusOutcome = statusOutcome
+        self.cursor = cursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeRcsIngestOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsIngestOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsIngestOutcome {
+        return
+            try NativeRcsIngestOutcome(
+                recordOutcome: FfiConverterString.read(from: &buf),
+                statusOutcome: FfiConverterOptionString.read(from: &buf),
+                cursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeRcsIngestOutcome, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.recordOutcome, into: &buf)
+        FfiConverterOptionString.write(value.statusOutcome, into: &buf)
+        FfiConverterOptionString.write(value.cursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsIngestOutcome_lift(_ buf: RustBuffer) throws -> NativeRcsIngestOutcome {
+    return try FfiConverterTypeNativeRcsIngestOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsIngestOutcome_lower(_ value: NativeRcsIngestOutcome) -> RustBuffer {
+    return FfiConverterTypeNativeRcsIngestOutcome.lower(value)
 }
 
 
@@ -16332,6 +16419,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_checkpoint_rcs_history() != 17731) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_go_rcs_record_json() != 18128) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_record_json() != 37536) {

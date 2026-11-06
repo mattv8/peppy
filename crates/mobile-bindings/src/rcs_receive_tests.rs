@@ -10,6 +10,182 @@ use uuid::Uuid;
 
 const PASSPHRASE: &str = "correct horse battery staple";
 
+// Verbatim record object from gmlink/receive_test.go: TestProjectRcsMessage's JSON assertion.
+const GO_RECORD: &str = r#"{"google_message_id":"message-1","google_conversation_id":"conversation-1","direction":"outgoing","body":"synthetic body","sent_at_ms":1735689600123,"status":"delivered","tmp_id":"tmp-1","rcs_reported":true}"#;
+
+fn go_incoming(status: &str) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(GO_RECORD).unwrap();
+    value["direction"] = json!("incoming");
+    value["status"] = json!(status);
+    value["cursor"] = json!("AAAAAAAAAAFtZXNzYWdlLTE");
+    value.to_string()
+}
+
+fn history_token(fixture: &Fixture) -> Option<String> {
+    with_client(&fixture.client.client, |core| {
+        Ok(core
+            .rcs_receive_state(fixture.conversation_id.parse().unwrap())?
+            .unwrap()
+            .history_token)
+    })
+    .unwrap()
+}
+
+#[test]
+fn go_wire_record_ingests_status_replays_and_checkpoints_only_explicitly() {
+    let fixture = fixture();
+    let original_token = history_token(&fixture);
+    for (expected, expected_status) in [
+        ("inserted", "status_applied"),
+        ("duplicate", "status_unchanged"),
+    ] {
+        let result = fixture
+            .client
+            .gateway_ingest_go_rcs_record_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                go_incoming("delivered"),
+            )
+            .unwrap();
+        assert_eq!(result.record_outcome, expected);
+        assert_eq!(result.status_outcome.as_deref(), Some(expected_status));
+        assert_eq!(result.cursor.as_deref(), Some("AAAAAAAAAAFtZXNzYWdlLTE"));
+        assert_eq!(history_token(&fixture), original_token);
+        let output = format!("{result:?}");
+        for identifier in ["message-1", "conversation-1", "tmp-1", "synthetic body"] {
+            assert!(!output.contains(identifier));
+        }
+    }
+    assert_eq!(
+        fixture
+            .client
+            .messages(fixture.conversation_id.clone())
+            .unwrap()[0]
+            .rcs_status
+            .as_deref(),
+        Some("delivered")
+    );
+    assert_eq!(
+        fixture
+            .client
+            .gateway_checkpoint_rcs_history(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                "AAAAAAAAAAFtZXNzYWdlLTE".into()
+            )
+            .unwrap(),
+        "recorded"
+    );
+    assert_eq!(
+        history_token(&fixture).as_deref(),
+        Some("AAAAAAAAAAFtZXNzYWdlLTE")
+    );
+}
+
+#[test]
+fn go_wire_record_empty_status_and_original_go_sample_are_accepted() {
+    let fixture = fixture();
+    let result = fixture
+        .client
+        .gateway_ingest_go_rcs_record_json(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            go_incoming(""),
+        )
+        .unwrap();
+    assert_eq!(result.record_outcome, "inserted");
+    assert_eq!(result.status_outcome, None);
+    // Go always emits the status key. Empty string means no inline application;
+    // omitting it is not Go's wire shape and is rejected by the required-key test.
+    let fixture = self::fixture();
+    let result = fixture
+        .client
+        .gateway_ingest_go_rcs_record_json(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            GO_RECORD.into(),
+        )
+        .unwrap();
+    assert_eq!(result.record_outcome, "unmatched_outgoing");
+    assert_eq!(result.status_outcome.as_deref(), Some("status_applied"));
+    assert_eq!(result.cursor, None);
+}
+
+#[test]
+fn go_wire_invalid_records_and_stale_generation_do_not_mutate() {
+    let fixture = fixture();
+    let before = reads(&fixture);
+    let token = history_token(&fixture);
+    let valid: serde_json::Value = serde_json::from_str(&go_incoming("sent")).unwrap();
+    let mut inputs = vec!["{".into(), " ".repeat(65_537)];
+    for key in [
+        "google_message_id",
+        "google_conversation_id",
+        "direction",
+        "body",
+        "sent_at_ms",
+        "status",
+        "rcs_reported",
+    ] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        inputs.push(missing.to_string());
+    }
+    for (key, value) in [
+        ("unknown", json!(true)),
+        ("googleMessageId", json!("id")),
+        ("google_message_id", json!("x".repeat(513))),
+        ("google_conversation_id", json!("x".repeat(513))),
+        ("tmp_id", json!("x".repeat(513))),
+        ("body", json!("x".repeat(16_385))),
+        ("cursor", json!("x".repeat(4_097))),
+        ("cursor", json!("not/a/token")),
+        ("direction", json!("sideways")),
+        ("status", json!("untrusted")),
+    ] {
+        let mut changed = valid.clone();
+        changed[key] = value;
+        inputs.push(changed.to_string());
+    }
+    for input in inputs {
+        assert!(matches!(
+            fixture.client.gateway_ingest_go_rcs_record_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                input,
+            ),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        assert_eq!(reads(&fixture), before);
+        assert_eq!(history_token(&fixture), token);
+    }
+    let result = fixture
+        .client
+        .gateway_ingest_go_rcs_record_json(
+            fixture.conversation_id.clone(),
+            fixture.generation + 1,
+            valid.to_string(),
+        )
+        .unwrap();
+    assert_eq!(result.record_outcome, "rejected:ownership_stale");
+    assert_eq!(result.status_outcome, None);
+    assert_eq!(result.cursor, None);
+    assert_eq!(reads(&fixture), before);
+    assert_eq!(history_token(&fixture), token);
+    assert_eq!(
+        fixture
+            .client
+            .gateway_ingest_go_rcs_record_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                valid.to_string(),
+            )
+            .unwrap()
+            .record_outcome,
+        "inserted"
+    );
+}
+
 struct Fixture {
     client: Arc<NativeClient>,
     conversation_id: String,

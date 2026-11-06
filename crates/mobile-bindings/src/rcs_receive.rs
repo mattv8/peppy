@@ -1,7 +1,7 @@
 use crate::{MobileBindingsError, NativeClient, NativeConversation, NativeMessage, with_client};
 use peppy_client_core::{
-    Client, Conversation, Direction, Message, RcsIdentityOutcome, RcsProjectedRecord,
-    RcsProjectedStatus, RcsProviderDetector, RcsReceiveCode, RcsReceiveOutcome,
+    Client, Conversation, ConversationId, Direction, Message, RcsIdentityOutcome,
+    RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsReceiveCode, RcsReceiveOutcome,
     RcsStatusApplication, Transport,
 };
 use serde::Deserialize;
@@ -122,6 +122,115 @@ fn receive_outcome(value: RcsReceiveOutcome) -> String {
     }
     .into()
 }
+const GO_RECORD_JSON_CAP: usize = 65_536;
+const GO_ID_CAP: usize = 512;
+const GO_BODY_CAP: usize = 16_384;
+const GO_CURSOR_CAP: usize = 4_096;
+
+/// Exact shape of Go's `rcsReceiveRecord` (`apps/android/googlemessages/gmlink/receive.go`).
+/// `cursor`, `tmp_id`, and `e2ee_reported` are `omitempty` on the Go side; all other keys are always emitted.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct GoReceiveRecord {
+    google_message_id: String,
+    google_conversation_id: String,
+    cursor: Option<String>,
+    direction: String,
+    body: String,
+    sent_at_ms: i64,
+    status: String,
+    tmp_id: Option<String>,
+    rcs_reported: bool,
+    e2ee_reported: Option<bool>,
+}
+
+struct GoReceiveParts {
+    record: RcsProjectedRecord,
+    status: Option<RcsStatusApplication>,
+    cursor: Option<String>,
+}
+
+fn bounded_text(value: &str, max: usize) -> Result<(), MobileBindingsError> {
+    if value.is_empty() || value.len() > max {
+        return Err(MobileBindingsError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn valid_go_cursor(value: &str) -> Result<(), MobileBindingsError> {
+    bounded_text(value, GO_CURSOR_CAP)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(MobileBindingsError::InvalidRequest);
+    }
+    Ok(())
+}
+
+impl GoReceiveRecord {
+    fn into_parts(self) -> Result<GoReceiveParts, MobileBindingsError> {
+        bounded_text(&self.google_message_id, GO_ID_CAP)?;
+        bounded_text(&self.google_conversation_id, GO_ID_CAP)?;
+        if self.body.len() > GO_BODY_CAP {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
+        if let Some(tmp_id) = self.tmp_id.as_deref() {
+            bounded_text(tmp_id, GO_ID_CAP)?;
+        }
+        if let Some(cursor) = self.cursor.as_deref() {
+            valid_go_cursor(cursor)?;
+        }
+        let direction = match self.direction.as_str() {
+            "incoming" => Direction::Incoming,
+            "outgoing" => Direction::Outgoing,
+            _ => return Err(MobileBindingsError::InvalidRequest),
+        };
+        let status = match self.status.as_str() {
+            "" => None,
+            "sending" => Some(RcsProjectedStatus::Sending),
+            "sent" => Some(RcsProjectedStatus::Sent),
+            "failed" => Some(RcsProjectedStatus::Failed),
+            "delivered" => Some(RcsProjectedStatus::Delivered),
+            "read" => Some(RcsProjectedStatus::Read),
+            _ => return Err(MobileBindingsError::InvalidRequest),
+        };
+        let sent_at_ms = Some(self.sent_at_ms);
+        let e2ee_reported = self.rcs_reported.then_some(self.e2ee_reported).flatten();
+        Ok(GoReceiveParts {
+            record: RcsProjectedRecord {
+                google_message_id: self.google_message_id.clone(),
+                google_conversation_id: self.google_conversation_id.clone(),
+                direction,
+                body: self.body,
+                sent_at_ms,
+                tmp_id: self.tmp_id.clone(),
+                rcs_reported: self.rcs_reported,
+                e2ee_reported,
+                // The cursor is never checkpointed inside ingest; the caller persists it after success.
+                history_token: None,
+            },
+            status: status.map(|status| RcsStatusApplication {
+                google_message_id: self.google_message_id,
+                google_conversation_id: self.google_conversation_id,
+                tmp_id: self.tmp_id,
+                status,
+            }),
+            cursor: self.cursor,
+        })
+    }
+}
+
+/// Closed outcomes plus the opaque Google page cursor. The cursor is present only when the
+/// record was accepted (not rejected) and carried one; the caller hands it back to
+/// `gateway_checkpoint_rcs_history` only after this call has succeeded.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsIngestOutcome {
+    pub record_outcome: String,
+    pub status_outcome: Option<String>,
+    pub cursor: Option<String>,
+}
+
 fn identity_outcome(value: RcsIdentityOutcome) -> String {
     match value {
         RcsIdentityOutcome::Recorded => "recorded".into(),
@@ -132,6 +241,57 @@ fn identity_outcome(value: RcsIdentityOutcome) -> String {
 
 #[uniffi::export]
 impl NativeClient {
+    /// Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
+    /// checkpoint; an inline status is applied only after an accepted ingest. Retries are
+    /// replay-safe: ingest reports `duplicate` and the status is idempotent.
+    pub fn gateway_ingest_go_rcs_record_json(
+        &self,
+        conversation_id: String,
+        ownership_generation: u64,
+        go_record_json: String,
+    ) -> Result<NativeRcsIngestOutcome, MobileBindingsError> {
+        if go_record_json.len() > GO_RECORD_JSON_CAP {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
+        let conversation: ConversationId = conversation_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        let go_record: GoReceiveRecord = serde_json::from_str(&go_record_json)
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        let GoReceiveParts {
+            record,
+            status,
+            cursor,
+        } = go_record.into_parts()?;
+        with_client(&self.client, |client| {
+            let record_outcome =
+                client.ingest_rcs_projected_record(conversation, ownership_generation, record)?;
+            if matches!(record_outcome, RcsReceiveOutcome::Rejected(_)) {
+                return Ok(NativeRcsIngestOutcome {
+                    record_outcome: receive_outcome(record_outcome),
+                    status_outcome: None,
+                    cursor: None,
+                });
+            }
+            let status_outcome = status
+                .map(|status| {
+                    client.apply_rcs_projected_status(conversation, ownership_generation, status)
+                })
+                .transpose()?;
+            let cursor = if status_outcome
+                .is_some_and(|outcome| matches!(outcome, RcsReceiveOutcome::Rejected(_)))
+            {
+                None
+            } else {
+                cursor
+            };
+            Ok(NativeRcsIngestOutcome {
+                record_outcome: receive_outcome(record_outcome),
+                status_outcome: status_outcome.map(receive_outcome),
+                cursor,
+            })
+        })
+    }
     pub fn gateway_ingest_rcs_record_json(
         &self,
         conversation_id: String,
