@@ -1302,6 +1302,7 @@ export function Composer({
   composerUserSized = false,
   maxAutoGrowHeight = 176,
   hideSmsCounter = false,
+  typingSlot,
   platform,
 }: {
   draft: string;
@@ -1325,6 +1326,7 @@ export function Composer({
   /** CSS max-height: 176px remains the hard ceiling (8 lines); this can only lower auto-grow. */
   maxAutoGrowHeight?: number;
   hideSmsCounter?: boolean;
+  typingSlot?: ReactNode;
   platform?: "macos" | "windows" | "linux";
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1449,7 +1451,7 @@ export function Composer({
           <Paperclip size={16} aria-hidden />
         </button>
         {gatewaySlot}
-        <div className="composer-toolbar-spacer" />
+        <div className="composer-toolbar-spacer">{typingSlot}</div>
         {!hideSmsCounter && counter && (
           <span id="sms-counter" aria-live="polite" aria-label="SMS character count">
             {counter}

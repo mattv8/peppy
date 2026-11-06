@@ -139,6 +139,8 @@ import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars, readShareTyping } from "./shell/layout-persistence";
 import { RcsBadge } from "./rcs/RcsBadge";
 import { useRcsRoute } from "./rcs/useRcsRoute";
+import { TypingAnnouncer, TypingIndicator } from "./typing/TypingIndicator";
+import { useTypingDisplay } from "./typing/useTypingDisplay";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { conversationContactAddress } from "./contacts/conversation-contact";
 import { hiddenTimeIds } from "./conversation/timestamp-bursts";
@@ -3297,6 +3299,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     gatewayId: route.kind === "route" ? route.gateway.id : undefined,
     locked: Boolean(appLock?.locked),
   });
+  const typingVisible = useTypingDisplay(bridge, active?.id, rcsRoute.current);
   const mmsRequired = requiresMms(content, active);
   const routeRecipients = recipientCount(content, active);
   const estimateBytes = draftEstimateBytes(content, attachmentViews);
@@ -4444,6 +4447,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         attachments={attachments}
         sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending}
         hideSmsCounter={rcsRoute.current}
+        typingSlot={<><TypingIndicator visible={typingVisible} /><TypingAnnouncer text={typingVisible ? "The other person is typing" : ""} /></>}
         unavailableReason={sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly}
         placeholder={composerReadOnly ? "Loading draft…" : undefined}
