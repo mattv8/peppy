@@ -375,7 +375,10 @@ fn participant_facts_consistent(record: &ConversationCandidateRecord) -> bool {
 }
 
 fn known_conversation_type(conversation_type: i32) -> bool {
-    matches!(conversation_type, SMS_CONVERSATION_TYPE | RCS_CONVERSATION_TYPE)
+    matches!(
+        conversation_type,
+        SMS_CONVERSATION_TYPE | RCS_CONVERSATION_TYPE
+    )
 }
 
 fn known_conversation_status(conversation_status: i32) -> bool {
@@ -391,13 +394,17 @@ fn self_participants_confirmed(
     region: Option<&str>,
     confirmed_own_identity: Option<&str>,
 ) -> bool {
-    record.participants.iter().filter(|participant| participant.self_).all(|participant| {
-        participant.identifier_type == PHONE_IDENTIFIER_TYPE
-            && confirmed_own_identity.is_some_and(|own_identity| {
-                canonical_address(own_identity, region)
-                    == canonical_address(&participant.raw_number, region)
-            })
-    })
+    record
+        .participants
+        .iter()
+        .filter(|participant| participant.self_)
+        .all(|participant| {
+            participant.identifier_type == PHONE_IDENTIFIER_TYPE
+                && confirmed_own_identity.is_some_and(|own_identity| {
+                    canonical_address(own_identity, region)
+                        == canonical_address(&participant.raw_number, region)
+                })
+        })
 }
 
 fn telephone_peer(participant: &ConversationCandidateParticipant, region: Option<&str>) -> bool {
@@ -502,7 +509,10 @@ mod tests {
         let forged_self = record(
             "forged-self",
             CandidateClassification::Eligible,
-            vec![participant("+12025550124", false), participant(TARGET, true)],
+            vec![
+                participant("+12025550124", false),
+                participant(TARGET, true),
+            ],
         );
 
         assert!(matches!(
@@ -655,7 +665,7 @@ mod tests {
         }"#;
 
         assert!(matches!(
-            classify_rcs_target(&conn, conversation_id.clone(), TARGET, route, snapshot, 1_000),
+            classify_rcs_target(&conn, conversation_id, TARGET, route, snapshot, 1_000),
             RcsTargetClassification::Found { .. }
         ));
         assert!(matches!(
