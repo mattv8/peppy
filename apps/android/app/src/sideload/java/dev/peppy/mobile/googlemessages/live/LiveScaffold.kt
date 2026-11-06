@@ -7,15 +7,11 @@ import java.util.ArrayDeque
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Disabled sideload-only contracts. Nothing in production constructs this scaffold yet. */
+/** Disabled sideload-only contracts. No production code constructs this scaffold. */
 internal interface LiveClock { fun elapsedRealtime(): Long }
 internal interface LiveCancellation { val cancelled: Boolean }
 internal class LiveCancelled : RuntimeException()
 internal class LiveRejected : RuntimeException()
-
-internal class LiveRequest internal constructor(val path: String, internal val bearer: String) {
-    init { require(path == "/v1/live") }
-}
 
 internal sealed interface LiveSocketFrame {
     data class Text(val value: String) : LiveSocketFrame
@@ -29,8 +25,8 @@ internal interface LiveSocket {
     fun close(deadlineElapsedMs: Long, cancellation: LiveCancellation)
 }
 
-/** A lease is the only capability that can form the fixed bearer request. */
-internal interface LiveLease { fun open(request: LiveRequest, deadlineElapsedMs: Long, cancellation: LiveCancellation): LiveSocket }
+/** The opaque lease alone constructs the fixed canonical-origin bearer request. */
+internal interface LiveLease { fun open(deadlineElapsedMs: Long, cancellation: LiveCancellation): LiveSocket }
 internal interface LiveLeaseFactory { fun acquire(): LiveLease? }
 
 internal object LiveTransport {
@@ -39,145 +35,233 @@ internal object LiveTransport {
     const val HANDSHAKE_MS = 5_000L
     const val CLOSE_MS = 1_000L
 
-    fun open(lease: LiveLease, bearer: String, clock: LiveClock, cancellation: LiveCancellation): LiveSocket {
+    fun open(lease: LiveLease, clock: LiveClock, cancellation: LiveCancellation): LiveSocket {
         val deadline = add(clock.elapsedRealtime(), HANDSHAKE_MS)
-        checkCancelled(cancellation)
-        val socket = lease.open(LiveRequest("/v1/live", bearer), deadline, cancellation)
-        val hello = socket.receive(deadline, cancellation) as? LiveSocketFrame.Text ?: throw LiveRejected()
-        if (bytes(hello.value) > MAX_TEXT_BYTES || !validServerHello(hello.value)) throw LiveRejected()
-        return socket
+        checkLive(clock, deadline, cancellation)
+        var socket: LiveSocket? = null
+        try {
+            socket = lease.open(deadline, cancellation)
+            checkLive(clock, deadline, cancellation)
+            val hello = socket.receive(deadline, cancellation) as? LiveSocketFrame.Text ?: throw LiveRejected()
+            checkLive(clock, deadline, cancellation)
+            if (bytes(hello.value) > MAX_TEXT_BYTES || !validServerHello(hello.value)) throw LiveRejected()
+            return socket
+        } catch (failure: RuntimeException) {
+            socket?.let { closeQuietly(it, clock, cancellation) }
+            throw failure
+        }
     }
 
-    fun write(socket: LiveSocket, value: String, deadlineElapsedMs: Long, cancellation: LiveCancellation) {
+    fun write(socket: LiveSocket, value: String, clock: LiveClock, deadlineElapsedMs: Long, cancellation: LiveCancellation) {
         if (bytes(value) > MAX_TEXT_BYTES) throw LiveRejected()
-        checkCancelled(cancellation)
+        checkLive(clock, deadlineElapsedMs, cancellation)
         socket.send(value, deadlineElapsedMs, cancellation)
-        checkCancelled(cancellation)
+        checkLive(clock, deadlineElapsedMs, cancellation)
     }
 
-    fun close(socket: LiveSocket, clock: LiveClock, cancellation: LiveCancellation) =
-        socket.close(add(clock.elapsedRealtime(), CLOSE_MS), cancellation)
+    fun close(socket: LiveSocket, clock: LiveClock, cancellation: LiveCancellation) {
+        val deadline = add(clock.elapsedRealtime(), CLOSE_MS)
+        socket.close(deadline, cancellation)
+    }
 
-    private fun validServerHello(raw: String): Boolean = SERVER_HELLO.matches(raw)
-
+    private fun closeQuietly(socket: LiveSocket, clock: LiveClock, cancellation: LiveCancellation) {
+        try { close(socket, clock, cancellation) } catch (_: RuntimeException) { }
+    }
+    private fun checkLive(clock: LiveClock, deadline: Long, cancellation: LiveCancellation) {
+        if (cancellation.cancelled) throw LiveCancelled()
+        if (clock.elapsedRealtime() >= deadline) throw LiveRejected()
+    }
+    private fun validServerHello(raw: String) = SERVER_HELLO.matches(raw)
     internal fun bytes(value: String) = value.toByteArray(Charsets.UTF_8).size
     internal fun add(left: Long, right: Long): Long = try { Math.addExact(left, right) } catch (_: ArithmeticException) { throw LiveRejected() }
-    internal fun checkCancelled(cancellation: LiveCancellation) { if (cancellation.cancelled) throw LiveCancelled() }
 }
 
 private val SERVER_HELLO = Regex("""\{\s*"type"\s*:\s*"hello"\s*,\s*"protocol_version"\s*:\s*2\s*,\s*"max_ttl_ms"\s*:\s*15000\s*,\s*"max_ciphertext_bytes"\s*:\s*5400\s*} """.trim())
 
 internal enum class MembershipRole { OWNER, GATEWAY, DEVICE }
-internal data class MembershipDevice(val deviceId: String, val revoked: Boolean, val keyEpoch: Int, val role: MembershipRole)
+internal data class MembershipDevice(val deviceId: String, val revoked: Boolean, val keyEpoch: Long, val role: MembershipRole)
 internal sealed interface MembershipControl {
     data class Bootstrap(val connectionId: String, val membershipVersion: Long, val roster: List<MembershipDevice>) : MembershipControl
     data class Response(val connectionId: String, val challengeId: String, val membershipVersion: Long, val roster: List<MembershipDevice>) : MembershipControl
     data class Hint(val membershipVersion: Long) : MembershipControl
 }
 
-/** Strict bounded Kotlin mirror for the disabled Rust-owned membership DTOs. */
+/** Bounded wire parser for disabled test seams; production must use the generated Rust contract bridge. */
 internal object MembershipControls {
     fun parse(raw: String): MembershipControl? {
         if (LiveTransport.bytes(raw) > LiveTransport.MAX_CONTROL_BYTES) return null
-        return parseValues(raw)?.let { values ->
-            if (values["version"] != "1") return@let null
-            when (values["type"]) {
-                "membership_hint" -> values.takeIf { it.keys == setOf("type", "version", "membership_version") }
-                    ?.get("membership_version")?.let(::version)?.let(MembershipControl::Hint)
-                else -> null // The production Rust parser owns bootstrap/response roster decoding.
+        return try {
+            JsonReader(StringReader(raw)).use { reader ->
+                reader.isLenient = false
+                val fields = objectFields(reader) ?: return null
+                if (reader.peek() != JsonToken.END_DOCUMENT || fields.string("type") == null || fields.long("version") != 1L) return null
+                when (fields.string("type")) {
+                    "membership_hint" -> fields.exact("type", "version", "membership_version")
+                        ?.let { fields.decimal("membership_version") }?.let(MembershipControl::Hint)
+                    "membership_bootstrap" -> fields.exact("type", "version", "connection_id", "membership_version", "roster")
+                        ?.let { bootstrap(fields) }
+                    "membership_response" -> fields.exact("type", "version", "connection_id", "challenge_id", "membership_version", "roster")
+                        ?.let { response(fields) }
+                    else -> null
+                }
             }
-        }
+        } catch (_: Exception) { null }
     }
 
-    fun bootstrap(connectionId: String, version: Long, roster: List<MembershipDevice>) =
-        validConnection(connectionId) && validVersion(version) && validRoster(roster)
-    fun response(connectionId: String, challengeId: String, version: Long, roster: List<MembershipDevice>) =
-        bootstrap(connectionId, version, roster) && validConnection(challengeId)
-    fun validVersion(value: Long) = value in 1..Long.MAX_VALUE
-    private fun version(raw: String) = raw.takeIf { it.matches(Regex("[1-9][0-9]{0,18}")) }?.toLongOrNull()?.takeIf(::validVersion)
-    private fun validConnection(value: String): Boolean = try {
+    fun bootstrap(connectionId: String, version: Long, roster: List<MembershipDevice>) = validId(connectionId) && validVersion(version) && validRoster(roster)
+    fun response(connectionId: String, challengeId: String, version: Long, roster: List<MembershipDevice>) = bootstrap(connectionId, version, roster) && validId(challengeId)
+    fun validVersion(value: Long) = value > 0
+
+    private fun bootstrap(fields: Fields): MembershipControl.Bootstrap? {
+        val control = MembershipControl.Bootstrap(fields.string("connection_id") ?: return null, fields.decimal("membership_version") ?: return null, fields.roster("roster") ?: return null)
+        return control.takeIf { bootstrap(it.connectionId, it.membershipVersion, it.roster) }
+    }
+    private fun response(fields: Fields): MembershipControl.Response? {
+        val control = MembershipControl.Response(fields.string("connection_id") ?: return null, fields.string("challenge_id") ?: return null, fields.decimal("membership_version") ?: return null, fields.roster("roster") ?: return null)
+        return control.takeIf { response(it.connectionId, it.challengeId, it.membershipVersion, it.roster) }
+    }
+    private fun validId(value: String): Boolean = try {
         value.length == 22 && Base64.getUrlDecoder().decode(value).let { it.size == 16 && Base64.getUrlEncoder().withoutPadding().encodeToString(it) == value }
     } catch (_: IllegalArgumentException) { false }
-    private fun validRoster(roster: List<MembershipDevice>) = roster.size <= 100 && roster.map { it.deviceId }.toSet().size == roster.size && roster.all {
-        it.deviceId.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) && it.keyEpoch > 0
+    private fun validRoster(roster: List<MembershipDevice>) = roster.isNotEmpty() && roster.size <= 100 && roster.map { it.deviceId }.toSet().size == roster.size && roster.all {
+        it.deviceId.matches(UUID) && it.keyEpoch in 1..0xffff_ffffL
     }
 }
 
-private fun parseValues(raw: String): Map<String, String>? {
-    val values = linkedMapOf<String, String>()
-    return try {
-        JsonReader(StringReader(raw)).use { reader ->
-            var valid = true
-            reader.isLenient = false; reader.beginObject()
-            while (reader.hasNext()) {
-                val name = reader.nextName()
-                if (name in values || reader.peek() !in setOf(JsonToken.STRING, JsonToken.NUMBER, JsonToken.BOOLEAN)) {
-                    valid = false
-                    reader.skipValue()
-                } else values[name] = reader.nextString()
-            }
-            reader.endObject()
-            if (valid && reader.peek() == JsonToken.END_DOCUMENT) values else null
+private val UUID = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+private class Fields(private val values: Map<String, Any>) {
+    fun exact(vararg names: String) = takeIf { values.keys == names.toSet() }
+    fun string(name: String) = values[name] as? String
+    fun long(name: String) = values[name] as? Long
+    fun decimal(name: String) = string(name)?.takeIf { it.matches(Regex("[1-9][0-9]{0,18}")) }?.toLongOrNull()?.takeIf { it > 0 }
+    fun roster(name: String): List<MembershipDevice>? = (values[name] as? List<*>)?.map {
+        val device = it as? Fields ?: return null
+        if (device.exact("device_id", "revoked", "key_epoch", "role") == null) return null
+        MembershipDevice(device.string("device_id") ?: return null, device.values["revoked"] as? Boolean ?: return null,
+            device.long("key_epoch") ?: return null, when (device.string("role")) { "owner" -> MembershipRole.OWNER; "gateway" -> MembershipRole.GATEWAY; "device" -> MembershipRole.DEVICE; else -> return null })
+    }
+}
+private fun objectFields(reader: JsonReader): Fields? {
+    if (reader.peek() != JsonToken.BEGIN_OBJECT) return null
+    val values = linkedMapOf<String, Any>(); reader.beginObject()
+    while (reader.hasNext()) {
+        val name = reader.nextName(); if (name in values) return null
+        values[name] = when (reader.peek()) {
+            JsonToken.STRING -> reader.nextString(); JsonToken.NUMBER -> reader.nextLong(); JsonToken.BOOLEAN -> reader.nextBoolean()
+            JsonToken.BEGIN_ARRAY -> { val items = mutableListOf<Fields>(); reader.beginArray(); while (reader.hasNext()) items += objectFields(reader) ?: return null; reader.endArray(); items }
+            else -> return null
         }
-    } catch (_: Exception) { null }
+    }
+    reader.endObject(); return Fields(values)
 }
 
-internal interface LiveCore { fun enable(); fun disable() }
-internal class LivePublication(private val core: LiveCore) {
-    private val enabled = AtomicBoolean(false)
-    fun enable() { if (enabled.compareAndSet(false, true)) core.enable() }
-    fun retire() { if (enabled.compareAndSet(true, false)) core.disable() }
-    fun publish(now: Long, leaseDeadline: Long, actionDeadline: Long, action: () -> Unit): Boolean {
-        if (!enabled.get() || now >= leaseDeadline || now >= actionDeadline || !enabled.get()) return false
-        action()
-        return enabled.get()
+internal data class LiveMembershipSnapshot(val connectionId: String, val version: Long, val activeRoster: List<MembershipDevice>)
+internal interface LiveCore { fun enable(snapshot: LiveMembershipSnapshot); fun disable() }
+
+/** One coordinator per captured native client. It never calls client code under a connection lock. */
+internal class LiveIncarnationCoordinator {
+    private val lock = Any()
+    fun enable(publication: LivePublication) = synchronized(lock) {
+        if (!publication.gate.get()) return@synchronized false
+        publication.core.enable(publication.snapshot)
+        if (!publication.gate.get()) publication.core.disable()
+        publication.gate.get()
+    }
+    fun retire(publication: LivePublication) = synchronized(lock) {
+        if (publication.enabled.compareAndSet(true, false)) publication.core.disable()
     }
 }
 
-/** Connection-owned control state. Core publication can be retired independently. */
-internal class LiveConnection(private val clock: LiveClock, private val core: LiveCore) {
-    private var connectionId: String? = null
-    private var highwater = 0L
-    private var pending: Pending? = null
-    private var lastIssue = Long.MIN_VALUE
-    private var leaseDeadline = Long.MIN_VALUE
-    private var retired = false
-    private var publication: LivePublication? = null
-    private val data = ArrayDeque<String>(64)
-    private val controls = ArrayDeque<MembershipControl>(4)
+internal class LivePublication internal constructor(internal val core: LiveCore, internal val snapshot: LiveMembershipSnapshot) {
+    internal val gate = AtomicBoolean(true)
+    internal val enabled = AtomicBoolean(false)
+    fun close(coordinator: LiveIncarnationCoordinator) { gate.set(false); coordinator.retire(this) }
+    fun closeAsync(coordinator: LiveIncarnationCoordinator) { gate.set(false); Thread { coordinator.retire(this) }.start() }
+    fun admit(actionDeadline: Long): LiveAdmission = LiveAdmission(this, actionDeadline)
+}
+internal class LiveAdmission internal constructor(private val publication: LivePublication, private val actionDeadline: Long) {
+    fun publish(clock: LiveClock, leaseDeadline: Long, action: () -> Unit): Boolean {
+        val now = clock.elapsedRealtime()
+        if (!publication.gate.get() || now >= leaseDeadline || now >= actionDeadline) return false
+        action()
+        return publication.gate.get() && clock.elapsedRealtime() < leaseDeadline
+    }
+}
+
+/**
+ * Lock order: connection state lock is never held while coordinator/core/socket work runs;
+ * coordinator lock only calls core. The atomic publication gate is checked at every publication.
+ */
+internal class LiveConnection(
+    private val clock: LiveClock,
+    private val core: LiveCore,
+    private val localDeviceId: String,
+    private val coordinator: LiveIncarnationCoordinator = LiveIncarnationCoordinator(),
+) {
+    private val state = Any(); private val connectionGate = AtomicBoolean(true)
+    private var connectionId: String? = null; private var highwater = 0L; private var pending: Pending? = null
+    private var lastIssue = Long.MIN_VALUE; private var leaseDeadline = Long.MIN_VALUE; private var retired = false
+    private var publication: LivePublication? = null; private var controlBytes = 0
+    private val data = ArrayDeque<String>(64); private val controls = ArrayDeque<Pair<MembershipControl, Int>>(4)
     private data class Pending(val nonce: String, val issuedAt: Long, val responseDeadline: Long)
 
-    fun bootstrap(control: MembershipControl.Bootstrap): Boolean = synchronized(this) {
-        if (retired || !MembershipControls.bootstrap(control.connectionId, control.membershipVersion, control.roster)) return false
-        connectionId = control.connectionId; highwater = maxOf(highwater, control.membershipVersion); pending = null; true
+    fun bootstrap(control: MembershipControl.Bootstrap): Boolean = synchronized(state) {
+        if (retired || connectionId != null || !MembershipControls.bootstrap(control.connectionId, control.membershipVersion, control.roster)) return@synchronized false
+        connectionId = control.connectionId; highwater = control.membershipVersion; true
     }
-    fun issue(nonce: String): Boolean = synchronized(this) {
+    fun issue(nonce: String): Boolean = synchronized(state) {
         val now = clock.elapsedRealtime()
-        if (retired || connectionId == null || pending != null || (lastIssue != Long.MIN_VALUE && now - lastIssue < 20_000L) || !validNonce(nonce)) return false
-        pending = Pending(nonce, now, LiveTransport.add(now, 5_000L)); lastIssue = now; true
+        if (!fresh(now) || pending != null || !validNonce(nonce)) return@synchronized false
+        val deadline = try { LiveTransport.add(now, 5_000) } catch (_: LiveRejected) { retireLocked(); return@synchronized false }
+        pending = Pending(nonce, now, deadline); lastIssue = now; true
     }
-    fun response(control: MembershipControl.Response): Boolean = synchronized(this) {
-        val now = clock.elapsedRealtime(); val expected = pending ?: return false
-        if (retired || now > expected.responseDeadline || control.connectionId != connectionId || control.challengeId != expected.nonce ||
-            !MembershipControls.response(control.connectionId, control.challengeId, control.membershipVersion, control.roster) || control.membershipVersion < highwater) return false
-        pending = null
-        if (control.membershipVersion > highwater && publication != null) { publication?.retire(); publication = null; highwater = control.membershipVersion; return false }
-        highwater = maxOf(highwater, control.membershipVersion)
-        leaseDeadline = LiveTransport.add(expected.issuedAt, 60_000L)
-        if (now >= leaseDeadline) { retire(); return false }
-        if (publication == null) publication = LivePublication(core).also { it.enable() }
-        true
+    /** Deterministic owner driver: callers supply CSPRNG bytes and dispatch the resulting control elsewhere. */
+    fun drive(nextNonce: () -> String): String? = synchronized(state) {
+        val now = clock.elapsedRealtime(); if (!fresh(now) || pending != null || (lastIssue != Long.MIN_VALUE && now - lastIssue < 20_000)) null
+        else nextNonce().takeIf { issue(it) }
     }
-    fun hint(control: MembershipControl.Hint): Boolean = synchronized(this) {
-        if (!MembershipControls.validVersion(control.membershipVersion)) return false
-        if (control.membershipVersion > highwater) { highwater = control.membershipVersion; publication?.retire(); publication = null }; true
+    fun response(control: MembershipControl.Response): Boolean {
+        val publicationToEnable: LivePublication
+        synchronized(state) {
+            val now = clock.elapsedRealtime(); val expected = pending ?: return false
+            if (!fresh(now) || now > expected.responseDeadline || control.connectionId != connectionId || control.challengeId != expected.nonce ||
+                !MembershipControls.response(control.connectionId, control.challengeId, control.membershipVersion, control.roster) || control.membershipVersion < highwater) {
+                retireLocked(); return false
+            }
+            val deadline = try { LiveTransport.add(expected.issuedAt, 60_000) } catch (_: LiveRejected) { retireLocked(); return false }
+            if (now >= deadline) { retireLocked(); return false }
+            pending = null; highwater = control.membershipVersion; leaseDeadline = deadline
+            if (publication != null && control.membershipVersion == publication!!.snapshot.version) return true
+            publication?.close(coordinator)
+            val roster = control.roster.filterNot { it.revoked }
+            if (roster.none { it.deviceId == localDeviceId }) { retireLocked(); return false }
+            publicationToEnable = LivePublication(core, LiveMembershipSnapshot(control.connectionId, control.membershipVersion, roster))
+            publication = publicationToEnable
+        }
+        val enabled = coordinator.enable(publicationToEnable)
+        synchronized(state) { if (!enabled || retired || publication !== publicationToEnable || !connectionGate.get()) { publicationToEnable.close(coordinator); if (publication === publicationToEnable) publication = null; return false }; publicationToEnable.enabled.set(true); return true }
     }
-    fun tick() = synchronized(this) { if (retired) false else if (pending?.let { clock.elapsedRealtime() > it.responseDeadline } == true || (publication != null && clock.elapsedRealtime() >= leaseDeadline)) { retire(); false } else true }
-    fun offerData(frame: String): Boolean = synchronized(this) { if (LiveTransport.bytes(frame) > LiveTransport.MAX_TEXT_BYTES || data.size == 64) false else { data.addLast(frame); true } }
-    fun offerControl(control: MembershipControl, rawBytes: Int): Boolean = synchronized(this) { if (rawBytes > LiveTransport.MAX_CONTROL_BYTES || controls.size == 4) { retire(); false } else { controls.addLast(control); true } }
-    fun publish(actionDeadline: Long, action: () -> Unit) = synchronized(this) { publication?.publish(clock.elapsedRealtime(), leaseDeadline, actionDeadline, action) ?: false }
-    fun retire() { publication?.retire(); publication = null; pending = null; retired = true; data.clear(); controls.clear() }
-    internal fun enabled() = publication != null
-    internal fun highwater() = highwater
-    private fun validNonce(value: String) = value.length == 22 && runCatching { Base64.getUrlDecoder().decode(value) }.getOrNull()?.size == 16
+    fun hint(control: MembershipControl.Hint): Boolean {
+        val toClose = synchronized(state) {
+            if (retired || !MembershipControls.validVersion(control.membershipVersion)) return false
+            if (control.membershipVersion <= highwater) return true
+            highwater = control.membershipVersion; pending = null; publication.also { publication = null }
+        }
+        toClose?.close(coordinator); return true
+    }
+    fun tick(): Boolean = synchronized(state) { val now = clock.elapsedRealtime(); if (!fresh(now) || pending?.let { now > it.responseDeadline } == true || (publication != null && now >= leaseDeadline)) { retireLocked(); false } else true }
+    fun offerData(frame: String): Boolean = synchronized(state) { if (retired || LiveTransport.bytes(frame) > LiveTransport.MAX_TEXT_BYTES || data.size == 64) false else { data.addLast(frame); true } }
+    fun offerControl(control: MembershipControl, raw: String): Boolean = synchronized(state) {
+        val bytes = LiveTransport.bytes(raw)
+        if (retired) return false
+        if (bytes > LiveTransport.MAX_CONTROL_BYTES || controls.size == 4 || controlBytes > LiveTransport.MAX_CONTROL_BYTES - bytes) { retireLocked(); return false }
+        controls.addLast(control to bytes); controlBytes += bytes; true
+    }
+    fun admit(actionDeadline: Long): LiveAdmission? = synchronized(state) { if (!tick() || !connectionGate.get()) null else publication?.admit(actionDeadline) }
+    fun retire() = synchronized(state) { retireLocked() }
+    internal fun enabled() = synchronized(state) { publication?.enabled?.get() == true }
+    internal fun highwater() = synchronized(state) { highwater }
+    private fun fresh(now: Long) = !retired && connectionGate.get() && connectionId != null && (publication == null || now < leaseDeadline)
+    private fun retireLocked() { if (retired) return; retired = true; connectionGate.set(false); pending = null; data.clear(); controls.clear(); controlBytes = 0; publication?.closeAsync(coordinator); publication = null }
+    private fun validNonce(value: String) = try { value.length == 22 && Base64.getUrlDecoder().decode(value).let { it.size == 16 && Base64.getUrlEncoder().withoutPadding().encodeToString(it) == value } } catch (_: IllegalArgumentException) { false }
 }
