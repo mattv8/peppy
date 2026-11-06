@@ -26,6 +26,13 @@ type Host interface {
 	ShowEmoji(emoji string)
 }
 
+// OwnedHost receives the immutable Go operation identity at the platform boundary.
+// Hosts that dispatch callbacks asynchronously use it to reject stale delivery.
+type OwnedHost interface {
+	EventOwned(kind, code string, value, generation, revision int64)
+	ShowEmojiOwned(emoji string, generation, revision int64)
+}
+
 var (
 	errPersistFailed                = errors.New("persist_failed")
 	errLinkClosed                   = errors.New("link_closed")
@@ -76,6 +83,7 @@ type Link struct {
 	closeReady            bool
 	outputStart           func(hostOutput)
 	completionOutputReady func()
+	pairCleanupReady      func(uint64)
 
 	changes            chan any
 	conversationEvents []conversationEvent
@@ -101,11 +109,12 @@ type queuedEvent struct {
 }
 
 type terminalCompletion struct {
-	revision uint64
-	state    persistedState
-	kind     string
-	code     string
-	done     chan struct{}
+	generation uint64
+	revision   uint64
+	state      persistedState
+	kind       string
+	code       string
+	done       chan struct{}
 }
 
 type hostOutput struct {
@@ -292,6 +301,9 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 			if link.restorePairFor(owner, previous, code) {
 				link.emitFor(owner, "link", code, 0)
 			}
+		}
+		if link.pairCleanupReady != nil {
+			link.pairCleanupReady(owner)
 		}
 		link.mu.Lock()
 		// Clear only this pair's own handles: a newer pair may already own them.
@@ -1155,7 +1167,7 @@ func (link *Link) completeTerminal(completion *terminalCompletion) {
 		link.completionOutputReady()
 	}
 	if current && err == nil {
-		link.enqueueOutput(hostOutput{kind: completion.kind, code: completion.code, revision: completion.revision, requireRevision: true})
+		link.enqueueOutput(hostOutput{kind: completion.kind, code: completion.code, generation: completion.generation, revision: completion.revision, requireRevision: true})
 	}
 }
 
@@ -1294,11 +1306,17 @@ func (link *Link) emitFor(generation uint64, kind, code string, value int64) {
 	if !isEventCode(kind, code) {
 		return
 	}
-	link.enqueueOutput(hostOutput{kind: kind, code: code, value: value, generation: generation, requireGeneration: true})
+	link.enqueueOutput(hostOutput{kind: kind, code: code, value: value, generation: generation, revision: link.outputRevision(), requireGeneration: true})
 }
 
 func (link *Link) showEmojiFor(owner uint64, emoji string) {
-	link.enqueueOutput(hostOutput{emoji: emoji, generation: owner, requirePair: true})
+	link.enqueueOutput(hostOutput{emoji: emoji, generation: owner, revision: link.outputRevision(), requirePair: true})
+}
+
+func (link *Link) outputRevision() uint64 {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	return link.stateRevision
 }
 
 func (link *Link) transitionFor(generation uint64, state, code string) {
@@ -1514,9 +1532,12 @@ func (link *Link) enqueueOutput(output hostOutput) {
 		return
 	}
 	link.outputQueue = append(link.outputQueue, output)
+	wait := link.outputActive == 0
 	link.outputCond.Signal()
 	link.outputMu.Unlock()
-	<-output.done
+	if wait {
+		<-output.done
+	}
 }
 
 func (link *Link) consumeOutputs() {
@@ -1538,10 +1559,8 @@ func (link *Link) consumeOutputs() {
 			continue
 		}
 		link.outputActive++
-		started := make(chan struct{})
-		go link.deliverOutput(output, started)
-		<-started
 		link.outputMu.Unlock()
+		link.deliverOutput(output)
 	}
 }
 
@@ -1562,7 +1581,31 @@ func (link *Link) outputAdmitted(output hostOutput) bool {
 }
 
 func (link *Link) deliverUnmanagedOutput(output hostOutput) {
-	if !link.outputAdmitted(output) {
+	if link.outputAdmitted(output) {
+		link.callHost(output)
+	}
+}
+
+func (link *Link) deliverOutput(output hostOutput) {
+	if link.outputStart != nil {
+		link.outputStart(output)
+	}
+	link.callHost(output)
+	close(output.done)
+
+	link.outputMu.Lock()
+	link.outputActive--
+	link.finalizeCloseLocked()
+	link.outputMu.Unlock()
+}
+
+func (link *Link) callHost(output hostOutput) {
+	if owned, ok := link.host.(OwnedHost); ok {
+		if output.emoji != "" {
+			owned.ShowEmojiOwned(output.emoji, int64(output.generation), int64(output.revision))
+		} else {
+			owned.EventOwned(output.kind, output.code, output.value, int64(output.generation), int64(output.revision))
+		}
 		return
 	}
 	if output.emoji != "" {
@@ -1572,22 +1615,14 @@ func (link *Link) deliverUnmanagedOutput(output hostOutput) {
 	}
 }
 
-func (link *Link) deliverOutput(output hostOutput, started chan<- struct{}) {
-	if link.outputStart != nil {
-		link.outputStart(output)
+// AcceptsOutput lets an asynchronous platform receiver validate the originating operation.
+func (link *Link) AcceptsOutput(generation, revision int64) bool {
+	if generation < 0 || revision < 0 {
+		return false
 	}
-	close(started)
-	if output.emoji != "" {
-		link.host.ShowEmoji(output.emoji)
-	} else {
-		link.host.Event(output.kind, output.code, output.value)
-	}
-	close(output.done)
-
-	link.outputMu.Lock()
-	link.outputActive--
-	link.finalizeCloseLocked()
-	link.outputMu.Unlock()
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	return !link.closed && link.generation == uint64(generation) && link.stateRevision == uint64(revision)
 }
 
 func (link *Link) finalizeCloseLocked() {
@@ -1601,7 +1636,10 @@ func (link *Link) emit(kind, code string, value int64) {
 	if !isEventCode(kind, code) {
 		return
 	}
-	link.enqueueOutput(hostOutput{kind: kind, code: code, value: value})
+	link.mu.Lock()
+	generation, revision := link.generation, link.stateRevision
+	link.mu.Unlock()
+	link.enqueueOutput(hostOutput{kind: kind, code: code, value: value, generation: generation, revision: revision})
 }
 
 // pairFailure is a fixed pair outcome. Its text is the reason code the host sees.

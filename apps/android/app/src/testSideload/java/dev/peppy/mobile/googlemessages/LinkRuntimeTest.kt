@@ -206,6 +206,33 @@ class LinkRuntimeTest {
     }
 
     @Test
+    fun `receiver drops callbacks from stale Go ownership`() {
+        lateinit var host: LinkHost
+        val queued = QueueExecutor()
+        var currentGeneration = 3L
+        val handle = FakeHandle { generation, revision -> generation == currentGeneration && revision == 4L }
+        val events = mutableListOf<String>()
+        LinkRuntimeTestHooks.callbackExecutor = queued
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> events += "$kind/$code" }
+        LinkRuntime.handle(context)
+        val attempt = LinkRuntime.tryBeginPairing()!!
+
+        host.eventOwned("link", "pair_ok", 0, 3, 4)
+        host.showEmojiOwned("old", 3, 4)
+        currentGeneration = 5
+        queued.runAll()
+
+        assertTrue(events.isEmpty())
+        assertEquals(null, LinkRuntime.emoji.value)
+        assertTrue(LinkRuntime.endPairing(attempt))
+    }
+
+    @Test
     fun `runtime event sink records through the production diagnostic path`() {
         val records = mutableListOf<String>()
         SyncDiagnostics.configureRuntime(enabled = true) { records += it }
@@ -240,7 +267,9 @@ class LinkRuntimeTest {
         override fun wipe() { wiped = true }
     }
 
-    private class FakeHandle : LinkHandle {
+    private class FakeHandle(
+        private val accepts: (Long, Long) -> Boolean = { _, _ -> true },
+    ) : LinkHandle {
         var closed = false
         override fun pair(cookiesJson: ByteArray) = Unit
         override fun relink() = Unit
@@ -250,5 +279,6 @@ class LinkRuntimeTest {
         override fun stop() = Unit
         override fun close() { closed = true }
         override fun status(): String = """{\"state\":\"unlinked\"}"""
+        override fun acceptsOutput(generation: Long, revision: Long): Boolean = accepts(generation, revision)
     }
 }

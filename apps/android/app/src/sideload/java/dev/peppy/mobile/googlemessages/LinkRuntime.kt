@@ -116,20 +116,24 @@ object LinkRuntime {
     private fun host(store: LinkStateStorage, generation: Long) = object : LinkHost {
         override fun persistState(state: ByteArray) = store.write(state)
 
-        override fun event(kind: String, code: String, value: Long) {
+        override fun event(kind: String, code: String, value: Long) = eventOwned(kind, code, value, -1, -1)
+
+        override fun eventOwned(kind: String, code: String, value: Long, ownerGeneration: Long, ownerRevision: Long) {
             val safeCode = filterReasonCode(code)
             callbackExecutor().execute {
-                if (!acceptsCallback(generation)) return@execute
+                if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
                 recordEvent(kind, safeCode, value)
                 GoogleMessagesLinkService.onLinkEvent(kind, safeCode)
                 signalChange()
             }
         }
 
-        override fun showEmoji(value: String) {
-            // Go calls ShowEmoji synchronously before FinishGaiaPairing, while Pair/Relink still owns this token.
+        override fun showEmoji(value: String) = showEmojiOwned(value, -1, -1)
+
+        override fun showEmojiOwned(value: String, ownerGeneration: Long, ownerRevision: Long) {
             val callbackPairingGeneration = synchronized(this@LinkRuntime) { pairingGeneration }
             callbackExecutor().execute {
+                if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
                 assignEmojiIfCurrent(generation, callbackPairingGeneration, value)
             }
         }
@@ -143,7 +147,11 @@ object LinkRuntime {
         changeCounter.value += 1
     }
 
-    private fun acceptsCallback(generation: Long): Boolean = synchronized(this) { generation == handleGeneration && cachedHandle != null }
+    private fun acceptsCallback(handle: Long, ownerGeneration: Long, ownerRevision: Long): Boolean = synchronized(this) {
+        if (handle != handleGeneration) return@synchronized false
+        val current = cachedHandle ?: return@synchronized false
+        ownerGeneration < 0 || ownerRevision < 0 || current.acceptsOutput(ownerGeneration, ownerRevision)
+    }
 
     private fun assignEmojiIfCurrent(handle: Long, attempt: Long, value: String) = synchronized(this) {
         if (handle != handleGeneration || cachedHandle == null) return@synchronized

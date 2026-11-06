@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,7 +27,14 @@ func TestOldPairCleanupKeepsNewPairOwnership(t *testing.T) {
 	})
 	link, host := openSafetyLink(t, nil)
 	setSafetyState(link, stateSignedOut, nil)
-	reached, release := host.holdNextEvent("pair_ok")
+	reached, release := make(chan struct{}), make(chan struct{})
+	var cleanupOnce sync.Once
+	link.pairCleanupReady = func(uint64) {
+		cleanupOnce.Do(func() {
+			close(reached)
+			<-release
+		})
+	}
 
 	oldResult := make(chan error, 1)
 	go func() { oldResult <- link.Pair(canaryCookieJSON(t)) }()
@@ -34,7 +42,7 @@ func TestOldPairCleanupKeepsNewPairOwnership(t *testing.T) {
 	select {
 	case <-reached:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the old pair never reached its success emit")
+		t.Fatal("the old pair never reached deferred cleanup")
 	}
 
 	// Sign the link out while the old pair still holds its cleanup.

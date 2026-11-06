@@ -11,8 +11,9 @@ import (
 )
 
 type orderedOutputHost struct {
-	firstDelivered  chan struct{}
-	secondDelivered chan struct{}
+	firstEntered  chan struct{}
+	releaseFirst  chan struct{}
+	secondEntered chan struct{}
 }
 
 func (*orderedOutputHost) PersistState([]byte) error { return nil }
@@ -20,60 +21,47 @@ func (*orderedOutputHost) ShowEmoji(string)          {}
 func (host *orderedOutputHost) Event(_, code string, _ int64) {
 	switch code {
 	case "recovered":
-		close(host.firstDelivered)
+		close(host.firstEntered)
+		<-host.releaseFirst
 	case "temporary_error":
-		close(host.secondDelivered)
+		close(host.secondEntered)
 	}
 }
 
 func TestHostOutputsPreserveAdmissionOrder(t *testing.T) {
 	host := &orderedOutputHost{
-		firstDelivered:  make(chan struct{}),
-		secondDelivered: make(chan struct{}),
+		firstEntered:  make(chan struct{}),
+		releaseFirst:  make(chan struct{}),
+		secondEntered: make(chan struct{}),
 	}
 	link, err := Open(nil, host)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer link.Close()
-	firstDispatch := make(chan struct{})
-	releaseFirst := make(chan struct{})
-	secondDispatch := make(chan struct{})
-	link.outputStart = func(output hostOutput) {
-		switch output.code {
-		case "recovered":
-			close(firstDispatch)
-			<-releaseFirst
-		case "temporary_error":
-			close(secondDispatch)
-		}
-	}
 	go link.emit("conn", "recovered", 0)
-	<-firstDispatch
+	<-host.firstEntered
 	go link.emit("conn", "temporary_error", 0)
 
 	select {
-	case <-secondDispatch:
-		close(releaseFirst)
-		t.Fatal("later Host output dispatch started before the earlier dispatch")
+	case <-host.secondEntered:
+		close(host.releaseFirst)
+		t.Fatal("later Host output entered before the earlier Host call returned")
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(releaseFirst)
+	close(host.releaseFirst)
 	select {
-	case <-host.firstDelivered:
+	case <-host.secondEntered:
 	case <-time.After(time.Second):
-		t.Fatal("first Host output was not delivered")
-	}
-	select {
-	case <-host.secondDelivered:
-	case <-time.After(time.Second):
-		t.Fatal("second Host output was not delivered")
+		t.Fatal("later Host output did not run after the earlier Host call returned")
 	}
 }
 
 type replacementFenceHost struct {
-	mu       sync.Mutex
-	sequence []string
+	mu         sync.Mutex
+	sequence   []string
+	oldEntered chan struct{}
+	releaseOld chan struct{}
 }
 
 func (*replacementFenceHost) PersistState([]byte) error { return nil }
@@ -82,6 +70,10 @@ func (host *replacementFenceHost) Event(_, code string, _ int64) {
 	host.mu.Lock()
 	host.sequence = append(host.sequence, code)
 	host.mu.Unlock()
+	if code == "recovered" {
+		close(host.oldEntered)
+		<-host.releaseOld
+	}
 }
 func (host *replacementFenceHost) index(value string) int {
 	host.mu.Lock()
@@ -94,34 +86,19 @@ func (host *replacementFenceHost) index(value string) int {
 	return -1
 }
 
-func TestAdmittedOutputStartsBeforeReplacementPairAdmission(t *testing.T) {
-	host := &replacementFenceHost{}
+func TestOldOutputEntersHostBeforeReplacementPairAdmission(t *testing.T) {
+	host := &replacementFenceHost{oldEntered: make(chan struct{}), releaseOld: make(chan struct{})}
 	link, err := Open(nil, host)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer link.Close()
 	setSafetyState(link, stateLinked, nil)
-	oldDispatch := make(chan struct{})
-	releaseOld := make(chan struct{})
-	link.outputStart = func(output hostOutput) {
-		if output.code == "recovered" {
-			close(oldDispatch)
-			<-releaseOld
-		}
-	}
 	go link.emitFor(link.generation, "conn", "recovered", 0)
-	<-oldDispatch
+	<-host.oldEntered
 
 	unlinkDone := make(chan error, 1)
 	go func() { unlinkDone <- link.Unlink() }()
-	select {
-	case err := <-unlinkDone:
-		close(releaseOld)
-		t.Fatalf("Unlink overtook admitted old output: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(releaseOld)
 	if err := <-unlinkDone; err != nil {
 		t.Fatal(err)
 	}
@@ -143,13 +120,14 @@ func TestAdmittedOutputStartsBeforeReplacementPairAdmission(t *testing.T) {
 	host.mu.Lock()
 	host.sequence = append(host.sequence, "pair_admitted")
 	host.mu.Unlock()
+	close(host.releaseOld)
 	link.Close()
 	<-pairDone
 
 	oldIndex := host.index("recovered")
 	pairIndex := host.index("pair_admitted")
 	if oldIndex < 0 || pairIndex < 0 || oldIndex > pairIndex {
-		t.Fatalf("Host sequence = %v, old output must start before replacement Pair admission", host.sequence)
+		t.Fatalf("Host sequence = %v, old output entered after replacement Pair admission", host.sequence)
 	}
 }
 
