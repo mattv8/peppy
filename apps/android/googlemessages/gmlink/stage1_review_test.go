@@ -433,3 +433,5 @@ func TestTerminalHostEventCanReenterClose(t *testing.T) {
 		t.Fatal("terminal Host.Event reentrant Close deadlocked")
 	}
 }
+
+func (*reentrantCloseHost) RcsEvent(string, int64, int64) {}

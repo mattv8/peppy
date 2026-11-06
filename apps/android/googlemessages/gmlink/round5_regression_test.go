@@ -115,3 +115,6 @@ func TestTerminalCompletionCarriesRetirementIdentity(t *testing.T) {
 		t.Fatal("superseded terminal identity was accepted")
 	}
 }
+
+func (*reentrantOperationHost) RcsEvent(string, int64, int64) {}
+func (*ownedIdentityHost) RcsEvent(string, int64, int64)      {}

@@ -11,6 +11,10 @@ grep -Eq 'event\(java\.lang\.String, java\.lang\.String, long, long, long\)' "$s
 	printf '%s\n' 'generated Host.event lacks generation/revision' >&2
 	return 1 2>/dev/null || exit 1
 }
+grep -Eq 'rcsEvent\(java\.lang\.String, long, long\)' "$signature" || {
+	printf '%s\n' 'generated Host.rcsEvent lacks generation/revision' >&2
+	return 1 2>/dev/null || exit 1
+}
 grep -Eq 'showEmoji\(java\.lang\.String, long, long\)' "$signature" || {
 	printf '%s\n' 'generated Host.showEmoji lacks generation/revision' >&2
 	return 1 2>/dev/null || exit 1

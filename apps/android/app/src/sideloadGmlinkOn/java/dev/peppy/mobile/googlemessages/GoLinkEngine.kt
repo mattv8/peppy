@@ -39,6 +39,14 @@ private object GoLinkEngine : LinkEngine {
                 }
             }
 
+            override fun rcsEvent(recordJson: String, generation: Long, revision: Long) {
+                try {
+                    linkHost.rcsEventOwned(recordJson, generation, revision)
+                } catch (_: Throwable) {
+                    // Host receive delivery must not unwind through JNI.
+                }
+            }
+
             override fun showEmoji(emoji: String, generation: Long, revision: Long) {
                 try {
                     linkHost.showEmojiOwned(emoji, generation, revision)

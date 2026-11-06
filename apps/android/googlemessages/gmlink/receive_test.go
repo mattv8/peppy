@@ -2,6 +2,7 @@ package gmlink
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -275,5 +276,112 @@ func assertRejectedProjectionHasNoBody(t *testing.T, projection rcsProjection) {
 	}
 	if string(encoded) != `{"code":"unsupported_message"}` && string(encoded) != `{"code":"status_unproven"}` {
 		t.Fatalf("rejected projection contains unapproved fields: %s", encoded)
+	}
+}
+
+type ownedRecordHost struct {
+	rcsRecords    []string
+	typingRecords []string
+}
+
+func (*ownedRecordHost) PersistState([]byte) error                 { return nil }
+func (*ownedRecordHost) Event(string, string, int64, int64, int64) {}
+func (*ownedRecordHost) ShowEmoji(string, int64, int64)            {}
+func (host *ownedRecordHost) RcsEvent(record string, _, _ int64) {
+	host.rcsRecords = append(host.rcsRecords, record)
+}
+func (host *ownedRecordHost) TypingEvent(record string, _, _ int64) {
+	host.typingRecords = append(host.typingRecords, record)
+}
+
+func receiveWiringLink(host Host) *Link {
+	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE}
+	return &Link{
+		host:                host,
+		generation:          7,
+		runGeneration:       7,
+		streamEpoch:         3,
+		stateRevision:       11,
+		ownerVerification:   &ownerVerification{generation: 7},
+		changes:             make(chan any, 8),
+		conversationRecords: map[string]*gmproto.Conversation{"conversation-1": conversation},
+	}
+}
+
+func drainQueuedEvents(link *Link) {
+	for len(link.changes) > 0 {
+		link.consumeQueuedEvent(<-link.changes)
+	}
+}
+
+func TestLinkProjectsLiveMessageAndStatusAsOwnedRecords(t *testing.T) {
+	host := &ownedRecordHost{}
+	link := receiveWiringLink(host)
+	for _, status := range []gmproto.MessageStatusType{
+		gmproto.MessageStatusType_INCOMING_COMPLETE,
+		gmproto.MessageStatusType_OUTGOING_DELIVERED,
+	} {
+		message := textMessage(status)
+		link.queueEventFor(7, message)
+		drainQueuedEvents(link)
+	}
+	if len(host.rcsRecords) != 2 {
+		t.Fatalf("records = %v", host.rcsRecords)
+	}
+	var incoming, delivered rcsProjection
+	if err := json.Unmarshal([]byte(host.rcsRecords[0]), &incoming); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(host.rcsRecords[1]), &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if incoming.Code != "ok" || incoming.Record == nil || incoming.Record.Direction != "incoming" || incoming.Record.Body != "synthetic body" {
+		t.Fatalf("incoming = %+v", incoming)
+	}
+	if delivered.Code != "ok" || delivered.Record == nil || delivered.Record.Status != "delivered" {
+		t.Fatalf("delivered = %+v", delivered)
+	}
+}
+
+func TestLinkProjectsUnsupportedAndTombstoneWithoutContent(t *testing.T) {
+	host := &ownedRecordHost{}
+	link := receiveWiringLink(host)
+	media := &libgm.WrappedMessage{Message: &gmproto.Message{
+		MessageID: "media", ConversationID: "conversation-1", Timestamp: 1,
+		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_INCOMING_COMPLETE},
+		MessageInfo:   []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{}}}},
+	}}
+	tombstone := textMessage(gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_TEXT)
+	for _, event := range []*libgm.WrappedMessage{media, tombstone} {
+		link.queueEventFor(7, event)
+		drainQueuedEvents(link)
+	}
+	if len(host.rcsRecords) != 2 || host.rcsRecords[0] != `{"code":"unsupported_message"}` || host.rcsRecords[1] != `{"code":"protocol_switch","google_conversation_id":"conversation-1"}` {
+		t.Fatalf("records = %v", host.rcsRecords)
+	}
+}
+
+func TestLinkDropsOldReceiveGenerationAndPreservesOrder(t *testing.T) {
+	host := &ownedRecordHost{}
+	link := receiveWiringLink(host)
+	link.queueEventFor(6, textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE))
+	for index := 1; index <= 2; index++ {
+		message := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE)
+		message.Message.MessageID = fmt.Sprintf("message-%d", index)
+		link.queueEventFor(7, message)
+	}
+	drainQueuedEvents(link)
+	if len(host.rcsRecords) != 2 {
+		t.Fatalf("records = %v", host.rcsRecords)
+	}
+	for index, encoded := range host.rcsRecords {
+		var projection rcsProjection
+		if err := json.Unmarshal([]byte(encoded), &projection); err != nil {
+			t.Fatal(err)
+		}
+		want := fmt.Sprintf("message-%d", index+1)
+		if projection.Record == nil || projection.Record.GoogleMessageID != want {
+			t.Fatalf("record %d = %+v", index, projection.Record)
+		}
 	}
 }

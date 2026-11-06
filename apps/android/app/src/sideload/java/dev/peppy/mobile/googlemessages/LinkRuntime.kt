@@ -179,6 +179,15 @@ object LinkRuntime {
             }
         }
 
+        override fun rcsEvent(recordJson: String) = rcsEventOwned(recordJson, -1, -1)
+
+        override fun rcsEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long) {
+            callbackExecutor().execute {
+                if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
+                (LinkRuntimeTestHooks.rcsReceiveSink ?: NoOpRcsReceiveSink).receive(recordJson)
+            }
+        }
+
         override fun showEmoji(value: String) = showEmojiOwned(value, -1, -1)
 
         override fun showEmojiOwned(value: String, ownerGeneration: Long, ownerRevision: Long) {
@@ -241,6 +250,7 @@ internal object LinkRuntimeTestHooks {
     @Volatile var engine: LinkEngine? = null
     @Volatile var storeFactory: ((Context) -> LinkStateStorage)? = null
     @Volatile var eventRecorder: ((String, String, Long) -> Unit)? = null
+    @Volatile var rcsReceiveSink: RcsReceiveSink? = null
     @Volatile var callbackExecutor: Executor? = null
     @Volatile var afterClosingCheck: (() -> Unit)? = null
 }

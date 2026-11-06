@@ -34,6 +34,7 @@ class LinkRuntimeTest {
         LinkRuntimeTestHooks.engine = null
         LinkRuntimeTestHooks.storeFactory = null
         LinkRuntimeTestHooks.eventRecorder = null
+        LinkRuntimeTestHooks.rcsReceiveSink = null
         LinkRuntimeTestHooks.callbackExecutor = null
         LinkRuntimeTestHooks.afterClosingCheck = null
         LinkCoreBridge.resetForTest()
@@ -338,6 +339,31 @@ class LinkRuntimeTest {
         assertTrue(events.isEmpty())
         assertEquals(null, LinkRuntime.emoji.value)
         assertTrue(LinkRuntime.endPairing(attempt))
+    }
+
+    @Test
+    fun `receive sink accepts current owner and drops stale owner`() {
+        lateinit var host: LinkHost
+        val queued = QueueExecutor()
+        var currentGeneration = 3L
+        val records = mutableListOf<String>()
+        val handle = FakeHandle { generation, revision -> generation == currentGeneration && revision == 4L }
+        LinkRuntimeTestHooks.callbackExecutor = queued
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntimeTestHooks.rcsReceiveSink = RcsReceiveSink { records += it }
+        LinkRuntime.handle(context)
+
+        host.rcsEventOwned("accepted", 3, 4)
+        queued.runAll()
+        host.rcsEventOwned("stale", 3, 4)
+        currentGeneration = 5
+        queued.runAll()
+
+        assertEquals(listOf("accepted"), records)
     }
 
     @Test

@@ -900,3 +900,5 @@ func awaitEmoji(t *testing.T, host *safetyHost) {
 		t.Fatal("Pair never reached the emoji wait")
 	}
 }
+
+func (*safetyHost) RcsEvent(string, int64, int64) {}

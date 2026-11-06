@@ -3,6 +3,7 @@ package gmlink
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -187,4 +188,27 @@ func opaquePageToken(cursor *gmproto.Cursor) string {
 	binary.BigEndian.PutUint64(data, uint64(cursor.GetLastItemTimestamp()))
 	copy(data[8:], cursor.GetLastItemID())
 	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func (link *Link) projectRcsEventFor(queued queuedEvent, wrapped *libgm.WrappedMessage) {
+	if wrapped == nil || wrapped.Message == nil {
+		return
+	}
+	link.mu.Lock()
+	if link.closed || queued.generation != link.generation || queued.streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(queued.streamSource) || !link.hasOwnerVerificationLocked() {
+		link.mu.Unlock()
+		return
+	}
+	conversation := cloneConversation(link.conversationRecords[wrapped.Message.GetConversationID()])
+	revision := link.stateRevision
+	link.mu.Unlock()
+	projection := projectRcsMessage(wrapped, conversation)
+	encoded, _ := json.Marshal(projection)
+	link.enqueueOutput(hostOutput{
+		rcsRecord:         string(encoded),
+		generation:        queued.generation,
+		revision:          revision,
+		requireGeneration: true,
+		requireRevision:   true,
+	})
 }

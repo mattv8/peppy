@@ -6,8 +6,10 @@ import org.json.JSONObject
 interface LinkHost {
     fun persistState(state: ByteArray)
     fun event(kind: String, code: String, value: Long)
+    fun rcsEvent(recordJson: String)
     fun showEmoji(emoji: String)
     fun eventOwned(kind: String, code: String, value: Long, generation: Long, revision: Long) = event(kind, code, value)
+    fun rcsEventOwned(recordJson: String, generation: Long, revision: Long) = rcsEvent(recordJson)
     fun showEmojiOwned(emoji: String, generation: Long, revision: Long) = showEmoji(emoji)
 }
 
@@ -69,4 +71,13 @@ sealed interface LinkOpenResult {
     data class Open(val handle: LinkHandle) : LinkOpenResult
     data object Unavailable : LinkOpenResult
     data class Unreadable(val code: String) : LinkOpenResult
+}
+
+
+internal fun interface RcsReceiveSink {
+    fun receive(recordJson: String)
+}
+
+internal object NoOpRcsReceiveSink : RcsReceiveSink {
+    override fun receive(recordJson: String) = Unit
 }

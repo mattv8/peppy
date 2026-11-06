@@ -232,3 +232,6 @@ func TestAuthRevisionIsAllocatedWithSnapshotCapture(t *testing.T) {
 		t.Fatalf("persisted auth = %s, want snapshot captured after the revision boundary", encoded)
 	}
 }
+
+func (*orderedOutputHost) RcsEvent(string, int64, int64)    {}
+func (*replacementFenceHost) RcsEvent(string, int64, int64) {}

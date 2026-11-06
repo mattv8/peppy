@@ -312,3 +312,5 @@ func TestNoLocalTimeUse(t *testing.T) {
 		}
 	}
 }
+
+func (*testHost) RcsEvent(string, int64, int64) {}
