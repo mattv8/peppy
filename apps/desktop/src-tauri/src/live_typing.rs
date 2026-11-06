@@ -1,13 +1,14 @@
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::{
-    Client, ConversationId, DeviceId, LiveClock, LiveEnableContext, LiveEnableGeneration,
-    LiveError, LiveExecutor,
+    Client, ConversationId, DeviceId, LiveAction, LiveClock, LiveEnableContext,
+    LiveEnableGeneration, LiveError, LiveExecutor, LiveOutcome, PeerSessionUpdate,
 };
 use peppy_desktop_api::rcs_status::{
     snapshot_at, RcsEligibilityState, RcsGatewayState, RcsStatusSnapshot, SnapshotAccess,
 };
 use peppy_protocol::LiveHelloV2;
 use std::{
+    collections::{HashMap, VecDeque},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -166,6 +167,112 @@ impl LiveTypingState {
 const LIVE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 const LIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVE_MAX_FRAME: usize = 64 * 1024;
+const INBOUND_QUEUE_LIMIT: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TypingDisplayState {
+    pub conversation_id: ConversationId,
+    pub state: peppy_protocol::TypingStateV2,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Default)]
+struct InboundTyping {
+    frames: VecDeque<String>,
+    queue_drops: u64,
+    gateway_intent_drops: u64,
+    displays: HashMap<ConversationId, TypingDisplayState>,
+    peers: HashMap<DeviceId, (u64, u64)>,
+    sequences: HashMap<(DeviceId, ConversationId), u64>,
+}
+impl InboundTyping {
+    fn push(&mut self, frame: String) -> bool {
+        if self.frames.len() == INBOUND_QUEUE_LIMIT {
+            self.queue_drops += 1;
+            false
+        } else {
+            self.frames.push_back(frame);
+            true
+        }
+    }
+    fn take(&mut self) -> Option<String> {
+        self.frames.pop_front()
+    }
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.displays.clear();
+        self.peers.clear();
+        self.sequences.clear();
+    }
+    fn expire(&mut self, mono: u64) {
+        self.displays
+            .retain(|_, display| display.expires_at_ms > mono);
+    }
+    fn publish(
+        &mut self,
+        outcome: LiveOutcome,
+        generation: Option<LiveEnableGeneration>,
+    ) -> Option<String> {
+        if Some(outcome.generation) != generation {
+            return None;
+        }
+        if let Some(update) = outcome.session_update {
+            self.update_peer(update);
+        }
+        let reply = outcome
+            .reply
+            .and_then(|frame| serde_json::to_string(&frame).ok());
+        let Some(action) = outcome.action else {
+            return reply;
+        };
+        match action {
+            LiveAction::Display {
+                peer_device_id,
+                session_token,
+                sequence,
+                conversation_id,
+                state,
+                deadline_mono,
+            } => {
+                if self
+                    .peers
+                    .get(&peer_device_id)
+                    .is_none_or(|(token, _)| *token != session_token)
+                {
+                    return reply;
+                }
+                let last = self
+                    .sequences
+                    .entry((peer_device_id, conversation_id))
+                    .or_insert(0);
+                if sequence <= *last {
+                    return reply;
+                }
+                *last = sequence;
+                self.displays.insert(
+                    conversation_id,
+                    TypingDisplayState {
+                        conversation_id,
+                        state,
+                        expires_at_ms: deadline_mono,
+                    },
+                );
+            }
+            LiveAction::GatewayTypingIntent { .. } => self.gateway_intent_drops += 1,
+        }
+        reply
+    }
+    fn update_peer(&mut self, update: PeerSessionUpdate) {
+        self.peers.insert(
+            update.peer_device_id,
+            (update.current_session_token, update.validation_revision),
+        );
+        if update.replaced_session_token.is_some() {
+            self.sequences
+                .retain(|(peer, _), _| *peer != update.peer_device_id);
+        }
+    }
+}
 
 pub(crate) fn start(session: Arc<Session>) {
     session.track_worker(tokio::spawn(supervise(session.clone())));
@@ -174,6 +281,7 @@ pub(crate) fn start(session: Arc<Session>) {
 async fn supervise(session: Arc<Session>) {
     let started = Instant::now();
     let mut state = LiveTypingState::default();
+    let mut inbound = InboundTyping::default();
     let mut backoff = Duration::from_secs(1);
     let mut probed = false;
     loop {
@@ -229,16 +337,30 @@ async fn supervise(session: Arc<Session>) {
             tokio::select! {
                 _ = session.cancel.cancelled() => {
                     disable(&mut state, &session);
+                    inbound.clear();
                     let _ = socket.close(None).await;
                     return;
                 }
                 frame = socket.next() => match frame {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(Message::Text(frame))) => {
+                        inbound.push(frame.to_string());
+                        while let Some(frame) = inbound.take() {
+                            let outcome = session.client.open_typing_signal_v2_json(&frame, clock(started));
+                            if let Ok(outcome) = outcome {
+                                if let Some(reply) = inbound.publish(outcome, state.generation()) {
+                                    let _ = socket.send(Message::Text(reply.into())).await;
+                                }
+                            }
+                            inbound.expire(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
+                        }
+                    }
                     Some(Ok(_)) => {}
                 }
             }
         }
         disable(&mut state, &session);
+        inbound.clear();
         if !wait_or_cancel(&session, jitter(backoff)).await {
             return;
         }
@@ -448,6 +570,26 @@ mod tests {
         let delay = jitter(capped);
         assert!(delay >= capped);
         assert!(delay <= capped + capped / 4);
+    }
+
+    #[test]
+    fn inbound_queue_drops_new_frames_after_sixty_four() {
+        let mut inbound = InboundTyping::default();
+        for _ in 0..INBOUND_QUEUE_LIMIT {
+            assert!(inbound.push("{}".into()));
+        }
+        assert!(!inbound.push("{}".into()));
+        assert_eq!(inbound.frames.len(), INBOUND_QUEUE_LIMIT);
+        assert_eq!(inbound.queue_drops, 1);
+    }
+
+    #[test]
+    fn disable_clears_inbound_display_state() {
+        let mut inbound = InboundTyping::default();
+        inbound.frames.push_back("frame".into());
+        inbound.clear();
+        assert!(inbound.frames.is_empty());
+        assert!(inbound.displays.is_empty());
     }
 
     #[tokio::test]
