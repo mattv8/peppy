@@ -28,7 +28,7 @@ func TestConversationIndexRefusesAmbiguousOrIneligibleCandidates(t *testing.T) {
 			stage2SeedCompleteIndex(t, link, conversation)
 			target := conversation.GetParticipants()[0].GetID().GetNumber()
 			want := `"code":"conversation_not_found_complete"`
-			if name == "group" {
+			if name == "group" || name == "numberless" {
 				want = `"code":"conversation_lookup_unknown"`
 			}
 			if result := link.ResolveExistingConversation(target); !strings.Contains(result, want) {

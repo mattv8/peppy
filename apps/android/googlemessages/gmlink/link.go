@@ -83,6 +83,7 @@ type Link struct {
 	conversationEvents           []conversationEvent
 	conversationCandidates       map[string][]conversationSummary
 	conversationTargets          map[string][]string
+	conversationRecords          map[string]*gmproto.Conversation
 	indexRevision                uint64
 	conversationIndexComplete    bool
 	conversationIndexGeneration  uint64
@@ -154,7 +155,7 @@ func Open(state []byte, host Host) (*Link, error) {
 		return nil, err
 	}
 	zerolog.SetGlobalLevel(zerolog.Disabled)
-	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, seq: decoded.Seq, changes: make(chan any, 64), conversationCandidates: make(map[string][]conversationSummary), conversationTargets: make(map[string][]string)}
+	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, seq: decoded.Seq, changes: make(chan any, 64), conversationCandidates: make(map[string][]conversationSummary), conversationTargets: make(map[string][]string), conversationRecords: make(map[string]*gmproto.Conversation)}
 	if len(decoded.Auth) > 0 && string(decoded.Auth) != "null" {
 		link.auth = libgm.NewAuthData()
 		if err := json.Unmarshal(decoded.Auth, link.auth); err != nil {
@@ -613,6 +614,11 @@ func (link *Link) ResolveExistingConversation(target string) string {
 	}
 	if !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation {
 		return conversationJSON("conversation_lookup_unknown")
+	}
+	for _, conversation := range link.conversationRecords {
+		if classifyConversation(conversation) == conversationClassificationUnknown {
+			return conversationJSON("conversation_lookup_unknown")
+		}
 	}
 	found := make(map[string]struct{})
 	for _, summary := range link.conversationCandidates[target] {

@@ -18,6 +18,12 @@ const (
 	conversationEventLimit = 128
 )
 
+const (
+	conversationClassificationEligible    = "eligible"
+	conversationClassificationUnsupported = "unsupported"
+	conversationClassificationUnknown     = "unknown"
+)
+
 type conversationSummary struct {
 	id           string
 	eligible     bool
@@ -169,6 +175,7 @@ func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation
 			continue
 		}
 		link.removeConversationLocked(conversation.GetConversationID())
+		link.conversationRecords[conversation.GetConversationID()] = conversation
 		others := visibleOtherParticipants(conversation)
 		for _, participant := range conversation.GetParticipants() {
 			if !participant.GetIsVisible() {
@@ -206,6 +213,7 @@ func (link *Link) removeConversationLocked(id string) {
 		}
 	}
 	delete(link.conversationTargets, id)
+	delete(link.conversationRecords, id)
 }
 
 func (link *Link) replaceConversationIndexFor(generation, streamEpoch, revision uint64, conversations []*gmproto.Conversation) bool {
@@ -220,6 +228,7 @@ func (link *Link) replaceConversationIndexForContext(ctx context.Context, genera
 	}
 	link.conversationCandidates = make(map[string][]conversationSummary)
 	link.conversationTargets = make(map[string][]string)
+	link.conversationRecords = make(map[string]*gmproto.Conversation)
 	link.indexConversationsLocked(conversations)
 	link.indexRevision++
 	link.conversationIndexComplete = true
@@ -237,6 +246,30 @@ func visibleOtherParticipants(conversation *gmproto.Conversation) []*gmproto.Par
 		}
 	}
 	return participants
+}
+
+func classifyConversation(conversation *gmproto.Conversation) string {
+	visibleOthers := visibleOtherParticipants(conversation)
+	for _, participant := range visibleOthers {
+		if participant.GetID().GetNumber() == "" {
+			return conversationClassificationUnknown
+		}
+	}
+	if len(visibleOthers) != 1 {
+		for _, participant := range conversation.GetParticipants() {
+			if participant.GetIsVisible() && participant.GetIsMe() {
+				return conversationClassificationUnsupported
+			}
+		}
+		if len(visibleOthers) == 0 {
+			return conversationClassificationUnknown
+		}
+		return conversationClassificationUnsupported
+	}
+	if conversation.GetType() != gmproto.ConversationType_RCS || conversation.GetStatus() != gmproto.ConversationStatus_ACTIVE {
+		return conversationClassificationUnsupported
+	}
+	return conversationClassificationEligible
 }
 
 func (link *Link) recordConversationEventLocked(id string) {
@@ -304,6 +337,7 @@ func (link *Link) invalidateConversationIndexLocked() {
 	link.invalidateConversationCompletenessLocked()
 	link.conversationCandidates = make(map[string][]conversationSummary)
 	link.conversationTargets = make(map[string][]string)
+	link.conversationRecords = make(map[string]*gmproto.Conversation)
 	link.conversationEvents = []conversationEvent{{Code: "conversation_resync"}}
 	link.pendingConversationEvents = 0
 	link.indexRevision++
@@ -313,6 +347,7 @@ func (link *Link) clearConversationIndexLocked() {
 	link.invalidateConversationCompletenessLocked()
 	link.conversationCandidates = make(map[string][]conversationSummary)
 	link.conversationTargets = make(map[string][]string)
+	link.conversationRecords = make(map[string]*gmproto.Conversation)
 	link.conversationEvents = nil
 	link.pendingConversationEvents = 0
 	link.indexRevision++

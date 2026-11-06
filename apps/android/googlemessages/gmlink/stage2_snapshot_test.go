@@ -300,6 +300,7 @@ func stage2LinkWithoutEventConsumer() *Link {
 		changes:                make(chan any, 64),
 		conversationCandidates: make(map[string][]conversationSummary),
 		conversationTargets:    make(map[string][]string),
+		conversationRecords:    make(map[string]*gmproto.Conversation),
 	}
 }
 
@@ -434,5 +435,24 @@ func TestConversationResyncRemainsStickyAcrossDrainsUntilReplacement(t *testing.
 	}
 	if got := link.DrainConversationEvents(); got != `null` {
 		t.Fatalf("post-replacement drain = %s", got)
+	}
+}
+
+func TestSoleNumberlessPeerMakesCompleteLookupUnknown(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link, &gmproto.Conversation{
+		ConversationID: "numberless-peer",
+		Type:           gmproto.ConversationType_RCS,
+		Status:         gmproto.ConversationStatus_ACTIVE,
+		Participants: []*gmproto.Participant{{
+			IsVisible: true,
+			ID: &gmproto.SmallInfo{
+				ParticipantID: "participant-without-number",
+				Type:          gmproto.IdentifierType_PHONE,
+			},
+		}},
+	})
+	if code := stage2Code(t, link.ResolveExistingConversation("any-target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("numberless peer lookup code = %s", code)
 	}
 }
