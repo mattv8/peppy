@@ -190,7 +190,7 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 		effect = client.SendMessage
 	}
 	ctx, cancel := context.WithCancel(operationCtx)
-	ctx = context.WithValue(ctx, sendAdmissionContextKey{}, sendAdmission(func() bool { return link.sendAdmissionCurrent(ticket) }))
+	ctx = context.WithValue(ctx, sendAdmissionContextKey{}, sendAdmission(func() bool { return link.admitPreparedSend(ticket) }))
 	response, err := effect(ctx, payload)
 	cancel()
 	if errors.Is(err, errSendAdmissionRevoked) {
@@ -206,6 +206,16 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 		return sendJSON(rcsSendResult{Code: "accepted"})
 	}
 	return sendJSON(rcsSendResult{Code: "outcome_unknown"})
+}
+
+func (link *Link) admitPreparedSend(ticket *preparedRcsTicket) bool {
+	link.mu.Lock()
+	hook := link.beforeSendAdmission
+	link.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return link.sendAdmissionCurrent(ticket)
 }
 
 func (link *Link) lockRPC(ctx context.Context) bool {

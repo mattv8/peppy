@@ -102,6 +102,7 @@ type Link struct {
 	streamOpen                   bool
 	preparedTicket               *preparedRcsTicket
 	sendAdmissionInFlight        bool
+	beforeSendAdmission          func()
 	ticketNow                    func() time.Time
 	sendMessage                  func(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error)
 

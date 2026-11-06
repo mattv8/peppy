@@ -29,6 +29,12 @@ func TestSendRcsRequiresVerificationBeforeSubmission(t *testing.T) {
 }
 
 func preparedRcsFixture(t *testing.T) (*Link, func(), string, string) {
+	link, fixture, cleanup, token, tmpID := preparedRcsFixtureWithPhone(t)
+	_ = fixture
+	return link, cleanup, token, tmpID
+}
+
+func preparedRcsFixtureWithPhone(t *testing.T) (*Link, *phoneFixture, func(), string, string) {
 	t.Helper()
 	auth := linkedSafetyAuth()
 	fixture := newPhoneFixture(t, auth)
@@ -64,7 +70,7 @@ func preparedRcsFixture(t *testing.T) (*Link, func(), string, string) {
 		}
 		link.Close()
 	}
-	return link, cleanup, snapshot.SnapshotToken, "00000000-0000-4000-8000-000000000000"
+	return link, fixture, cleanup, snapshot.SnapshotToken, "00000000-0000-4000-8000-000000000000"
 }
 
 func prepareTicket(t *testing.T, link *Link, snapshotToken, tmpID string) string {
@@ -285,6 +291,39 @@ func TestPrepareRcsStrictJSONRejectsAliasesDuplicatesAndTrailingData(t *testing.
 		if decodeFixedJSON(input, &decoded) {
 			t.Fatalf("accepted malformed envelope: %s", input)
 		}
+	}
+}
+
+func TestPreparedRcsAdmissionRejectsRevocationBeforeHTTPWrite(t *testing.T) {
+	link, fixture, cleanup, token, tmpID := preparedRcsFixtureWithPhone(t)
+	defer cleanup()
+	ticket := prepareTicket(t, link, token, tmpID)
+	reached, release := make(chan struct{}), make(chan struct{})
+	link.mu.Lock()
+	link.beforeSendAdmission = func() {
+		close(reached)
+		<-release
+	}
+	link.mu.Unlock()
+	result := make(chan string, 1)
+	go func() { result <- decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))) }()
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("transport admission was not reached")
+	}
+	link.mu.Lock()
+	link.invalidateEvidenceLocked()
+	link.mu.Unlock()
+	close(release)
+	if got := <-result; got != "rejected" {
+		t.Fatalf("revoked admission = %s", got)
+	}
+	fixture.mu.Lock()
+	sends := len(fixture.sendRequests)
+	fixture.mu.Unlock()
+	if sends != 0 {
+		t.Fatalf("revoked send requests = %d", sends)
 	}
 }
 
