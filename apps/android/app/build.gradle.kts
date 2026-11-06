@@ -1148,18 +1148,31 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
             googleMessagesProvenanceInputs(provenanceFixtureDirectory, provenanceFixtureAar)
                 .entries.joinToString("\n") { (name, value) -> "$name=$value" } + "\n",
         )
-        provenanceFixturePatch.appendText("changed without checksum\n")
-        check(runCatching {
-            googleMessagesProvenanceInputs(provenanceFixtureDirectory, provenanceFixtureAar)
-        }.isFailure) { "Changed safety patch must not trust an unchanged checksum file" }
-        provenanceFixtureChecksum.writeText("${sha256(provenanceFixturePatch)}  upstream-safety.patch\n")
         check(runCatching {
             verifyGoogleMessagesAarProvenance(
                 provenanceFixtureDirectory,
                 provenanceFixtureAar,
                 provenanceFixtureFile,
             )
-        }.isFailure) { "Changed safety patch must reject stale AAR provenance" }
+        }.isSuccess) { "Consistent patch, checksum pin and AAR provenance must pass verification" }
+        provenanceFixturePatch.appendText("changed without checksum\n")
+        val staleChecksumFailure = runCatching {
+            googleMessagesProvenanceInputs(provenanceFixtureDirectory, provenanceFixtureAar)
+        }.exceptionOrNull()
+        check(staleChecksumFailure?.message?.contains("does not match upstream-safety.patch") == true) {
+            "Changed safety patch must fail the checksum comparison, got: ${staleChecksumFailure?.message}"
+        }
+        provenanceFixtureChecksum.writeText("${sha256(provenanceFixturePatch)}  upstream-safety.patch\n")
+        val staleProvenanceFailure = runCatching {
+            verifyGoogleMessagesAarProvenance(
+                provenanceFixtureDirectory,
+                provenanceFixtureAar,
+                provenanceFixtureFile,
+            )
+        }.exceptionOrNull()
+        check(staleProvenanceFailure?.message?.contains("does not match current inputs") == true) {
+            "Changed safety patch must reject stale AAR provenance, got: ${staleProvenanceFailure?.message}"
+        }
         val fixtureApk = fixtureDirectory.resolve("app-release-unsigned.apk")
         ZipOutputStream(fixtureApk.outputStream()).use { archive ->
             archive.putNextEntry(ZipEntry("classes.dex"))
