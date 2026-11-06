@@ -3107,8 +3107,11 @@ async fn live_websocket(
                 peer,
                 backend,
                 readiness,
-                LiveSessionLifetime { lease, shutdown },
-                ticket_session,
+                LiveSessionLifetime {
+                    lease,
+                    shutdown,
+                    ticket_session,
+                },
             )
         })
         .into_response())
@@ -3122,8 +3125,8 @@ async fn live_session(
     backend: Arc<dyn crate::live::LiveBackend>,
     readiness: tokio::sync::watch::Receiver<bool>,
     lifetime: LiveSessionLifetime,
-    ticket_session: Option<[u8; 16]>,
 ) {
+    let ticket_session = lifetime.ticket_session;
     let registration = match ticket_session {
         Some(session_id) => state.live_hub.register_ticket(
             VaultId(principal.vault),
@@ -3312,6 +3315,7 @@ struct LiveSession {
 struct LiveSessionLifetime {
     lease: Option<crate::serving::ConnectionLease>,
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    ticket_session: Option<[u8; 16]>,
 }
 
 fn live_now_ms() -> u64 {
