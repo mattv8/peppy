@@ -93,7 +93,7 @@ impl Client {
         Ok(RcsOwnership {
             conversation_id,
             owner: RcsReceiveOwner::Link,
-            ownership_generation: generation,
+            ownership_generation: generation as u64,
             history_token: Some(initial_history_token.into()),
             detector_floor: provider_floor,
         })
@@ -219,7 +219,7 @@ impl Client {
         tx.commit()?;
         Ok(RcsCutover {
             owner: RcsReceiveOwner::Provider,
-            ownership_generation: generation as u64,
+            ownership_generation: generation,
             freeze_detector_floor,
             ambiguous_detector_alert,
         })
