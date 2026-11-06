@@ -2776,16 +2776,39 @@ async fn receipt(
 }
 
 const LIVE_TICKET_SESSION_LIMIT: i64 = 6;
-const LIVE_TICKET_TOMBSTONE_LIMIT: i64 = 32;
+const LIVE_TICKET_LIFETIME_REFUSED: &str = "live_ticket_lifetime_refused";
 
 #[derive(Deserialize)]
 struct LiveTicketRequest {
     session_id: String,
+    lifetime_handle: Option<String>,
 }
 #[derive(Serialize)]
 struct LiveTicketResponse {
     ticket: String,
     expires_at_ms: i64,
+    lifetime_handle: String,
+}
+
+fn lifetime_refused() -> ApiError {
+    ApiError(StatusCode::CONFLICT, LIVE_TICKET_LIFETIME_REFUSED)
+}
+
+fn live_ticket_lifetime_handle(value: Option<&str>) -> ApiResult<i64> {
+    let value = value.ok_or_else(lifetime_refused)?;
+    let bytes: [u8; 8] = URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(lifetime_refused)?;
+    let incarnation = i64::from_be_bytes(bytes);
+    (incarnation > 0 && URL_SAFE_NO_PAD.encode(bytes) == value)
+        .then_some(incarnation)
+        .ok_or_else(lifetime_refused)
+}
+
+fn encode_live_ticket_lifetime_handle(incarnation: i64) -> String {
+    URL_SAFE_NO_PAD.encode(incarnation.to_be_bytes())
 }
 
 fn live_ticket_session_hash(value: &str) -> ApiResult<Vec<u8>> {
@@ -2961,61 +2984,102 @@ async fn issue_live_ticket(
             "live_unavailable",
         ));
     }
-    let p = authenticated(&state, &headers, Operation::Sync).await?;
     let session = live_ticket_session_hash(&request.session_id)?;
+    let lifetime = request
+        .lifetime_handle
+        .as_deref()
+        .map(|value| live_ticket_lifetime_handle(Some(value)))
+        .transpose()?;
+    let p = authenticated(&state, &headers, Operation::Sync).await?;
     let mut tx = live_ticket_tx(&state, &p).await?;
-    let current: Option<String> = sqlx::query_scalar("SELECT state FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE").bind(p.vault).bind(p.device).bind(&session).fetch_optional(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_lock"))?;
-    match current.as_deref() {
-        Some("closed" | "terminal") => {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "live_ticket_session_terminal",
-            ));
+    let current: Option<(String, i64)> = sqlx::query_as("SELECT state,session_incarnation FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE").bind(p.vault).bind(p.device).bind(&session).fetch_optional(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_lock"))?;
+    let incarnation = match (lifetime, current) {
+        (Some(handle), Some((state, incarnation))) if state == "open" && handle == incarnation => {
+            incarnation
         }
-        Some("open") => {}
-        _ => {
+        (Some(_), _) => return Err(lifetime_refused()),
+        (None, Some(_)) => return Err(lifetime_refused()),
+        (None, None) => {
+            let replaceable: Option<(Vec<u8>, i64)> = sqlx::query_as("SELECT s.session_id_hash,s.session_incarnation FROM live_ticket_sessions s WHERE s.vault_id=$1 AND s.device_id=$2 AND s.state='open' AND s.active_connection_id IS NULL AND NOT EXISTS (SELECT 1 FROM live_tickets t WHERE t.vault_id=s.vault_id AND t.device_id=s.device_id AND t.session_id_hash=s.session_id_hash AND t.session_incarnation=s.session_incarnation AND t.consumed_at IS NOT NULL) FOR UPDATE")
+                .bind(p.vault)
+                .bind(p.device)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| database_unavailable(&e, "live_ticket_replacement_lock"))?;
+            if replaceable.is_none() {
+                let open: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state='open')")
+                    .bind(p.vault)
+                    .bind(p.device)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|e| database_unavailable(&e, "live_ticket_open"))?;
+                if open {
+                    return Err(ApiError(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "live_ticket_rate_limited",
+                    ));
+                }
+            }
+            if let Some((old_session, old_incarnation)) = replaceable {
+                sqlx::query("UPDATE live_ticket_sessions SET state='terminal',closed_at=clock_timestamp(),lease_until=NULL WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND state='open'")
+                    .bind(p.vault).bind(p.device).bind(&old_session).bind(old_incarnation).execute(&mut *tx).await
+                    .map_err(|e| database_unavailable(&e, "live_ticket_replacement_terminal"))?;
+                sqlx::query("DELETE FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND consumed_at IS NULL")
+                    .bind(p.vault).bind(p.device).bind(old_session).bind(old_incarnation).execute(&mut *tx).await
+                    .map_err(|e| database_unavailable(&e, "live_ticket_replacement_tickets"))?;
+            }
             let created: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND created_at >= now()-interval '60 seconds'").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_rate"))?;
-            let open: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state='open'").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_open"))?;
-            if created >= LIVE_TICKET_SESSION_LIMIT || open >= 1 {
+            if created >= LIVE_TICKET_SESSION_LIMIT {
                 return Err(ApiError(
                     StatusCode::TOO_MANY_REQUESTS,
                     "live_ticket_rate_limited",
                 ));
             }
-            sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',now()+interval '90 seconds')").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_insert"))?;
+            let incarnation = crate::live_ticket_authority::allocate_session_incarnation(
+                &mut tx, p.vault, p.device,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::live_ticket_authority::AllocationError::Exhausted => lifetime_refused(),
+                crate::live_ticket_authority::AllocationError::Database(error) => {
+                    database_unavailable(&error, "live_ticket_incarnation")
+                }
+            })?;
+            sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,session_incarnation,state,lease_until) VALUES($1,$2,$3,$4,'open',now()+interval '90 seconds')").bind(p.vault).bind(p.device).bind(&session).bind(incarnation).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_insert"))?;
+            incarnation
         }
-    }
-    let lease_active: bool = sqlx::query_scalar("SELECT lease_until > clock_timestamp() FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
+    };
+    let lease_active: bool = sqlx::query_scalar("SELECT lease_until > clock_timestamp() FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4")
         .bind(p.vault)
         .bind(p.device)
         .bind(&session)
+        .bind(incarnation)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| database_unavailable(&e, "live_ticket_lease"))?;
     if !lease_active {
-        sqlx::query("UPDATE live_ticket_sessions SET state='terminal',closed_at=clock_timestamp(),lease_until=NULL WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open'")
+        sqlx::query("UPDATE live_ticket_sessions SET state='terminal',closed_at=clock_timestamp(),lease_until=NULL WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND state='open'")
             .bind(p.vault)
             .bind(p.device)
             .bind(&session)
+            .bind(incarnation)
             .execute(&mut *tx)
             .await
             .map_err(|e| database_unavailable(&e, "live_ticket_terminal"))?;
-        sqlx::query("DELETE FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND consumed_at IS NULL")
+        sqlx::query("DELETE FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND consumed_at IS NULL")
             .bind(p.vault)
             .bind(p.device)
             .bind(&session)
+            .bind(incarnation)
             .execute(&mut *tx)
             .await
             .map_err(|e| database_unavailable(&e, "live_ticket_terminal_tickets"))?;
         tx.commit()
             .await
             .map_err(|e| database_unavailable(&e, "live_ticket_terminal_commit"))?;
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "live_ticket_session_terminal",
-        ));
+        return Err(lifetime_refused());
     }
-    sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()+interval '90 seconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open'").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_renew"))?;
+    sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()+interval '90 seconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND state='open'").bind(p.vault).bind(p.device).bind(&session).bind(incarnation).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_renew"))?;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND consumed_at IS NULL AND expires_at>now()").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_count"))?;
     if count >= 2 {
         return Err(ApiError(
@@ -3027,7 +3091,7 @@ async fn issue_live_ticket(
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "live_unavailable"))?;
     let mut ticket = [0_u8; 32];
     libsodium_rs::random::fill_bytes(&mut ticket);
-    let expires_at_ms: i64 = sqlx::query_scalar("INSERT INTO live_tickets(ticket_digest,vault_id,device_id,session_id_hash,issued_at,expires_at) VALUES($1,$2,$3,$4,now(),now()+interval '30 seconds') RETURNING (extract(epoch FROM expires_at)*1000)::bigint").bind(Sha256::digest(ticket).as_slice()).bind(p.vault).bind(p.device).bind(&session).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_insert"))?;
+    let expires_at_ms: i64 = sqlx::query_scalar("INSERT INTO live_tickets(ticket_digest,vault_id,device_id,session_id_hash,session_incarnation,issued_at,expires_at) VALUES($1,$2,$3,$4,$5,now(),now()+interval '30 seconds') RETURNING (extract(epoch FROM expires_at)*1000)::bigint").bind(Sha256::digest(ticket).as_slice()).bind(p.vault).bind(p.device).bind(&session).bind(incarnation).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_insert"))?;
     tx.commit()
         .await
         .map_err(|e| database_unavailable(&e, "live_ticket_commit"))?;
@@ -3036,6 +3100,7 @@ async fn issue_live_ticket(
         Json(LiveTicketResponse {
             ticket: URL_SAFE_NO_PAD.encode(ticket),
             expires_at_ms,
+            lifetime_handle: encode_live_ticket_lifetime_handle(incarnation),
         }),
     ))
 }
@@ -3045,29 +3110,22 @@ async fn close_live_ticket_session(
     headers: HeaderMap,
     Json(request): Json<LiveTicketRequest>,
 ) -> ApiResult<StatusCode> {
-    let p = authenticated(&state, &headers, Operation::Sync).await?;
     let session = live_ticket_session_hash(&request.session_id)?;
+    let incarnation = live_ticket_lifetime_handle(request.lifetime_handle.as_deref())?;
+    let p = authenticated(&state, &headers, Operation::Sync).await?;
     let session_id: [u8; 16] = URL_SAFE_NO_PAD
         .decode(&request.session_id)
         .expect("live_ticket_session_hash validated session ID")
         .try_into()
         .expect("live_ticket_session_hash validated session length");
     let mut tx = live_ticket_tx(&state, &p).await?;
-    let current: Option<String> = sqlx::query_scalar("SELECT state FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE").bind(p.vault).bind(p.device).bind(&session).fetch_optional(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_lock"))?;
-    if current.is_none() {
-        let created: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND created_at >= now()-interval '60 seconds'").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_rate"))?;
-        let tombstones: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state IN ('closed','terminal') AND closed_at >= now()-interval '5 minutes'").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_tombstones"))?;
-        if created >= LIVE_TICKET_SESSION_LIMIT || tombstones >= LIVE_TICKET_TOMBSTONE_LIMIT {
-            return Err(ApiError(
-                StatusCode::TOO_MANY_REQUESTS,
-                "live_session_rate_limited",
-            ));
-        }
-        sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,closed_at) VALUES($1,$2,$3,'closed',now())").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_tombstone_insert"))?;
-    } else {
-        sqlx::query("UPDATE live_ticket_sessions SET state='closed',closed_at=COALESCE(closed_at,now()),lease_until=NULL WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open'").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_close"))?;
-        sqlx::query("DELETE FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND consumed_at IS NULL").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_delete"))?;
+    let current: Option<(String, i64)> = sqlx::query_as("SELECT state,session_incarnation FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE").bind(p.vault).bind(p.device).bind(&session).fetch_optional(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_lock"))?;
+    if !matches!(current, Some((ref state, current_incarnation)) if state == "open" && current_incarnation == incarnation)
+    {
+        return Err(lifetime_refused());
     }
+    sqlx::query("UPDATE live_ticket_sessions SET state='closed',closed_at=clock_timestamp(),lease_until=NULL WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND state='open'").bind(p.vault).bind(p.device).bind(&session).bind(incarnation).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_close"))?;
+    sqlx::query("DELETE FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND consumed_at IS NULL").bind(p.vault).bind(p.device).bind(&session).bind(incarnation).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_delete"))?;
     let socket_generation =
         state
             .live_hub

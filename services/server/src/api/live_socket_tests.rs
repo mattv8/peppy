@@ -1090,6 +1090,7 @@ async fn live_ticket_issue_hashes_ticket_and_delete_terminalizes_session() {
     assert_eq!(issued.status(), reqwest::StatusCode::CREATED);
     let body: serde_json::Value = issued.json().await.unwrap();
     let ticket = body["ticket"].as_str().unwrap();
+    let handle = body["lifetime_handle"].as_str().unwrap().to_owned();
     let ticket_digest: Vec<u8> = sqlx::query_scalar("SELECT ticket_digest FROM live_tickets")
         .fetch_one(&server.pool)
         .await
@@ -1099,27 +1100,42 @@ async fn live_ticket_issue_hashes_ticket_and_delete_terminalizes_session() {
         Sha256::digest(URL_SAFE_NO_PAD.decode(ticket).unwrap()).to_vec()
     );
 
-    let closed = client
-        .delete(format!("{}/v1/live/tickets", server.base_url))
-        .bearer_auth(&server.owner_token)
-        .json(&serde_json::json!({"session_id": session_id}))
-        .send()
-        .await
-        .unwrap();
+    let closed = live_ticket_body_request(
+        &server,
+        reqwest::Method::DELETE,
+        serde_json::json!({"session_id": session_id, "lifetime_handle": handle}),
+    )
+    .await;
     assert_eq!(closed.status(), reqwest::StatusCode::NO_CONTENT);
-    let rejected = client
-        .post(format!("{}/v1/live/tickets", server.base_url))
-        .bearer_auth(&server.owner_token)
-        .json(&serde_json::json!({"session_id": session_id}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), reqwest::StatusCode::CONFLICT);
-    assert_eq!(
-        rejected.json::<serde_json::Value>().await.unwrap()["code"],
-        "live_ticket_session_terminal"
-    );
+    let rejected = live_ticket_request(&server, reqwest::Method::POST, session_id).await;
+    assert_lifetime_refused(rejected, "initial POST after close").await;
     server.shutdown().await;
+}
+
+/// Step timeout for lifecycle tests: every await in those tests is bounded.
+const LIFECYCLE_STEP_TIMEOUT: Duration = Duration::from_secs(10);
+const LIFETIME_REFUSED: &str = "live_ticket_lifetime_refused";
+
+async fn bounded<T>(step: impl Future<Output = T>) -> T {
+    tokio::time::timeout(LIFECYCLE_STEP_TIMEOUT, step)
+        .await
+        .expect("live ticket lifecycle step exceeded its test timeout")
+}
+
+async fn live_ticket_body_request(
+    server: &LiveTestServer,
+    method: reqwest::Method,
+    body: serde_json::Value,
+) -> reqwest::Response {
+    bounded(
+        reqwest::Client::new()
+            .request(method, format!("{}/v1/live/tickets", server.base_url))
+            .bearer_auth(&server.owner_token)
+            .json(&body)
+            .send(),
+    )
+    .await
+    .unwrap()
 }
 
 async fn live_ticket_request(
@@ -1127,24 +1143,153 @@ async fn live_ticket_request(
     method: reqwest::Method,
     session_id: String,
 ) -> reqwest::Response {
-    reqwest::Client::new()
-        .request(method, format!("{}/v1/live/tickets", server.base_url))
-        .bearer_auth(&server.owner_token)
-        .json(&serde_json::json!({"session_id": session_id}))
-        .send()
-        .await
-        .unwrap()
+    live_ticket_body_request(
+        server,
+        method,
+        serde_json::json!({"session_id": session_id}),
+    )
+    .await
 }
 
 async fn issue_ticket(server: &LiveTestServer, session_id: String) -> String {
+    issue_ticket_with_handle(server, session_id).await.0
+}
+
+/// Returns `(ticket, lifetime_handle)` from an initial reservation.
+async fn issue_ticket_with_handle(server: &LiveTestServer, session_id: String) -> (String, String) {
     let response = live_ticket_request(server, reqwest::Method::POST, session_id)
         .await
         .error_for_status()
         .unwrap();
-    response.json::<serde_json::Value>().await.unwrap()["ticket"]
-        .as_str()
-        .unwrap()
-        .to_owned()
+    let body = bounded(response.json::<serde_json::Value>()).await.unwrap();
+    (
+        body["ticket"].as_str().unwrap().to_owned(),
+        body["lifetime_handle"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// Reconnects the exact lifetime named by `handle`, expecting a fresh ticket.
+async fn reconnect_ticket(server: &LiveTestServer, session_id: &str, handle: &str) -> String {
+    let response = live_ticket_body_request(
+        server,
+        reqwest::Method::POST,
+        serde_json::json!({"session_id": session_id, "lifetime_handle": handle}),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let body = bounded(response.json::<serde_json::Value>()).await.unwrap();
+    assert_eq!(body["lifetime_handle"], handle);
+    body["ticket"].as_str().unwrap().to_owned()
+}
+
+async fn assert_lifetime_refused(response: reqwest::Response, case: &str) {
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::CONFLICT,
+        "{case} was not refused"
+    );
+    let body = bounded(response.json::<serde_json::Value>()).await.unwrap();
+    assert_eq!(body["code"], LIFETIME_REFUSED, "{case} code");
+}
+
+/// Every live-ticket row for the owner device, serialized for exact comparison.
+async fn live_ticket_device_snapshot(server: &LiveTestServer) -> String {
+    bounded(
+        sqlx::query_scalar::<_, String>(
+            "SELECT json_build_object(
+                'sessions', (SELECT coalesce(json_agg(s ORDER BY s.session_id_hash), '[]'::json) FROM live_ticket_sessions s WHERE s.vault_id=$1 AND s.device_id=$2),
+                'tickets', (SELECT coalesce(json_agg(t ORDER BY t.ticket_digest), '[]'::json) FROM live_tickets t WHERE t.vault_id=$1 AND t.device_id=$2),
+                'authority', (SELECT coalesce(json_agg(a), '[]'::json) FROM live_ticket_device_authority a WHERE a.vault_id=$1 AND a.device_id=$2)
+            )::text",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .fetch_one(&server.pool),
+    )
+    .await
+    .unwrap()
+}
+
+async fn live_ticket_session_row(server: &LiveTestServer, session_id: &str) -> Option<String> {
+    let hash = Sha256::digest(URL_SAFE_NO_PAD.decode(session_id).unwrap()).to_vec();
+    bounded(
+        sqlx::query_scalar::<_, String>(
+            "SELECT row_to_json(s)::text FROM live_ticket_sessions s WHERE s.vault_id=$1 AND s.device_id=$2 AND s.session_id_hash=$3",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .bind(hash)
+        .fetch_optional(&server.pool),
+    )
+    .await
+    .unwrap()
+}
+
+async fn live_ticket_session_state(server: &LiveTestServer, session_id: &str) -> Option<String> {
+    let hash = Sha256::digest(URL_SAFE_NO_PAD.decode(session_id).unwrap()).to_vec();
+    bounded(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .bind(hash)
+        .fetch_optional(&server.pool),
+    )
+    .await
+    .unwrap()
+}
+
+async fn live_ticket_unconsumed_count(server: &LiveTestServer, session_id: &str) -> i64 {
+    let hash = Sha256::digest(URL_SAFE_NO_PAD.decode(session_id).unwrap()).to_vec();
+    bounded(
+        sqlx::query_scalar(
+            "SELECT count(*) FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND consumed_at IS NULL",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .bind(hash)
+        .fetch_one(&server.pool),
+    )
+    .await
+    .unwrap()
+}
+
+/// Invalid, absent, or foreign handles for reconnect and close.
+fn invalid_lifetime_bodies(
+    session_id: &str,
+    handle: &str,
+) -> Vec<(&'static str, serde_json::Value)> {
+    let bytes = URL_SAFE_NO_PAD.decode(handle).unwrap();
+    let mut long = bytes.clone();
+    long.push(0);
+    let mut non_canonical = handle.to_owned();
+    non_canonical.pop();
+    non_canonical.push('B');
+    let body = |value: serde_json::Value| serde_json::json!({"session_id": session_id, "lifetime_handle": value});
+    vec![
+        ("missing", serde_json::json!({"session_id": session_id})),
+        ("null", body(serde_json::Value::Null)),
+        ("empty", body("".into())),
+        ("malformed", body("not a handle".into())),
+        ("padded", body(format!("{handle}=").into())),
+        (
+            "standard_alphabet",
+            body(format!("+{}", &handle[1..]).into()),
+        ),
+        ("short", body(URL_SAFE_NO_PAD.encode(&bytes[..7]).into())),
+        ("long", body(URL_SAFE_NO_PAD.encode(&long).into())),
+        ("non_canonical", body(non_canonical.into())),
+        ("zero", body(URL_SAFE_NO_PAD.encode([0_u8; 8]).into())),
+        (
+            "out_of_range",
+            body(URL_SAFE_NO_PAD.encode([0xff_u8; 8]).into()),
+        ),
+        (
+            "mismatched",
+            body(URL_SAFE_NO_PAD.encode(999_999_i64.to_be_bytes()).into()),
+        ),
+    ]
 }
 
 async fn live_ticket_write_counts(server: &LiveTestServer) -> LiveTicketWriteCounts {
@@ -1298,11 +1443,15 @@ async fn duplicate_ticket_protocol_headers_are_rejected_over_raw_tcp() {
 async fn closed_ticket_session_is_rejected_at_upgrade() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let session_id = URL_SAFE_NO_PAD.encode([34_u8; 16]);
-    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (ticket, handle) = issue_ticket_with_handle(&server, session_id.clone()).await;
     assert_eq!(
-        live_ticket_request(&server, reqwest::Method::DELETE, session_id.clone())
-            .await
-            .status(),
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            serde_json::json!({"session_id": session_id, "lifetime_handle": handle}),
+        )
+        .await
+        .status(),
         reqwest::StatusCode::NO_CONTENT
     );
 
@@ -1319,14 +1468,18 @@ async fn closed_ticket_session_is_rejected_at_upgrade() {
 async fn deleting_ticket_session_closes_its_open_socket() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let session_id = URL_SAFE_NO_PAD.encode([36_u8; 16]);
-    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (ticket, handle) = issue_ticket_with_handle(&server, session_id.clone()).await;
     let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
     expect_strict_hello(&mut socket).await;
 
     assert_eq!(
-        live_ticket_request(&server, reqwest::Method::DELETE, session_id)
-            .await
-            .status(),
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            serde_json::json!({"session_id": session_id, "lifetime_handle": handle}),
+        )
+        .await
+        .status(),
         reqwest::StatusCode::NO_CONTENT
     );
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -1481,17 +1634,27 @@ async fn live_ticket_reaper_terminalizes_and_reclaims_only_eligible_rows() {
         .await
         .unwrap();
     let recent_tombstone = URL_SAFE_NO_PAD.encode([44_u8; 16]);
+    let (_, recent_handle) = issue_ticket_with_handle(&server, recent_tombstone.clone()).await;
     assert_eq!(
-        live_ticket_request(&server, reqwest::Method::DELETE, recent_tombstone.clone())
-            .await
-            .status(),
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            serde_json::json!({"session_id": recent_tombstone, "lifetime_handle": recent_handle}),
+        )
+        .await
+        .status(),
         reqwest::StatusCode::NO_CONTENT
     );
     let old_tombstone = URL_SAFE_NO_PAD.encode([45_u8; 16]);
+    let (_, old_handle) = issue_ticket_with_handle(&server, old_tombstone.clone()).await;
     assert_eq!(
-        live_ticket_request(&server, reqwest::Method::DELETE, old_tombstone.clone())
-            .await
-            .status(),
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            serde_json::json!({"session_id": old_tombstone, "lifetime_handle": old_handle}),
+        )
+        .await
+        .status(),
         reqwest::StatusCode::NO_CONTENT
     );
     sqlx::query("UPDATE live_ticket_sessions SET closed_at=now()-interval '6 minutes' WHERE session_id_hash=$1")
@@ -1538,7 +1701,7 @@ async fn live_ticket_reaper_terminalizes_and_reclaims_only_eligible_rows() {
 async fn delayed_ticket_cancel_for_g1_leaves_g2_open() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let session_id = URL_SAFE_NO_PAD.encode([37_u8; 16]);
-    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (ticket, handle) = issue_ticket_with_handle(&server, session_id.clone()).await;
     let (mut g1, _) = server.connect_with_ticket(&session_id, &ticket).await;
     expect_strict_hello(&mut g1).await;
     let (session, _) = ticket_parts(&session_id, &ticket);
@@ -1551,7 +1714,7 @@ async fn delayed_ticket_cancel_for_g1_leaves_g2_open() {
         )
         .unwrap();
 
-    let replacement_ticket = issue_ticket(&server, session_id.clone()).await;
+    let replacement_ticket = reconnect_ticket(&server, &session_id, &handle).await;
     let (mut g2, _) = server
         .connect_with_ticket(&session_id, &replacement_ticket)
         .await;
@@ -1619,21 +1782,24 @@ async fn live_ticket_issue_and_delete_trace_logs_do_not_contain_request_or_respo
         .await
         .error_for_status()
         .unwrap();
-    let ticket = issued.json::<serde_json::Value>().await.unwrap()["ticket"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let body = issued.json::<serde_json::Value>().await.unwrap();
+    let ticket = body["ticket"].as_str().unwrap().to_owned();
+    let handle = body["lifetime_handle"].as_str().unwrap().to_owned();
     let protocol = live_ticket_protocol(&session_id, &ticket);
     assert_eq!(
-        live_ticket_request(&server, reqwest::Method::DELETE, session_id)
-            .await
-            .status(),
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            serde_json::json!({"session_id": session_id, "lifetime_handle": handle}),
+        )
+        .await
+        .status(),
         reqwest::StatusCode::NO_CONTENT
     );
 
     let captured = logs.text();
     assert!(captured.contains(SAFE_MARKER));
-    for secret in [&ticket, &protocol, &server.owner_token] {
+    for secret in [&ticket, &protocol, &handle, &server.owner_token] {
         assert!(
             !captured.contains(secret),
             "live ticket request or response secret reached tracing output"
@@ -1647,7 +1813,8 @@ async fn ticket_live_upgrade_rejects_replay_origin_mixed_revoked_and_closed_sess
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
 
     let replay_session = URL_SAFE_NO_PAD.encode([32_u8; 16]);
-    let replay_ticket = issue_ticket(&server, replay_session.clone()).await;
+    let (replay_ticket, replay_handle) =
+        issue_ticket_with_handle(&server, replay_session.clone()).await;
     let (socket, _) = server
         .connect_with_ticket(&replay_session, &replay_ticket)
         .await;
@@ -1665,7 +1832,7 @@ async fn ticket_live_upgrade_rejects_replay_origin_mixed_revoked_and_closed_sess
     );
 
     let origin_session = replay_session;
-    let origin_ticket = issue_ticket(&server, origin_session.clone()).await;
+    let origin_ticket = reconnect_ticket(&server, &origin_session, &replay_handle).await;
     assert_eq!(
         server
             .ticket_upgrade_status(
@@ -1855,7 +2022,7 @@ async fn live_ticket_consume_allows_exactly_one_replica_winner() {
 async fn expired_provisional_ticket_lease_terminalizes_persistently_after_lock_delay() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let session_id = URL_SAFE_NO_PAD.encode([19_u8; 16]);
-    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (ticket, handle) = issue_ticket_with_handle(&server, session_id.clone()).await;
     let session_hash = Sha256::digest(URL_SAFE_NO_PAD.decode(&session_id).unwrap()).to_vec();
     sqlx::query("UPDATE live_ticket_sessions SET lease_until=clock_timestamp()+interval '100 milliseconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
         .bind(server.vault)
@@ -1875,11 +2042,12 @@ async fn expired_provisional_ticket_lease_terminalizes_persistently_after_lock_d
     let base_url = server.base_url.clone();
     let owner_token = server.owner_token.clone();
     let blocked_session = session_id.clone();
+    let blocked_handle = handle.clone();
     let request = tokio::spawn(async move {
         reqwest::Client::new()
             .post(format!("{base_url}/v1/live/tickets"))
             .bearer_auth(owner_token)
-            .json(&serde_json::json!({"session_id": blocked_session}))
+            .json(&serde_json::json!({"session_id": blocked_session, "lifetime_handle": blocked_handle}))
             .send()
             .await
             .unwrap()
@@ -1887,12 +2055,8 @@ async fn expired_provisional_ticket_lease_terminalizes_persistently_after_lock_d
     tokio::time::sleep(Duration::from_millis(250)).await;
     device_lock.commit().await.unwrap();
 
-    let rejected = request.await.unwrap();
-    assert_eq!(rejected.status(), reqwest::StatusCode::CONFLICT);
-    assert_eq!(
-        rejected.json::<serde_json::Value>().await.unwrap()["code"],
-        "live_ticket_session_terminal"
-    );
+    let rejected = bounded(request).await.unwrap();
+    assert_lifetime_refused(rejected, "delayed expired reconnect").await;
     let state: String = sqlx::query_scalar(
         "SELECT state FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3",
     )
@@ -1933,18 +2097,8 @@ async fn expired_provisional_ticket_lease_terminalizes_persistently_after_lock_d
 }
 
 #[tokio::test]
-async fn live_ticket_delete_before_issue_is_terminal_and_tickets_are_not_stored_raw() {
+async fn live_ticket_issued_tickets_are_stored_only_as_digests() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
-    let closed_id = URL_SAFE_NO_PAD.encode([9_u8; 16]);
-    assert_eq!(
-        live_ticket_request(&server, reqwest::Method::DELETE, closed_id.clone())
-            .await
-            .status(),
-        reqwest::StatusCode::NO_CONTENT
-    );
-    let rejected = live_ticket_request(&server, reqwest::Method::POST, closed_id).await;
-    assert_eq!(rejected.status(), reqwest::StatusCode::CONFLICT);
-
     let active_id = URL_SAFE_NO_PAD.encode([10_u8; 16]);
     let issued = live_ticket_request(&server, reqwest::Method::POST, active_id).await;
     assert_eq!(issued.status(), reqwest::StatusCode::CREATED);
@@ -1964,208 +2118,117 @@ async fn live_ticket_delete_before_issue_is_terminal_and_tickets_are_not_stored_
 }
 
 #[tokio::test]
-async fn live_ticket_caps_bound_fresh_session_creation_and_tombstones() {
-    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
-    let first = URL_SAFE_NO_PAD.encode([11_u8; 16]);
-    assert_eq!(
-        live_ticket_request(&server, reqwest::Method::POST, first.clone())
-            .await
-            .status(),
-        reqwest::StatusCode::CREATED
-    );
-    assert_eq!(
-        live_ticket_request(&server, reqwest::Method::POST, first.clone())
-            .await
-            .status(),
-        reqwest::StatusCode::CREATED
-    );
-    assert_eq!(
-        live_ticket_request(&server, reqwest::Method::POST, first.clone())
-            .await
-            .status(),
-        reqwest::StatusCode::TOO_MANY_REQUESTS
-    );
-    assert_eq!(
-        live_ticket_request(
-            &server,
-            reqwest::Method::POST,
-            URL_SAFE_NO_PAD.encode([12_u8; 16])
-        )
-        .await
-        .status(),
-        reqwest::StatusCode::TOO_MANY_REQUESTS
-    );
-    assert_eq!(
-        live_ticket_request(&server, reqwest::Method::DELETE, first)
-            .await
-            .status(),
-        reqwest::StatusCode::NO_CONTENT
-    );
-
-    for byte in 13_u8..18 {
+async fn live_ticket_initial_reservations_are_capped_per_minute() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
+    for byte in 11_u8..17 {
         assert_eq!(
             live_ticket_request(
                 &server,
-                reqwest::Method::DELETE,
+                reqwest::Method::POST,
                 URL_SAFE_NO_PAD.encode([byte; 16])
             )
             .await
             .status(),
-            reqwest::StatusCode::NO_CONTENT
+            reqwest::StatusCode::CREATED
         );
     }
+    let before = live_ticket_device_snapshot(&server).await;
     assert_eq!(
         live_ticket_request(
             &server,
-            reqwest::Method::DELETE,
-            URL_SAFE_NO_PAD.encode([18_u8; 16])
+            reqwest::Method::POST,
+            URL_SAFE_NO_PAD.encode([17_u8; 16])
         )
         .await
         .status(),
         reqwest::StatusCode::TOO_MANY_REQUESTS
     );
-    let sessions: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2",
+    assert_eq!(live_ticket_device_snapshot(&server).await, before);
+    let open: i64 = bounded(
+        sqlx::query_scalar(
+            "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state='open'",
+        )
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .fetch_one(&server.pool),
     )
-    .bind(server.vault)
-    .bind(server.owner_device)
-    .fetch_one(&server.pool)
     .await
     .unwrap();
-    assert!(sessions <= 6);
-    assert_eq!(
-        live_ticket_request(
-            &server,
-            reqwest::Method::DELETE,
-            URL_SAFE_NO_PAD.encode([11_u8; 16])
-        )
-        .await
-        .status(),
-        reqwest::StatusCode::NO_CONTENT
-    );
+    assert_eq!(open, 1);
     server.shutdown().await;
 }
 
 #[tokio::test]
-async fn live_ticket_delete_flood_is_admission_bounded_and_reaper_preserves_recent_rows() {
-    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+async fn live_ticket_absent_session_delete_is_refused_and_reaper_keeps_recent_rows() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
     let existing_session = URL_SAFE_NO_PAD.encode([61_u8; 16]);
     let live_session = URL_SAFE_NO_PAD.encode([68_u8; 16]);
-    assert_eq!(
-        live_ticket_request(&server, reqwest::Method::POST, existing_session.clone())
-            .await
-            .status(),
-        reqwest::StatusCode::CREATED
-    );
-    let absent_sessions: Vec<_> = (62_u8..67)
-        .map(|byte| URL_SAFE_NO_PAD.encode([byte; 16]))
-        .collect();
-    for session_id in &absent_sessions {
-        assert_eq!(
-            live_ticket_request(&server, reqwest::Method::DELETE, session_id.clone())
-                .await
-                .status(),
-            reqwest::StatusCode::NO_CONTENT
-        );
+    let (_, existing_handle) = issue_ticket_with_handle(&server, existing_session.clone()).await;
+    bounded(
+        sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',now()+interval '1 hour')")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&live_session).unwrap()).to_vec())
+            .execute(&server.pool),
+    )
+    .await
+    .unwrap();
+    let before = live_ticket_device_snapshot(&server).await;
+    for byte in 62_u8..67 {
+        let absent = URL_SAFE_NO_PAD.encode([byte; 16]);
+        let fabricated = URL_SAFE_NO_PAD.encode(7_i64.to_be_bytes());
+        assert_lifetime_refused(
+            live_ticket_body_request(
+                &server,
+                reqwest::Method::DELETE,
+                serde_json::json!({"session_id": absent, "lifetime_handle": fabricated}),
+            )
+            .await,
+            "absent DELETE flood",
+        )
+        .await;
     }
-    let tombstones: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state='closed'",
-    )
-    .bind(server.vault)
-    .bind(server.owner_device)
-    .fetch_one(&server.pool)
-    .await
-    .unwrap();
-    assert_eq!(tombstones, absent_sessions.len() as i64);
+    assert_eq!(live_ticket_device_snapshot(&server).await, before);
 
-    let rows_before_rejection: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2",
-    )
-    .bind(server.vault)
-    .bind(server.owner_device)
-    .fetch_one(&server.pool)
-    .await
-    .unwrap();
     assert_eq!(
-        live_ticket_request(
+        live_ticket_body_request(
             &server,
             reqwest::Method::DELETE,
-            URL_SAFE_NO_PAD.encode([67_u8; 16]),
+            serde_json::json!({"session_id": existing_session, "lifetime_handle": existing_handle}),
         )
         .await
         .status(),
-        reqwest::StatusCode::TOO_MANY_REQUESTS
-    );
-    let rows_after_rejection: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2",
-    )
-    .bind(server.vault)
-    .bind(server.owner_device)
-    .fetch_one(&server.pool)
-    .await
-    .unwrap();
-    assert_eq!(rows_after_rejection, rows_before_rejection);
-
-    assert_eq!(
-        live_ticket_request(&server, reqwest::Method::DELETE, existing_session.clone())
-            .await
-            .status(),
         reqwest::StatusCode::NO_CONTENT
     );
-    sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',now()+interval '1 hour')")
-        .bind(server.vault)
-        .bind(server.owner_device)
-        .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&live_session).unwrap()).to_vec())
-        .execute(&server.pool)
-        .await
-        .unwrap();
-    for session_id in &absent_sessions {
+    bounded(
         sqlx::query("UPDATE live_ticket_sessions SET closed_at=now()-interval '6 minutes' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
             .bind(server.vault)
             .bind(server.owner_device)
-            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(session_id).unwrap()).to_vec())
-            .execute(&server.pool)
-            .await
-            .unwrap();
-    }
-
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&existing_session).unwrap()).to_vec())
+            .execute(&server.pool),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        crate::live_ticket_maintenance::reap_live_tickets(&server.pool, 100)
-            .await
-            .unwrap(),
-        absent_sessions.len() as u64
-    );
-    let old_tombstones: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state='closed' AND closed_at<now()-interval '5 minutes'",
-    )
-    .bind(server.vault)
-    .bind(server.owner_device)
-    .fetch_one(&server.pool)
-    .await
-    .unwrap();
-    assert_eq!(old_tombstones, 0);
-    for session_id in [&existing_session, &live_session] {
-        let retained: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3",
-        )
-        .bind(server.vault)
-        .bind(server.owner_device)
-        .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(session_id).unwrap()).to_vec())
-        .fetch_one(&server.pool)
+        bounded(crate::live_ticket_maintenance::reap_live_tickets(
+            &server.pool,
+            100
+        ))
         .await
-        .unwrap();
-        assert_eq!(retained, 1);
-    }
-    let unexpired_live_sessions: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open' AND lease_until>now()",
-    )
-    .bind(server.vault)
-    .bind(server.owner_device)
-    .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(live_session).unwrap()).to_vec())
-    .fetch_one(&server.pool)
-    .await
-    .unwrap();
-    assert_eq!(unexpired_live_sessions, 1);
+        .unwrap(),
+        1
+    );
+    assert!(
+        live_ticket_session_state(&server, &existing_session)
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        live_ticket_session_state(&server, &live_session)
+            .await
+            .as_deref(),
+        Some("open")
+    );
     server.shutdown().await;
 }
 
@@ -2229,27 +2292,40 @@ async fn live_ticket_concurrent_issue_on_replicas_keeps_one_open_session() {
 }
 
 #[tokio::test]
-async fn live_ticket_issue_delete_race_never_leaves_an_open_session_after_delete() {
+async fn live_ticket_reconnect_close_race_never_leaves_an_open_lifetime() {
     for value in 0_u8..20 {
-        let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+        let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
         let replica_one = live_ticket_replica_pool(&server.schema).await;
         let replica_two = live_ticket_replica_pool(&server.schema).await;
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let session = URL_SAFE_NO_PAD.encode([value; 16]);
-        let post = async {
-            barrier.wait().await;
-            live_ticket_request(&server, reqwest::Method::POST, session.clone())
-                .await
-                .status()
+        let (_, handle) = issue_ticket_with_handle(&server, session.clone()).await;
+        let reconnect = async {
+            bounded(barrier.wait()).await;
+            live_ticket_body_request(
+                &server,
+                reqwest::Method::POST,
+                serde_json::json!({"session_id": session, "lifetime_handle": handle}),
+            )
+            .await
+            .status()
         };
         let delete = async {
-            barrier.wait().await;
-            live_ticket_request(&server, reqwest::Method::DELETE, session.clone())
-                .await
-                .status()
+            bounded(barrier.wait()).await;
+            live_ticket_body_request(
+                &server,
+                reqwest::Method::DELETE,
+                serde_json::json!({"session_id": session, "lifetime_handle": handle}),
+            )
+            .await
+            .status()
         };
-        let (_post, deleted) = tokio::join!(post, delete);
+        let (reconnected, deleted) = tokio::join!(reconnect, delete);
         assert_eq!(deleted, reqwest::StatusCode::NO_CONTENT);
+        assert!(matches!(
+            reconnected,
+            reqwest::StatusCode::CREATED | reqwest::StatusCode::CONFLICT
+        ));
         let open: i64 =
             sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE state='open'")
                 .fetch_one(&replica_one)
@@ -2266,6 +2342,311 @@ async fn live_ticket_issue_delete_race_never_leaves_an_open_session_after_delete
         replica_two.close().await;
         server.shutdown().await;
     }
+}
+
+fn lifecycle_session(byte: u8) -> String {
+    URL_SAFE_NO_PAD.encode([byte; 16])
+}
+
+fn lifetime_body(session_id: &str, handle: &str) -> serde_json::Value {
+    serde_json::json!({"session_id": session_id, "lifetime_handle": handle})
+}
+
+#[tokio::test]
+async fn live_ticket_invalid_lifetime_handles_are_refused_without_writes() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
+    let session_id = lifecycle_session(50);
+    let absent_session = lifecycle_session(51);
+    let (_ticket, handle) = issue_ticket_with_handle(&server, session_id.clone()).await;
+    let before = live_ticket_device_snapshot(&server).await;
+    for (case, body) in invalid_lifetime_bodies(&session_id, &handle) {
+        assert_lifetime_refused(
+            live_ticket_body_request(&server, reqwest::Method::POST, body.clone()).await,
+            case,
+        )
+        .await;
+        assert_eq!(
+            live_ticket_device_snapshot(&server).await,
+            before,
+            "{case} reconnect wrote"
+        );
+        assert_lifetime_refused(
+            live_ticket_body_request(&server, reqwest::Method::DELETE, body).await,
+            case,
+        )
+        .await;
+        assert_eq!(
+            live_ticket_device_snapshot(&server).await,
+            before,
+            "{case} close wrote"
+        );
+    }
+    for (case, body) in invalid_lifetime_bodies(&absent_session, &handle) {
+        assert_lifetime_refused(
+            live_ticket_body_request(&server, reqwest::Method::DELETE, body).await,
+            case,
+        )
+        .await;
+    }
+    assert_eq!(
+        live_ticket_device_snapshot(&server).await,
+        before,
+        "absent close wrote"
+    );
+    assert_eq!(
+        live_ticket_session_state(&server, &session_id)
+            .await
+            .as_deref(),
+        Some("open")
+    );
+    reconnect_ticket(&server, &session_id, &handle).await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_ticket_exact_handle_reconnects_then_closes_only_its_lifetime() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
+    let session_id = lifecycle_session(58);
+    let (first_ticket, handle) = issue_ticket_with_handle(&server, session_id.clone()).await;
+    let reconnected = reconnect_ticket(&server, &session_id, &handle).await;
+    assert_ne!(reconnected, first_ticket);
+    let (mut socket, _) = bounded(server.connect_with_ticket(&session_id, &reconnected)).await;
+    bounded(expect_strict_hello(&mut socket)).await;
+
+    assert_eq!(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            lifetime_body(&session_id, &handle)
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        live_ticket_session_state(&server, &session_id)
+            .await
+            .as_deref(),
+        Some("closed")
+    );
+    let closed = live_ticket_device_snapshot(&server).await;
+    assert_lifetime_refused(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            lifetime_body(&session_id, &handle),
+        )
+        .await,
+        "repeated close",
+    )
+    .await;
+    assert_lifetime_refused(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::POST,
+            lifetime_body(&session_id, &handle),
+        )
+        .await,
+        "reconnect after close",
+    )
+    .await;
+    assert_eq!(live_ticket_device_snapshot(&server).await, closed);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_ticket_stale_handle_after_reaping_never_touches_the_successor() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
+    let session_id = lifecycle_session(56);
+    let (_ticket, stale) = issue_ticket_with_handle(&server, session_id.clone()).await;
+    assert_eq!(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            lifetime_body(&session_id, &stale)
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    bounded(
+        sqlx::query("UPDATE live_ticket_sessions SET closed_at=now()-interval '6 minutes' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&session_id).unwrap()).to_vec())
+            .execute(&server.pool),
+    )
+    .await
+    .unwrap();
+    bounded(crate::live_ticket_maintenance::reap_live_tickets(
+        &server.pool,
+        100,
+    ))
+    .await
+    .unwrap();
+    assert!(
+        live_ticket_session_state(&server, &session_id)
+            .await
+            .is_none()
+    );
+
+    let (_successor_ticket, successor) =
+        issue_ticket_with_handle(&server, session_id.clone()).await;
+    assert_ne!(successor, stale);
+    let before = live_ticket_device_snapshot(&server).await;
+    assert_lifetime_refused(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::POST,
+            lifetime_body(&session_id, &stale),
+        )
+        .await,
+        "stale reconnect",
+    )
+    .await;
+    assert_lifetime_refused(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            lifetime_body(&session_id, &stale),
+        )
+        .await,
+        "stale close",
+    )
+    .await;
+    assert_eq!(live_ticket_device_snapshot(&server).await, before);
+    assert_eq!(
+        live_ticket_session_state(&server, &session_id)
+            .await
+            .as_deref(),
+        Some("open")
+    );
+    reconnect_ticket(&server, &session_id, &successor).await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_ticket_exact_expired_handle_terminalizes_only_its_own_lifetime() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
+    let expired = lifecycle_session(57);
+    let sibling = lifecycle_session(59);
+    let (_ticket, expired_handle) = issue_ticket_with_handle(&server, expired.clone()).await;
+    // A row created outside this route proves that exact expiry cannot touch another lifetime.
+    bounded(
+        sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',now()+interval '1 hour')")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&sibling).unwrap()).to_vec())
+            .execute(&server.pool),
+    )
+    .await
+    .unwrap();
+    bounded(
+        sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()-interval '1 second' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&expired).unwrap()).to_vec())
+            .execute(&server.pool),
+    )
+    .await
+    .unwrap();
+    let sibling_before = live_ticket_session_row(&server, &sibling).await;
+
+    assert_lifetime_refused(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::POST,
+            lifetime_body(&expired, &expired_handle),
+        )
+        .await,
+        "expired exact reconnect",
+    )
+    .await;
+    assert_eq!(
+        live_ticket_session_state(&server, &expired)
+            .await
+            .as_deref(),
+        Some("terminal")
+    );
+    assert_eq!(live_ticket_unconsumed_count(&server, &expired).await, 0);
+    assert_eq!(
+        live_ticket_session_row(&server, &sibling).await,
+        sibling_before
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_ticket_lost_initial_response_recovers_with_a_fresh_session() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
+    let lost = lifecycle_session(52);
+    let fresh = lifecycle_session(53);
+    // The client never learns this lifetime's handle, so it forgets the SID and handle.
+    let (lost_ticket, _forgotten_handle) = issue_ticket_with_handle(&server, lost.clone()).await;
+    let (_fresh_ticket, fresh_handle) = issue_ticket_with_handle(&server, fresh.clone()).await;
+    assert_eq!(
+        live_ticket_session_state(&server, &lost).await.as_deref(),
+        Some("terminal")
+    );
+    assert_eq!(live_ticket_unconsumed_count(&server, &lost).await, 0);
+
+    let before = live_ticket_device_snapshot(&server).await;
+    assert_lifetime_refused(
+        live_ticket_request(&server, reqwest::Method::POST, lost.clone()).await,
+        "forgotten initial POST",
+    )
+    .await;
+    assert_lifetime_refused(
+        live_ticket_body_request(
+            &server,
+            reqwest::Method::DELETE,
+            serde_json::json!({"session_id": lost}),
+        )
+        .await,
+        "forgotten close",
+    )
+    .await;
+    assert_eq!(live_ticket_device_snapshot(&server).await, before);
+    assert_eq!(
+        bounded(server.ticket_upgrade_status(
+            &lost,
+            &lost_ticket,
+            Some("https://web.peppy.test"),
+            false,
+        ))
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    reconnect_ticket(&server, &fresh, &fresh_handle).await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_ticket_consumed_reservation_is_never_replaced() {
+    let server = bounded(LiveTestServer::start(FakeLiveBackend::immediate(), true)).await;
+    let consumed = lifecycle_session(54);
+    let (ticket, handle) = issue_ticket_with_handle(&server, consumed.clone()).await;
+    let (session_bytes, secret) = ticket_parts(&consumed, &ticket);
+    bounded(consume_live_ticket(&server.pool, session_bytes, secret))
+        .await
+        .unwrap();
+
+    let before = live_ticket_device_snapshot(&server).await;
+    let response = live_ticket_request(&server, reqwest::Method::POST, lifecycle_session(55)).await;
+    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        bounded(response.json::<serde_json::Value>()).await.unwrap()["code"],
+        "live_ticket_rate_limited"
+    );
+    assert_eq!(live_ticket_device_snapshot(&server).await, before);
+    assert_eq!(
+        live_ticket_session_state(&server, &consumed)
+            .await
+            .as_deref(),
+        Some("open")
+    );
+    reconnect_ticket(&server, &consumed, &handle).await;
+    server.shutdown().await;
 }
 
 #[tokio::test]
