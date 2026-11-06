@@ -691,6 +691,9 @@ mod tests {
               DROP TABLE rcs_link_status_projection;
               DROP TABLE rcs_link_eligibility_projection;
               DROP TABLE rcs_capability_published;
+              DROP TABLE rcs_provider_detectors;
+              DROP TABLE rcs_message_identities;
+              DROP TABLE rcs_lane_ownership;
               ALTER TABLE attempts DROP COLUMN finalized_transport;
               UPDATE schema_meta SET version=42;",
         )
