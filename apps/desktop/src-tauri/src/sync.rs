@@ -1889,6 +1889,7 @@ mod transport_status_tests {
             Arc::new(MemoryStore::default()),
             noop(),
         );
+        let shutdown_timeout = state.session_drain_timeout;
         state.session_drain_timeout = Duration::from_millis(10);
         let origin = "http://127.0.0.1:9";
         let credential = Arc::new(
@@ -1905,6 +1906,7 @@ mod transport_status_tests {
             .unwrap();
         let old = state.session().await.unwrap().unwrap();
         revoke(&old);
+        assert!(drain(&old, shutdown_timeout).await);
         let (release, held) = tokio::sync::oneshot::channel();
         old.retain_workers(vec![tokio::spawn(async move {
             let _ = held.await;
@@ -1927,6 +1929,7 @@ mod transport_status_tests {
         assert!(snapshot.draft.is_none());
 
         release.send(()).unwrap();
+        assert!(drain(&old, shutdown_timeout).await);
         crate::activate_import(&state, credential).await.unwrap();
         let replacement = state.session().await.unwrap().unwrap();
         assert!(!Arc::ptr_eq(&replacement, &old));
