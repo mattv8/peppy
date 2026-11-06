@@ -17,8 +17,7 @@ func TestRetiredEventIsRejectedBeforeAndAfterQueueing(t *testing.T) {
 	if got := len(link.changes); got != 0 {
 		t.Fatalf("retired event queued: %d", got)
 	}
-	link.changes <- queuedEvent{generation: old, event: &gmproto.Settings{}}
-	link.consumeQueuedEvent(<-link.changes)
+	link.consumeQueuedEvent(queuedEvent{generation: old, event: &gmproto.Settings{}})
 	if link.settings != nil {
 		t.Fatal("retired event mutated settings")
 	}

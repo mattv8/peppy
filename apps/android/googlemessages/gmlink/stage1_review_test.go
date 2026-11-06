@@ -28,10 +28,25 @@ func TestActualPostConnectActiveSessionKeepsOwningRunAlive(t *testing.T) {
 	default:
 	}
 	expectStatus(t, link, `"running":true`, `"healthy":true`)
-
-	link.Stop()
-	if err := awaitSafetyResult(t, done, "Run after Stop"); err != nil {
-		t.Fatalf("Run error after Stop = %v", err)
+	link.mu.Lock()
+	source, open := link.streamSource, link.streamOpen
+	generation := link.generation
+	link.mu.Unlock()
+	if !open || source == (libgm.StreamSource{}) {
+		t.Fatal("actual postConnect did not retain its physical stream source")
+	}
+	link.queueEventFor(generation, &libgm.StreamEvent{Source: source, Event: &libgm.WrappedSettings{Settings: settingsWithSIM("post-connect-source")}})
+	awaitSafety(t, "postConnect same-source settings", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.settings != nil
+	})
+	link.queueEventFor(generation, &libgm.StreamEvent{Source: source, Event: &events.GaiaLoggedOut{}})
+	awaitSafety(t, "postConnect same-source terminal", func() bool {
+		return host.hasEvent("link", "relink_needed")
+	})
+	if err := awaitSafetyResult(t, done, "Run after same-source terminal"); err != nil {
+		t.Fatalf("Run error after same-source terminal = %v", err)
 	}
 }
 
