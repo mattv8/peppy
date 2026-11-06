@@ -181,7 +181,7 @@ fn expiry(observed_at_ms: i64) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateways::{gateway_views, CapabilitiesResponse, DevicesResponse};
+    use crate::gateways::{CapabilitiesResponse, DevicesResponse, gateway_views};
 
     #[test]
     fn expiry_matches_core_inclusive_currentness_boundary() {
@@ -208,7 +208,31 @@ mod tests {
         let gateways = gateway_views(&devices, &capabilities);
 
         assert!(gateways[0].supports_sms);
-        assert_eq!(gateways[0].availability, crate::GatewayAvailability::UnsupportedPlatform);
+        assert_eq!(
+            gateways[0].availability,
+            crate::GatewayAvailability::UnsupportedPlatform
+        );
+        assert!(validated_gateway_ids(&gateways, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn simulated_sms_report_is_not_an_rcs_gateway() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({
+            "devices": [{"device_id": id, "role": "gateway", "revoked": false}]
+        }))
+        .unwrap();
+        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({
+            "capabilities": [{
+                "device_id": id,
+                "simulator": true,
+                "capabilities": {"sims": [{"subscription_id": "sim", "sms": "available", "mms": "unavailable"}]}
+            }]
+        }))
+        .unwrap();
+        let gateways = gateway_views(&devices, &capabilities);
+
+        assert!(gateways[0].supports_sms && gateways[0].simulated);
         assert!(validated_gateway_ids(&gateways, &HashSet::new()).is_empty());
     }
 
@@ -229,10 +253,26 @@ mod tests {
             current,
         };
 
-        assert!(current_gateway(&status(RcsCapabilityState::Linked, 1, true)));
-        assert!(!current_gateway(&status(RcsCapabilityState::Unlinked, 1, true)));
-        assert!(!current_gateway(&status(RcsCapabilityState::Linked, i64::MAX, true)));
-        assert!(!current_gateway(&status(RcsCapabilityState::Linked, 1, false)));
+        assert!(current_gateway(&status(
+            RcsCapabilityState::Linked,
+            1,
+            true
+        )));
+        assert!(!current_gateway(&status(
+            RcsCapabilityState::Unlinked,
+            1,
+            true
+        )));
+        assert!(!current_gateway(&status(
+            RcsCapabilityState::Linked,
+            i64::MAX,
+            true
+        )));
+        assert!(!current_gateway(&status(
+            RcsCapabilityState::Linked,
+            1,
+            false
+        )));
         let view = gateway_status(gateway, &status(RcsCapabilityState::Linked, 1, true));
         assert_eq!(view.capability_revision, u64::MAX.to_string());
         assert_eq!(view.observed_at_ms, "1");

@@ -293,6 +293,64 @@ fn native_snapshot_projects_current_rcs_only_for_the_selected_existing_conversat
     assert_eq!(session.client.pending_outbox_count().unwrap(), outbox_before_snapshot);
 }
 
+#[test]
+fn native_snapshot_does_not_project_rcs_eligibility_for_an_implicit_draft_only_selection() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let draft = session
+        .save_draft(&input("new", "", "draft", &["+15555550101"], "0"))
+        .unwrap();
+    let conversation = draft.conversation_id.parse().unwrap();
+    let gateway_id = fixture.binding.device_id.clone();
+    let gateway_device_id = gateway_id.parse().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    session
+        .client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms: now,
+                capability_revision: 1,
+                feature_bits: 1,
+            },
+            &[RcsEligibilityProjection {
+                conversation_id: conversation,
+                eligibility: RcsEligibility::Eligible,
+                feature_bits: 1,
+                mapping_revision: 1,
+                observed_at_ms: now,
+                gateway_device_id,
+            }],
+            now,
+        )
+        .unwrap();
+    let mut gateway_view = gateway(&gateway_id, true, false);
+    gateway_view.simulated = false;
+    session.set_status(|status| {
+        status.gateways = vec![gateway_view];
+        status.rcs_roster_validated = true;
+    });
+    let outbox_before_snapshot = session.client.pending_outbox_count().unwrap();
+
+    let snapshot = session
+        .snapshot(None, None, crate::head(), None, Default::default())
+        .unwrap()
+        .0;
+
+    assert!(snapshot.rcs_status.unwrap().eligibilities.is_empty());
+    assert_eq!(session.client.pending_outbox_count().unwrap(), outbox_before_snapshot);
+}
+
 fn assert_sanitized(json: &str, dir: &Path) {
     for forbidden in [
         TOKEN,

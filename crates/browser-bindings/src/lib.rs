@@ -591,11 +591,9 @@ impl BrowserCore {
             &self.context.revoked_device_ids,
             dto::rcs_status::SnapshotAccess {
                 active_conversation: active,
-                active_is_existing: !explicitly_requested
-                    || (requested.is_some()
-                        && active.is_some_and(|id| {
-                            conversations.iter().any(|item| item.conversation_id == id)
-                        })),
+                active_is_existing: active.is_some_and(|id| {
+                    conversations.iter().any(|item| item.conversation_id == id)
+                }) && (!explicitly_requested || requested.is_some()),
                 roster_validated: self.context.rcs_roster_validated,
                 unlocked,
                 now_ms: now_ms(),
@@ -1078,34 +1076,115 @@ mod tests {
         let snapshot = value(&core.dispatch(
             &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
         ));
-        assert_eq!(snapshot["rcsStatus"]["gateways"][0]["gatewayId"], gateway.to_string());
-        assert_eq!(snapshot["rcsStatus"]["eligibilities"][0]["conversationId"], conversation.to_string());
-        assert_eq!(snapshot["rcsStatus"]["eligibilities"][0]["eligibility"], "eligible");
+        assert_eq!(
+            snapshot["rcsStatus"]["gateways"][0]["gatewayId"],
+            gateway.to_string()
+        );
+        assert_eq!(
+            snapshot["rcsStatus"]["eligibilities"][0]["conversationId"],
+            conversation.to_string()
+        );
+        assert_eq!(
+            snapshot["rcsStatus"]["eligibilities"][0]["eligibility"],
+            "eligible"
+        );
         assert_eq!(
             snapshot["rcsStatus"]["eligibilities"][0]["mappingRevision"],
             (i64::MAX as u64).to_string()
         );
         assert!(snapshot["rcsStatus"]["gateways"][0]["featureBits"].is_null());
         assert!(snapshot["rcsStatus"]["eligibilities"][0]["featureBits"].is_null());
-        for invalid_conversation in [ConversationId::new().to_string(), "not-a-conversation".into()] {
-            let snapshot = value(&core.dispatch(
-                &json!({"command":"snapshot","args":{"conversationId":invalid_conversation}}).to_string(),
-            ));
-            assert!(snapshot["rcsStatus"]["eligibilities"].as_array().unwrap().is_empty());
+        for invalid_conversation in [
+            ConversationId::new().to_string(),
+            "not-a-conversation".into(),
+        ] {
+            let snapshot = value(
+                &core.dispatch(
+                    &json!({"command":"snapshot","args":{"conversationId":invalid_conversation}})
+                        .to_string(),
+                ),
+            );
+            assert!(
+                snapshot["rcsStatus"]["eligibilities"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
         }
-        let revoked: Value = serde_json::from_str(&core.dispatch(
-            &json!({"command":"_worker_apply_server_context","args":{
-                "connection":"connected",
-                "devices":{"devices":[{"device_id":gateway,"role":"gateway","revoked":true}]},
-                "capabilities":{"capabilities":[]}
-            }}).to_string(),
-        ))
+        let revoked: Value = serde_json::from_str(
+            &core.dispatch(
+                &json!({"command":"_worker_apply_server_context","args":{
+                    "connection":"connected",
+                    "devices":{"devices":[{"device_id":gateway,"role":"gateway","revoked":true}]},
+                    "capabilities":{"capabilities":[]}
+                }})
+                .to_string(),
+            ),
+        )
         .unwrap();
         assert_eq!(revoked["error"]["code"], "device-revoked");
         let revoked_snapshot = value(&core.dispatch(
             &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
         ));
         assert!(revoked_snapshot["rcsStatus"].is_null());
+        assert_eq!(
+            core.client().unwrap().pending_outbox_count().unwrap(),
+            outbox_before_snapshot
+        );
+    }
+
+    #[test]
+    fn snapshot_does_not_project_rcs_eligibility_for_an_implicit_draft_only_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = VaultId::new();
+        let gateway = DeviceId::new();
+        let mut core = BrowserCore::new(root.path().to_path_buf());
+        open(&mut core, vault, gateway, [7; 32]);
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        value(&core.dispatch(
+            &json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string(),
+        ));
+        let draft = value(&core.dispatch(
+            &json!({"command":"save_draft","args":{"id":"new","conversationId":"","text":"draft","recipientIds":["+15555550101"],"attachmentIds":[],"gatewayId":gateway,"simId":"sim","expectedRevision":"0"}}).to_string(),
+        ));
+        let conversation: ConversationId = draft["conversationId"].as_str().unwrap().parse().unwrap();
+        let now = now_ms();
+        core.client()
+            .unwrap()
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: gateway,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now,
+                    capability_revision: 1,
+                    feature_bits: 1,
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id: conversation,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 1,
+                    mapping_revision: 1,
+                    observed_at_ms: now,
+                    gateway_device_id: gateway,
+                }],
+                now,
+            )
+            .unwrap();
+        value(&core.dispatch(
+            &json!({"command":"_worker_apply_server_context","args":{"connection":"connected","devices":{"devices":[{"device_id":gateway,"role":"gateway","revoked":false}]},"capabilities":{"capabilities":[{"device_id":gateway,"simulator":false,"capabilities":{"sims":[{"subscription_id":"sim","sms":"available","mms":"unavailable"}]}}]}}}).to_string(),
+        ));
+        let outbox_before_snapshot = core.client().unwrap().pending_outbox_count().unwrap();
+        let snapshot = value(&core.dispatch(r#"{"command":"snapshot","args":{}}"#));
+
+        assert!(snapshot["rcsStatus"]["eligibilities"].as_array().unwrap().is_empty());
         assert_eq!(core.client().unwrap().pending_outbox_count().unwrap(), outbox_before_snapshot);
     }
 

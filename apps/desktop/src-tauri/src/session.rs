@@ -1672,11 +1672,9 @@ impl Session {
                 &status.revoked_device_ids,
                 dto::rcs_status::SnapshotAccess {
                     active_conversation: active,
-                    active_is_existing: !explicitly_requested
-                        || (requested.is_some()
-                            && active.is_some_and(|id| {
-                                conversations.iter().any(|item| item.conversation_id == id)
-                            })),
+                    active_is_existing: active.is_some_and(|id| {
+                        conversations.iter().any(|item| item.conversation_id == id)
+                    }) && (!explicitly_requested || requested.is_some()),
                     roster_validated: status.rcs_roster_validated,
                     unlocked,
                     now_ms: now_ms(),
