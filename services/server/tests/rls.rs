@@ -12,7 +12,7 @@ use peppy_crypto::KeyProfile;
 use peppy_server::{ServerBuilder, config::Config, rls};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
@@ -1397,6 +1397,699 @@ async fn cross_vault_credential_rebind_invalidates_both_vaults() {
             .unwrap();
     assert_eq!(after_a, before_a + 1);
     assert_eq!(after_b, before_b + 1);
+    fixture.cleanup().await;
+}
+
+#[derive(Clone, Copy)]
+enum Writer {
+    Owner,
+    Runtime,
+}
+
+struct MembershipCase {
+    label: &'static str,
+    writer: Writer,
+    sql: String,
+    bump: i64,
+}
+
+fn vault_insert(vault: Uuid) -> String {
+    format!(
+        "INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) \
+         VALUES('{vault}','{{}}',decode('01','hex'),1,repeat('f',64))"
+    )
+}
+
+fn device_insert(vault: Uuid, device: Uuid) -> String {
+    format!(
+        "INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) \
+         VALUES('{vault}','{device}','device','{{}}',repeat('f',64),1)"
+    )
+}
+
+async fn token_in(connection: &mut PgConnection, vault: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+        .bind(vault)
+        .fetch_one(connection)
+        .await
+        .unwrap()
+}
+
+impl Fixture {
+    fn writer(&self, writer: Writer) -> &PgPool {
+        match writer {
+            Writer::Owner => &self.migration,
+            Writer::Runtime => &self.runtime,
+        }
+    }
+
+    async fn run_owner(&self, sql: &str) {
+        sqlx::raw_sql(sql).execute(&self.migration).await.unwrap();
+    }
+
+    async fn token(&self, vault: Uuid) -> i64 {
+        let mut connection = self.migration.acquire().await.unwrap();
+        token_in(&mut connection, vault).await
+    }
+
+    /// Commits `sql` as `writer`, scoped to `vault` the way request handlers are.
+    async fn apply(&self, writer: Writer, vault: Uuid, sql: &str) -> Result<(), sqlx::Error> {
+        let mut transaction = self.writer(writer).begin().await?;
+        sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+            .bind(vault.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::raw_sql(sql).execute(&mut *transaction).await?;
+        transaction.commit().await
+    }
+
+    /// Runs `sql` as the owner with the named triggers dropped, returns the token delta, then rolls back.
+    async fn token_delta_without(&self, vault: Uuid, dropped: &[(&str, &str)], sql: &str) -> i64 {
+        let mut transaction = self.migration.begin().await.unwrap();
+        for (trigger, table) in dropped {
+            sqlx::raw_sql(&format!("DROP TRIGGER {trigger} ON {table}"))
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+        }
+        let before = token_in(&mut transaction, vault).await;
+        sqlx::raw_sql(sql).execute(&mut *transaction).await.unwrap();
+        let after = token_in(&mut transaction, vault).await;
+        transaction.rollback().await.unwrap();
+        after - before
+    }
+
+    /// Each mutation must bump the token exactly as declared, and must not bump
+    /// once its protected trigger is absent. Discrimination runs before the
+    /// committed run so it never observes a state the commit has already changed.
+    async fn assert_protected(
+        &self,
+        vault: Uuid,
+        dropped: &[(&str, &str)],
+        cases: &[MembershipCase],
+    ) {
+        for case in cases {
+            assert_eq!(
+                self.token_delta_without(vault, dropped, &case.sql).await,
+                0,
+                "{}: token must not move without the protected trigger",
+                case.label
+            );
+            let before = self.token(vault).await;
+            self.apply(case.writer, vault, &case.sql)
+                .await
+                .unwrap_or_else(|error| panic!("{}: {error}", case.label));
+            assert_eq!(
+                self.token(vault).await - before,
+                case.bump,
+                "{}: token delta",
+                case.label
+            );
+        }
+    }
+
+    async fn assert_unchanged(&self, vault: Uuid, writer: Writer, label: &str, sql: &str) {
+        let before = self.token(vault).await;
+        self.apply(writer, vault, sql)
+            .await
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(self.token(vault).await, before, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn membership_vault_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+
+    let mut transaction = fixture.migration.begin().await.unwrap();
+    sqlx::raw_sql("DROP TRIGGER vaults_initialize_membership_version ON vaults")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    sqlx::raw_sql(&vault_insert(vault))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(rows, 0, "without the initializer no token row is created");
+
+    fixture.run_owner(&vault_insert(vault)).await;
+    assert_eq!(
+        fixture.token(vault).await,
+        1,
+        "vault creation initializes the token"
+    );
+
+    fixture
+        .assert_protected(
+            vault,
+            &[("vaults_invalidate_membership_version", "vaults")],
+            &[
+                MembershipCase {
+                    label: "vault profile fingerprint",
+                    writer: Writer::Owner,
+                    sql: format!(
+                        "UPDATE vaults SET profile_fingerprint=repeat('e',64) WHERE vault_id='{vault}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "vault check header",
+                    writer: Writer::Owner,
+                    sql: format!(
+                        "UPDATE vaults SET encrypted_vault_check_header=decode('02','hex') WHERE vault_id='{vault}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "vault public key profile",
+                    writer: Writer::Owner,
+                    sql: format!(
+                        "UPDATE vaults SET public_key_profile='{{\"epoch\":2}}' WHERE vault_id='{vault}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "vault key epoch",
+                    writer: Writer::Owner,
+                    sql: format!("UPDATE vaults SET key_epoch=2 WHERE vault_id='{vault}'"),
+                    bump: 1,
+                },
+            ],
+        )
+        .await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_device_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    let added = Uuid::new_v4();
+    let removed = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture.run_owner(&device_insert(vault, device)).await;
+    fixture.run_owner(&device_insert(vault, removed)).await;
+
+    fixture
+        .assert_protected(
+            vault,
+            &[("devices_invalidate_membership_version", "devices")],
+            &[
+                MembershipCase {
+                    label: "device insert",
+                    writer: Writer::Runtime,
+                    sql: device_insert(vault, added),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "device role",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE devices SET role='gateway' WHERE vault_id='{vault}' AND device_id='{device}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "device profile fingerprint",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE devices SET profile_fingerprint=repeat('e',64) WHERE vault_id='{vault}' AND device_id='{device}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "device revocation",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE devices SET revoked_at=clock_timestamp() WHERE vault_id='{vault}' AND device_id='{added}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "device delete",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "DELETE FROM devices WHERE vault_id='{vault}' AND device_id='{removed}'"
+                    ),
+                    bump: 1,
+                },
+            ],
+        )
+        .await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_device_credential_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture.run_owner(&device_insert(vault, device)).await;
+
+    fixture
+        .assert_protected(
+            vault,
+            &[(
+                "device_credentials_invalidate_membership_version",
+                "device_credentials",
+            )],
+            &[
+                MembershipCase {
+                    label: "credential insert",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES(decode(repeat('02',32),'hex'),'{vault}','{device}')"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "credential digest rotation",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE device_credentials SET token_digest=decode(repeat('03',32),'hex') WHERE vault_id='{vault}' AND token_digest=decode(repeat('02',32),'hex')"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "credential revocation",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE device_credentials SET revoked_at=clock_timestamp() WHERE vault_id='{vault}' AND token_digest=decode(repeat('03',32),'hex')"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "credential delete",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "DELETE FROM device_credentials WHERE vault_id='{vault}' AND token_digest=decode(repeat('03',32),'hex')"
+                    ),
+                    bump: 1,
+                },
+            ],
+        )
+        .await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_key_profile_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+
+    let profile_insert = format!(
+        "INSERT INTO vault_key_profiles(vault_id,key_epoch,public_key_profile,encrypted_vault_check_header,profile_fingerprint) \
+         VALUES('{vault}',2,'{{}}',decode('03','hex'),repeat('e',64))"
+    );
+    fixture
+        .assert_protected(
+            vault,
+            &[(
+                "vault_key_profiles_invalidate_membership_version",
+                "vault_key_profiles",
+            )],
+            &[MembershipCase {
+                label: "key profile insert",
+                writer: Writer::Owner,
+                sql: profile_insert,
+                bump: 1,
+            }],
+        )
+        .await;
+
+    // The immutability guard rejects profile deletion; the membership trigger
+    // must still bump on delete if that guard is ever absent.
+    let profile_delete =
+        format!("DELETE FROM vault_key_profiles WHERE vault_id='{vault}' AND key_epoch=2");
+    let rejected = fixture
+        .apply(Writer::Owner, vault, &profile_delete)
+        .await
+        .expect_err("guarded profile delete must fail");
+    assert!(rejected.to_string().contains("immutable"), "{rejected}");
+    let guard = ("vault_key_profiles_immutable", "vault_key_profiles");
+    let membership = (
+        "vault_key_profiles_invalidate_membership_version",
+        "vault_key_profiles",
+    );
+    assert_eq!(
+        fixture
+            .token_delta_without(vault, &[guard], &profile_delete)
+            .await,
+        1,
+        "profile delete bumps the token when only the guard is absent"
+    );
+    assert_eq!(
+        fixture
+            .token_delta_without(vault, &[guard, membership], &profile_delete)
+            .await,
+        0,
+        "profile delete does not bump the token without the membership trigger"
+    );
+    assert_eq!(
+        fixture.token(vault).await,
+        2,
+        "rejected delete leaves the token unchanged"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_admission_key_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+
+    fixture
+        .assert_protected(
+            vault,
+            &[(
+                "vault_admission_keys_invalidate_membership_version",
+                "vault_admission_keys",
+            )],
+            &[
+                MembershipCase {
+                    label: "admission key insert",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) VALUES('{vault}',1,repeat('f',64),decode(repeat('02',32),'hex'))"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "admission verifier update",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE vault_admission_keys SET admission_public_key=decode(repeat('03',32),'hex') WHERE vault_id='{vault}' AND key_epoch=1"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "admission key delete",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "DELETE FROM vault_admission_keys WHERE vault_id='{vault}' AND key_epoch=1"
+                    ),
+                    bump: 1,
+                },
+            ],
+        )
+        .await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_excluded_mutations_leave_token_unchanged() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    let phone = Uuid::new_v4();
+    let computer = Uuid::new_v4();
+    let recipient = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture.run_owner(&device_insert(vault, device)).await;
+    fixture
+        .run_owner(&format!(
+            "INSERT INTO vault_key_profiles(vault_id,key_epoch,public_key_profile,encrypted_vault_check_header,profile_fingerprint) \
+             VALUES('{vault}',1,'{{}}',decode('01','hex'),repeat('f',64))"
+        ))
+        .await;
+    let before = fixture.token(vault).await;
+
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "device display name",
+            &format!(
+                "UPDATE devices SET name='renamed' WHERE vault_id='{vault}' AND device_id='{device}'"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "device presence insert",
+            &format!(
+                "INSERT INTO device_presence(vault_id,device_id,last_seen_at) VALUES('{vault}','{device}',clock_timestamp())"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "device presence update",
+            &format!(
+                "UPDATE device_presence SET last_seen_at=clock_timestamp() WHERE vault_id='{vault}' AND device_id='{device}'"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "waiting phone invitation create",
+            &format!(
+                "INSERT INTO phone_invitations(id,vault_id,owner_device_id,origin,method,token_digest,owner_transfer_public_key,profile_fingerprint,key_epoch,state,expires_at) \
+                 VALUES('{phone}','{vault}','{device}','https://peppy.test','transfer',decode(repeat('0a',32),'hex'),decode(repeat('0b',32),'hex'),repeat('f',64),1,'waiting',clock_timestamp()+interval '1 hour')"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "waiting phone invitation cleanup",
+            &format!("DELETE FROM phone_invitations WHERE vault_id='{vault}' AND id='{phone}'"),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "waiting computer enrollment create",
+            &format!(
+                "INSERT INTO computer_enrollments(id,vault_id,owner_device_id,origin,claim_token_digest,server_nonce,recipient_device_id,recipient_kind,recipient_name,recipient_signing_public_key,recipient_transfer_public_key,recipient_credential_digest,recipient_commitment,profile_fingerprint,key_epoch,state,expires_at) \
+                 VALUES('{computer}','{vault}','{device}','https://peppy.test',decode(repeat('0c',32),'hex'),decode(repeat('0d',32),'hex'),'{recipient}','browser','Laptop',decode(repeat('0e',32),'hex'),decode(repeat('0f',32),'hex'),decode(repeat('10',32),'hex'),decode(repeat('11',32),'hex'),repeat('f',64),1,'waiting',clock_timestamp()+interval '1 hour')"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "waiting computer enrollment cleanup",
+            &format!(
+                "DELETE FROM computer_enrollments WHERE vault_id='{vault}' AND id='{computer}'"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Owner,
+            "key profile activation",
+            &format!(
+                "UPDATE vault_key_profiles SET activated_at=clock_timestamp() WHERE vault_id='{vault}' AND key_epoch=1"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Owner,
+            "vault no-op epoch assignment",
+            &format!("UPDATE vaults SET key_epoch=key_epoch WHERE vault_id='{vault}'"),
+        )
+        .await;
+    assert_eq!(
+        fixture.token(vault).await,
+        before,
+        "excluded mutations never move the token"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_mutations_fail_closed_without_token_row_or_counter() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture
+        .run_owner(&device_insert(vault, Uuid::new_v4()))
+        .await;
+    let token_before = fixture.token(vault).await;
+
+    let device_mutation = device_insert(vault, Uuid::new_v4());
+    let vault_mutation = format!("UPDATE vaults SET key_epoch=2 WHERE vault_id='{vault}'");
+    let preludes = [
+        (
+            "missing token row",
+            format!("DELETE FROM membership_versions WHERE vault_id='{vault}'"),
+        ),
+        (
+            "exhausted token",
+            format!(
+                "UPDATE membership_versions SET version=9223372036854775807 WHERE vault_id='{vault}'"
+            ),
+        ),
+    ];
+    for (label, prelude) in &preludes {
+        for mutation in [&device_mutation, &vault_mutation] {
+            let mut transaction = fixture.migration.begin().await.unwrap();
+            sqlx::raw_sql(prelude)
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+            let error = sqlx::raw_sql(mutation)
+                .execute(&mut *transaction)
+                .await
+                .expect_err(label);
+            assert!(
+                error
+                    .to_string()
+                    .contains("membership version missing or exhausted"),
+                "{label}: {error}"
+            );
+            transaction.rollback().await.unwrap();
+        }
+    }
+    assert_eq!(
+        fixture.token(vault).await,
+        token_before,
+        "failed mutations leave the committed token unchanged"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_vault_delete_cascades_children_without_token_errors() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture
+        .run_owner(&format!(
+            "INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) \
+             VALUES('{vault}',1,repeat('f',64),decode(repeat('02',32),'hex'))"
+        ))
+        .await;
+    assert_eq!(
+        fixture.token(vault).await,
+        2,
+        "admission child bumped before cascade"
+    );
+
+    fixture
+        .run_owner(&format!("DELETE FROM vaults WHERE vault_id='{vault}'"))
+        .await;
+
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM membership_versions WHERE vault_id=$1) \
+              + (SELECT count(*) FROM vault_admission_keys WHERE vault_id=$1)",
+    )
+    .bind(vault)
+    .fetch_one(&fixture.migration)
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "vault delete cascades token and admission children"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_cross_vault_device_move_invalidates_both_vaults() {
+    let fixture = Fixture::new().await;
+    let source = Uuid::new_v4();
+    let destination = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(source)).await;
+    fixture.run_owner(&vault_insert(destination)).await;
+    fixture.run_owner(&device_insert(source, device)).await;
+    // The device insert trigger creates a retention dependent that blocks the move.
+    fixture
+        .run_owner(&format!(
+            "DELETE FROM attachment_retention_devices WHERE vault_id='{source}' AND device_id='{device}'"
+        ))
+        .await;
+    let source_before = fixture.token(source).await;
+    let destination_before = fixture.token(destination).await;
+
+    fixture
+        .run_owner(&format!(
+            "UPDATE devices SET vault_id='{destination}' WHERE vault_id='{source}' AND device_id='{device}'"
+        ))
+        .await;
+
+    assert_eq!(
+        fixture.token(source).await - source_before,
+        1,
+        "source loses the device"
+    );
+    assert_eq!(
+        fixture.token(destination).await - destination_before,
+        1,
+        "destination gains the device"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_token_is_tenant_scoped_and_not_publicly_executable() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture.run_owner(&vault_insert(other)).await;
+
+    let mut transaction = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let own: i64 = sqlx::query_scalar("SELECT count(*) FROM membership_versions WHERE vault_id=$1")
+        .bind(vault)
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+    let foreign: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM membership_versions WHERE vault_id=$1")
+            .bind(other)
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(own, 1, "runtime reads its own token");
+    assert_eq!(foreign, 0, "runtime cannot read another vault's token");
+
+    let executable: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege('public', 'membership_version_invalidate()', 'EXECUTE') \
+             OR has_function_privilege('public', 'membership_version_initialize()', 'EXECUTE') \
+             OR has_function_privilege($1, 'membership_version_invalidate()', 'EXECUTE') \
+             OR has_function_privilege($1, 'membership_version_initialize()', 'EXECUTE')",
+    )
+    .bind(&fixture.runtime_role)
+    .fetch_one(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        !executable,
+        "token trigger functions are not directly executable by PUBLIC or runtime"
+    );
     fixture.cleanup().await;
 }
 
