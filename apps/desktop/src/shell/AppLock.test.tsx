@@ -31,7 +31,7 @@ describe("AppLockScreen", () => {
     expect(retry).toHaveAttribute("aria-busy", "true");
     expect(await screen.findByRole("alert")).toHaveTextContent("Peppy still cannot reach secure storage.");
     expect(screen.getByRole("alert")).not.toHaveTextContent("password requirement");
-    expect(retry).toHaveFocus();
+    await waitFor(() => expect(retry).toHaveFocus());
   });
 });
 
