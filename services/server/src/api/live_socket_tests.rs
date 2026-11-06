@@ -1017,6 +1017,13 @@ async fn live_ticket_consume_is_atomic_and_fails_closed() {
     let session = URL_SAFE_NO_PAD.encode([23_u8; 16]);
     let ticket = issue_ticket(&server, session.clone()).await;
     let (session_id, secret) = ticket_parts(&session, &ticket);
+    let resolved: Option<Uuid> =
+        sqlx::query_scalar("SELECT vault_id FROM community_resolve_live_ticket_vault($1)")
+            .bind(Sha256::digest(secret).to_vec())
+            .fetch_optional(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(resolved, Some(server.vault));
     let principal = consume_live_ticket(&server.pool, session_id, secret)
         .await
         .unwrap();

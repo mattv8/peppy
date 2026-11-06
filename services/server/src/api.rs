@@ -2789,11 +2789,15 @@ async fn consume_live_ticket(
     let Some(vault) = vault else {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"));
     };
-    let session_hash = Sha256::digest(session_id);
+    let session_hash = Sha256::digest(session_id).to_vec();
     let mut tx = scope::begin(pool, vault)
         .await
         .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
-    sqlx::query("SET LOCAL lock_timeout='60s'; SET LOCAL statement_timeout='60s'")
+    sqlx::query("SET LOCAL lock_timeout='60s'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    sqlx::query("SET LOCAL statement_timeout='60s'")
         .execute(&mut *tx)
         .await
         .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
