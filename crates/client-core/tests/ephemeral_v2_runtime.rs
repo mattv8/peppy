@@ -82,8 +82,13 @@ fn expected_v2_aad(signal: &EphemeralSignalV2, vault_id: VaultId) -> Vec<u8> {
     let mut aad = b"peppy-ephemeral-typing-v2\0".to_vec();
     aad.extend_from_slice(vault_id.0.as_bytes());
     aad.extend_from_slice(&2_u16.to_be_bytes());
-    aad.push(b"typing".len() as u8);
-    aad.extend_from_slice(b"typing");
+    let kind = match signal.kind {
+        peppy_protocol::EphemeralSignalV2Kind::Typing => "typing",
+        peppy_protocol::EphemeralSignalV2Kind::Challenge => "challenge",
+        peppy_protocol::EphemeralSignalV2Kind::SessionAck => "session_ack",
+    };
+    aad.push(kind.len() as u8);
+    aad.extend_from_slice(kind.as_bytes());
     aad.extend_from_slice(signal.sender_device_id.0.as_bytes());
     aad.extend_from_slice(&signal.key_epoch.to_be_bytes());
     aad.extend_from_slice(&URL_SAFE_NO_PAD.decode(&signal.session_id).unwrap());
@@ -266,6 +271,26 @@ fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
         .unwrap()
         .reply
         .unwrap();
+    let bytes = STANDARD.decode(&acknowledgement.ciphertext_b64).unwrap();
+    let nonce: [u8; 24] = bytes[..24].try_into().unwrap();
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let acknowledgement_plaintext: peppy_protocol::SessionAckPlaintextV2 = serde_json::from_slice(
+        &decrypt(
+            &key,
+            &expected_v2_aad(&acknowledgement, vault.id),
+            &EncryptedEnvelope {
+                nonce,
+                ciphertext: bytes[24..].to_vec(),
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        acknowledgement_plaintext.sequence_floor,
+        acknowledgement.sequence
+    );
     assert!(
         receiver
             .open_typing_signal_v2(
@@ -296,6 +321,29 @@ fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
             .action,
         Some(LiveAction::GatewayTypingIntent { conversation_id, state: TypingStateV2::Started, .. }) if conversation_id == conversation
     ));
+    let renewal = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        12_000,
+        12_000,
+    )
+    .unwrap();
+    let outcome = receiver
+        .open_typing_signal_v2(
+            &renewal.signal,
+            LiveClock {
+                wall_ms: 12_000,
+                mono_ms: 12_000,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome.action,
+        Some(LiveAction::GatewayTypingIntent { .. })
+    ));
+    assert!(outcome.reply.is_some());
 }
 
 #[test]
@@ -341,6 +389,160 @@ fn disabled_sharing_preserves_outbound_clock_and_sequence_state() {
         .signal
         .sequence,
         "1"
+    );
+}
+
+#[test]
+fn google_contact_typing_displays_only_for_the_current_gateway() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "v2-google-gateway", &vault);
+    let desktop_config = config(&directory, "v2-google-desktop", &vault);
+    let other_config = config(&directory, "v2-google-other", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let other = unlocked(&other_config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&gateway, gateway_config.device_id, conversation);
+    publish_eligible(&other, other_config.device_id, conversation);
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    let roster = vec![
+        gateway_config.device_id,
+        desktop_config.device_id,
+        other_config.device_id,
+    ];
+    for (client, device, executor) in [
+        (
+            &gateway,
+            gateway_config.device_id,
+            LiveExecutor::CurrentGateway,
+        ),
+        (&other, other_config.device_id, LiveExecutor::CurrentGateway),
+    ] {
+        client
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: roster.clone(),
+                    local_gateway_device_id: device,
+                    local_executor: executor,
+                },
+                LiveClock {
+                    wall_ms: 1_000,
+                    mono_ms: 1_000,
+                },
+            )
+            .unwrap();
+    }
+    desktop
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster,
+                local_gateway_device_id: gateway_config.device_id,
+                local_executor: LiveExecutor::None,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+    let first = gateway
+        .seal_typing_signal_v2(
+            conversation,
+            gateway_config.device_id,
+            TypingOriginV2::GoogleContact,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 1_001,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let challenge = desktop
+        .open_typing_signal_v2(
+            &first.signal,
+            LiveClock {
+                wall_ms: 1_001,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    let acknowledgement = gateway
+        .open_typing_signal_v2(
+            &challenge,
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_002,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    desktop
+        .open_typing_signal_v2(
+            &acknowledgement,
+            LiveClock {
+                wall_ms: 1_003,
+                mono_ms: 1_003,
+            },
+        )
+        .unwrap();
+    let displayed = gateway
+        .seal_typing_signal_v2(
+            conversation,
+            gateway_config.device_id,
+            TypingOriginV2::GoogleContact,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 4_001,
+                mono_ms: 4_001,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        desktop
+            .open_typing_signal_v2(
+                &displayed.signal,
+                LiveClock {
+                    wall_ms: 4_001,
+                    mono_ms: 4_001
+                }
+            )
+            .unwrap()
+            .action,
+        Some(LiveAction::Display { .. })
+    ));
+    let wrong_gateway = other
+        .seal_typing_signal_v2(
+            conversation,
+            other_config.device_id,
+            TypingOriginV2::GoogleContact,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 1_001,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        desktop
+            .open_typing_signal_v2(
+                &wrong_gateway.signal,
+                LiveClock {
+                    wall_ms: 4_002,
+                    mono_ms: 4_002
+                }
+            )
+            .unwrap()
+            .action,
+        None
     );
 }
 
