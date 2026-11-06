@@ -550,17 +550,19 @@ impl Client {
                     "SELECT c.message_id FROM rcs_send_ledger l JOIN commands c ON c.command_id=l.command_id WHERE l.tmp_id=? AND l.google_conversation_id=?",
                     params![tmp_id, application.google_conversation_id],
                     |row| row.get(0),
-                )
-                .optional()?;
+            )
+            .optional()?;
             if let Some(message_id) = message_id.as_deref() {
-                record_identity(
+                if let RcsIdentityOutcome::Rejected(code) = record_identity(
                     &tx,
                     conversation_id,
                     ownership_generation,
                     &application.google_message_id,
                     &application.google_conversation_id,
                     Some(message_id.parse().map_err(|_| Error::Database)?),
-                )?;
+                )? {
+                    return Ok(RcsReceiveOutcome::Rejected(code));
+                }
             }
         }
         let Some(message_id) = message_id else {
