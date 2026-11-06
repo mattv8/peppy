@@ -1060,6 +1060,166 @@ async fn valid_source_community_policies_pass() {
 }
 
 #[tokio::test]
+async fn membership_versions_are_trigger_owned_and_rls_read_only() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,'{}',$2,1,$3)")
+        .bind(vault)
+        .bind([1_u8].as_slice())
+        .bind("f".repeat(64))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    let initial: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(
+        initial, 0,
+        "vault creation initializes the version atomically"
+    );
+
+    let mut runtime = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch,name) VALUES($1,$2,'device','{}',$3,1,'first')")
+        .bind(vault)
+        .bind(device)
+        .bind("f".repeat(64))
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind([2_u8; 32].as_slice())
+        .bind(vault)
+        .bind(device)
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    let bumped: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *runtime)
+            .await
+            .unwrap();
+    assert_eq!(
+        bumped, 2,
+        "device and active credential mutations invalidate membership"
+    );
+    sqlx::query("UPDATE devices SET name='renamed' WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault)
+        .bind(device)
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    let unchanged: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *runtime)
+            .await
+            .unwrap();
+    assert_eq!(
+        unchanged, bumped,
+        "display-name changes do not invalidate membership"
+    );
+    runtime.commit().await.unwrap();
+
+    let mut forbidden_runtime = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *forbidden_runtime)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("UPDATE membership_versions SET version=0 WHERE vault_id=$1")
+            .bind(vault)
+            .execute(&mut *forbidden_runtime)
+            .await
+            .is_err()
+    );
+    forbidden_runtime.rollback().await.unwrap();
+
+    assert!(
+        sqlx::query("UPDATE membership_versions SET version=0 WHERE vault_id=$1")
+            .bind(vault)
+            .execute(&fixture.maintenance)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("ALTER TABLE devices DISABLE TRIGGER devices_invalidate_membership_version")
+            .execute(&fixture.runtime)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("ALTER TABLE devices DISABLE TRIGGER devices_invalidate_membership_version")
+            .execute(&fixture.maintenance)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("TRUNCATE membership_versions")
+            .execute(&fixture.runtime)
+            .await
+            .is_err()
+    );
+
+    sqlx::query(
+        "UPDATE devices SET revoked_at=clock_timestamp() WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(vault)
+    .bind(device)
+    .execute(&fixture.maintenance)
+    .await
+    .unwrap();
+    let after_maintenance: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    assert_eq!(
+        after_maintenance,
+        bumped + 1,
+        "BYPASSRLS maintenance still fires triggers"
+    );
+
+    sqlx::query("DELETE FROM device_credentials WHERE vault_id=$1")
+        .bind(vault)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM devices WHERE vault_id=$1")
+        .bind(vault)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM vaults WHERE vault_id=$1")
+        .bind(vault)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "vault cascade removes the version without trigger failures"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn hosted_duplicate_equivalent_policies_pass() {
     let fixture = Fixture::new().await;
 

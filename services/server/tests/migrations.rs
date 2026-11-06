@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 25] = [
+const UP: [&str; 27] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -29,9 +29,11 @@ const UP: [&str; 25] = [
     include_str!("../migrations/0023_origin_tag_indexes.sql"),
     include_str!("../migrations/0024_compacted_origin_tag_index.sql"),
     include_str!("../migrations/0025_validate_origin_tag_constraints.sql"),
+    include_str!("../migrations/0026_live_ticket_sessions.sql"),
+    include_str!("../migrations/0027_membership_versions.sql"),
 ];
 
-const DOWN: [&str; 25] = [
+const DOWN: [&str; 27] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -57,6 +59,8 @@ const DOWN: [&str; 25] = [
     include_str!("../migrations/down/0023_origin_tag_indexes.down.sql"),
     include_str!("../migrations/down/0024_compacted_origin_tag_index.down.sql"),
     include_str!("../migrations/down/0025_validate_origin_tag_constraints.down.sql"),
+    include_str!("../migrations/down/0026_live_ticket_sessions.down.sql"),
+    include_str!("../migrations/down/0027_membership_versions.down.sql"),
 ];
 
 #[tokio::test]
@@ -173,6 +177,8 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(column_exists(database, "compacted_records", "origin_tag").await);
     assert!(index_exists(database, "encrypted_records_origin_tag_unique").await);
     assert!(index_exists(database, "compacted_records_origin_tag_unique").await);
+    assert!(table_exists(database, "membership_versions").await);
+    assert!(function_exists(database, "membership_version_invalidate").await);
 }
 
 async fn seed_populated_downgrade_case(database: &mut PgConnection, version: usize) {

@@ -42,6 +42,8 @@ pub const TENANT_TABLES: &[&str] = &[
     "live_ticket_device_authority",
 ];
 
+const MEMBERSHIP_VERSION_TABLE: &str = "membership_versions";
+
 const CONTROL_PLANE_TABLES: &[&str] = &[
     "vault_owners",
     "instance_sessions",
@@ -132,6 +134,7 @@ pub async fn grant_runtime_privileges(pool: &PgPool, role: &str) -> Result<(), R
     let tenant_tables = qualified_tables(&schema, TENANT_TABLES);
     let admission_tables = qualified_tables(&schema, ADMISSION_TABLES);
     let control_plane_tables = qualified_tables(&schema, CONTROL_PLANE_TABLES);
+    let membership_version_table = qualified_tables(&schema, &[MEMBERSHIP_VERSION_TABLE]);
     sqlx::raw_sql(&format!(
         "GRANT USAGE ON SCHEMA {schema_identifier} TO {role}"
     ))
@@ -139,6 +142,11 @@ pub async fn grant_runtime_privileges(pool: &PgPool, role: &str) -> Result<(), R
     .await?;
     sqlx::raw_sql(&format!(
         "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {tenant_tables} TO {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT ON TABLE {membership_version_table} TO {role}; REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE {membership_version_table} FROM {role}"
     ))
     .execute(pool)
     .await?;
@@ -195,8 +203,14 @@ pub async fn grant_maintenance_privileges(pool: &PgPool, role: &str) -> Result<(
     let tenant_tables = qualified_tables(&schema, TENANT_TABLES);
     let admission_tables = qualified_tables(&schema, ADMISSION_TABLES);
     let control_plane_tables = qualified_tables(&schema, CONTROL_PLANE_TABLES);
+    let membership_version_table = qualified_tables(&schema, &[MEMBERSHIP_VERSION_TABLE]);
     sqlx::raw_sql(&format!(
         "GRANT USAGE ON SCHEMA {schema_identifier} TO {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT ON TABLE {membership_version_table} TO {role}; REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE {membership_version_table} FROM {role}"
     ))
     .execute(pool)
     .await?;
@@ -253,9 +267,26 @@ pub async fn validate_runtime_role(pool: &PgPool, community: bool) -> Result<(),
     }
     validate_rls_schema(pool, community).await?;
     validate_live_ticket_runtime_capabilities(pool).await?;
+    validate_membership_version_runtime_privileges(pool).await?;
     validate_admission_runtime_privileges(pool).await?;
     if community {
         validate_community_privileges(pool).await?;
+    }
+    Ok(())
+}
+
+async fn validate_membership_version_runtime_privileges(pool: &PgPool) -> Result<(), RlsError> {
+    let safe: bool = sqlx::query_scalar(
+        "SELECT relrowsecurity AND NOT relforcerowsecurity AND has_table_privilege(current_user, oid, 'SELECT') AND NOT has_table_privilege(current_user, oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = $1",
+    )
+    .bind(MEMBERSHIP_VERSION_TABLE)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+    if !safe {
+        return Err(RlsError::UnsafeRuntimeRole(
+            "membership version grant is missing or unsafe",
+        ));
     }
     Ok(())
 }
@@ -435,6 +466,7 @@ async fn validate_community_privileges(pool: &PgPool) -> Result<(), RlsError> {
     let mut allowed = tenant_table_names();
     allowed.extend(CONTROL_PLANE_TABLES.iter().map(|name| (*name).to_owned()));
     allowed.extend([
+        MEMBERSHIP_VERSION_TABLE.to_owned(),
         "instance_admission_windows".to_owned(),
         "instance_admission_sources".to_owned(),
         "_sqlx_migrations".to_owned(),
@@ -495,6 +527,7 @@ pub async fn validate_maintenance_role(pool: &PgPool) -> Result<(), RlsError> {
     if !tenant_dml {
         return Err(RlsError::UnsafeMaintenanceRole("requires tenant DML"));
     }
+    validate_membership_version_maintenance_privileges(pool).await?;
     let control_plane_sweep: bool = sqlx::query_scalar(
         "SELECT count(*) = $2 AND COALESCE(bool_and(has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'DELETE')), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
     )
@@ -508,6 +541,20 @@ pub async fn validate_maintenance_role(pool: &PgPool) -> Result<(), RlsError> {
         ));
     }
     validate_admission_maintenance_privileges(pool).await
+}
+
+async fn validate_membership_version_maintenance_privileges(pool: &PgPool) -> Result<(), RlsError> {
+    let safe: bool = sqlx::query_scalar(
+        "SELECT has_table_privilege(current_user, 'membership_versions', 'SELECT') AND NOT has_table_privilege(current_user, 'membership_versions', 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !safe {
+        return Err(RlsError::UnsafeMaintenanceRole(
+            "membership version grant is unsafe",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
