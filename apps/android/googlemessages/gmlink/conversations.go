@@ -205,7 +205,7 @@ func (link *Link) removeConversationLocked(id string) {
 func (link *Link) replaceConversationIndexFor(generation, streamEpoch, revision uint64, conversations []*gmproto.Conversation) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || revision != link.indexRevision || !link.hasOwnerVerificationLocked() {
+	if link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || revision != link.indexRevision || link.pendingConversationEvents != 0 || !link.hasOwnerVerificationLocked() {
 		return false
 	}
 	link.conversationCandidates = make(map[string][]conversationSummary)
@@ -249,6 +249,10 @@ func (link *Link) recordConversationEventLocked(id string) {
 }
 
 func (link *Link) recordConversationEventFor(generation uint64, source libgm.StreamSource, streamEpoch uint64, conversation *gmproto.Conversation) {
+	link.recordQueuedConversationEventFor(generation, source, streamEpoch, conversation, false)
+}
+
+func (link *Link) recordQueuedConversationEventFor(generation uint64, source libgm.StreamSource, streamEpoch uint64, conversation *gmproto.Conversation, pending bool) {
 	if conversation == nil || conversation.GetConversationID() == "" {
 		return
 	}
@@ -256,6 +260,9 @@ func (link *Link) recordConversationEventFor(generation uint64, source libgm.Str
 	defer link.mu.Unlock()
 	if link.closed || generation != link.generation || streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(source) {
 		return
+	}
+	if pending && link.pendingConversationEvents > 0 {
+		link.pendingConversationEvents--
 	}
 	link.applyConversationsLocked([]*gmproto.Conversation{conversation})
 	if !link.hasOwnerVerificationLocked() {
@@ -288,6 +295,7 @@ func (link *Link) invalidateConversationIndexLocked() {
 	link.conversationCandidates = make(map[string][]conversationSummary)
 	link.conversationTargets = make(map[string][]string)
 	link.conversationEvents = []conversationEvent{{Code: "conversation_resync"}}
+	link.pendingConversationEvents = 0
 	link.indexRevision++
 }
 
@@ -296,6 +304,7 @@ func (link *Link) clearConversationIndexLocked() {
 	link.conversationCandidates = make(map[string][]conversationSummary)
 	link.conversationTargets = make(map[string][]string)
 	link.conversationEvents = nil
+	link.pendingConversationEvents = 0
 	link.indexRevision++
 }
 

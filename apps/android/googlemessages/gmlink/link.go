@@ -87,6 +87,7 @@ type Link struct {
 	conversationIndexComplete    bool
 	conversationIndexGeneration  uint64
 	conversationIndexStreamEpoch uint64
+	pendingConversationEvents    uint64
 	settings                     *gmproto.Settings
 	settingsAt                   time.Time
 	settingsVersion              uint64
@@ -100,11 +101,12 @@ type Link struct {
 // queuedEvent is fenced twice: before it enters the queue and immediately before
 // it mutates Link state. A callback from a retired libgm client is never current.
 type queuedEvent struct {
-	generation   uint64
-	streamEpoch  uint64
-	streamSource libgm.StreamSource
-	receivedAt   time.Time
-	event        any
+	generation               uint64
+	streamEpoch              uint64
+	streamSource             libgm.StreamSource
+	receivedAt               time.Time
+	pendingConversationEvent bool
+	event                    any
 }
 
 type terminalCompletion struct {
@@ -1012,12 +1014,20 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		go link.completeTerminal(completion)
 		return
 	}
+	pendingConversationEvent := false
+	if conversation, ok := event.(*gmproto.Conversation); ok && conversation != nil && conversation.GetConversationID() != "" {
+		link.invalidateConversationCompletenessLocked()
+		link.indexRevision++
+		link.pendingConversationEvents++
+		pendingConversationEvent = true
+	}
 	queued := queuedEvent{
-		generation:   generation,
-		streamEpoch:  link.streamEpoch,
-		streamSource: source,
-		receivedAt:   receivedAt,
-		event:        event,
+		generation:               generation,
+		streamEpoch:              link.streamEpoch,
+		streamSource:             source,
+		receivedAt:               receivedAt,
+		pendingConversationEvent: pendingConversationEvent,
+		event:                    event,
 	}
 	select {
 	case link.changes <- queued:
@@ -1201,7 +1211,7 @@ func (link *Link) projectQueuedEvent(queued queuedEvent) {
 	case *libgm.WrappedSettings:
 		link.recordSettingsFor(queued.generation, queued.streamSource, queued.streamEpoch, queued.receivedAt, value)
 	case *gmproto.Conversation:
-		link.recordConversationEventFor(queued.generation, queued.streamSource, queued.streamEpoch, value)
+		link.recordQueuedConversationEventFor(queued.generation, queued.streamSource, queued.streamEpoch, value, queued.pendingConversationEvent)
 	case *events.GaiaLoggedOut:
 		link.transitionFor(queued.generation, stateNeedsRelink, "relink_needed")
 	case *events.ListenFatalError:

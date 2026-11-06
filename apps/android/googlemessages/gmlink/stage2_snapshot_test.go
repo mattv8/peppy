@@ -291,3 +291,58 @@ func TestDirectGapSignalsInvalidateCompleteSnapshot(t *testing.T) {
 		})
 	}
 }
+
+func stage2LinkWithoutEventConsumer() *Link {
+	return &Link{
+		changes:                make(chan any, 64),
+		conversationCandidates: make(map[string][]conversationSummary),
+		conversationTargets:    make(map[string][]string),
+	}
+}
+
+func TestAcceptedConversationEventFencesScanBeforeConsumerDrain(t *testing.T) {
+	link := stage2LinkWithoutEventConsumer()
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	revision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok {
+		t.Fatal("refresh did not start")
+	}
+	link.queueEventFor(generation, stage2Conversation("contradiction", stage2Participant("target", true, false)))
+	if link.replaceConversationIndexFor(generation, streamEpoch, revision, nil) {
+		t.Fatal("scan published while an accepted conversation event remained unapplied")
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("lookup code = %s", code)
+	}
+}
+
+func TestQueuedPreScanConversationCannotOverwriteNewerSnapshot(t *testing.T) {
+	link := stage2LinkWithoutEventConsumer()
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	link.queueEventFor(generation, stage2Conversation("same-id", stage2Participant("old-target", true, false)))
+	revision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok {
+		t.Fatal("refresh did not start")
+	}
+	if link.replaceConversationIndexFor(generation, streamEpoch, revision, []*gmproto.Conversation{
+		stage2Conversation("same-id", stage2Participant("new-target", true, false)),
+	}) {
+		t.Fatal("scan published over an unapplied pre-scan event")
+	}
+	link.consumeQueuedEvent(<-link.changes)
+	if link.replaceConversationIndexFor(generation, streamEpoch, revision, nil) {
+		t.Fatal("scan published after its revision was superseded by the queued event")
+	}
+	freshRevision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok || !link.replaceConversationIndexFor(generation, streamEpoch, freshRevision, []*gmproto.Conversation{
+		stage2Conversation("same-id", stage2Participant("new-target", true, false)),
+	}) {
+		t.Fatal("newer snapshot did not publish after the queue drained")
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("old-target")); code != "conversation_not_found_complete" {
+		t.Fatalf("old target lookup code = %s", code)
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("new-target")); code != "conversation_found" {
+		t.Fatalf("new target lookup code = %s", code)
+	}
+}
