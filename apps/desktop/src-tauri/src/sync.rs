@@ -2430,16 +2430,12 @@ mod drain_tests {
             {"device_id": revoked_peer, "role": "device", "revoked": true}
         ]}))
         .unwrap();
-        let capabilities: CapabilitiesResponse =
-            serde_json::from_value(serde_json::json!({"capabilities": []})).unwrap();
+        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities": []})).unwrap();
 
         apply_gateway_refresh(&session, &devices, &capabilities);
 
         let status = session.status.lock().unwrap();
         assert!(status.rcs_roster_validated);
-        assert_eq!(
-            status.rcs_live_roster,
-            vec![fixture.binding.device_id, active_peer]
-        );
+        assert_eq!(status.rcs_live_roster, vec![fixture.binding.device_id, active_peer]);
     }
 }
