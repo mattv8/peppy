@@ -18,7 +18,7 @@ var fixedCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
 var allowedLibgmCalls = map[string]bool{
 	"FetchConfig": true, "SetEventHandler": true, "SetPingInterval": true, "StartGaiaPairing": true,
 	"FinishGaiaPairing": true, "Connect": true, "Disconnect": true, "ListConversations": true, "GetConversation": true,
-	"GetOrCreateConversation": true, "SendMessage": true, "UnpairGaia": true,
+	"GetOrCreateConversation": true, "SendMessage": true, "FetchMessages": true, "UnpairGaia": true,
 }
 
 // forbiddenRPCNames are the read, send, open, typing, delete and Bugle-revoke methods.

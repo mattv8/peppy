@@ -260,7 +260,9 @@ func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
 		return encodeRcsPage(rcsPageFailure("conversation_unproven"))
 	}
 	if fetch == nil {
-		fetch = client.FetchMessages
+		fetch = func(ctx context.Context, conversationID string, count int64, cursor *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+			return client.FetchMessages(ctx, conversationID, count, cursor)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(runCtx, rcsGapPageTimeout)
