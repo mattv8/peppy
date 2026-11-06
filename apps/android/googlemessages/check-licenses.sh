@@ -3,7 +3,14 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 inventory=${LICENSE_INVENTORY:-"$root/license-inventory.json"}
-notice=${GOOGLE_MESSAGES_NOTICE:-"$root/../app/src/sideload/assets/third_party/NOTICE-google-messages.txt"}
+gmlink_assets="$root/../app/src/sideloadGmlinkOn/assets/third_party"
+legacy_assets="$root/../app/src/sideload/assets/third_party"
+if [ -d "$gmlink_assets" ]; then
+    assets=$gmlink_assets
+else
+    assets=$legacy_assets
+fi
+notice=${GOOGLE_MESSAGES_NOTICE:-"$assets/NOTICE-google-messages.txt"}
 modules=$(mktemp)
 if [ ! -f "$root/build/gmlink.aar" ]; then
     printf '%s\n' 'build the AAR first' >&2
@@ -13,16 +20,17 @@ trap 'rm -f "$modules"' EXIT
 
 cd "$root"
 go list -m -json all > "$modules"
-python3 - "$inventory" "$modules" "$root/build/gmlink.aar" "$root/../app/src/sideload/assets/third_party" "$notice" <<'PY'
+python3 - "$inventory" "$modules" "$root/build/gmlink.aar" "$gmlink_assets" "$legacy_assets" "$notice" <<'PY'
 import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
 import zipfile
 
-inventory_path, modules_path, aar_path, assets_path, notice_path = map(pathlib.Path, sys.argv[1:])
+inventory_path, modules_path, aar_path, *asset_paths, notice_path = map(pathlib.Path, sys.argv[1:])
 inventory = json.loads(inventory_path.read_text())
 decoder = json.JSONDecoder()
 modules_text = modules_path.read_text()
@@ -44,27 +52,37 @@ if set(entries) != set(resolved):
 
 notice_modules = {}
 for line in notice_path.read_text().splitlines():
-    if not line.startswith("* "):
+    if line.startswith("* "):
+        module_and_version, *details = line[2:].split(" — ")
+        if len(details) != 2:
+            raise SystemExit("Google Messages notice has an invalid module entry")
+    elif line.startswith("Package: "):
+        module_and_version = line.removeprefix("Package: ")
+    else:
+        module_and_version = line
+    match = re.fullmatch(r"([A-Za-z0-9./-]+) (v\S+)", module_and_version)
+    if match is None:
         continue
-    parts = line[2:].split(" — ")
-    if len(parts) != 3:
-        raise SystemExit("Google Messages notice has an invalid module entry")
-    module_and_version, license_family, asset = parts
-    try:
-        path, version = module_and_version.rsplit(" ", 1)
-    except ValueError as error:
-        raise SystemExit("Google Messages notice has an invalid module entry") from error
-    if path in notice_modules:
+    path, version = match.groups()
+    if path in notice_modules and notice_modules[path] != version:
         raise SystemExit("Google Messages notice has duplicate module entries")
-    notice_modules[path] = (version, license_family, asset)
+    notice_modules[path] = version
 
 distributed_modules = {
-    path: (entry["version"], entry["licenseFamily"], entry["asset"])
+    path: entry["version"]
     for path, entry in entries.items()
     if entry["distributed"]
 }
 if notice_modules != distributed_modules:
     raise SystemExit("Google Messages notice module list does not match distributed inventory")
+
+
+def notice_asset(asset_name):
+    for assets_path in asset_paths:
+        asset = assets_path / asset_name
+        if asset.is_file():
+            return asset
+    return None
 
 linked = {}
 with zipfile.ZipFile(aar_path) as aar, tempfile.TemporaryDirectory() as temporary_directory:
@@ -101,14 +119,14 @@ for path, version in resolved.items():
         asset_name = entry.get("asset")
         if not asset_name:
             raise SystemExit("linked module has no notice asset")
-        asset = assets_path / asset_name
-        if not asset.is_file():
+        asset = notice_asset(asset_name)
+        if asset is None:
             raise SystemExit("linked module has no notice asset")
         if hashlib.sha256(asset.read_bytes()).hexdigest() != entry["licenseSha256"]:
             raise SystemExit("notice asset differs from the resolved upstream license text")
     if "licenseExceptions" in entry:
         exception = entry["licenseExceptions"]
-        asset = assets_path / exception["asset"]
-        if not asset.is_file() or hashlib.sha256(asset.read_bytes()).hexdigest() != exception["sha256"]:
+        asset = notice_asset(exception["asset"])
+        if asset is None or hashlib.sha256(asset.read_bytes()).hexdigest() != exception["sha256"]:
             raise SystemExit("notice asset differs from the resolved upstream license exception text")
 PY

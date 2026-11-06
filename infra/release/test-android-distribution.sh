@@ -22,14 +22,19 @@ mode=
 for argument in "$@"; do
   case "$argument" in
     dump) mode=dump ;;
+    --mode=universal) mode=universal ;;
     --bundle=*) bundle=${argument#--bundle=} ;;
     --output=*) output=${argument#--output=} ;;
   esac
 done
 if [ "$mode" = dump ]; then
   cat "${bundle}.manifest.xml"
-else
+elif [ "$mode" = universal ]; then
+  printf '%s\n' universal >> "$BUNDLETOOL_CALLS"
   cp "${bundle}.apks" "$output"
+else
+  printf '%s\n' default >> "$BUNDLETOOL_CALLS"
+  cp "${bundle}.split.apks" "$output"
 fi
 SH
 cat > "$bin/llvm-nm" <<'SH'
@@ -81,14 +86,17 @@ PY
 }
 
 write_apks() {
-  local output=$1 apk=$2
-  python3 - "$output" "$apk" <<'PY'
+  local output=$1
+  shift
+  python3 - "$output" "$@" <<'PY'
 import pathlib
 import sys
 import zipfile
 
 with zipfile.ZipFile(sys.argv[1], "w") as output:
-    output.write(sys.argv[2], "universal.apk")
+    for item in sys.argv[2:]:
+        name, apk = item.split("=", 1)
+        output.write(apk, name)
 PY
 }
 
@@ -119,7 +127,14 @@ write_archive "$direct" \
 write_archive "$play" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
 clean_play_apk="$root/clean-play.apk"
 write_archive "$clean_play_apk" 'lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
-write_apks "$play.apks" "$clean_play_apk"
+write_apks "$play.apks" "universal.apk=$clean_play_apk"
+clean_split_apk="$root/clean-split.apk"
+clean_standalone_apk="$root/clean-standalone.apk"
+write_archive "$clean_split_apk" 'lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
+write_archive "$clean_standalone_apk" 'lib/x86_64/libpeppy_mobile_bindings.so=fixture'
+write_apks "$play.split.apks" \
+  "splits/base-master.apk=$clean_split_apk" \
+  "standalones/standalone.apk=$clean_standalone_apk"
 write_manifest "$direct.manifest.xml" direct
 write_manifest "$play.manifest.xml" play
 printf fixture > "$root/symbols/arm64-v8a/libpeppy_mobile_bindings.so.sym"
@@ -136,8 +151,11 @@ expect_failure_reason 'BUNDLETOOL_JAR must name the verified bundletool JAR' \
   env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/missing-bundletool.jar" PATH="$bin:$PATH" \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play" "$symbols"
 
+export BUNDLETOOL_CALLS="$root/bundletool-calls"
 env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play" "$symbols"
+grep -qx universal "$BUNDLETOOL_CALLS"
+grep -qx default "$BUNDLETOOL_CALLS"
 
 missing_direct_library="$root/missing-direct-library.apk"
 write_archive "$missing_direct_library" \
@@ -187,6 +205,7 @@ play_with_link="$root/play-with-link.aab"
 write_archive "$play_with_link" 'base/lib/arm64-v8a/libgojni.so=fixture'
 cp "$play.manifest.xml" "$play_with_link.manifest.xml"
 cp "$play.apks" "$play_with_link.apks"
+cp "$play.split.apks" "$play_with_link.split.apks"
 expect_failure_reason 'Play AAB contains libgojni.so' \
   env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_link" "$symbols"
@@ -195,6 +214,7 @@ play_with_dex="$root/play-with-dex.aab"
 write_archive "$play_with_dex" 'base/dex/classes.dex=Ldev/peppy/gmlink/Gmlink;'
 cp "$play.manifest.xml" "$play_with_dex.manifest.xml"
 cp "$play.apks" "$play_with_dex.apks"
+cp "$play.split.apks" "$play_with_dex.split.apks"
 expect_failure_reason 'Play AAB contains dev/peppy/gmlink/ dex classes' \
   env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_dex" "$symbols"
@@ -204,7 +224,8 @@ write_archive "$play_apk_with_notice" 'assets/third_party/NOTICE-google-messages
 play_with_notice="$root/play-with-notice.aab"
 write_archive "$play_with_notice" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
 cp "$play.manifest.xml" "$play_with_notice.manifest.xml"
-write_apks "$play_with_notice.apks" "$play_apk_with_notice"
+write_apks "$play_with_notice.apks" "universal.apk=$play_apk_with_notice"
+cp "$play.split.apks" "$play_with_notice.split.apks"
 expect_failure_reason 'Play APK universal.apk contains Google Messages notice content' \
   env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_notice" "$symbols"
@@ -214,10 +235,33 @@ write_archive "$play_apk_with_agpl" 'assets/third_party/AGPL-3.0.txt=GNU AFFERO 
 play_with_agpl="$root/play-with-agpl.aab"
 write_archive "$play_with_agpl" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
 cp "$play.manifest.xml" "$play_with_agpl.manifest.xml"
-write_apks "$play_with_agpl.apks" "$play_apk_with_agpl"
+write_apks "$play_with_agpl.apks" "universal.apk=$play_apk_with_agpl"
+cp "$play.split.apks" "$play_with_agpl.split.apks"
 expect_failure_reason 'Play APK universal.apk contains AGPL text' \
   env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_agpl" "$symbols"
+
+play_split_with_link="$root/play-split-with-link.apk"
+write_archive "$play_split_with_link" 'lib/arm64-v8a/libgojni.so=fixture'
+play_with_split_link="$root/play-with-split-link.aab"
+write_archive "$play_with_split_link" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
+cp "$play.manifest.xml" "$play_with_split_link.manifest.xml"
+cp "$play.apks" "$play_with_split_link.apks"
+write_apks "$play_with_split_link.split.apks" "splits/base-master.apk=$play_split_with_link"
+expect_failure_reason 'Play APK base-master.apk contains libgojni.so' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_split_link" "$symbols"
+
+play_standalone_with_dex="$root/play-standalone-with-dex.apk"
+write_archive "$play_standalone_with_dex" 'classes.dex=Ldev/peppy/gmlink/Gmlink;'
+play_with_standalone_dex="$root/play-with-standalone-dex.aab"
+write_archive "$play_with_standalone_dex" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
+cp "$play.manifest.xml" "$play_with_standalone_dex.manifest.xml"
+cp "$play.apks" "$play_with_standalone_dex.apks"
+write_apks "$play_with_standalone_dex.split.apks" "standalones/standalone.apk=$play_standalone_with_dex"
+expect_failure_reason 'Play APK standalone.apk contains dev/peppy/gmlink/ dex classes' \
+  env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+  "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_standalone_dex" "$symbols"
 
 write_manifest "$play.manifest.xml" direct
 expect_failure_reason "play manifest distribution metadata must be exactly 'play'" \

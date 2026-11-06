@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 saved_aar=
+backup_directory=
 error_output=
 temporary_notice=
 cleanup() {
@@ -10,6 +11,7 @@ cleanup() {
     if [ -n "$saved_aar" ] && [ -f "$saved_aar" ]; then
         mv "$saved_aar" "$root/build/gmlink.aar"
     fi
+    [ -z "$backup_directory" ] || rm -rf "$backup_directory"
 }
 
 temporary_inventory=$(mktemp)
@@ -31,13 +33,13 @@ if LICENSE_INVENTORY="$temporary_inventory" "$root/check-licenses.sh"; then
 fi
 
 temporary_notice=$(mktemp)
-python3 - "$root/../app/src/sideload/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
+python3 - "$root/../app/src/sideloadGmlinkOn/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
 import pathlib
 import sys
 
 notice = pathlib.Path(sys.argv[1]).read_text().splitlines()
 pathlib.Path(sys.argv[2]).write_text(
-    "\n".join(line for line in notice if not line.startswith("* google.golang.org/protobuf ")) + "\n"
+    "\n".join(line for line in notice if not line.startswith("google.golang.org/protobuf ")) + "\n"
 )
 PY
 if GOOGLE_MESSAGES_NOTICE="$temporary_notice" "$root/check-licenses.sh"; then
@@ -72,17 +74,26 @@ import sys
 inventory = json.load(open(sys.argv[1]))
 entry = next(entry for entry in inventory["modules"] if entry["path"] == "golang.org/x/mobile")
 entry["distributed"] = False
-entry.pop("asset", None)
-entry.pop("licenseSha256", None)
 json.dump(inventory, open(sys.argv[2], "w"), indent=2)
 PY
 
-if LICENSE_INVENTORY="$temporary_inventory" "$root/check-licenses.sh"; then
+python3 - "$root/../app/src/sideloadGmlinkOn/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
+import pathlib
+import sys
+
+notice = pathlib.Path(sys.argv[1]).read_text().splitlines()
+pathlib.Path(sys.argv[2]).write_text(
+    "\n".join(line for line in notice if not line.startswith("golang.org/x/mobile ")) + "\n"
+)
+PY
+if error=$(LICENSE_INVENTORY="$temporary_inventory" GOOGLE_MESSAGES_NOTICE="$temporary_notice" "$root/check-licenses.sh" 2>&1); then
     printf '%s\n' 'expected linked module marked non-distributed to fail' >&2
     exit 1
 fi
+printf '%s\n' "$error" | grep -qx 'inventory distribution marker does not match the built native library'
 
-saved_aar=$(mktemp)
+backup_directory=$(mktemp -d)
+saved_aar="$backup_directory/gmlink.aar"
 error_output=$(mktemp)
 mv "$root/build/gmlink.aar" "$saved_aar"
 if "$root/check-licenses.sh" 2>"$error_output"; then

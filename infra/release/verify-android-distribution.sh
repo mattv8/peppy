@@ -58,26 +58,30 @@ for manifest_path, expected_distribution in EXPECTED:
         )
 PY
 
-play_apks_archive="$temporary_dir/play.apks"
-play_apks_directory="$temporary_dir/play-apks"
-java -jar "$bundletool_jar" build-apks --bundle="$play_aab" --output="$play_apks_archive" --mode=universal || {
-  echo 'could not materialize APKs from Play AAB' >&2
-  exit 1
-}
-mkdir "$play_apks_directory"
-unzip -q "$play_apks_archive" -d "$play_apks_directory" || {
-  echo 'could not extract APKs materialized from Play AAB' >&2
-  exit 1
-}
 play_apks=()
-while IFS= read -r -d '' apk; do
-  play_apks+=("$apk")
-done < <(find "$play_apks_directory" -type f -name '*.apk' -print0)
-[ "${#play_apks[@]}" -gt 0 ] || {
-  echo 'bundletool did not materialize any APKs from Play AAB' >&2
-  exit 1
+materialize_play_apks() {
+  local mode=$1 archive="$temporary_dir/$1.apks" directory="$temporary_dir/$1-apks" initial_count=${#play_apks[@]}
+  shift
+  java -jar "$bundletool_jar" build-apks --bundle="$play_aab" --output="$archive" "$@" || {
+    echo "could not materialize $mode APKs from Play AAB" >&2
+    exit 1
+  }
+  mkdir "$directory"
+  unzip -q "$archive" -d "$directory" || {
+    echo "could not extract $mode APKs materialized from Play AAB" >&2
+    exit 1
+  }
+  while IFS= read -r -d '' apk; do
+    play_apks+=("$apk")
+  done < <(find "$directory" -type f -name '*.apk' -print0)
+  [ "${#play_apks[@]}" -gt "$initial_count" ] || {
+    echo "bundletool did not materialize any $mode APKs from Play AAB" >&2
+    exit 1
+  }
 }
 
+materialize_play_apks universal --mode=universal
+materialize_play_apks default
 python3 - "$direct_apk" "$play_aab" "${play_apks[@]}" <<'PY'
 import pathlib
 import re
