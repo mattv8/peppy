@@ -103,6 +103,8 @@ pub struct NetStatus {
     pub gateways: Vec<GatewayView>,
     pub gateways_known: bool,
     pub rcs_roster_validated: bool,
+    /// Authenticated, non-revoked device IDs from the latest gateway refresh.
+    pub rcs_live_roster: Vec<String>,
     pub vault: Option<VaultSummary>,
     pub device_role: Option<String>,
     pub revoked_device_ids: HashSet<String>,

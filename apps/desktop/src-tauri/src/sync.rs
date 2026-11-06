@@ -241,6 +241,16 @@ pub(crate) fn apply_gateway_refresh(
     let views = gateway_views(devices, capabilities);
     let device_role = extract_device_role(devices, &session.binding.device_id);
     let rcs_roster_validated = device_role.is_some();
+    let rcs_live_roster = rcs_roster_validated
+        .then(|| {
+            devices
+                .devices
+                .iter()
+                .filter(|device| !device.revoked)
+                .map(|device| device.device_id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let revoked_device_ids = devices
         .devices
         .iter()
@@ -253,10 +263,12 @@ pub(crate) fn apply_gateway_refresh(
             || status.gateways != views
             || status.device_role != device_role
             || status.rcs_roster_validated != rcs_roster_validated
+            || status.rcs_live_roster != rcs_live_roster
             || status.revoked_device_ids != revoked_device_ids;
         status.gateways = views.clone();
         status.gateways_known = true;
         status.rcs_roster_validated = rcs_roster_validated;
+        status.rcs_live_roster = rcs_live_roster;
         status.device_role = device_role;
         status.revoked_device_ids = revoked_device_ids;
         changed
@@ -2403,5 +2415,26 @@ mod drain_tests {
 
         assert!(!drain_all(Duration::from_millis(1)).await);
         assert!(drain_all(Duration::from_secs(1)).await);
+    }
+
+    #[test]
+    fn gateway_refresh_keeps_only_authenticated_non_revoked_roster_members() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open(&fixture, &fixture.binding, &[]);
+        let active_peer = uuid::Uuid::new_v4().to_string();
+        let revoked_peer = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices": [
+            {"device_id": fixture.binding.device_id, "role": "device", "revoked": false},
+            {"device_id": active_peer, "role": "gateway", "revoked": false},
+            {"device_id": revoked_peer, "role": "device", "revoked": true}
+        ]}))
+        .unwrap();
+        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities": []})).unwrap();
+
+        apply_gateway_refresh(&session, &devices, &capabilities);
+
+        let status = session.status.lock().unwrap();
+        assert!(status.rcs_roster_validated);
+        assert_eq!(status.rcs_live_roster, vec![fixture.binding.device_id, active_peer]);
     }
 }
