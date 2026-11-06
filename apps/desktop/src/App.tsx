@@ -2065,9 +2065,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       state.activeConversationId === requestedConversationId ||
       state.conversations.some((conversation) => conversation.id === requestedConversationId)
     ) return;
-    adoptHostDraft(requestedConversationId);
     const missingSlot = store.get(requestedConversationId);
-    if (missingSlot && (isDirty(missingSlot) || missingSlot.held || missingSlot.error)) return;
+    if (!missingSlot?.id) return;
+    adoptHostDraft(requestedConversationId);
+    const reconciledSlot = store.get(requestedConversationId);
+    if (reconciledSlot && (isDirty(reconciledSlot) || reconciledSlot.held || reconciledSlot.error)) return;
     if (!composerConversation && selectedRef.current === requestedConversationId) {
       choose(state.activeConversationId ?? "");
       setNewComposeKey((current) => current === requestedConversationId ? null : current);
