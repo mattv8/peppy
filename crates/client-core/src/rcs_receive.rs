@@ -170,14 +170,47 @@ impl Client {
         let tx = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO rcs_provider_detectors(conversation_id,provider_row_id,provider_thread_id,provider_type,observed_at_ms,observed_generation,resolved) VALUES(?,?,?,?,?,?,0)
-             ON CONFLICT(conversation_id,provider_row_id) DO NOTHING",
-            params![detector.conversation_id.to_string(), detector.provider_row_id, detector.provider_thread_id, detector.provider_type, detector.observed_at_ms, detector.observed_generation],
+        let conversation_id = detector.conversation_id.to_string();
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM rcs_provider_detectors WHERE conversation_id=? AND provider_row_id=?)",
+            params![conversation_id, detector.provider_row_id],
+            |row| row.get(0),
         )?;
+        if exists {
+            tx.commit()?;
+            return Ok(());
+        }
         tx.execute(
-            "DELETE FROM rcs_provider_detectors WHERE conversation_id=? AND provider_row_id IN (SELECT provider_row_id FROM rcs_provider_detectors WHERE conversation_id=? ORDER BY observed_at_ms DESC,provider_row_id DESC LIMIT -1 OFFSET ?)",
-            params![detector.conversation_id.to_string(), detector.conversation_id.to_string(), MAX_DETECTORS_PER_CONVERSATION],
+            "DELETE FROM rcs_provider_detectors WHERE conversation_id=? AND provider_row_id IN (
+                SELECT provider_row_id FROM rcs_provider_detectors
+                WHERE conversation_id=? AND resolved=1
+                  AND (SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?) >= ?
+                ORDER BY observed_at_ms,provider_row_id
+                LIMIT 1
+            )",
+            params![
+                conversation_id,
+                conversation_id,
+                conversation_id,
+                MAX_DETECTORS_PER_CONVERSATION
+            ],
+        )?;
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?",
+            [conversation_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if count >= MAX_DETECTORS_PER_CONVERSATION {
+            tx.execute(
+                "UPDATE rcs_lane_ownership SET alert_code='detector_overflow' WHERE conversation_id=?",
+                [conversation_id.as_str()],
+            )?;
+            tx.commit()?;
+            return Ok(());
+        }
+        tx.execute(
+            "INSERT INTO rcs_provider_detectors(conversation_id,provider_row_id,provider_thread_id,provider_type,observed_at_ms,observed_generation,resolved) VALUES(?,?,?,?,?,?,0)",
+            params![conversation_id, detector.provider_row_id, detector.provider_thread_id, detector.provider_type, detector.observed_at_ms, detector.observed_generation],
         )?;
         tx.commit()?;
         Ok(())

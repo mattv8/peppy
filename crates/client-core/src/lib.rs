@@ -6536,7 +6536,7 @@ CREATE TABLE rcs_lane_ownership(
   ownership_generation INTEGER NOT NULL CHECK(ownership_generation > 0),
   history_token TEXT,
   detector_floor INTEGER NOT NULL,
-  alert_code TEXT CHECK(alert_code IN ('ambiguous_provider_window'))
+  alert_code TEXT CHECK(alert_code IN ('ambiguous_provider_window','detector_overflow'))
 );
 CREATE INDEX rcs_lane_ownership_owner_generation ON rcs_lane_ownership(owner,ownership_generation);
 CREATE TABLE rcs_message_identities(
