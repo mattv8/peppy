@@ -592,6 +592,97 @@ mod tests {
         assert!(inbound.displays.is_empty());
     }
 
+    fn display_outcome(
+        peer: DeviceId,
+        conversation: ConversationId,
+        generation: u64,
+        token: u64,
+        sequence: u64,
+        deadline: u64,
+    ) -> LiveOutcome {
+        LiveOutcome {
+            generation: LiveEnableGeneration(generation),
+            session_update: None,
+            reply: None,
+            action: Some(LiveAction::Display {
+                peer_device_id: peer,
+                session_token: token,
+                sequence,
+                conversation_id: conversation,
+                state: peppy_protocol::TypingStateV2::Started,
+                deadline_mono: deadline,
+            }),
+        }
+    }
+
+    #[test]
+    fn publication_fence_drops_stale_generation_retired_tokens_and_replayed_sequences() {
+        let peer = DeviceId::new();
+        let conversation = ConversationId::new();
+        let mut inbound = InboundTyping::default();
+        inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 2,
+            validation_revision: 1,
+        });
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 2, 2, 10),
+            Some(LiveEnableGeneration(2)),
+        );
+        assert!(inbound.displays.is_empty());
+        inbound.publish(
+            display_outcome(peer, conversation, 2, 1, 2, 10),
+            Some(LiveEnableGeneration(2)),
+        );
+        assert!(inbound.displays.is_empty());
+        inbound.publish(
+            display_outcome(peer, conversation, 2, 2, 2, 10),
+            Some(LiveEnableGeneration(2)),
+        );
+        assert_eq!(inbound.displays.len(), 1);
+        inbound.publish(
+            display_outcome(peer, conversation, 2, 2, 2, 11),
+            Some(LiveEnableGeneration(2)),
+        );
+        assert_eq!(inbound.displays[&conversation].expires_at_ms, 10);
+    }
+
+    #[test]
+    fn expiry_and_gateway_intent_never_publish() {
+        let peer = DeviceId::new();
+        let conversation = ConversationId::new();
+        let mut inbound = InboundTyping::default();
+        inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 1,
+        });
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 1, 1, 10),
+            Some(LiveEnableGeneration(1)),
+        );
+        inbound.expire(10);
+        assert!(inbound.displays.is_empty());
+        let outcome = LiveOutcome {
+            generation: LiveEnableGeneration(1),
+            session_update: None,
+            reply: None,
+            action: Some(LiveAction::GatewayTypingIntent {
+                peer_device_id: peer,
+                session_token: 1,
+                sequence: 2,
+                conversation_id: conversation,
+                state: peppy_protocol::TypingStateV2::Started,
+                deadline_mono: 11,
+            }),
+        };
+        inbound.publish(outcome, Some(LiveEnableGeneration(1)));
+        assert!(inbound.displays.is_empty());
+        assert_eq!(inbound.gateway_intent_drops, 1);
+    }
+
     #[tokio::test]
     async fn cancellation_wakes_supervisor_wait_without_enabling() {
         let (_, session, _) = session_with_linked_eligible_gateway();
