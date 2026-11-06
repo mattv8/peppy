@@ -249,17 +249,7 @@ async fn supervise(session: Arc<Session>) {
 async fn connect(
     session: &Session,
 ) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, ()> {
-    let url = format!("{}/v1/live", session.api.origin())
-        .replacen("https://", "wss://", 1)
-        .replacen("http://", "ws://", 1);
-    let mut request = url.into_client_request().map_err(|_| ())?;
-    let mut bearer =
-        tungstenite::http::HeaderValue::from_str(&format!("Bearer {}", session.api.bearer()))
-            .map_err(|_| ())?;
-    bearer.set_sensitive(true);
-    request
-        .headers_mut()
-        .insert(tungstenite::http::header::AUTHORIZATION, bearer);
+    let request = live_request(session.api.origin(), session.api.bearer())?;
     let connector = crate::tls::websocket_connector(session.api.origin()).map_err(|_| ())?;
     timeout(
         LIVE_CONNECT_TIMEOUT,
@@ -278,6 +268,20 @@ async fn connect(
     .map_err(|_| ())?
     .map(|(socket, _)| socket)
     .map_err(|_| ())
+}
+
+fn live_request(origin: &str, token: &str) -> Result<tungstenite::http::Request<()>, ()> {
+    let url = format!("{origin}/v1/live")
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1);
+    let mut request = url.into_client_request().map_err(|_| ())?;
+    let mut bearer =
+        tungstenite::http::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| ())?;
+    bearer.set_sensitive(true);
+    request
+        .headers_mut()
+        .insert(tungstenite::http::header::AUTHORIZATION, bearer);
+    Ok(request)
 }
 
 async fn server_hello(
@@ -312,6 +316,10 @@ fn disable(state: &mut LiveTypingState, session: &Session) {
 
 async fn wait_or_cancel(session: &Session, delay: Duration) -> bool {
     tokio::select! { _ = session.cancel.cancelled() => false, _ = sleep(delay) => true }
+}
+
+fn next_live_backoff(backoff: Duration) -> Duration {
+    (backoff * 2).min(LIVE_MAX_BACKOFF)
 }
 
 #[cfg(test)]
@@ -420,6 +428,56 @@ mod tests {
             session.client.set_typing_sharing(true),
             Err(LiveError::Disabled)
         );
+    }
+
+    #[test]
+    fn live_request_targets_v2_endpoint_with_device_bearer() {
+        let request = live_request("https://example.test", "device-token").unwrap();
+        assert_eq!(request.uri(), "wss://example.test/v1/live");
+        assert_eq!(
+            request.headers()[tungstenite::http::header::AUTHORIZATION],
+            "Bearer device-token"
+        );
+        assert_eq!(LiveHelloV2::new().protocol_version, 2);
+    }
+
+    #[test]
+    fn probe_failure_backoff_is_jittered_and_capped() {
+        let capped = next_live_backoff(LIVE_MAX_BACKOFF);
+        assert_eq!(capped, LIVE_MAX_BACKOFF);
+        let delay = jitter(capped);
+        assert!(delay >= capped);
+        assert!(delay <= capped + capped / 4);
+    }
+
+    #[tokio::test]
+    async fn cancellation_wakes_supervisor_wait_without_enabling() {
+        let (_, session, _) = session_with_linked_eligible_gateway();
+        session.cancel.cancel();
+        assert!(!wait_or_cancel(&session, Duration::from_secs(1)).await);
+        assert_eq!(
+            session.client.set_typing_sharing(true),
+            Err(LiveError::Disabled)
+        );
+    }
+
+    #[test]
+    fn socket_drop_disables_and_reconnect_reenables_with_new_generation() {
+        let (fixture, session, _) = session_with_linked_eligible_gateway();
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        install_gateway(&session, &fixture.binding.device_id);
+        let context = {
+            let status = session.status.lock().unwrap();
+            enable_context(&status, inputs(&session))
+        };
+        let mut state = LiveTypingState::default();
+        let first = state
+            .apply(&session.client, context.clone(), clock())
+            .unwrap();
+        disable(&mut state, &session);
+        assert_eq!(state.generation(), None);
+        let second = state.apply(&session.client, context, clock()).unwrap();
+        assert_ne!(first, second);
     }
 
     #[test]
