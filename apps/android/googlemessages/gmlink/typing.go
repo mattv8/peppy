@@ -33,6 +33,7 @@ type gatewayTypingIntent struct {
 	ConversationID string      `json:"conversation_id"`
 	State          typingState `json:"state"`
 	DeadlineMono   uint64      `json:"deadline_mono"`
+	LinkGeneration uint64      `json:"link_generation"`
 }
 
 type typingSetRequest struct {
@@ -154,7 +155,7 @@ func (link *Link) SetTyping(intentJSON string) string {
 	link.rpcMu.Lock()
 	defer link.rpcMu.Unlock()
 	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
-	if !ok {
+	if !ok || intent.LinkGeneration != generation {
 		return "typing_stale"
 	}
 	link.mu.Lock()
@@ -162,10 +163,12 @@ func (link *Link) SetTyping(intentJSON string) string {
 		link.mu.Unlock()
 		return "typing_stale"
 	}
-	conversations := make([]*gmproto.Conversation, 0, len(link.conversationRecords))
-	for _, conversation := range link.conversationRecords {
-		conversations = append(conversations, cloneConversation(conversation))
+	conversation := link.currentSupportedRcsConversationLocked(intent.ConversationID, generation, streamEpoch)
+	if conversation == nil {
+		link.mu.Unlock()
+		return "typing_refused"
 	}
+	conversations := []*gmproto.Conversation{conversation}
 	simPayload := typingSIMPayload(intent.ConversationID, link.conversationRecords, link.settings)
 	now := link.typingNowMono
 	effect := link.setTyping

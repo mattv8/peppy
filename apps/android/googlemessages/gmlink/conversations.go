@@ -361,6 +361,17 @@ func conversationBlocksCompleteAbsence(conversation *gmproto.Conversation) bool 
 	return false
 }
 
+func (link *Link) currentSupportedRcsConversationLocked(id string, generation, streamEpoch uint64) *gmproto.Conversation {
+	if id == "" || !link.conversationIndexComplete || link.conversationIndexGeneration != generation || link.conversationIndexStreamEpoch != streamEpoch || link.pendingConversationEvents != 0 {
+		return nil
+	}
+	conversation := link.conversationRecords[id]
+	if classifyConversation(conversation) != conversationClassificationEligible {
+		return nil
+	}
+	return cloneConversation(conversation)
+}
+
 func classifyConversation(conversation *gmproto.Conversation) string {
 	visibleOthers := visibleOtherParticipants(conversation)
 	for _, participant := range visibleOthers {

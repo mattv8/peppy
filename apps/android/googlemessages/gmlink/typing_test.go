@@ -99,7 +99,7 @@ func TestTypingArgumentsOnlyStartsAndContextIsBounded(t *testing.T) {
 }
 
 func typingConversation(id string, visible bool) *gmproto.Conversation {
-	return &gmproto.Conversation{ConversationID: id, Participants: []*gmproto.Participant{
+	return &gmproto.Conversation{ConversationID: id, Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE, Participants: []*gmproto.Participant{
 		{IsMe: true, IsVisible: true, ID: &gmproto.SmallInfo{Number: "synthetic-self"}},
 		{IsVisible: visible, ID: &gmproto.SmallInfo{Number: "synthetic-participant"}},
 	}}
@@ -120,17 +120,20 @@ func assertTypingRecordShape(t *testing.T, record *typingRecord) {
 
 func typingLink(host Host, conversation *gmproto.Conversation) *Link {
 	return &Link{
-		host:              host,
-		client:            &libgm.Client{},
-		state:             stateLinked,
-		running:           true,
-		runCtx:            context.Background(),
-		generation:        7,
-		runGeneration:     7,
-		streamEpoch:       3,
-		stateRevision:     11,
-		ownerVerification: &ownerVerification{generation: 7},
-		changes:           make(chan any, 8),
+		host:                         host,
+		client:                       &libgm.Client{},
+		state:                        stateLinked,
+		running:                      true,
+		runCtx:                       context.Background(),
+		generation:                   7,
+		runGeneration:                7,
+		streamEpoch:                  3,
+		stateRevision:                11,
+		conversationIndexComplete:    true,
+		conversationIndexGeneration:  7,
+		conversationIndexStreamEpoch: 3,
+		ownerVerification:            &ownerVerification{generation: 7},
+		changes:                      make(chan any, 8),
 		conversationRecords: map[string]*gmproto.Conversation{
 			conversation.GetConversationID(): conversation,
 		},
@@ -188,11 +191,11 @@ func TestSetTypingRefusesExpiredAndOldGeneration(t *testing.T) {
 	calls := 0
 	link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
 
-	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":100}`); got != "typing_expired" {
+	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":100,"link_generation":7}`); got != "typing_expired" {
 		t.Fatalf("expired = %q", got)
 	}
 	link.runGeneration = 6
-	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101}`); got != "typing_stale" {
+	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101,"link_generation":7}`); got != "typing_stale" {
 		t.Fatalf("stale = %q", got)
 	}
 	if calls != 0 {
@@ -219,7 +222,7 @@ func TestSetTypingStartsWithBoundedContext(t *testing.T) {
 		return nil
 	}
 
-	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101}`); got != "ok" || !called {
+	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101,"link_generation":7}`); got != "ok" || !called {
 		t.Fatalf("result = %q, called = %t", got, called)
 	}
 }
@@ -230,4 +233,56 @@ func typingSettings() *gmproto.Settings {
 		RCSChats:       &gmproto.RCSChats{Enabled: true},
 		SIMData:        &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}},
 	}}}
+}
+
+func TestSetTypingRequiresCurrentLinkGeneration(t *testing.T) {
+	conversation := typingConversation("synthetic-conversation", true)
+	conversation.DefaultOutgoingID = "self-sim"
+	link := typingLink(&ownedRecordHost{}, conversation)
+	link.settings = typingSettings()
+	link.typingNowMono = func() uint64 { return 100 }
+	calls := 0
+	link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
+
+	got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101,"link_generation":6}`)
+
+	if got != "typing_stale" || calls != 0 {
+		t.Fatalf("result = %q, calls = %d", got, calls)
+	}
+}
+
+func TestSetTypingRequiresEligibleStage2Conversation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*Link, *gmproto.Conversation)
+	}{
+		{name: "sms", configure: func(_ *Link, conversation *gmproto.Conversation) { conversation.Type = gmproto.ConversationType_SMS }},
+		{name: "inactive", configure: func(_ *Link, conversation *gmproto.Conversation) {
+			conversation.Status = gmproto.ConversationStatus_ARCHIVED
+		}},
+		{name: "group", configure: func(_ *Link, conversation *gmproto.Conversation) {
+			conversation.Participants = typingGroup(conversation.ConversationID).Participants
+		}},
+		{name: "unknown", configure: func(link *Link, conversation *gmproto.Conversation) {
+			delete(link.conversationRecords, conversation.ConversationID)
+		}},
+		{name: "incomplete index", configure: func(link *Link, _ *gmproto.Conversation) { link.conversationIndexComplete = false }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conversation := typingConversation("synthetic-conversation", true)
+			conversation.DefaultOutgoingID = "self-sim"
+			link := typingLink(&ownedRecordHost{}, conversation)
+			link.settings = typingSettings()
+			link.typingNowMono = func() uint64 { return 100 }
+			test.configure(link, conversation)
+			calls := 0
+			link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
+
+			got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","deadline_mono":101,"link_generation":7}`)
+
+			if got != "typing_refused" || calls != 0 {
+				t.Fatalf("result = %q, calls = %d", got, calls)
+			}
+		})
+	}
 }
