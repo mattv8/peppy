@@ -32,7 +32,7 @@ export function useTypingSender(input: TypingSenderInput) {
 
   const stop = () => {
     const conversationId = activeConversationId.current;
-    if (!conversationId) return;
+    if (!conversationId) { setState("idle"); return; }
     activeConversationId.current = undefined;
     clearTimers();
     setState("idle");
@@ -65,6 +65,8 @@ export function useTypingSender(input: TypingSenderInput) {
       activeConversationId.current = conversationId;
       setState("active");
       void inputRef.current.bridge.send_typing?.({ conversationId, state: "started" }).catch(() => undefined);
+      refreshTimer.current = window.setInterval(refresh, REFRESH_MS);
+    } else if (refreshTimer.current === undefined) {
       refreshTimer.current = window.setInterval(refresh, REFRESH_MS);
     }
     if (idleTimer.current !== undefined) window.clearTimeout(idleTimer.current);

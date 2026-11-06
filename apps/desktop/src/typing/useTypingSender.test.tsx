@@ -109,4 +109,16 @@ describe("useTypingSender", () => {
     expect(rejected).toHaveBeenCalledTimes(2);
     expect(rejected).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
   });
+
+  it("rearms refresh after input resumes and returns suppressed state to idle", () => {
+    vi.useFakeTimers();
+    const { result, sendTyping } = renderSender();
+    act(() => result.current.noteInput("message"));
+    act(() => vi.advanceTimersByTime(3_201));
+    act(() => result.current.noteInput("message"));
+    act(() => vi.advanceTimersByTime(3_200));
+    expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "started" });
+    act(() => result.current.noteSend());
+    expect(result.current.state).toBe("idle");
+  });
 });

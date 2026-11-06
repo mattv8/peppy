@@ -701,7 +701,6 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 @keyframes typing-dot { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { #typing-indicator-dots i { animation: none; opacity: .7; } }
 @media (forced-colors: active) { #typing-indicator-dots i { background: CanvasText; } }
-@container composer-card (width < 380px) { #shared-composer:has(#typing-indicator:not([hidden])) #shift-enter-hint { display: none; } }
 .header-copy-details small {
   color: var(--peppy-text-secondary);
   font-size: 11px;

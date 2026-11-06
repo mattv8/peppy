@@ -53,6 +53,13 @@ describe("useTypingDisplay", () => {
     expect(unsubscribe).toHaveBeenCalled();
   });
 
+  it("keeps a visible remote indicator when local typing starts", () => {
+    const { result, receive, rerender } = display();
+    receive({ conversationId: "chat-1", state: "started" });
+    rerender({ conversationId: "chat-1", current: true, local: true });
+    expect(result.current.visible).toBe(true);
+  });
+
   it("does nothing without a subscription or while the local user is typing", () => {
     const absent = display({ subscribe: false });
     expect(absent.result.current.visible).toBe(false);

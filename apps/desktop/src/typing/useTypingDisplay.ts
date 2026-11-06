@@ -8,6 +8,8 @@ export const TYPING_ANNOUNCE_COOLDOWN_MS = 30_000;
 export function useTypingDisplay(bridge: DesktopBridge, conversationId: string | undefined, current: boolean, localUserTyping = false) {
   const [state, setState] = useState({ visible: false, announcement: false });
   const announcements = useRef(new Map<string, number>());
+  const localTypingRef = useRef(localUserTyping);
+  localTypingRef.current = localUserTyping;
   useEffect(() => {
     if (!current || !conversationId || !bridge.subscribe_typing) {
       setState({ visible: false, announcement: false });
@@ -30,7 +32,7 @@ export function useTypingDisplay(bridge: DesktopBridge, conversationId: string |
       if (deadline <= Date.now()) return clear();
       if (displayTimer !== undefined) window.clearTimeout(displayTimer);
       const lastAnnouncement = announcements.current.get(conversationId);
-      const announce = !localUserTyping && (lastAnnouncement === undefined || lastAnnouncement + TYPING_ANNOUNCE_COOLDOWN_MS <= Date.now());
+      const announce = !localTypingRef.current && (lastAnnouncement === undefined || lastAnnouncement + TYPING_ANNOUNCE_COOLDOWN_MS <= Date.now());
       if (announce) announcements.current.set(conversationId, Date.now());
       setState(previous => ({ visible: true, announcement: previous.announcement || announce }));
       if (announce) {
@@ -41,6 +43,6 @@ export function useTypingDisplay(bridge: DesktopBridge, conversationId: string |
     };
     const unsubscribe = bridge.subscribe_typing(receive);
     return () => { clear(); unsubscribe(); };
-  }, [bridge, conversationId, current, localUserTyping]);
+  }, [bridge, conversationId, current]);
   return state;
 }
