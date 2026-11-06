@@ -599,7 +599,7 @@ impl Client {
             return Err(Error::InvalidRequest("invalid RCS provider detector"));
         }
         let mut store = self.lock()?;
-        let (conn, _) = store.parts();
+        let (conn, ctx) = store.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let conversation_id = detector.conversation_id.to_string();
         tx.execute(
@@ -640,6 +640,7 @@ impl Client {
                 "UPDATE rcs_lane_ownership SET alert_code='detector_overflow' WHERE conversation_id=?",
                 [conversation_id.as_str()],
             )?;
+            publish_metadata(&tx, &ctx, detector.conversation_id, None, true)?;
             tx.commit()?;
             return Ok(());
         }
