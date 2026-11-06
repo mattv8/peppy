@@ -148,7 +148,8 @@ pub use rcs_native::{
 };
 pub use rcs_receive::{
     RcsCutover, RcsIdentityOutcome, RcsOwnership, RcsProjectedRecord, RcsProviderDetector,
-    RcsReceiveAlert, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState,
+    RcsProjectedStatus, RcsReceiveAlert, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner,
+    RcsReceiveState, RcsStatusApplication,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
@@ -382,10 +383,24 @@ pub enum Direction {
     Incoming,
     Outgoing,
 }
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RcsMessageStatus {
+    Sending,
+    Sent,
+    Failed,
+    Delivered,
+    Read,
+}
 /// Canonical encrypted inner wire. Native code never parses this; it only moves envelopes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrivatePayload {
+    RcsMessageStatus {
+        message_id: MessageId,
+        status: RcsMessageStatus,
+    },
     RcsLinkStatus(RcsLinkStatusPayload),
     RcsLinkEligibility(RcsLinkEligibilityPayload),
     MmsDeferredPreview {
@@ -6608,6 +6623,10 @@ CREATE TABLE rcs_provider_detectors(
   PRIMARY KEY(conversation_id,provider_row_id)
 );
 CREATE INDEX rcs_provider_detectors_unresolved ON rcs_provider_detectors(conversation_id,resolved,provider_row_id);
+CREATE TABLE rcs_message_status(
+  message_id TEXT PRIMARY KEY,
+  status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 1 AND 5)
+);
 ";
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
@@ -7729,6 +7748,11 @@ fn apply_record(
         other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
+        (EnvelopePurpose::Event, PrivatePayload::RcsMessageStatus { message_id, status }) => {
+            if !rcs_receive::apply_replicated_status(conn, message_id, status)? {
+                return Ok(None);
+            }
+        }
         (EnvelopePurpose::Event, PrivatePayload::RcsLinkStatus(status)) => {
             if !rcs_capability::apply_status(
                 conn,

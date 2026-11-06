@@ -1,7 +1,7 @@
 use crate::{
     Client, ConversationId, Ctx, Direction, EnvelopePurpose, Error, Inserted, MessageId,
-    MessagePayload, MessageRecord, PrivatePayload, Transport, enqueue, insert_message,
-    next_source_sequence,
+    MessagePayload, MessageRecord, PrivatePayload, RcsMessageStatus, Transport, enqueue,
+    insert_message, next_source_sequence,
 };
 use peppy_crypto::compaction_hmac;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -78,7 +78,26 @@ pub struct RcsProjectedRecord {
 pub enum RcsReceiveOutcome {
     Inserted,
     Duplicate,
+    StatusApplied,
+    StatusUnchanged,
     Rejected(RcsReceiveCode),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RcsProjectedStatus {
+    Sending,
+    Sent,
+    Failed,
+    Delivered,
+    Read,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RcsStatusApplication {
+    pub google_message_id: String,
+    pub google_conversation_id: String,
+    pub tmp_id: Option<String>,
+    pub status: RcsProjectedStatus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +326,58 @@ impl Client {
         Ok(outcome)
     }
 
+    pub fn apply_rcs_projected_status(
+        &self,
+        conversation_id: ConversationId,
+        ownership_generation: u64,
+        application: RcsStatusApplication,
+    ) -> Result<RcsReceiveOutcome, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(ownership) = load_ownership(&tx, conversation_id)? else {
+            return Ok(RcsReceiveOutcome::Rejected(
+                RcsReceiveCode::ConversationUnproven,
+            ));
+        };
+        if ownership.owner != RcsReceiveOwner::Link
+            || ownership.ownership_generation != ownership_generation
+        {
+            return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::OwnershipStale));
+        }
+        let message_id: Option<String> = tx.query_row(
+            "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=? AND conversation_id=?",
+            params![application.google_message_id, application.google_conversation_id, conversation_id.to_string()],
+            |row| row.get(0),
+        ).optional()?.flatten();
+        let Some(message_id) = message_id else {
+            return Ok(RcsReceiveOutcome::Rejected(
+                RcsReceiveCode::IdentityConflict,
+            ));
+        };
+        let message_id: MessageId = message_id.parse().map_err(|_| Error::Database)?;
+        let status = match application.status {
+            RcsProjectedStatus::Sending => RcsMessageStatus::Sending,
+            RcsProjectedStatus::Sent => RcsMessageStatus::Sent,
+            RcsProjectedStatus::Failed => RcsMessageStatus::Failed,
+            RcsProjectedStatus::Delivered => RcsMessageStatus::Delivered,
+            RcsProjectedStatus::Read => RcsMessageStatus::Read,
+        };
+        if !apply_status(&tx, message_id, status)? {
+            return Ok(RcsReceiveOutcome::StatusUnchanged);
+        }
+        enqueue(
+            &tx,
+            &ctx,
+            EnvelopePurpose::Event,
+            None,
+            None,
+            &PrivatePayload::RcsMessageStatus { message_id, status },
+        )?;
+        tx.commit()?;
+        Ok(RcsReceiveOutcome::StatusApplied)
+    }
+
     pub fn checkpoint_rcs_history(
         &self,
         conversation_id: ConversationId,
@@ -513,6 +584,40 @@ fn deterministic_message_id(
     uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x80;
     uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;
     Ok(MessageId(Uuid::from_bytes(uuid_bytes)))
+}
+
+fn apply_status(
+    conn: &Connection,
+    message_id: MessageId,
+    status: RcsMessageStatus,
+) -> Result<bool, Error> {
+    let rank = |status| match status {
+        RcsMessageStatus::Sending => 1,
+        RcsMessageStatus::Sent => 2,
+        RcsMessageStatus::Failed => 3,
+        RcsMessageStatus::Delivered => 4,
+        RcsMessageStatus::Read => 5,
+    };
+    let current: Option<i64> = conn
+        .query_row(
+            "SELECT status_rank FROM rcs_message_status WHERE message_id=?",
+            [message_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if current.is_some_and(|current| current >= rank(status)) {
+        return Ok(false);
+    }
+    conn.execute("INSERT INTO rcs_message_status(message_id,status_rank) VALUES(?,?) ON CONFLICT(message_id) DO UPDATE SET status_rank=excluded.status_rank", params![message_id.to_string(), rank(status)])?;
+    Ok(true)
+}
+
+pub(crate) fn apply_replicated_status(
+    conn: &Connection,
+    message_id: MessageId,
+    status: RcsMessageStatus,
+) -> Result<bool, Error> {
+    apply_status(conn, message_id, status)
 }
 
 fn next_generation(conn: &Connection, conversation_id: ConversationId) -> Result<i64, Error> {

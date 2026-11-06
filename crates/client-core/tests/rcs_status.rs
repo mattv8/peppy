@@ -209,3 +209,56 @@ fn page_records_are_imported_while_live_records_remain_unseen() {
         Some("page-token")
     );
 }
+
+#[test]
+fn rcs_status_lattice_is_monotonic() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let owner = client
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("live"))
+        .unwrap();
+    for status in [
+        RcsProjectedStatus::Sending,
+        RcsProjectedStatus::Sent,
+        RcsProjectedStatus::Failed,
+        RcsProjectedStatus::Delivered,
+        RcsProjectedStatus::Read,
+    ] {
+        assert_eq!(
+            client
+                .apply_rcs_projected_status(
+                    conversation,
+                    owner.ownership_generation,
+                    RcsStatusApplication {
+                        google_message_id: "provider-message".into(),
+                        google_conversation_id: "provider-conversation".into(),
+                        tmp_id: None,
+                        status,
+                    },
+                )
+                .unwrap(),
+            RcsReceiveOutcome::StatusApplied
+        );
+    }
+    assert_eq!(
+        client
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                RcsStatusApplication {
+                    google_message_id: "provider-message".into(),
+                    google_conversation_id: "provider-conversation".into(),
+                    tmp_id: None,
+                    status: RcsProjectedStatus::Failed,
+                },
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusUnchanged
+    );
+}
