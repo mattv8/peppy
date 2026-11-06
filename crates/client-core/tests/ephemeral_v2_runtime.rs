@@ -195,6 +195,107 @@ fn v2_is_disabled_until_a_trusted_context_enables_and_then_seals_a_real_frame() 
 }
 
 #[test]
+fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&directory, "v2-sender", &vault);
+    let receiver_config = config(&directory, "v2-receiver", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let receiver = unlocked(&receiver_config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&receiver, receiver_config.device_id, conversation);
+    let roster = vec![sender_config.device_id, receiver_config.device_id];
+    sender
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster.clone(),
+                local_gateway_device_id: sender_config.device_id,
+                local_executor: LiveExecutor::None,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+    receiver
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster,
+                local_gateway_device_id: receiver_config.device_id,
+                local_executor: LiveExecutor::CurrentGateway,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+
+    let typing = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        1_001,
+        1_001,
+    )
+    .unwrap();
+    let challenge = receiver
+        .open_typing_signal_v2(
+            &typing.signal,
+            LiveClock {
+                wall_ms: 1_001,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    let acknowledgement = sender
+        .open_typing_signal_v2(
+            &challenge,
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_002,
+            },
+        )
+        .unwrap()
+        .reply
+        .unwrap();
+    assert!(
+        receiver
+            .open_typing_signal_v2(
+                &acknowledgement,
+                LiveClock {
+                    wall_ms: 1_003,
+                    mono_ms: 1_003
+                },
+            )
+            .unwrap()
+            .session_update
+            .is_some()
+    );
+
+    let typing = seal(
+        &sender,
+        conversation,
+        receiver_config.device_id,
+        TypingStateV2::Started,
+        1_004,
+        1_004,
+    )
+    .unwrap();
+    assert!(matches!(
+        receiver
+            .open_typing_signal_v2(&typing.signal, LiveClock { wall_ms: 1_004, mono_ms: 1_004 })
+            .unwrap()
+            .action,
+        Some(LiveAction::GatewayTypingIntent { conversation_id, state: TypingStateV2::Started, .. }) if conversation_id == conversation
+    ));
+}
+
+#[test]
 fn v2_rejects_empty_host_roster() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();

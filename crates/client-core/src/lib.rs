@@ -38,9 +38,9 @@ mod deferred_media;
 mod device_succession;
 mod ephemeral;
 mod ephemeral_v2;
+mod ephemeral_v2_control;
+mod ephemeral_v2_decode;
 mod ephemeral_v2_policy;
-/// Temporary private staging boundary; C3 consumes this session module and removes the allowance.
-#[allow(dead_code)]
 mod ephemeral_v2_session;
 mod gateway_settings;
 mod history_import;
@@ -60,7 +60,8 @@ pub use ephemeral::{
     TypingState, TypingView,
 };
 pub use ephemeral_v2::{
-    LiveClock, LiveEnableContext, LiveEnableGeneration, LiveError, LiveExecutor, LiveOutbound,
+    LiveAction, LiveClock, LiveEnableContext, LiveEnableGeneration, LiveError, LiveExecutor,
+    LiveOutbound, LiveOutcome, PeerSessionUpdate,
 };
 mod media_paging;
 mod mms;
@@ -121,7 +122,7 @@ pub use peppy_domain::{
 };
 pub use peppy_protocol::{
     CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, EphemeralSignalV1,
-    GatewayRoute,
+    EphemeralSignalV2, GatewayRoute,
 };
 use peppy_protocol::{MAX_CIPHERTEXT_BYTES, MAX_COMPACTION_SUPERSEDES, PROTOCOL_VERSION};
 pub use phone_read::{
@@ -2101,6 +2102,16 @@ impl Client {
             state,
             clock,
         )
+    }
+
+    /// Opens an authenticated v2 live typing frame under the current enabled incarnation.
+    pub fn open_typing_signal_v2(
+        &self,
+        signal: &EphemeralSignalV2,
+        clock: LiveClock,
+    ) -> Result<LiveOutcome, LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::open(&mut store, signal, clock)
     }
 
     /// Exports both purpose keys of an unlocked epoch for OS secure storage. The root key and
