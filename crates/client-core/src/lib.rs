@@ -148,8 +148,8 @@ pub use rcs_native::{
 };
 pub use rcs_receive::{
     RcsConversationMetadata, RcsConversationTransport, RcsCutover, RcsIdentityOutcome,
-    RcsOwnership, RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsReceiveAlert,
-    RcsMessageStatusProjection, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner,
+    RcsMessageStatusProjection, RcsOwnership, RcsProjectedRecord, RcsProjectedStatus,
+    RcsProviderDetector, RcsReceiveAlert, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner,
     RcsReceiveState, RcsStatusApplication,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};

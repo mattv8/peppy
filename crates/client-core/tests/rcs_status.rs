@@ -122,11 +122,13 @@ fn stale_metadata_generation_is_rejected_without_writing() {
             .unwrap_err(),
         Error::InvalidRequest("stale RCS conversation metadata writer")
     );
-    assert!(!client
-        .rcs_conversation_metadata(conversation)
-        .unwrap()
-        .unwrap()
-        .rcs_history_gap);
+    assert!(
+        !client
+            .rcs_conversation_metadata(conversation)
+            .unwrap()
+            .unwrap()
+            .rcs_history_gap
+    );
 }
 
 #[test]
@@ -166,7 +168,10 @@ fn rcs_read_accessors_expose_google_reported_status_and_metadata_facts() {
     client
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
         .unwrap();
-    let message_id = only_message(&client, conversation).payload.record.message_id;
+    let message_id = only_message(&client, conversation)
+        .payload
+        .record
+        .message_id;
     assert_eq!(client.rcs_message_status(message_id).unwrap(), None);
     client
         .apply_rcs_projected_status(
@@ -185,7 +190,10 @@ fn rcs_read_accessors_expose_google_reported_status_and_metadata_facts() {
     client
         .publish_rcs_conversation_metadata(conversation, owner.ownership_generation, Some(true))
         .unwrap();
-    let metadata = client.rcs_conversation_metadata(conversation).unwrap().unwrap();
+    let metadata = client
+        .rcs_conversation_metadata(conversation)
+        .unwrap()
+        .unwrap();
     assert_eq!(metadata.rcs_encryption, Some(true));
     assert!(!metadata.rcs_history_gap);
 }
@@ -220,27 +228,33 @@ fn rcs_metadata_replicates_a_history_gap_through_cutover_and_relink() {
     let mut server = Server::default();
     server.upload(&first);
     server.sync(&second);
-    assert!(second
-        .rcs_conversation_metadata(conversation)
-        .unwrap()
-        .unwrap()
-        .rcs_history_gap);
+    assert!(
+        second
+            .rcs_conversation_metadata(conversation)
+            .unwrap()
+            .unwrap()
+            .rcs_history_gap
+    );
 
     let _relink = first
         .begin_rcs_link_ownership(conversation, "relink", 1)
         .unwrap();
-    assert!(!first
-        .rcs_conversation_metadata(conversation)
-        .unwrap()
-        .unwrap()
-        .rcs_history_gap);
+    assert!(
+        !first
+            .rcs_conversation_metadata(conversation)
+            .unwrap()
+            .unwrap()
+            .rcs_history_gap
+    );
     server.upload(&first);
     server.sync(&second);
-    assert!(!second
-        .rcs_conversation_metadata(conversation)
-        .unwrap()
-        .unwrap()
-        .rcs_history_gap);
+    assert!(
+        !second
+            .rcs_conversation_metadata(conversation)
+            .unwrap()
+            .unwrap()
+            .rcs_history_gap
+    );
 }
 
 #[test]
@@ -250,7 +264,9 @@ fn compacted_snapshot_restores_rcs_status_and_metadata_without_provider_identifi
     let gateway = unlocked(&config(&directory, "gateway", &vault), &vault);
     let restored = unlocked(&config(&directory, "restored", &vault), &vault);
     let conversation = ConversationId::new();
-    let owner = gateway.begin_rcs_link_ownership(conversation, "token", 0).unwrap();
+    let owner = gateway
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
     gateway
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
         .unwrap();
@@ -289,11 +305,19 @@ fn compacted_snapshot_restores_rcs_status_and_metadata_without_provider_identifi
             Some(3),
         )
         .unwrap();
-    restored.append_snapshot_page(session.generation, &records).unwrap();
+    restored
+        .append_snapshot_page(session.generation, &records)
+        .unwrap();
     restored.finish_snapshot(session.generation).unwrap();
     while restored.apply_pending(100).unwrap().snapshot_remaining > 0 {}
-    let message_id = only_message(&gateway, conversation).payload.record.message_id;
-    assert_eq!(status_rank(&config(&directory, "restored", &vault), message_id), Some(5));
+    let message_id = only_message(&gateway, conversation)
+        .payload
+        .record
+        .message_id;
+    assert_eq!(
+        status_rank(&config(&directory, "restored", &vault), message_id),
+        Some(5)
+    );
     assert_eq!(
         restored.rcs_conversation_metadata(conversation).unwrap(),
         gateway.rcs_conversation_metadata(conversation).unwrap()

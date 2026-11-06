@@ -44,9 +44,9 @@
 //! live apply ignores them by quarantine.
 use crate::{
     AppFilter, Client, Ctx, Cursor, EnvelopePurpose, Error, MAX_SNAPSHOT_PAGE_BYTES,
-    NotificationTarget, NotificationWire, Opened, PrivatePayload, contact_media, contacts,
-    conversation_folders, conversation_pinning, conversation_tones, notification_preferences,
-    notifications, open_payload, parse_wire, take_within_budget, to_i64, RcsMessageStatus,
+    NotificationTarget, NotificationWire, Opened, PrivatePayload, RcsMessageStatus, contact_media,
+    contacts, conversation_folders, conversation_pinning, conversation_tones,
+    notification_preferences, notifications, open_payload, parse_wire, take_within_budget, to_i64,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
