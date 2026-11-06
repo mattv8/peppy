@@ -3009,23 +3009,36 @@ async fn live_websocket(
     shutdown: Option<Extension<tokio::sync::watch::Receiver<bool>>>,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    let mode = crate::live_ticket_upgrade::classify_live_upgrade(
+    let mode = match crate::live_ticket_upgrade::classify_live_upgrade(
         &headers,
         state.live_trusted_origin.as_ref(),
-    )
-    .map_err(|rejection| {
-        let status = match rejection {
-            crate::live_ticket_upgrade::UpgradeRejection::ProtocolInvalid
-            | crate::live_ticket_upgrade::UpgradeRejection::AuthModeMixed => {
-                StatusCode::BAD_REQUEST
-            }
-            crate::live_ticket_upgrade::UpgradeRejection::OriginForbidden => StatusCode::FORBIDDEN,
-            crate::live_ticket_upgrade::UpgradeRejection::Unsupported => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-        };
-        ApiError(status, rejection.code())
-    })?;
+    ) {
+        Err(crate::live_ticket_upgrade::UpgradeRejection::ProtocolInvalid)
+            if !headers.contains_key("authorization")
+                && !headers.contains_key("sec-websocket-protocol") =>
+        {
+            authenticated(&state, &headers, Operation::Sync).await?;
+            unreachable!("missing credentials cannot authenticate")
+        }
+        Ok(mode) => mode,
+        Err(rejection) => {
+            return Err({
+                let status = match rejection {
+                    crate::live_ticket_upgrade::UpgradeRejection::ProtocolInvalid
+                    | crate::live_ticket_upgrade::UpgradeRejection::AuthModeMixed => {
+                        StatusCode::BAD_REQUEST
+                    }
+                    crate::live_ticket_upgrade::UpgradeRejection::OriginForbidden => {
+                        StatusCode::FORBIDDEN
+                    }
+                    crate::live_ticket_upgrade::UpgradeRejection::Unsupported => {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                };
+                ApiError(status, rejection.code())
+            });
+        }
+    };
     let (principal, ticket_session, protocol) = match mode {
         crate::live_ticket_upgrade::UpgradeMode::Bearer => (
             authenticated(&state, &headers, Operation::Sync).await?,
