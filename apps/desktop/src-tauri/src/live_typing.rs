@@ -346,11 +346,8 @@ async fn supervise(session: Arc<Session>) {
                     Some(Ok(Message::Text(frame))) => {
                         inbound.push(frame.to_string());
                         while let Some(frame) = inbound.take() {
-                            let outcome = session.client.open_typing_signal_v2_json(&frame, clock(started));
-                            if let Ok(outcome) = outcome {
-                                if let Some(reply) = inbound.publish(outcome, state.generation()) {
-                                    let _ = socket.send(Message::Text(reply.into())).await;
-                                }
+                            if let Some(reply) = process_inbound_frame(&session.client, &mut inbound, &frame, state.generation(), clock(started)) {
+                                let _ = socket.send(Message::Text(reply.into())).await;
                             }
                             inbound.expire(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
                         }
@@ -366,6 +363,19 @@ async fn supervise(session: Arc<Session>) {
         }
         backoff = (backoff * 2).min(LIVE_MAX_BACKOFF);
     }
+}
+
+fn process_inbound_frame(
+    client: &Client,
+    inbound: &mut InboundTyping,
+    frame_json: &str,
+    generation: Option<LiveEnableGeneration>,
+    clock: LiveClock,
+) -> Option<String> {
+    let outcome = client.open_typing_signal_v2_json(frame_json, clock).ok()?;
+    let reply = inbound.publish(outcome, generation);
+    inbound.expire(clock.mono_ms);
+    reply
 }
 
 async fn connect(
@@ -681,6 +691,177 @@ mod tests {
         inbound.publish(outcome, Some(LiveEnableGeneration(1)));
         assert!(inbound.displays.is_empty());
         assert_eq!(inbound.gateway_intent_drops, 1);
+    }
+
+    fn upload(client: &Client) -> Vec<peppy_client_core::Envelope> {
+        let pending = client.pending_outbox().unwrap();
+        for envelope in &pending {
+            client.ack_outbox(envelope.envelope_id).unwrap();
+        }
+        pending
+    }
+
+    fn sync(client: &Client, envelopes: &[peppy_client_core::Envelope]) {
+        for (index, envelope) in envelopes.iter().enumerate() {
+            let cursor = peppy_client_core::Cursor(index as u64 + 1);
+            let result = client.ingest(envelope, cursor).unwrap();
+            assert!(matches!(
+                result,
+                peppy_client_core::IngestResult::Journaled
+                    | peppy_client_core::IngestResult::Duplicate
+            ));
+        }
+        client.apply_pending(100).unwrap();
+    }
+
+    #[test]
+    fn real_clients_complete_challenge_ack_then_publish_display() {
+        use peppy_client_core::{ClientConfig, DatabaseKey, KeyProfile, VaultId};
+        use peppy_crypto::{create_vault_check_header, derive_root_key};
+        use peppy_protocol::{TypingOriginV2, TypingStateV2};
+        let directory = tempfile::tempdir().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key(PHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let sender_config = ClientConfig {
+            database_path: directory.path().join("a.db"),
+            vault_id,
+            device_id: DeviceId::new(),
+        };
+        let receiver_config = ClientConfig {
+            database_path: directory.path().join("b.db"),
+            vault_id,
+            device_id: DeviceId::new(),
+        };
+        let sender =
+            Client::open(sender_config.clone(), DatabaseKey::new(&[7; 32]).unwrap()).unwrap();
+        let receiver =
+            Client::open(receiver_config.clone(), DatabaseKey::new(&[7; 32]).unwrap()).unwrap();
+        for client in [&sender, &receiver] {
+            client.unlock(&profile, &header, PHRASE).unwrap();
+        }
+        let conversation = ConversationId::new();
+        sender
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: sender_config.device_id,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: 1_000,
+                    capability_revision: 1,
+                    feature_bits: 1,
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id: conversation,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 1,
+                    mapping_revision: 1,
+                    observed_at_ms: 1_000,
+                    gateway_device_id: sender_config.device_id,
+                }],
+                1_000,
+            )
+            .unwrap();
+        sync(&receiver, &upload(&sender));
+
+        let roster = vec![sender_config.device_id, receiver_config.device_id];
+        for (client, local_executor) in [
+            (&sender, LiveExecutor::CurrentGateway),
+            (&receiver, LiveExecutor::None),
+        ] {
+            client
+                .enable_live_typing(
+                    LiveEnableContext {
+                        trusted_roster: roster.clone(),
+                        local_gateway_device_id: sender_config.device_id,
+                        local_executor,
+                    },
+                    LiveClock {
+                        wall_ms: 1_000,
+                        mono_ms: 1_000,
+                    },
+                )
+                .unwrap();
+        }
+        let first = sender
+            .seal_typing_signal_v2(
+                conversation,
+                sender_config.device_id,
+                TypingOriginV2::GoogleContact,
+                TypingStateV2::Started,
+                LiveClock {
+                    wall_ms: 1_001,
+                    mono_ms: 1_001,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let mut inbound = InboundTyping::default();
+        let challenge = process_inbound_frame(
+            &receiver,
+            &mut inbound,
+            &serde_json::to_string(&first.signal).unwrap(),
+            Some(LiveEnableGeneration(1)),
+            LiveClock {
+                wall_ms: 1_001,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap();
+        let ack = process_inbound_frame(
+            &sender,
+            &mut InboundTyping::default(),
+            &challenge,
+            Some(LiveEnableGeneration(1)),
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_002,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            process_inbound_frame(
+                &receiver,
+                &mut inbound,
+                &ack,
+                Some(LiveEnableGeneration(1)),
+                LiveClock {
+                    wall_ms: 1_003,
+                    mono_ms: 1_003,
+                },
+            ),
+            None
+        );
+        let second = sender
+            .seal_typing_signal_v2(
+                conversation,
+                sender_config.device_id,
+                TypingOriginV2::GoogleContact,
+                TypingStateV2::Started,
+                LiveClock {
+                    wall_ms: 4_001,
+                    mono_ms: 4_001,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            process_inbound_frame(
+                &receiver,
+                &mut inbound,
+                &serde_json::to_string(&second.signal).unwrap(),
+                Some(LiveEnableGeneration(1)),
+                LiveClock {
+                    wall_ms: 4_001,
+                    mono_ms: 4_001,
+                },
+            ),
+            None
+        );
+        assert!(inbound.displays.contains_key(&conversation));
     }
 
     #[tokio::test]
