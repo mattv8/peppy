@@ -672,3 +672,482 @@ fn opened_fact_only_payload_contains_no_provider_identity() {
     assert!(encoded.get("google_conversation_id").is_none());
     assert!(encoded.get("tmp_id").is_none());
 }
+
+#[derive(Clone, Copy, Debug)]
+enum Denial {
+    Absent,
+    Stale,
+    Multiple,
+    CurrentOther,
+    StaleGeneration,
+    ProviderOwned,
+    Unproven,
+}
+
+const DENIALS: [Denial; 7] = [
+    Denial::Absent,
+    Denial::Stale,
+    Denial::Multiple,
+    Denial::CurrentOther,
+    Denial::StaleGeneration,
+    Denial::ProviderOwned,
+    Denial::Unproven,
+];
+
+impl Denial {
+    fn expected(self) -> RcsReceiveCode {
+        match self {
+            Self::Absent | Self::Stale | Self::Multiple | Self::CurrentOther => {
+                RcsReceiveCode::GatewayUnavailable
+            }
+            Self::StaleGeneration | Self::ProviderOwned => RcsReceiveCode::OwnershipStale,
+            Self::Unproven => RcsReceiveCode::ConversationUnproven,
+        }
+    }
+}
+
+struct Scene {
+    _directory: tempfile::TempDir,
+    _vault: Vault,
+    config: ClientConfig,
+    client: Client,
+    conversation: ConversationId,
+    generation: u64,
+}
+
+fn denied_scene(denial: Denial) -> Scene {
+    let (directory, vault, config, client, mut conversation, owner) = fixture();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("seed"))
+        .unwrap();
+    let connection = sql(&config);
+    match denial {
+        Denial::Absent => {
+            connection
+                .execute("DELETE FROM rcs_link_status_projection", [])
+                .unwrap();
+        }
+        Denial::Stale => {
+            connection
+                .execute("UPDATE rcs_link_status_projection SET observed_at_ms=0", [])
+                .unwrap();
+        }
+        Denial::Multiple => {
+            connection
+                .execute(
+                    "INSERT INTO rcs_link_status_projection VALUES(?,?,?,?,?,?,?,?,?)",
+                    params![
+                        DeviceId::new().to_string(),
+                        "linked",
+                        true,
+                        true,
+                        true,
+                        now(),
+                        1,
+                        1,
+                        1
+                    ],
+                )
+                .unwrap();
+        }
+        Denial::CurrentOther => {
+            connection
+                .execute(
+                    "UPDATE rcs_link_status_projection SET gateway_device_id=?",
+                    [DeviceId::new().to_string()],
+                )
+                .unwrap();
+        }
+        Denial::StaleGeneration => {
+            client
+                .begin_rcs_link_ownership(conversation, "newer", 0)
+                .unwrap();
+        }
+        Denial::ProviderOwned => {
+            client.begin_rcs_unlink_cutover(conversation).unwrap();
+        }
+        Denial::Unproven => {
+            conversation = ConversationId::new();
+        }
+    }
+    Scene {
+        _directory: directory,
+        _vault: vault,
+        config,
+        client,
+        conversation,
+        generation: owner.ownership_generation,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct FencedSnapshot {
+    messages: i64,
+    identities: i64,
+    outbox: i64,
+    detectors: i64,
+    high_water: Option<i64>,
+    history_token: Option<String>,
+    alert: Option<String>,
+    statuses: Vec<(String, i64, i64)>,
+    send_states: Vec<Option<SendState>>,
+    metadata: Option<(Option<bool>, bool)>,
+}
+
+fn fenced_snapshot(
+    client: &Client,
+    connection: &Connection,
+    conversation: ConversationId,
+) -> FencedSnapshot {
+    let key = conversation.to_string();
+    let (messages, identities, outbox, detectors, high_water, history_token, alert): (
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    ) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM rcs_message_identities), (SELECT COUNT(*) FROM outbox), (SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?1), (SELECT observed_detector_high_water FROM rcs_lane_ownership WHERE conversation_id=?1), (SELECT history_token FROM rcs_lane_ownership WHERE conversation_id=?1), (SELECT alert_code FROM rcs_lane_ownership WHERE conversation_id=?1)",
+            [key.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .unwrap();
+    let mut statement = connection
+        .prepare("SELECT message_id,status_rank,rcs_reported FROM rcs_message_status ORDER BY message_id")
+        .unwrap();
+    let statuses = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let send_states = client
+        .messages(conversation)
+        .unwrap()
+        .into_iter()
+        .map(|message| message.send_state)
+        .collect();
+    FencedSnapshot {
+        messages,
+        identities,
+        outbox,
+        detectors,
+        high_water,
+        history_token,
+        alert,
+        statuses,
+        send_states,
+        metadata: client
+            .rcs_conversation_metadata(conversation)
+            .unwrap()
+            .map(|metadata| (metadata.rcs_encryption, metadata.rcs_history_gap)),
+    }
+}
+
+fn detector(provider_row_id: i64, generation: u64) -> RcsProviderDetector {
+    RcsProviderDetector {
+        provider_row_id,
+        provider_thread_id: 1,
+        provider_type: 1,
+        observed_at_ms: provider_row_id,
+        observed_generation: generation,
+    }
+}
+
+fn publish_gateway_state(
+    client: &Client,
+    config: &ClientConfig,
+    state: RcsCapabilityState,
+    availability: bool,
+    capability_revision: u64,
+) {
+    let observed_at_ms = now();
+    client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id: config.device_id,
+                state,
+                availability,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms,
+                capability_revision,
+                feature_bits: 1,
+                linked_since_ms: Some(observed_at_ms),
+            },
+            &[],
+            observed_at_ms,
+        )
+        .unwrap();
+}
+
+fn metadata_flags(client: &Client, conversation: ConversationId) -> (Option<bool>, bool) {
+    let metadata = client
+        .rcs_conversation_metadata(conversation)
+        .unwrap()
+        .unwrap();
+    (metadata.rcs_encryption, metadata.rcs_history_gap)
+}
+
+#[test]
+fn fenced_detector_rejects_gateway_and_ownership_denials_without_writes() {
+    for denial in DENIALS {
+        let scene = denied_scene(denial);
+        let connection = sql(&scene.config);
+        let before = fenced_snapshot(&scene.client, &connection, scene.conversation);
+        assert_eq!(
+            scene
+                .client
+                .record_rcs_provider_detector(
+                    scene.conversation,
+                    scene.generation,
+                    detector(77, scene.generation),
+                )
+                .unwrap(),
+            RcsIdentityOutcome::Rejected(denial.expected()),
+            "{denial:?}"
+        );
+        assert_eq!(
+            fenced_snapshot(&scene.client, &connection, scene.conversation),
+            before,
+            "{denial:?}"
+        );
+    }
+    // Positive control: the unique current gateway admits the detector (guard: unique_current_gateway in record_rcs_provider_detector, 94109b0f).
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    let connection = sql(&config);
+    let before = fenced_snapshot(&client, &connection, conversation);
+    assert_eq!(
+        client
+            .record_rcs_provider_detector(
+                conversation,
+                owner.ownership_generation,
+                detector(77, owner.ownership_generation),
+            )
+            .unwrap(),
+        RcsIdentityOutcome::Recorded
+    );
+    let after = fenced_snapshot(&client, &connection, conversation);
+    assert_eq!(after.detectors, before.detectors + 1);
+    // Reverting the ownership-generation or unique_current_gateway checks in record_rcs_provider_detector fails the loop above.
+}
+
+#[test]
+fn fenced_status_rejects_gateway_and_ownership_denials_without_writes() {
+    for denial in DENIALS {
+        let scene = denied_scene(denial);
+        let connection = sql(&scene.config);
+        let before = fenced_snapshot(&scene.client, &connection, scene.conversation);
+        assert_eq!(
+            scene
+                .client
+                .apply_rcs_projected_status(
+                    scene.conversation,
+                    scene.generation,
+                    status("seed", None, RcsProjectedStatus::Sent),
+                )
+                .unwrap(),
+            RcsReceiveOutcome::Rejected(denial.expected()),
+            "{denial:?}"
+        );
+        assert_eq!(
+            fenced_snapshot(&scene.client, &connection, scene.conversation),
+            before,
+            "{denial:?}"
+        );
+    }
+    // Positive control: a known message's status applies under the unique current gateway (guard: unique_current_gateway in apply_rcs_projected_status, 94109b0f).
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("seed"))
+        .unwrap();
+    let message_id = only_message(&client, conversation)
+        .payload
+        .record
+        .message_id;
+    let connection = sql(&config);
+    let before = fenced_snapshot(&client, &connection, conversation);
+    assert_eq!(
+        client
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status("seed", None, RcsProjectedStatus::Sent),
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusApplied
+    );
+    assert!(client.rcs_message_status(message_id).unwrap().is_some());
+    assert_ne!(fenced_snapshot(&client, &connection, conversation), before);
+    // Reverting the status gate fails the denial loop: the status row and outbox would change.
+}
+
+#[test]
+fn fenced_checkpoint_rejects_gateway_and_ownership_denials_without_writes() {
+    for denial in DENIALS {
+        let scene = denied_scene(denial);
+        let connection = sql(&scene.config);
+        let before = fenced_snapshot(&scene.client, &connection, scene.conversation);
+        assert_eq!(
+            scene
+                .client
+                .checkpoint_rcs_history(scene.conversation, scene.generation, "fenced-token")
+                .unwrap(),
+            RcsIdentityOutcome::Rejected(denial.expected()),
+            "{denial:?}"
+        );
+        assert_eq!(
+            fenced_snapshot(&scene.client, &connection, scene.conversation),
+            before,
+            "{denial:?}"
+        );
+    }
+    // Positive control: the unique current gateway records the checkpoint (guard: unique_current_gateway in checkpoint_rcs_history, 94109b0f).
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    assert_eq!(
+        client
+            .checkpoint_rcs_history(conversation, owner.ownership_generation, "fenced-token")
+            .unwrap(),
+        RcsIdentityOutcome::Recorded
+    );
+    let connection = sql(&config);
+    assert_eq!(
+        fenced_snapshot(&client, &connection, conversation).history_token,
+        Some("fenced-token".into())
+    );
+}
+
+#[test]
+fn gateway_withdrawal_publishes_history_gap_to_peer_and_relink_clears_it() {
+    let (directory, vault, client_config, client, conversation, owner) = fixture();
+    let mut encrypted = record("encrypted");
+    encrypted.e2ee_reported = Some(true);
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, encrypted)
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    assert_eq!(metadata_flags(&client, conversation), (Some(true), false));
+    let peer_config = config(&directory, "peer", &vault);
+    let peer = unlocked(&peer_config, &vault);
+    let mut server = Server::default();
+    server.upload(&client);
+    server.sync(&peer);
+    assert_eq!(metadata_flags(&peer, conversation), (Some(true), false));
+
+    publish_gateway_state(
+        &client,
+        &client_config,
+        RcsCapabilityState::Unlinked,
+        false,
+        2,
+    );
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(
+                conversation,
+                owner.ownership_generation,
+                record("withdrawn")
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::GatewayUnavailable)
+    );
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .alert,
+        RcsReceiveAlert::GatewayUnavailable
+    );
+    // Guard: publish_metadata(&tx, &ctx, conversation_id, None, true) in the gateway-unavailable ingest branch (94109b0f).
+    assert_eq!(metadata_flags(&client, conversation), (Some(true), true));
+    server.upload(&client);
+    server.sync(&peer);
+    assert_eq!(metadata_flags(&peer, conversation), (Some(true), true));
+
+    publish_gateway_state(&client, &client_config, RcsCapabilityState::Linked, true, 3);
+    let relinked = client
+        .begin_rcs_link_ownership(conversation, "relink", 0)
+        .unwrap();
+    assert_eq!(metadata_flags(&client, conversation), (Some(true), false));
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(
+                conversation,
+                relinked.ownership_generation,
+                record("after-relink")
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    server.upload(&client);
+    server.sync(&peer);
+    assert_eq!(metadata_flags(&peer, conversation), (Some(true), false));
+}
+
+#[test]
+fn gateway_unavailable_alert_and_metadata_roll_back_together_on_publication_failure() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    let mut encrypted = record("encrypted");
+    encrypted.e2ee_reported = Some(true);
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, encrypted)
+        .unwrap();
+    publish_gateway_state(&client, &config, RcsCapabilityState::Unlinked, false, 2);
+    let connection = sql(&config);
+    let before = fenced_snapshot(&client, &connection, conversation);
+    assert_eq!(before.alert, None);
+    assert_eq!(before.metadata, Some((Some(true), false)));
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_gateway_metadata BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'reject'); END;",
+        )
+        .unwrap();
+    assert!(
+        client
+            .ingest_rcs_projected_record(
+                conversation,
+                owner.ownership_generation,
+                record("withdrawn")
+            )
+            .is_err()
+    );
+    // Guard: the alert UPDATE and publish_metadata share one transaction in the gateway-unavailable branch (94109b0f); both must roll back.
+    assert_eq!(fenced_snapshot(&client, &connection, conversation), before);
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .alert,
+        RcsReceiveAlert::None
+    );
+    connection
+        .execute_batch("DROP TRIGGER reject_gateway_metadata;")
+        .unwrap();
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(
+                conversation,
+                owner.ownership_generation,
+                record("withdrawn")
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::GatewayUnavailable)
+    );
+    assert_eq!(metadata_flags(&client, conversation), (Some(true), true));
+}
