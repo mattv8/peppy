@@ -17,11 +17,28 @@ class AssetThirdPartyNoticesSideloadTest {
 
         assertTrue(notices.notice().isNotBlank())
         val entries = notices.entries()
-        assertTrue(entries.map(ThirdPartyNoticeEntry::fileName).containsAll(listOf("LGPL-2.1.txt", "BoringSSL-LICENSE.txt")))
+        val expectedGoogleMessagesEntries = listOf(
+            "AGPL-3.0.txt",
+            "LICENSE-exceptions-google-messages.txt",
+            "NOTICE-google-messages.txt",
+            "MPL-2.0.txt",
+            "BSD-3-Clause-google-uuid.txt",
+            "BSD-3-Clause-go-x-and-mobile.txt",
+            "BSD-3-Clause-google-protobuf.txt",
+            "MIT-go-colorable.txt",
+            "MIT-go-isatty.txt",
+            "MIT-zerolog.txt",
+        )
+        assertTrue(entries.map(ThirdPartyNoticeEntry::fileName).containsAll(expectedGoogleMessagesEntries))
+        assertEquals(expectedGoogleMessagesEntries, entries.filter { it.fileName in expectedGoogleMessagesEntries }.map(ThirdPartyNoticeEntry::fileName))
+        assertTrue(notices.notice().contains("release-tagged public Peppy repository"))
+        assertTrue(notices.notice().contains("in-repository private patch"))
+        assertTrue(notices.notice().contains("Go module"))
         entries.forEach { entry -> assertNotNull("${entry.fileName} needs a catalog title", entry.titleRes) }
 
         val expectedTitles = mapOf(
             "AGPL-3.0.txt" to "GNU Affero General Public License v3.0",
+            "LICENSE-exceptions-google-messages.txt" to "Google Messages link license exceptions",
             "MPL-2.0.txt" to "Mozilla Public License 2.0",
             "NOTICE-google-messages.txt" to "Google Messages link notices",
             "BSD-3-Clause-google-uuid.txt" to "google/uuid — BSD 3-Clause License",

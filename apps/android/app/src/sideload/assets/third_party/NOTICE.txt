@@ -32,6 +32,18 @@ Peppy's local data on the device.
 The LGPL-3.0, GPL-3.0 and LGPL-2.1 texts are in LGPL-3.0.txt, GPL-3.0.txt and
 LGPL-2.1.txt.
 
+Google Messages link
+--------------------
+The direct Android APK links go.mau.fi/mautrix-gmessages
+v0.2610.1-0.20261103213626-d9140a5e807e (libgm) under AGPL-3.0-or-later. Its
+private safety patch is apps/android/googlemessages/upstream-safety.patch.
+The release-tagged public Peppy repository provides the app source, the
+in-repository private patch, and the Go module needed to rebuild the direct
+Android APK with a modified library. A modifier rebuilds from that
+release-tagged repository and signs the resulting APK with their own signing
+key. NOTICE-google-messages.txt lists the linked Go dependencies and their
+license-text assets.
+
 libadb-android 3.1.1
 --------------------
 Copyright Muntashir Al-Islam and libadb-android contributors.

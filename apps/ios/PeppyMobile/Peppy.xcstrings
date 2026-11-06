@@ -701,6 +701,16 @@
         }
       }
     },
+    "peppy.about_license_google_messages_exceptions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages link license exceptions"
+          }
+        }
+      }
+    },
     "peppy.about_license_google_uuid": {
       "localizations": {
         "en": {

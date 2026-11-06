@@ -70,6 +70,7 @@ export const catalog = Object.freeze({
   about_license_agpl_3_0: "GNU Affero General Public License v3.0",
   about_license_mpl_2_0: "Mozilla Public License 2.0",
   about_license_google_messages: "Google Messages link notices",
+  about_license_google_messages_exceptions: "Google Messages link license exceptions",
   about_license_google_uuid: "google/uuid — BSD 3-Clause License",
   about_license_go_x_and_mobile: "Go x/mobile and x modules — BSD 3-Clause License",
   about_license_google_protobuf: "Google Protocol Buffers — BSD 3-Clause License",
