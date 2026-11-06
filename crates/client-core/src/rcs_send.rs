@@ -1,16 +1,16 @@
 use crate::{
-    CommandId, ConversationId, Error, MessagePayload, Transport,
-    conversation_match::{canonical_address, identity_region, recipient_set},
+    conversation_match::canonical_address,
     rcs_mapping::{
-        self, RCS_MAPPING_FRESHNESS_MS, RcsConversationType, RcsMapping, RcsMappingClass,
-        RcsMappingObservation, RcsSendMode,
+        self, RcsConversationType, RcsMapping, RcsMappingClass, RcsMappingObservation, RcsSendMode,
+        RCS_MAPPING_FRESHNESS_MS,
     },
     rcs_native::{
         LocalRcsTargetSnapshot, NativeRcsCommitProjection, NativeRcsParticipant,
         NativeRcsTargetClass,
     },
+    CommandId, ConversationId, Error, MessagePayload, Transport,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -92,7 +92,9 @@ pub(crate) fn record_carrier_only_proof(
         return Err(Error::InvalidRequest("carrier-only proof is not current"));
     }
     canonical_recipients(&proof.recipients)?;
-    if proof.canonical_recipient.is_empty() || proof.identity_region.is_empty() {
+    if proof.canonical_recipient.is_empty()
+        || (proof.identity_region.is_empty() && !proof.canonical_recipient.starts_with('+'))
+    {
         return Err(Error::InvalidRequest("invalid carrier-only recipient"));
     }
     let stored = StoredCarrierOnlyProof {
@@ -137,8 +139,8 @@ pub(crate) fn carrier_admission(
             CarrierAdmission::Blocked
         });
     }
-    let region = identity_region(conn)?;
-    if transport == Transport::Sms && is_short_code(recipients, &region) {
+    let region = crate::rcs_target::resolved_region(conn).map_err(|_| Error::Database)?;
+    if transport == Transport::Sms && is_short_code(recipients, region.as_deref()) {
         record_admission_diagnostic(
             conn,
             conversation_id,
@@ -146,7 +148,9 @@ pub(crate) fn carrier_admission(
         )?;
         return Ok(CarrierAdmission::ShortCodeSms);
     }
-    if transport == Transport::Mms && recipient_set(recipients, Some(&region)).len() > 1 {
+    if transport == Transport::Mms
+        && nonself_recipient_count(conn, recipients, region.as_deref())? > 1
+    {
         record_admission_diagnostic(
             conn,
             conversation_id,
@@ -178,13 +182,17 @@ pub(crate) fn carrier_admission(
             && proof.subscription_id == subscription_id
             && recipients.len() == 1
             && proof.canonical_recipient
-                == canonical_address(&recipients[0], Some(&proof.identity_region))
-            && rcs_mapping::context_is_current(
+                == canonical_address(
+                    &recipients[0],
+                    (!proof.identity_region.is_empty()).then_some(proof.identity_region.as_str()),
+                )
+            && rcs_mapping::context_matches_carrier_proof(
                 conn,
                 proof.link_generation,
                 proof.session_generation,
                 proof.context_revision,
-                true,
+                &proof.identity_region,
+                proof.canonicalizer_revision,
             )?
         {
             CarrierAdmission::Permitted
@@ -194,16 +202,36 @@ pub(crate) fn carrier_admission(
     )
 }
 
-fn is_short_code(recipients: &[String], region: &str) -> bool {
+fn is_short_code(recipients: &[String], region: Option<&str>) -> bool {
     let Some(recipient) = recipients.first().filter(|_| recipients.len() == 1) else {
         return false;
     };
     let trimmed = recipient.trim();
+    let Some(region) = region else {
+        return false;
+    };
     SHORT_CODE_REGIONS.contains(&region)
         && (5..=6).contains(&trimmed.len())
         && trimmed.bytes().all(|byte| byte.is_ascii_digit())
         && matches!(trimmed.as_bytes().first(), Some(b'2'..=b'9'))
         && canonical_address(trimmed, Some(region)) == trimmed
+}
+
+fn nonself_recipient_count(
+    conn: &Connection,
+    recipients: &[String],
+    region: Option<&str>,
+) -> Result<usize, Error> {
+    let own_identity = rcs_mapping::confirmed_own_identity(conn)?;
+    Ok(recipients
+        .iter()
+        .filter_map(|recipient| {
+            let canonical = canonical_address(recipient, region);
+            (!canonical.is_empty() && own_identity.as_deref() != Some(canonical.as_str()))
+                .then_some(canonical)
+        })
+        .collect::<BTreeSet<_>>()
+        .len())
 }
 
 fn record_admission_diagnostic(

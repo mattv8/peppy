@@ -3837,7 +3837,12 @@ impl Client {
                 PermitBlock::CarrierOnlyProofUnavailable,
             ));
         }
-        if !matches!(carrier_admission, rcs_send::CarrierAdmission::Permitted) {
+        if !matches!(
+            carrier_admission,
+            rcs_send::CarrierAdmission::Permitted
+                | rcs_send::CarrierAdmission::ShortCodeSms
+                | rcs_send::CarrierAdmission::GroupMmsPreM4
+        ) {
             return Ok(PermitDecision::Blocked(
                 PermitBlock::CarrierOnlyProofUnavailable,
             ));
