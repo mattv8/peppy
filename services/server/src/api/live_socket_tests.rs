@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{SinkExt, StreamExt};
 use peppy_domain::VaultId;
 use peppy_protocol::{EphemeralSignalV2, LiveHelloV2};
@@ -924,6 +925,53 @@ async fn invalid_utf8_application_frame_closes_with_fixed_policy_reason() {
     let close = next_close(&mut socket).await;
     assert_eq!(close.code, CloseCode::Policy);
     assert_eq!(close.reason, "invalid_live_frame");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_ticket_issue_hashes_ticket_and_delete_terminalizes_session() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([7_u8; 16]);
+    let client = reqwest::Client::new();
+    let issued = client
+        .post(format!("{}/v1/live/tickets", server.base_url))
+        .bearer_auth(&server.owner_token)
+        .json(&serde_json::json!({"session_id": session_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(issued.status(), reqwest::StatusCode::CREATED);
+    let body: serde_json::Value = issued.json().await.unwrap();
+    let ticket = body["ticket"].as_str().unwrap();
+    let ticket_digest: Vec<u8> = sqlx::query_scalar("SELECT ticket_digest FROM live_tickets")
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        ticket_digest,
+        Sha256::digest(URL_SAFE_NO_PAD.decode(ticket).unwrap()).to_vec()
+    );
+
+    let closed = client
+        .delete(format!("{}/v1/live/tickets", server.base_url))
+        .bearer_auth(&server.owner_token)
+        .json(&serde_json::json!({"session_id": session_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(closed.status(), reqwest::StatusCode::NO_CONTENT);
+    let rejected = client
+        .post(format!("{}/v1/live/tickets", server.base_url))
+        .bearer_auth(&server.owner_token)
+        .json(&serde_json::json!({"session_id": session_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        rejected.json::<serde_json::Value>().await.unwrap()["code"],
+        "live_ticket_session_terminal"
+    );
     server.shutdown().await;
 }
 

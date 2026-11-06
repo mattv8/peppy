@@ -688,6 +688,10 @@ fn build_router_with_live_backend(
             get(attachments::download_public_copy),
         )
         .route("/v1/ws", get(websocket))
+        .route(
+            "/v1/live/tickets",
+            post(issue_live_ticket).delete(close_live_ticket_session),
+        )
         .route("/v1/live", get(live_websocket));
     let router = if row_security {
         router
@@ -2734,6 +2738,147 @@ async fn receipt(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "receipt_commit"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+const LIVE_TICKET_SESSION_LIMIT: i64 = 6;
+const LIVE_TICKET_TOMBSTONE_LIMIT: i64 = 32;
+
+#[derive(Deserialize)]
+struct LiveTicketRequest {
+    session_id: String,
+}
+#[derive(Serialize)]
+struct LiveTicketResponse {
+    ticket: String,
+    expires_at_ms: i64,
+}
+
+fn live_ticket_session_hash(value: &str) -> ApiResult<Vec<u8>> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .filter(|bytes| bytes.len() == 16)
+        .ok_or(ApiError(
+            StatusCode::BAD_REQUEST,
+            "live_ticket_session_invalid",
+        ))?;
+    (URL_SAFE_NO_PAD.encode(&bytes) == value)
+        .then(|| Sha256::digest(bytes).to_vec())
+        .ok_or(ApiError(
+            StatusCode::BAD_REQUEST,
+            "live_ticket_session_invalid",
+        ))
+}
+
+async fn live_ticket_tx(
+    state: &ApiState,
+    p: &Principal,
+) -> ApiResult<sqlx::Transaction<'static, sqlx::Postgres>> {
+    let mut tx = scope::begin(&state.db, p.vault)
+        .await
+        .map_err(|e| database_unavailable(&e, "live_ticket_begin"))?;
+    sqlx::query("SET LOCAL lock_timeout='60s'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| database_unavailable(&e, "live_ticket_timeout"))?;
+    sqlx::query("SET LOCAL statement_timeout='60s'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| database_unavailable(&e, "live_ticket_timeout"))?;
+    let locked: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE")
+            .bind(p.vault)
+            .bind(p.device)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| database_unavailable(&e, "live_ticket_device_lock"))?;
+    if locked.is_none() {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid_bearer"));
+    }
+    revalidate_principal(&mut tx, p).await?;
+    Ok(tx)
+}
+
+async fn issue_live_ticket(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<LiveTicketRequest>,
+) -> ApiResult<(StatusCode, Json<LiveTicketResponse>)> {
+    let p = authenticated(&state, &headers, Operation::Sync).await?;
+    let session = live_ticket_session_hash(&request.session_id)?;
+    let mut tx = live_ticket_tx(&state, &p).await?;
+    let current: Option<String> = sqlx::query_scalar("SELECT state FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE").bind(p.vault).bind(p.device).bind(&session).fetch_optional(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_lock"))?;
+    match current.as_deref() {
+        Some("closed" | "terminal") => {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "live_ticket_session_terminal",
+            ));
+        }
+        Some("open") => {}
+        _ => {
+            let created: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND created_at >= now()-interval '60 seconds'").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_rate"))?;
+            let open: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state='open'").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_open"))?;
+            if created >= LIVE_TICKET_SESSION_LIMIT || open >= 1 {
+                return Err(ApiError(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "live_ticket_rate_limited",
+                ));
+            }
+            sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state) VALUES($1,$2,$3,'open')").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_insert"))?;
+        }
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND consumed_at IS NULL AND expires_at>now()").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_count"))?;
+    if count >= 2 {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "live_ticket_rate_limited",
+        ));
+    }
+    libsodium_rs::ensure_init()
+        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "live_unavailable"))?;
+    let mut ticket = [0_u8; 32];
+    libsodium_rs::random::fill_bytes(&mut ticket);
+    let expires_at_ms: i64 = sqlx::query_scalar("INSERT INTO live_tickets(ticket_digest,vault_id,device_id,session_id_hash,issued_at,expires_at) VALUES($1,$2,$3,$4,now(),now()+interval '30 seconds') RETURNING (extract(epoch FROM expires_at)*1000)::bigint").bind(Sha256::digest(ticket).as_slice()).bind(p.vault).bind(p.device).bind(&session).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_insert"))?;
+    tx.commit()
+        .await
+        .map_err(|e| database_unavailable(&e, "live_ticket_commit"))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(LiveTicketResponse {
+            ticket: URL_SAFE_NO_PAD.encode(ticket),
+            expires_at_ms,
+        }),
+    ))
+}
+
+async fn close_live_ticket_session(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<LiveTicketRequest>,
+) -> ApiResult<StatusCode> {
+    let p = authenticated(&state, &headers, Operation::Sync).await?;
+    let session = live_ticket_session_hash(&request.session_id)?;
+    let mut tx = live_ticket_tx(&state, &p).await?;
+    let current: Option<String> = sqlx::query_scalar("SELECT state FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE").bind(p.vault).bind(p.device).bind(&session).fetch_optional(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_lock"))?;
+    if current.is_none() {
+        let created: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND created_at >= now()-interval '60 seconds'").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_rate"))?;
+        let tombstones: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state IN ('closed','terminal') AND closed_at >= now()-interval '5 minutes'").bind(p.vault).bind(p.device).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_tombstones"))?;
+        if created >= LIVE_TICKET_SESSION_LIMIT || tombstones >= LIVE_TICKET_TOMBSTONE_LIMIT {
+            return Err(ApiError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "live_session_rate_limited",
+            ));
+        }
+        sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,closed_at) VALUES($1,$2,$3,'closed',now())").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_tombstone_insert"))?;
+    } else {
+        sqlx::query("UPDATE live_ticket_sessions SET state='closed',closed_at=COALESCE(closed_at,now()),lease_until=NULL WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open'").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_close"))?;
+        sqlx::query("DELETE FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND consumed_at IS NULL").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_delete"))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| database_unavailable(&e, "live_ticket_commit"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
