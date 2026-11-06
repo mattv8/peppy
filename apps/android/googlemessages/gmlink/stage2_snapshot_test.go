@@ -185,7 +185,7 @@ func TestExactTargetIgnoresGroupAndNonVisibleParticipants(t *testing.T) {
 	}
 	revision, ok := link.beginConversationIndexRefreshFor(7, 3)
 	if !ok || !link.replaceConversationIndexFor(7, 3, revision, []*gmproto.Conversation{
-		stage2Conversation("exact", stage2Participant("self", true, true), stage2Participant("target", true, false), stage2Participant("ignored", false, false)),
+		stage2Conversation("exact", stage2Participant("", true, true), stage2Participant("target", true, false), stage2Participant("ignored", false, false)),
 	}) {
 		t.Fatal("exact snapshot was not published")
 	}
@@ -396,5 +396,21 @@ func TestCancellationAtPublicationBoundaryRejectsSnapshot(t *testing.T) {
 	}
 	if code := stage2Code(t, link.ResolveExistingConversation("target")); code != "conversation_lookup_unknown" {
 		t.Fatalf("lookup code = %s", code)
+	}
+}
+
+func TestSelfChatIsUnsupportedWithoutCarrierProof(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link,
+		stage2Conversation("self-chat", stage2Participant("own-target", true, true)),
+	)
+	if code := stage2Code(t, link.ResolveExistingConversation("own-target")); code != "conversation_unsupported" {
+		t.Fatalf("self-chat lookup code = %s", code)
+	}
+	link.mu.Lock()
+	summaries := append([]conversationSummary(nil), link.conversationCandidates["own-target"]...)
+	link.mu.Unlock()
+	if len(summaries) != 1 || !summaries[0].self || summaries[0].conversation == nil {
+		t.Fatalf("self-chat facts were not preserved: %+v", summaries)
 	}
 }

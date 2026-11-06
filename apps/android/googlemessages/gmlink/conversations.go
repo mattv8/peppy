@@ -21,6 +21,7 @@ const (
 type conversationSummary struct {
 	id           string
 	eligible     bool
+	self         bool
 	conversation *gmproto.Conversation
 }
 
@@ -169,14 +170,19 @@ func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation
 		}
 		link.removeConversationLocked(conversation.GetConversationID())
 		others := visibleOtherParticipants(conversation)
-		for _, participant := range others {
+		for _, participant := range conversation.GetParticipants() {
+			if !participant.GetIsVisible() {
+				continue
+			}
 			target := participant.GetID().GetNumber()
 			if target == "" {
 				continue
 			}
+			self := participant.GetIsMe()
 			summary := conversationSummary{
 				id:           conversation.GetConversationID(),
-				eligible:     len(others) == 1 && conversation.GetType() == gmproto.ConversationType_RCS && conversation.GetStatus() == gmproto.ConversationStatus_ACTIVE,
+				eligible:     !self && len(others) == 1 && conversation.GetType() == gmproto.ConversationType_RCS && conversation.GetStatus() == gmproto.ConversationStatus_ACTIVE,
+				self:         self,
 				conversation: conversation,
 			}
 			link.conversationCandidates[target] = append(link.conversationCandidates[target], summary)

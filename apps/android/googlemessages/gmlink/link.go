@@ -616,6 +616,9 @@ func (link *Link) ResolveExistingConversation(target string) string {
 	}
 	found := make(map[string]struct{})
 	for _, summary := range link.conversationCandidates[target] {
+		if summary.self {
+			return conversationJSON("conversation_unsupported")
+		}
 		if summary.eligible {
 			found[summary.id] = struct{}{}
 		}
