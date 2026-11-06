@@ -56,6 +56,9 @@ impl ClockState {
             .checked_add(elapsed_ms)
             .ok_or(PolicyError::Clock)?;
         let effective_wall_ms = advanced_wall_ms.max(clock.wall_ms);
+        if effective_wall_ms > i64::MAX - MAX_WIRE_TTL_MS {
+            return Err(PolicyError::Clock);
+        }
 
         self.last_mono_ms = clock.mono_ms;
         self.wall_effective_ms = effective_wall_ms;
@@ -249,6 +252,18 @@ mod tests {
             })
             .is_ok()
         );
+        let mut boundary = ClockState::new(LiveClock {
+            wall_ms: i64::MAX - MAX_WIRE_TTL_MS,
+            mono_ms: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            boundary.advance(LiveClock {
+                wall_ms: 0,
+                mono_ms: 0,
+            }),
+            Ok(i64::MAX - MAX_WIRE_TTL_MS)
+        );
 
         let mut clock = ClockState::new(LiveClock {
             wall_ms: 10,
@@ -287,6 +302,7 @@ mod tests {
             Err(PolicyError::Clock)
         );
         assert_eq!(clock, before);
+
         assert_eq!(
             clock.advance(LiveClock {
                 wall_ms: -1,
@@ -299,6 +315,24 @@ mod tests {
             clock.advance(LiveClock {
                 wall_ms: 0,
                 mono_ms: u64::MAX
+            }),
+            Err(PolicyError::Clock)
+        );
+        assert_eq!(clock, before);
+    }
+
+    #[test]
+    fn decreasing_monotonic_clock_has_zero_mutation() {
+        let mut clock = ClockState::new(LiveClock {
+            wall_ms: 0,
+            mono_ms: 100,
+        })
+        .unwrap();
+        let before = clock.clone();
+        assert_eq!(
+            clock.advance(LiveClock {
+                wall_ms: 0,
+                mono_ms: 99,
             }),
             Err(PolicyError::Clock)
         );
@@ -329,7 +363,28 @@ mod tests {
             Err(PolicyError::Clock)
         );
         assert_eq!(clock, before);
+    }
 
+    #[test]
+    fn computed_effective_wall_headroom_has_zero_mutation() {
+        let mut computed_headroom = ClockState::new(LiveClock {
+            wall_ms: i64::MAX - MAX_WIRE_TTL_MS,
+            mono_ms: 0,
+        })
+        .unwrap();
+        let computed_before = computed_headroom.clone();
+        assert_eq!(
+            computed_headroom.advance(LiveClock {
+                wall_ms: 0,
+                mono_ms: 1,
+            }),
+            Err(PolicyError::Clock)
+        );
+        assert_eq!(computed_headroom, computed_before);
+    }
+
+    #[test]
+    fn largest_runtime_clock_values_advance_at_the_boundary() {
         let mut largest_valid = ClockState::new(LiveClock {
             wall_ms: i64::MAX - MAX_WIRE_TTL_MS - 1,
             mono_ms: u64::MAX - CLOCK_MONO_HEADROOM_MS - 1,
