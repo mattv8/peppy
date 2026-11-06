@@ -38,7 +38,7 @@ fun strictBooleanProperty(name: String): Boolean = providers.gradleProperty(name
     }
 } ?: false
 
-fun resolveGoogleMessagesLink(distribution: String, sideloadTaskRequested: Boolean, explicitValue: String?): Boolean {
+fun resolveGoogleMessagesLink(distribution: String, explicitValue: String?): Boolean {
     val explicit = explicitValue?.let { value ->
         when (value) {
             "true" -> true
@@ -50,7 +50,7 @@ fun resolveGoogleMessagesLink(distribution: String, sideloadTaskRequested: Boole
         require(explicit != true) { "peppyGoogleMessagesLink cannot be enabled for Play distribution" }
         return false
     }
-    return explicit ?: sideloadTaskRequested
+    return explicit ?: (distribution == "direct")
 }
 
 val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
@@ -72,9 +72,16 @@ require(peppyDistribution in setOf("direct", "play")) {
 }
 val peppyGoogleMessagesLink = resolveGoogleMessagesLink(
     peppyDistribution,
-    gradle.startParameter.taskNames.any { taskName -> taskName.contains("sideload", ignoreCase = true) },
     providers.gradleProperty("peppyGoogleMessagesLink").orNull,
 )
+
+gradle.taskGraph.whenReady {
+    if (peppyDistribution == "play") {
+        allTasks.firstOrNull { task -> task.name.contains("Sideload") }?.let { task ->
+            throw GradleException("Play distribution cannot execute sideload task ${task.path}")
+        }
+    }
+}
 val jnaVersion = "5.17.0"
 
 fun gitValueOrNull(vararg arguments: String): String? = runCatching {
@@ -289,6 +296,7 @@ android {
         getByName("debug").res.srcDir(developmentTlsResources)
         getByName("sideload").manifest.srcFile("src/sideload/AndroidManifest.xml")
         getByName("sideload").java.srcDir(if (peppyGoogleMessagesLink) "src/sideloadGmlinkOn/java" else "src/sideloadGmlinkOff/java")
+        if (peppyGoogleMessagesLink) getByName("sideload").assets.srcDir("src/sideloadGmlinkOn/assets")
     }
 
     testOptions {
@@ -363,8 +371,23 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     add("sideloadImplementation", project(":libadb"))
     if (peppyGoogleMessagesLink) {
-        check(googleMessagesAar.asFile.isFile) { "peppyGoogleMessagesLink=true needs apps/android/googlemessages/build-aar.sh first" }
         add("sideloadImplementation", files(googleMessagesAar))
+    }
+}
+
+val checkGoogleMessagesAar = tasks.register("checkGoogleMessagesAar") {
+    doLast {
+        check(googleMessagesAar.asFile.isFile) {
+            "peppyGoogleMessagesLink=true needs apps/android/googlemessages/build-aar.sh first"
+        }
+    }
+}
+
+if (peppyGoogleMessagesLink) {
+    tasks.configureEach {
+        if (name == "preSideloadBuild") {
+            dependsOn(checkGoogleMessagesAar)
+        }
     }
 }
 
@@ -684,7 +707,7 @@ fun googleMessagesLinkArtifacts(archives: List<File>, noticePath: String = googl
             ZipFile(archive).use { zip -> zip.entries().asSequence().any { it.name.matches(Regex("(?:base/)?lib/[^/]+/$googleMessagesNativeLibrary")) } }
         }) add(googleMessagesNativeLibrary)
     if (archiveDexContains(archives, googleMessagesDexPrefix)) add("dev/peppy/gmlink/")
-    if (archiveContainsEntry(archives, noticePath)) add(noticePath)
+    if (archiveContainsEntry(archives, noticePath)) add(googleMessagesNotice)
 }
 
 fun verifyGoogleMessagesLinkExclusion(archives: List<File>, variant: String, noticePath: String = googleMessagesNotice) {
@@ -891,20 +914,36 @@ val verifySideloadGoogleMessagesLink = tasks.register("verifySideloadGoogleMessa
 
     doLast {
         val metadata = layout.buildDirectory.file("outputs/apk/sideload/output-metadata.json").get().asFile
-        val artifacts = googleMessagesLinkArtifacts(apksFromMetadata(metadata, "sideload"))
-        verifySideloadGoogleMessagesLinkArtifacts(artifacts, peppyGoogleMessagesLink)
+        val archives = apksFromMetadata(metadata, "sideload").toMutableList()
+        if (gradle.taskGraph.allTasks.any { task -> task.name == "bundleSideload" }) {
+            val sideloadAab = layout.buildDirectory.file("outputs/bundle/sideload/app-sideload.aab").get().asFile
+            check(sideloadAab.isFile) { "Expected sideload AAB at $sideloadAab" }
+            archives += sideloadAab
+        }
+        archives.forEach { archive ->
+            val noticePath = if (archive.extension == "aab") "base/$googleMessagesNotice" else googleMessagesNotice
+            verifySideloadGoogleMessagesLinkArtifacts(
+                googleMessagesLinkArtifacts(listOf(archive), noticePath),
+                peppyGoogleMessagesLink,
+            )
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "bundleSideload") {
+        finalizedBy(verifySideloadGoogleMessagesLink)
     }
 }
 
 val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleaseRestrictedSetupExclusionFixtures") {
     doLast {
-        check(runCatching { resolveGoogleMessagesLink("play", false, "true") }.isFailure) {
+        check(runCatching { resolveGoogleMessagesLink("play", "true") }.isFailure) {
             "Play distribution must reject an explicit Google Messages link property"
         }
-        check(!resolveGoogleMessagesLink("play", true, null)) { "Play distribution must disable the Google Messages link" }
-        check(resolveGoogleMessagesLink("direct", true, null)) { "Direct sideload tasks must enable the Google Messages link" }
-        check(!resolveGoogleMessagesLink("direct", true, "false")) { "Explicit false must disable the Google Messages link" }
-        check(!resolveGoogleMessagesLink("direct", false, null)) { "Debug tasks must keep the Google Messages stub" }
+        check(!resolveGoogleMessagesLink("play", null)) { "Play distribution must disable the Google Messages link" }
+        check(resolveGoogleMessagesLink("direct", null)) { "Direct distribution must enable the Google Messages link" }
+        check(!resolveGoogleMessagesLink("direct", "false")) { "Explicit false must disable the Google Messages link" }
 
         val fixtureDirectory = layout.buildDirectory.dir("tmp/restricted-setup-exclusion-fixtures").get().asFile
         fixtureDirectory.deleteRecursively()

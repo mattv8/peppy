@@ -31,9 +31,8 @@ class AssetThirdPartyNoticesSideloadTest {
         )
         assertTrue(entries.map(ThirdPartyNoticeEntry::fileName).containsAll(expectedGoogleMessagesEntries))
         assertEquals(expectedGoogleMessagesEntries, entries.filter { it.fileName in expectedGoogleMessagesEntries }.map(ThirdPartyNoticeEntry::fileName))
-        assertTrue(notices.notice().contains("release-tagged public Peppy repository"))
-        assertTrue(notices.notice().contains("in-repository private patch"))
-        assertTrue(notices.notice().contains("Go module"))
+        assertTrue(notices.notice().contains("spake2-android"))
+        assertTrue(!notices.notice().contains("Google Messages link"))
         entries.forEach { entry -> assertNotNull("${entry.fileName} needs a catalog title", entry.titleRes) }
 
         val expectedTitles = mapOf(
