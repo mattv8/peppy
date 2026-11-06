@@ -475,3 +475,105 @@ fn outgoing_tmp_echo_binds_existing_message_and_replays_after_reopen() {
     server.upload(&reopened);
     assert_eq!(reopened.messages(conversation).unwrap().len(), 1);
 }
+
+#[test]
+fn matched_echo_status_replicates_without_provider_identifiers() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let first_config = config(&directory, "first", &vault);
+    let second_config = config(&directory, "second", &vault);
+    let first = unlocked(&first_config, &vault);
+    let second = unlocked(&second_config, &vault);
+    let conversation = ConversationId::new();
+    let first_owner = first
+        .begin_rcs_link_ownership(conversation, "first", 0)
+        .unwrap();
+    let second_owner = second
+        .begin_rcs_link_ownership(conversation, "second", 0)
+        .unwrap();
+    first
+        .ingest_rcs_projected_record(
+            conversation,
+            first_owner.ownership_generation,
+            record("body"),
+        )
+        .unwrap();
+    second
+        .ingest_rcs_projected_record(
+            conversation,
+            second_owner.ownership_generation,
+            record("body"),
+        )
+        .unwrap();
+    let before = only_message(&first, conversation).send_state;
+    assert_eq!(
+        first
+            .apply_rcs_projected_status(
+                conversation,
+                first_owner.ownership_generation,
+                status(RcsProjectedStatus::Read)
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusApplied
+    );
+    assert_eq!(only_message(&first, conversation).send_state, before);
+    let mut server = Server::default();
+    for envelope in first.pending_outbox().unwrap() {
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        assert!(!serialized.contains("provider-message"));
+        assert!(!serialized.contains("provider-conversation"));
+    }
+    server.upload(&first);
+    server.sync(&second);
+    let connection = Connection::open(&second_config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    let payload: String = connection
+        .query_row("SELECT payload FROM messages LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    assert!(!payload.contains("provider-message"));
+    assert!(!payload.contains("provider-conversation"));
+}
+
+#[test]
+fn conflicting_identity_rejects_without_partial_message() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let owner = client
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
+    let connection = Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection.execute("INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES('provider-message','provider-conversation',?,1,NULL)", [ConversationId::new().to_string()]).unwrap();
+    let before: (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM messages),(SELECT COUNT(*) FROM rcs_message_identities)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::IdentityConflict)
+    );
+    let after: (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM messages),(SELECT COUNT(*) FROM rcs_message_identities)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+}
