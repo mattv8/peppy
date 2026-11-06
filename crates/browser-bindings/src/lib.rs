@@ -729,7 +729,8 @@ impl BrowserCore {
         let client = self.client()?;
         let window = client.load_message_window(input.into()).map_err(core)?;
         serde_json::to_value(dto::message_window_view(window, |message| {
-            message_view(client, &message)
+            rcs_receive::message_view(client, &message)
+                .unwrap_or_else(|_| message_view(client, &message))
         }))
         .map_err(|_| core(CoreError::Database))
     }

@@ -15,11 +15,20 @@ pub(crate) fn message_view(
                 .attachment_info(reference.attachment_id)
                 .ok()
                 .map(|info| {
-                    peppy_desktop_api::snapshot_attachment_view(
+                    let mut view = peppy_desktop_api::snapshot_attachment_view(
                         &info,
                         None,
                         client.deferred_media_status(info.attachment_id),
+                    );
+                    view.media_meta = peppy_desktop_api::message_attachment_media_metadata_view(
+                        client,
+                        message.payload.record.message_id,
+                        info.attachment_id,
                     )
+                    .ok()
+                    .flatten()
+                    .map(Box::new);
+                    view
                 })
         })
         .collect();
