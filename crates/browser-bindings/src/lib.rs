@@ -990,8 +990,9 @@ pub unsafe extern "C" fn peppy_browser_free_response(response: *mut u8) {
 mod tests {
     use super::*;
     use peppy_client_core::{
-        Client, ClientConfig, ComposeDraftUpdate, Cursor, DatabaseKey, DraftId, GatewayRoute, IncomingSms, OutgoingSms,
-        RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent,
+        Client, ClientConfig, ComposeDraftUpdate, Cursor, DatabaseKey, DraftId, GatewayRoute,
+        IncomingSms, OutgoingSms, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection,
+        RcsLinkStatusEvent,
     };
     use peppy_crypto::{create_vault_check_header, derive_root_key};
 
@@ -1045,7 +1046,9 @@ mod tests {
             DatabaseKey::new(&[3; 32]).unwrap(),
         )
         .unwrap();
-        gateway_core.unlock(&profile, &header, "passphrase").unwrap();
+        gateway_core
+            .unlock(&profile, &header, "passphrase")
+            .unwrap();
         gateway_core
             .publish_rcs_capability(
                 &RcsLinkStatusEvent {
@@ -1070,7 +1073,10 @@ mod tests {
             )
             .unwrap();
         for (index, envelope) in gateway_core.pending_outbox().unwrap().iter().enumerate() {
-            core.client().unwrap().ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+            core.client()
+                .unwrap()
+                .ingest(envelope, Cursor(index as u64 + 1))
+                .unwrap();
         }
         core.client().unwrap().apply_pending(100).unwrap();
         value(&core.dispatch(
@@ -1150,7 +1156,8 @@ mod tests {
                     .is_empty()
             );
         }
-        value(&core.dispatch(
+        value(
+            &core.dispatch(
                 &json!({"command":"_worker_apply_server_context","args":{
                     "connection":"connected",
                     "devices":{"devices":[
@@ -1160,7 +1167,8 @@ mod tests {
                     "capabilities":{"capabilities":[]}
                 }})
                 .to_string(),
-        ));
+            ),
+        );
         let revoked_snapshot = value(&core.dispatch(
             &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
         ));
