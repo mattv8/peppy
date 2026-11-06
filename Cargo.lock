@@ -2174,6 +2174,7 @@ dependencies = [
  "peppy-hosted-client",
  "serde",
  "serde_json",
+ "tempfile",
  "ts-rs",
  "uuid",
 ]
