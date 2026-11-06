@@ -29,6 +29,8 @@ mod attachment_retention;
 mod hosted;
 pub mod newenrollment;
 mod rcs_receive;
+#[cfg(test)]
+mod rcs_receive_tests;
 mod rcs_status;
 mod typing;
 

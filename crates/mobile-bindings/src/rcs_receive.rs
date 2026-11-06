@@ -152,7 +152,10 @@ impl NativeClient {
                     sent_at_ms: record.sent_at_ms,
                     tmp_id: record.tmp_id,
                     rcs_reported: record.rcs_reported,
-                    e2ee_reported: record.e2ee_reported,
+                    e2ee_reported: record
+                        .rcs_reported
+                        .then_some(record.e2ee_reported)
+                        .flatten(),
                     history_token: record.history_token,
                 },
             )
