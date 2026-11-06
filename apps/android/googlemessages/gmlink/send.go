@@ -19,6 +19,11 @@ const (
 	preparedRcsTicketTTL = 30 * time.Second
 	rcsSendDeadline      = 5 * time.Second
 	maxRcsBodyBytes      = 4096
+	maxPrepareJSONBytes  = 4608
+	maxCommitJSONBytes   = 5120
+	maxOpaqueIDBytes     = 256
+	snapshotTokenBytes   = 64
+	proofDigestBytes     = 44
 )
 
 type rcsSendRequest struct {
@@ -258,22 +263,68 @@ func (link *Link) nowForTicketLocked() time.Time {
 }
 
 func decodeFixedJSON(input string, output any) bool {
-	decoder := json.NewDecoder(bytes.NewBufferString(input))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(output) != nil {
+	maxBytes, fields := 0, map[string]struct{}(nil)
+	switch output.(type) {
+	case *prepareRcsRequest:
+		maxBytes, fields = maxPrepareJSONBytes, requiredJSONFields("tmp_id", "google_conversation_id", "snapshot_token", "content")
+	case *commitRcsPermit:
+		maxBytes, fields = maxCommitJSONBytes, requiredJSONFields("command_id", "tmp_id", "google_conversation_id", "snapshot_token", "mapping_revision", "proof_digest", "content")
+	default:
 		return false
 	}
-	return decoder.Decode(&struct{}{}) == io.EOF
+	if len(input) > maxBytes {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewBufferString(input))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return false
+	}
+	values := make(map[string]json.RawMessage, len(fields))
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		key, ok := keyToken.(string)
+		if err != nil || !ok {
+			return false
+		}
+		if _, allowed := fields[key]; !allowed {
+			return false
+		}
+		if _, duplicate := values[key]; duplicate {
+			return false
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return false
+		}
+		values[key] = value
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') || len(values) != len(fields) || decoder.Decode(&struct{}{}) != io.EOF {
+		return false
+	}
+	encoded, err := json.Marshal(values)
+	return err == nil && json.Unmarshal(encoded, output) == nil
+}
+
+func requiredJSONFields(names ...string) map[string]struct{} {
+	fields := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		fields[name] = struct{}{}
+	}
+	return fields
 }
 
 func validPrepareRcsRequest(request prepareRcsRequest) bool {
 	parsed, err := uuid.Parse(request.TmpID)
-	return err == nil && parsed.Version() == 4 && parsed.Variant() == uuid.RFC4122 && parsed.String() == request.TmpID && request.GoogleConversationID != "" && request.SnapshotToken != "" && request.Content != "" && len(request.Content) <= maxRcsBodyBytes
+	return err == nil && parsed.Version() == 4 && parsed.Variant() == uuid.RFC4122 && parsed.String() == request.TmpID && request.GoogleConversationID != "" && len(request.GoogleConversationID) <= maxOpaqueIDBytes && request.SnapshotToken != "" && len(request.SnapshotToken) <= snapshotTokenBytes && request.Content != "" && len(request.Content) <= maxRcsBodyBytes
 }
 
 func validCommitRcsPermit(permit commitRcsPermit) bool {
+	if len(permit.CommandID) == 0 || len(permit.CommandID) > maxOpaqueIDBytes || len(permit.ProofDigest) != proofDigestBytes {
+		return false
+	}
 	digest, err := base64.StdEncoding.DecodeString(permit.ProofDigest)
-	return err == nil && len(digest) == 32 && permit.CommandID != "" && permit.MappingRevision != 0 && validPrepareRcsRequest(prepareRcsRequest{TmpID: permit.TmpID, GoogleConversationID: permit.GoogleConversationID, SnapshotToken: permit.SnapshotToken, Content: permit.Content})
+	return err == nil && len(digest) == 32 && permit.MappingRevision != 0 && validPrepareRcsRequest(prepareRcsRequest{TmpID: permit.TmpID, GoogleConversationID: permit.GoogleConversationID, SnapshotToken: permit.SnapshotToken, Content: permit.Content})
 }
 
 func permitMatchesTicket(permit commitRcsPermit, ticket *preparedRcsTicket) bool {
