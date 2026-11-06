@@ -146,6 +146,11 @@ pub async fn grant_runtime_privileges(pool: &PgPool, role: &str) -> Result<(), R
     .execute(pool)
     .await?;
     sqlx::raw_sql(&format!(
+        "REVOKE TRUNCATE, TRIGGER ON TABLE {tenant_tables} FROM {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
         "GRANT SELECT ON TABLE {membership_version_table} TO {role}; REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE {membership_version_table} FROM {role}"
     ))
     .execute(pool)
@@ -216,6 +221,11 @@ pub async fn grant_maintenance_privileges(pool: &PgPool, role: &str) -> Result<(
     .await?;
     sqlx::raw_sql(&format!(
         "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {tenant_tables} TO {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
+        "REVOKE TRUNCATE, TRIGGER ON TABLE {tenant_tables} FROM {role}"
     ))
     .execute(pool)
     .await?;
@@ -518,7 +528,7 @@ pub async fn validate_maintenance_role(pool: &PgPool) -> Result<(), RlsError> {
         return Err(RlsError::UnsafeMaintenanceRole("role membership"));
     }
     let tenant_dml: bool = sqlx::query_scalar(
-        "SELECT count(*) = $2 AND COALESCE(bool_and(has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'INSERT') AND has_table_privilege(current_user, oid, 'UPDATE') AND has_table_privilege(current_user, oid, 'DELETE')), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
+        "SELECT count(*) = $2 AND COALESCE(bool_and(has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'INSERT') AND has_table_privilege(current_user, oid, 'UPDATE') AND has_table_privilege(current_user, oid, 'DELETE') AND NOT has_table_privilege(current_user, oid, 'TRUNCATE, TRIGGER')), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
     )
     .bind(tenant_table_names())
     .bind(TENANT_TABLES.len() as i64)

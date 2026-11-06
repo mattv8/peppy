@@ -179,6 +179,16 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(index_exists(database, "compacted_records_origin_tag_unique").await);
     assert!(table_exists(database, "membership_versions").await);
     assert!(function_exists(database, "membership_version_invalidate").await);
+    let version: i64 = sqlx::query_scalar(
+        "SELECT version FROM membership_versions WHERE vault_id = '00000000-0000-0000-0000-000000000030'",
+    )
+    .fetch_one(&mut *database)
+    .await
+    .unwrap();
+    assert_eq!(
+        version, 1,
+        "backfill creates protocol-valid membership tokens"
+    );
 }
 
 async fn seed_populated_downgrade_case(database: &mut PgConnection, version: usize) {
@@ -230,6 +240,13 @@ async fn seed_populated_downgrade_case(database: &mut PgConnection, version: usi
                 INSERT INTO vault_invites(id, token_digest, created_by, state, expires_at) VALUES ('00000000-0000-0000-0000-000000000024', decode(repeat('04', 32), 'hex'), '00000000-0000-0000-0000-000000000020', 'used', now() + interval '1 hour');
                 INSERT INTO vault_requests(id, invite_id, display_name, client_kind, secret_digest, state, expires_at) VALUES ('00000000-0000-0000-0000-000000000025', '00000000-0000-0000-0000-000000000024', 'requester', 'desktop', decode(repeat('05', 32), 'hex'), 'pending', now() + interval '1 hour');
             ").await;
+        }
+        25 => {
+            run(database, "
+                INSERT INTO vaults(vault_id, public_key_profile, encrypted_vault_check_header, key_epoch, profile_fingerprint)
+                VALUES ('00000000-0000-0000-0000-000000000030', '{}', '\\x01', 1, repeat('d', 64));
+            ")
+            .await;
         }
         _ => {}
     }

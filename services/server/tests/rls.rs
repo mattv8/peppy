@@ -852,6 +852,25 @@ async fn startup_validation_rejects_grant_policy_and_execute_drift() {
         .await
         .unwrap();
 
+    sqlx::query(&format!(
+        "GRANT TRUNCATE ON devices TO {}",
+        fixture.maintenance_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        rls::validate_maintenance_role(&fixture.maintenance)
+            .await
+            .is_err()
+    );
+    rls::grant_maintenance_privileges(&fixture.migration, &fixture.maintenance_role)
+        .await
+        .unwrap();
+    rls::validate_maintenance_role(&fixture.maintenance)
+        .await
+        .unwrap();
+
     fixture.cleanup().await;
 }
 
@@ -1078,8 +1097,54 @@ async fn membership_versions_are_trigger_owned_and_rls_read_only() {
             .await
             .unwrap();
     assert_eq!(
-        initial, 0,
+        initial, 1,
         "vault creation initializes the version atomically"
+    );
+
+    let mut shadow_runtime = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TEMP TABLE membership_versions(vault_id uuid, version bigint)")
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO membership_versions VALUES($1, 100)")
+        .bind(vault)
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',$3,1)")
+        .bind(vault)
+        .bind(Uuid::new_v4())
+        .bind("f".repeat(64))
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    let shadow_version: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *shadow_runtime)
+            .await
+            .unwrap();
+    assert_eq!(shadow_version, 100, "temporary shadow is never touched");
+    sqlx::query("DROP TABLE membership_versions")
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    shadow_runtime.commit().await.unwrap();
+    let after_shadow: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(
+        after_shadow,
+        initial + 1,
+        "real version table is invalidated"
     );
 
     let mut runtime = fixture.runtime.begin().await.unwrap();
@@ -1109,7 +1174,8 @@ async fn membership_versions_are_trigger_owned_and_rls_read_only() {
             .await
             .unwrap();
     assert_eq!(
-        bumped, 2,
+        bumped,
+        after_shadow + 2,
         "device and active credential mutations invalidate membership"
     );
     sqlx::query("UPDATE devices SET name='renamed' WHERE vault_id=$1 AND device_id=$2")
@@ -1216,6 +1282,121 @@ async fn membership_versions_are_trigger_owned_and_rls_read_only() {
         remaining, 0,
         "vault cascade removes the version without trigger failures"
     );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn admission_verifier_updates_invalidate_membership() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,'{}',$2,1,$3)")
+        .bind(vault)
+        .bind([1_u8].as_slice())
+        .bind("f".repeat(64))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    let mut runtime = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) VALUES($1,1,$2,$3)")
+        .bind(vault)
+        .bind("f".repeat(64))
+        .bind([2_u8; 32].as_slice())
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    let before: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *runtime)
+            .await
+            .unwrap();
+    sqlx::query(
+        "UPDATE vault_admission_keys SET admission_public_key=$2 WHERE vault_id=$1 AND key_epoch=1",
+    )
+    .bind(vault)
+    .bind([3_u8; 32].as_slice())
+    .execute(&mut *runtime)
+    .await
+    .unwrap();
+    let after: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *runtime)
+            .await
+            .unwrap();
+    assert_eq!(after, before + 1);
+    runtime.commit().await.unwrap();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn cross_vault_credential_rebind_invalidates_both_vaults() {
+    let fixture = Fixture::new().await;
+    let vault_a = Uuid::new_v4();
+    let vault_b = Uuid::new_v4();
+    let device_a = Uuid::new_v4();
+    let device_b = Uuid::new_v4();
+    for (vault, device) in [(vault_a, device_a), (vault_b, device_b)] {
+        sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,'{}',$2,1,$3)")
+            .bind(vault)
+            .bind([1_u8].as_slice())
+            .bind("f".repeat(64))
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',$3,1)")
+            .bind(vault)
+            .bind(device)
+            .bind("f".repeat(64))
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind([4_u8; 32].as_slice())
+        .bind(vault_a)
+        .bind(device_a)
+        .execute(&fixture.maintenance)
+        .await
+        .unwrap();
+    let before_a: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault_a)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    let before_b: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault_b)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE device_credentials SET vault_id=$2, device_id=$3 WHERE token_digest=$1")
+        .bind([4_u8; 32].as_slice())
+        .bind(vault_b)
+        .bind(device_b)
+        .execute(&fixture.maintenance)
+        .await
+        .unwrap();
+    let after_a: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault_a)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    let after_b: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault_b)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    assert_eq!(after_a, before_a + 1);
+    assert_eq!(after_b, before_b + 1);
     fixture.cleanup().await;
 }
 
