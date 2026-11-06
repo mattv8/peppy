@@ -1,8 +1,5 @@
 package dev.peppy.mobile.googlemessages.live
 
-import android.util.JsonReader
-import android.util.JsonToken
-import java.io.StringReader
 import java.util.ArrayDeque
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
@@ -47,9 +44,18 @@ internal object LiveTransport {
             if (bytes(hello.value) > MAX_TEXT_BYTES || !validServerHello(hello.value)) throw LiveRejected()
             return socket
         } catch (failure: RuntimeException) {
-            socket?.let { closeQuietly(it, clock, cancellation) }
+            socket?.let { closeQuietly(it, clock) }
             throw failure
         }
+    }
+
+    fun receiveText(socket: LiveSocket, clock: LiveClock, deadlineElapsedMs: Long, cancellation: LiveCancellation): String {
+        checkLive(clock, deadlineElapsedMs, cancellation)
+        val frame = socket.receive(deadlineElapsedMs, cancellation)
+        checkLive(clock, deadlineElapsedMs, cancellation)
+        val text = (frame as? LiveSocketFrame.Text)?.value ?: throw LiveRejected()
+        if (bytes(text) > MAX_TEXT_BYTES) throw LiveRejected()
+        return text
     }
 
     fun write(socket: LiveSocket, value: String, clock: LiveClock, deadlineElapsedMs: Long, cancellation: LiveCancellation) {
@@ -64,8 +70,12 @@ internal object LiveTransport {
         socket.close(deadline, cancellation)
     }
 
-    private fun closeQuietly(socket: LiveSocket, clock: LiveClock, cancellation: LiveCancellation) {
-        try { close(socket, clock, cancellation) } catch (_: RuntimeException) { }
+    private fun closeQuietly(socket: LiveSocket, clock: LiveClock) {
+        try { close(socket, clock, NeverCancelled) } catch (_: RuntimeException) { }
+    }
+
+    private data object NeverCancelled : LiveCancellation {
+        override val cancelled = false
     }
     private fun checkLive(clock: LiveClock, deadline: Long, cancellation: LiveCancellation) {
         if (cancellation.cancelled) throw LiveCancelled()
@@ -91,21 +101,18 @@ internal object MembershipControls {
     fun parse(raw: String): MembershipControl? {
         if (LiveTransport.bytes(raw) > LiveTransport.MAX_CONTROL_BYTES) return null
         return try {
-            JsonReader(StringReader(raw)).use { reader ->
-                reader.isLenient = false
-                val fields = objectFields(reader) ?: return null
-                if (reader.peek() != JsonToken.END_DOCUMENT || fields.string("type") == null || fields.long("version") != 1L) return null
-                when (fields.string("type")) {
-                    "membership_hint" -> fields.exact("type", "version", "membership_version")
-                        ?.let { fields.decimal("membership_version") }?.let(MembershipControl::Hint)
-                    "membership_bootstrap" -> fields.exact("type", "version", "connection_id", "membership_version", "roster")
-                        ?.let { bootstrap(fields) }
-                    "membership_response" -> fields.exact("type", "version", "connection_id", "challenge_id", "membership_version", "roster")
-                        ?.let { response(fields) }
-                    else -> null
-                }
+            val fields = StrictJsonParser(raw).parseObject() ?: return null
+            if (fields.string("type") == null || fields.long("version") != 1L) return null
+            when (fields.string("type")) {
+                "membership_hint" -> fields.exact("type", "version", "membership_version")
+                    ?.let { fields.decimal("membership_version") }?.let(MembershipControl::Hint)
+                "membership_bootstrap" -> fields.exact("type", "version", "connection_id", "membership_version", "roster")
+                    ?.let { bootstrap(fields) }
+                "membership_response" -> fields.exact("type", "version", "connection_id", "challenge_id", "membership_version", "roster")
+                    ?.let { response(fields) }
+                else -> null
             }
-        } catch (_: Exception) { null }
+        } catch (_: RuntimeException) { null }
     }
 
     fun bootstrap(connectionId: String, version: Long, roster: List<MembershipDevice>) = validId(connectionId) && validVersion(version) && validRoster(roster)
@@ -141,18 +148,128 @@ private class Fields(private val values: Map<String, Any>) {
             device.long("key_epoch") ?: return null, when (device.string("role")) { "owner" -> MembershipRole.OWNER; "gateway" -> MembershipRole.GATEWAY; "device" -> MembershipRole.DEVICE; else -> return null })
     }
 }
-private fun objectFields(reader: JsonReader): Fields? {
-    if (reader.peek() != JsonToken.BEGIN_OBJECT) return null
-    val values = linkedMapOf<String, Any>(); reader.beginObject()
-    while (reader.hasNext()) {
-        val name = reader.nextName(); if (name in values) return null
-        values[name] = when (reader.peek()) {
-            JsonToken.STRING -> reader.nextString(); JsonToken.NUMBER -> reader.nextLong(); JsonToken.BOOLEAN -> reader.nextBoolean()
-            JsonToken.BEGIN_ARRAY -> { val items = mutableListOf<Fields>(); reader.beginArray(); while (reader.hasNext()) items += objectFields(reader) ?: return null; reader.endArray(); items }
-            else -> return null
+private class StrictJsonParser(private val input: String) {
+    private var offset = 0
+
+    fun parseObject(): Fields? {
+        val value = objectValue(0) ?: return null
+        whitespace()
+        return value.takeIf { offset == input.length }
+    }
+
+    private fun objectValue(depth: Int): Fields? {
+        if (depth > MAX_JSON_DEPTH || !consume('{')) return null
+        val values = linkedMapOf<String, Any>()
+        whitespace()
+        if (consume('}')) return Fields(values)
+        while (true) {
+            val name = stringValue() ?: return null
+            if (name in values || !consume(':')) return null
+            values[name] = value(depth + 1) ?: return null
+            when {
+                consume('}') -> return Fields(values)
+                consume(',') -> Unit
+                else -> return null
+            }
         }
     }
-    reader.endObject(); return Fields(values)
+
+    private fun value(depth: Int): Any? {
+        whitespace()
+        return when (input.getOrNull(offset)) {
+            '"' -> stringValue()
+            '{' -> objectValue(depth)
+            '[' -> arrayValue(depth)
+            't' -> literal("true", true)
+            'f' -> literal("false", false)
+            in '0'..'9' -> numberValue()
+            else -> null
+        }
+    }
+
+    private fun arrayValue(depth: Int): List<Fields>? {
+        if (!consume('[')) return null
+        val values = mutableListOf<Fields>()
+        whitespace()
+        if (consume(']')) return values
+        while (true) {
+            values += objectValue(depth + 1) ?: return null
+            when {
+                consume(']') -> return values
+                consume(',') -> Unit
+                else -> return null
+            }
+        }
+    }
+
+    private fun stringValue(): String? {
+        whitespace()
+        if (input.getOrNull(offset) != '"') return null
+        offset++
+        val result = StringBuilder()
+        while (offset < input.length) {
+            val character = input[offset++]
+            when {
+                character == '"' -> return result.toString()
+                character == '\\' -> result.append(escapedCharacter() ?: return null)
+                character < ' ' -> return null
+                else -> result.append(character)
+            }
+        }
+        return null
+    }
+
+    private fun escapedCharacter(): Char? = when (val escaped = input.getOrNull(offset++)) {
+        '"', '\\', '/' -> escaped
+        'b' -> '\b'
+        'f' -> '\u000c'
+        'n' -> '\n'
+        'r' -> '\r'
+        't' -> '\t'
+        'u' -> unicodeCharacter()
+        else -> null
+    }
+
+    private fun unicodeCharacter(): Char? {
+        if (offset + 4 > input.length) return null
+        return input.substring(offset, offset + 4).toIntOrNull(16)?.toChar().also { offset += 4 }
+    }
+
+    private fun numberValue(): Long? {
+        whitespace()
+        val start = offset
+        if (input.getOrNull(offset) == '0') {
+            offset++
+            if (input.getOrNull(offset) in '0'..'9') return null
+        } else {
+            while (input.getOrNull(offset) in '0'..'9') offset++
+        }
+        return input.substring(start, offset).toLongOrNull()
+    }
+
+    private fun literal(expected: String, value: Boolean): Boolean? {
+        if (!input.startsWith(expected, offset)) return null
+        offset += expected.length
+        return value
+    }
+
+    private fun consume(expected: Char): Boolean {
+        whitespace()
+        if (input.getOrNull(offset) != expected) return false
+        offset++
+        return true
+    }
+
+    private fun whitespace() {
+        while (input.getOrNull(offset)?.let(::isJsonWhitespace) == true) offset++
+    }
+
+    private fun isJsonWhitespace(character: Char) =
+        character == ' ' || character == '\n' || character == '\r' || character == '\t'
+
+    private companion object {
+        const val MAX_JSON_DEPTH = 3
+    }
 }
 
 internal data class LiveMembershipSnapshot(val connectionId: String, val version: Long, val activeRoster: List<MembershipDevice>)
@@ -161,13 +278,30 @@ internal interface LiveCore { fun enable(snapshot: LiveMembershipSnapshot); fun 
 /** One coordinator per captured native client. It never calls client code under a connection lock. */
 internal class LiveIncarnationCoordinator {
     private val lock = Any()
+    private var active: LivePublication? = null
+
     fun enable(publication: LivePublication) = synchronized(lock) {
         if (!publication.gate.get()) return@synchronized false
+        active?.takeIf { it !== publication }?.let { previous ->
+            previous.gate.set(false)
+            disable(previous)
+        }
         publication.core.enable(publication.snapshot)
-        if (!publication.gate.get()) publication.core.disable()
-        publication.gate.get()
+        publication.enabled.set(true)
+        if (!publication.gate.get()) {
+            disable(publication)
+            return@synchronized false
+        }
+        active = publication
+        true
     }
+
     fun retire(publication: LivePublication) = synchronized(lock) {
+        disable(publication)
+        if (active === publication) active = null
+    }
+
+    private fun disable(publication: LivePublication) {
         if (publication.enabled.compareAndSet(true, false)) publication.core.disable()
     }
 }
@@ -184,7 +318,8 @@ internal class LiveAdmission internal constructor(private val publication: LiveP
         val now = clock.elapsedRealtime()
         if (!publication.gate.get() || now >= leaseDeadline || now >= actionDeadline) return false
         action()
-        return publication.gate.get() && clock.elapsedRealtime() < leaseDeadline
+        val completedAt = clock.elapsedRealtime()
+        return publication.gate.get() && completedAt < leaseDeadline && completedAt < actionDeadline
     }
 }
 
@@ -200,7 +335,8 @@ internal class LiveConnection(
 ) {
     private val state = Any(); private val connectionGate = AtomicBoolean(true)
     private var connectionId: String? = null; private var highwater = 0L; private var pending: Pending? = null
-    private var lastIssue = Long.MIN_VALUE; private var leaseDeadline = Long.MIN_VALUE; private var retired = false
+    private var lastIssue = Long.MIN_VALUE; private var lastNonce: String? = null
+    private var leaseDeadline = Long.MIN_VALUE; private var retired = false
     private var publication: LivePublication? = null; private var controlBytes = 0
     private val data = ArrayDeque<String>(64); private val controls = ArrayDeque<Pair<MembershipControl, Int>>(4)
     private data class Pending(val nonce: String, val issuedAt: Long, val responseDeadline: Long)
@@ -209,19 +345,25 @@ internal class LiveConnection(
         if (retired || connectionId != null || !MembershipControls.bootstrap(control.connectionId, control.membershipVersion, control.roster)) return@synchronized false
         connectionId = control.connectionId; highwater = control.membershipVersion; true
     }
-    fun issue(nonce: String): Boolean = synchronized(state) {
-        val now = clock.elapsedRealtime()
-        if (!fresh(now) || pending != null || !validNonce(nonce)) return@synchronized false
-        val deadline = try { LiveTransport.add(now, 5_000) } catch (_: LiveRejected) { retireLocked(); return@synchronized false }
-        pending = Pending(nonce, now, deadline); lastIssue = now; true
-    }
-    /** Deterministic owner driver: callers supply CSPRNG bytes and dispatch the resulting control elsewhere. */
-    fun drive(nextNonce: () -> String): String? = synchronized(state) {
-        val now = clock.elapsedRealtime(); if (!fresh(now) || pending != null || (lastIssue != Long.MIN_VALUE && now - lastIssue < 20_000)) null
-        else nextNonce().takeIf { issue(it) }
+    fun issue(nonce: String): Boolean = synchronized(state) { issueLocked(nonce, clock.elapsedRealtime()) }
+
+    /** Deterministic owner driver: callers supply CSPRNG bytes and a bounded control enqueue. */
+    fun drive(nextNonce: () -> String, enqueue: (String) -> Boolean = { true }): String? {
+        val nonce = synchronized(state) {
+            val now = clock.elapsedRealtime()
+            if (!fresh(now) || pending != null || !cadenceElapsed(now)) return null
+            nextNonce().takeIf { issueLocked(it, now) } ?: return null
+        }
+        val queued = try { enqueue(nonce) } catch (_: RuntimeException) { false }
+        if (!queued) {
+            retire()
+            return null
+        }
+        return synchronized(state) { nonce.takeIf { !retired && pending?.nonce == nonce } }
     }
     fun response(control: MembershipControl.Response): Boolean {
-        val publicationToEnable: LivePublication
+        var publicationToRetire: LivePublication? = null
+        var publicationToEnable: LivePublication? = null
         synchronized(state) {
             val now = clock.elapsedRealtime(); val expected = pending ?: return false
             if (!fresh(now) || now > expected.responseDeadline || control.connectionId != connectionId || control.challengeId != expected.nonce ||
@@ -230,16 +372,38 @@ internal class LiveConnection(
             }
             val deadline = try { LiveTransport.add(expected.issuedAt, 60_000) } catch (_: LiveRejected) { retireLocked(); return false }
             if (now >= deadline) { retireLocked(); return false }
-            pending = null; highwater = control.membershipVersion; leaseDeadline = deadline
-            if (publication != null && control.membershipVersion == publication!!.snapshot.version) return true
-            publication?.close(coordinator)
             val roster = control.roster.filterNot { it.revoked }
             if (roster.none { it.deviceId == localDeviceId }) { retireLocked(); return false }
-            publicationToEnable = LivePublication(core, LiveMembershipSnapshot(control.connectionId, control.membershipVersion, roster))
-            publication = publicationToEnable
+            pending = null
+            highwater = control.membershipVersion
+            val current = publication
+            if (current != null && control.membershipVersion == current.snapshot.version) {
+                leaseDeadline = deadline
+                return true
+            }
+            if (current != null) {
+                publication = null
+                leaseDeadline = Long.MIN_VALUE
+                publicationToRetire = current
+            } else {
+                leaseDeadline = deadline
+                publicationToEnable = LivePublication(core, LiveMembershipSnapshot(control.connectionId, control.membershipVersion, roster))
+                publication = publicationToEnable
+            }
         }
-        val enabled = coordinator.enable(publicationToEnable)
-        synchronized(state) { if (!enabled || retired || publication !== publicationToEnable || !connectionGate.get()) { publicationToEnable.close(coordinator); if (publication === publicationToEnable) publication = null; return false }; publicationToEnable.enabled.set(true); return true }
+        publicationToRetire?.let {
+            it.close(coordinator)
+            return true
+        }
+        val target = publicationToEnable ?: return false
+        val enabled = coordinator.enable(target)
+        val accepted = synchronized(state) {
+            val current = enabled && !retired && publication === target && connectionGate.get()
+            if (!current && publication === target) publication = null
+            current
+        }
+        if (!accepted) target.close(coordinator)
+        return accepted
     }
     fun hint(control: MembershipControl.Hint): Boolean {
         val toClose = synchronized(state) {
@@ -262,6 +426,15 @@ internal class LiveConnection(
     internal fun enabled() = synchronized(state) { publication?.enabled?.get() == true }
     internal fun highwater() = synchronized(state) { highwater }
     private fun fresh(now: Long) = !retired && connectionGate.get() && connectionId != null && (publication == null || now < leaseDeadline)
+    private fun cadenceElapsed(now: Long) = lastIssue == Long.MIN_VALUE || (now >= lastIssue && now - lastIssue >= 20_000)
+    private fun issueLocked(nonce: String, now: Long): Boolean {
+        if (!fresh(now) || pending != null || nonce == lastNonce || !validNonce(nonce)) return false
+        val deadline = try { LiveTransport.add(now, 5_000) } catch (_: LiveRejected) { retireLocked(); return false }
+        pending = Pending(nonce, now, deadline)
+        lastIssue = now
+        lastNonce = nonce
+        return true
+    }
     private fun retireLocked() { if (retired) return; retired = true; connectionGate.set(false); pending = null; data.clear(); controls.clear(); controlBytes = 0; publication?.closeAsync(coordinator); publication = null }
     private fun validNonce(value: String) = try { value.length == 22 && Base64.getUrlDecoder().decode(value).let { it.size == 16 && Base64.getUrlEncoder().withoutPadding().encodeToString(it) == value } } catch (_: IllegalArgumentException) { false }
 }
