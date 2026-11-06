@@ -206,6 +206,21 @@ impl LiveHub {
         }
     }
 
+    pub(crate) fn ticket_generation(
+        &self,
+        vault_id: VaultId,
+        device_id: DeviceId,
+        session_id: [u8; 16],
+    ) -> Option<u64> {
+        self.inner
+            .sinks
+            .lock()
+            .expect("live hub lock poisoned")
+            .get(&(vault_id, device_id))
+            .filter(|sink| sink.session_id == Some(session_id))
+            .map(|sink| sink.generation)
+    }
+
     pub(crate) fn unregister(&self, vault_id: VaultId, device_id: DeviceId, generation: u64) {
         let mut sinks = self.inner.sinks.lock().expect("live hub lock poisoned");
         let key = (vault_id, device_id);

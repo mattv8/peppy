@@ -547,15 +547,19 @@ struct RouterBuildOptions {
     push_advertisement: PushConfigAdvertisement,
 }
 
+#[cfg(test)]
+type LiveBackendOverride = (
+    Arc<dyn crate::live::LiveBackend>,
+    tokio::sync::watch::Receiver<bool>,
+    Duration,
+    Option<Arc<std::sync::Mutex<Option<crate::live::LiveHub>>>>,
+);
+
 fn build_router_with_live_backend(
     db: PgPool,
     build: RouterBuildOptions,
     authorization: RouterAuthorization,
-    #[cfg(test)] live_override: Option<(
-        Arc<dyn crate::live::LiveBackend>,
-        tokio::sync::watch::Receiver<bool>,
-        Duration,
-    )>,
+    #[cfg(test)] live_override: Option<LiveBackendOverride>,
 ) -> Result<(Router, Maintenance), &'static str> {
     let RouterBuildOptions {
         config,
@@ -602,7 +606,14 @@ fn build_router_with_live_backend(
     let live_readiness = live_backend.subscribe_readiness();
     #[cfg(test)]
     let (live_backend_override, live_readiness, live_publish_timeout) = match live_override {
-        Some((backend, readiness, publish_timeout)) => (Some(backend), readiness, publish_timeout),
+        Some((backend, readiness, publish_timeout, hub_observer)) => {
+            if let Some(hub_observer) = hub_observer {
+                *hub_observer
+                    .lock()
+                    .expect("live hub observer lock poisoned") = Some(live_hub.clone());
+            }
+            (Some(backend), readiness, publish_timeout)
+        }
         None => (None, live_readiness, LIVE_PUBLISH_TIMEOUT),
     };
     let router = Router::new()
@@ -2979,6 +2990,11 @@ async fn close_live_ticket_session(
 ) -> ApiResult<StatusCode> {
     let p = authenticated(&state, &headers, Operation::Sync).await?;
     let session = live_ticket_session_hash(&request.session_id)?;
+    let session_id: [u8; 16] = URL_SAFE_NO_PAD
+        .decode(&request.session_id)
+        .expect("live_ticket_session_hash validated session ID")
+        .try_into()
+        .expect("live_ticket_session_hash validated session length");
     let mut tx = live_ticket_tx(&state, &p).await?;
     let current: Option<String> = sqlx::query_scalar("SELECT state FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE").bind(p.vault).bind(p.device).bind(&session).fetch_optional(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_lock"))?;
     if current.is_none() {
@@ -2995,9 +3011,21 @@ async fn close_live_ticket_session(
         sqlx::query("UPDATE live_ticket_sessions SET state='closed',closed_at=COALESCE(closed_at,now()),lease_until=NULL WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open'").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_close"))?;
         sqlx::query("DELETE FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND consumed_at IS NULL").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_delete"))?;
     }
+    let socket_generation =
+        state
+            .live_hub
+            .ticket_generation(VaultId(p.vault), DeviceId(p.device), session_id);
     tx.commit()
         .await
         .map_err(|e| database_unavailable(&e, "live_ticket_commit"))?;
+    if let Some(socket_generation) = socket_generation {
+        state.live_hub.cancel_exact(
+            VaultId(p.vault),
+            DeviceId(p.device),
+            session_id,
+            socket_generation,
+        );
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

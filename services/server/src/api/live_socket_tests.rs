@@ -15,7 +15,8 @@ use peppy_protocol::{EphemeralSignalV2, LiveHelloV2};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{
-    net::TcpListener,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     sync::{Notify, oneshot, watch},
     task::JoinHandle,
 };
@@ -113,6 +114,7 @@ struct LiveTestServer {
     task: JoinHandle<()>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     _readiness_sender: watch::Sender<bool>,
+    live_hub: crate::live::LiveHub,
     owner_token: String,
     owner_device: Uuid,
     vault: Uuid,
@@ -122,7 +124,11 @@ struct LiveTestServer {
 
 impl LiveTestServer {
     async fn start(backend: FakeLiveBackend, ready: bool) -> Self {
-        Self::start_with_configuration(backend, ready, LIVE_PUBLISH_TIMEOUT).await
+        Self::start_with_trusted_origin(backend, ready, LIVE_PUBLISH_TIMEOUT, true).await
+    }
+
+    async fn start_without_trusted_origin(backend: FakeLiveBackend, ready: bool) -> Self {
+        Self::start_with_trusted_origin(backend, ready, LIVE_PUBLISH_TIMEOUT, false).await
     }
 
     async fn start_with_publish_timeout(
@@ -137,6 +143,15 @@ impl LiveTestServer {
         backend: FakeLiveBackend,
         ready: bool,
         publish_timeout: Duration,
+    ) -> Self {
+        Self::start_with_trusted_origin(backend, ready, publish_timeout, true).await
+    }
+
+    async fn start_with_trusted_origin(
+        backend: FakeLiveBackend,
+        ready: bool,
+        publish_timeout: Duration,
+        trusted_origin: bool,
     ) -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; live socket tests never silently skip");
@@ -198,6 +213,7 @@ impl LiveTestServer {
         .unwrap();
 
         let (readiness_sender, readiness) = watch::channel(ready);
+        let live_hub_observer = Arc::new(Mutex::new(None));
         let authorization = RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: Arc::new(CommunityEnrollmentAuthorization::new(pool.clone())),
@@ -205,17 +221,26 @@ impl LiveTestServer {
             row_security: false,
             rls_enforced: false,
         };
+        let mut config = test_config(&database_url);
+        if !trusted_origin {
+            config.web_live_trusted_origin = None;
+        }
         let (router, _maintenance) = build_router_with_live_backend(
             pool.clone(),
             RouterBuildOptions {
-                config: Some(test_config(&database_url)),
+                config: Some(config),
                 initialized_storage: None,
                 transport: TransportOptions::default(),
                 explicit_relay_url: None,
                 push_advertisement: PushConfigAdvertisement::default(),
             },
             authorization,
-            Some((Arc::new(backend), readiness, publish_timeout)),
+            Some((
+                Arc::new(backend),
+                readiness,
+                publish_timeout,
+                Some(live_hub_observer.clone()),
+            )),
         )
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -237,6 +262,11 @@ impl LiveTestServer {
             task,
             shutdown: Mutex::new(Some(shutdown_sender)),
             _readiness_sender: readiness_sender,
+            live_hub: live_hub_observer
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("live test router must expose its hub"),
             owner_token: owner.device_token,
             owner_device: owner.device_id,
             vault,
@@ -324,6 +354,20 @@ impl LiveTestServer {
             panic!("ticket upgrade unexpectedly succeeded")
         };
         response.status()
+    }
+
+    async fn raw_ticket_upgrade_status(&self, protocol: &str) -> StatusCode {
+        let address = self.base_url.strip_prefix("http://").unwrap();
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "GET /v1/live HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nOrigin: https://web.peppy.test\r\nSec-WebSocket-Protocol: {protocol}\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut bytes = [0_u8; 1024];
+        let count = stream.read(&mut bytes).await.unwrap();
+        let response = std::str::from_utf8(&bytes[..count]).unwrap();
+        let status = response.lines().next().unwrap();
+        StatusCode::from_u16(status.split_whitespace().nth(1).unwrap().parse().unwrap()).unwrap()
     }
 
     async fn snapshot(&self) -> serde_json::Value {
@@ -1088,6 +1132,147 @@ async fn ticket_live_upgrade_echoes_protocol_and_sends_hello() {
     let ticket = issue_ticket(&server, session_id.clone()).await;
     let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
     expect_strict_hello(&mut socket).await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn ticket_upgrade_without_trusted_origin_returns_fixed_unsupported_code() {
+    let server =
+        LiveTestServer::start_without_trusted_origin(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([30_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let protocol = live_ticket_protocol(&session_id, &ticket);
+    let mut headers = HeaderMap::new();
+    headers.insert("origin", "https://web.peppy.test".parse().unwrap());
+    headers.insert("sec-websocket-protocol", protocol.parse().unwrap());
+
+    let rejection = crate::live_ticket_upgrade::classify_live_upgrade(&headers, None).unwrap_err();
+    assert_eq!(rejection.code(), "live_ticket_unsupported");
+    assert_eq!(
+        server
+            .ticket_upgrade_status(&session_id, &ticket, Some("https://web.peppy.test"), false)
+            .await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn duplicate_ticket_protocol_headers_are_rejected_over_raw_tcp() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([33_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let protocol = live_ticket_protocol(&session_id, &ticket);
+
+    assert_eq!(
+        server.raw_ticket_upgrade_status(&protocol).await,
+        StatusCode::BAD_REQUEST
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn closed_ticket_session_is_rejected_at_upgrade() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([34_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::DELETE, session_id.clone())
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+
+    assert_eq!(
+        server
+            .ticket_upgrade_status(&session_id, &ticket, Some("https://web.peppy.test"), false)
+            .await,
+        StatusCode::UNAUTHORIZED
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn deleting_ticket_session_closes_its_open_socket() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([36_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
+    expect_strict_hello(&mut socket).await;
+
+    assert_eq!(
+        live_ticket_request(&server, reqwest::Method::DELETE, session_id)
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while socket.next().await.is_some() {}
+    })
+    .await
+    .expect("ticket socket remained open after session deletion");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn delayed_ticket_cancel_for_g1_leaves_g2_open() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([37_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (mut g1, _) = server.connect_with_ticket(&session_id, &ticket).await;
+    expect_strict_hello(&mut g1).await;
+    let (session, _) = ticket_parts(&session_id, &ticket);
+    let g1_generation = server
+        .live_hub
+        .ticket_generation(
+            VaultId(server.vault),
+            DeviceId(server.owner_device),
+            session,
+        )
+        .unwrap();
+
+    let replacement_ticket = issue_ticket(&server, session_id.clone()).await;
+    let (mut g2, _) = server
+        .connect_with_ticket(&session_id, &replacement_ticket)
+        .await;
+    expect_strict_hello(&mut g2).await;
+    server.live_hub.cancel_exact(
+        VaultId(server.vault),
+        DeviceId(server.owner_device),
+        session,
+        g1_generation,
+    );
+
+    match tokio::time::timeout(Duration::from_millis(200), g2.next()).await {
+        Err(_) | Ok(Some(Ok(tungstenite::Message::Ping(_)))) => {}
+        Ok(Some(Ok(tungstenite::Message::Close(_)))) | Ok(None) => {
+            panic!("delayed G1 cancellation closed G2")
+        }
+        Ok(Some(Ok(message))) => panic!("unexpected G2 frame: {message:?}"),
+        Ok(Some(Err(error))) => panic!("G2 read failed: {error}"),
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn ticket_upgrade_trace_logs_do_not_contain_ticket_or_protocol() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([35_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (mut socket, protocol) = server.connect_with_ticket(&session_id, &ticket).await;
+    expect_strict_hello(&mut socket).await;
+
+    let captured = logs.text();
+    assert!(!captured.contains(&ticket));
+    assert!(!captured.contains(&protocol));
     server.shutdown().await;
 }
 
