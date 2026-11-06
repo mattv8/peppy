@@ -456,3 +456,119 @@ func TestSoleNumberlessPeerMakesCompleteLookupUnknown(t *testing.T) {
 		t.Fatalf("numberless peer lookup code = %s", code)
 	}
 }
+
+func TestConversationCandidateSnapshotExportsEveryRawRecord(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link,
+		&gmproto.Conversation{
+			ConversationID: "eligible",
+			Type:           gmproto.ConversationType_RCS,
+			Status:         gmproto.ConversationStatus_ACTIVE,
+			Participants: []*gmproto.Participant{
+				{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "peer-id", Type: gmproto.IdentifierType_PHONE, Number: "+12025550123"}, FormattedNumber: "(202) 555-0123"},
+				{IsVisible: false, IsMe: true, ID: &gmproto.SmallInfo{ParticipantID: "self-id", Type: gmproto.IdentifierType_PHONE}},
+			},
+		},
+		&gmproto.Conversation{
+			ConversationID: "numberless",
+			Type:           gmproto.ConversationType_RCS,
+			Status:         gmproto.ConversationStatus_ACTIVE,
+			Participants: []*gmproto.Participant{{
+				IsVisible: true,
+				ID:        &gmproto.SmallInfo{ParticipantID: "numberless-id", Type: gmproto.IdentifierType_PHONE},
+			}},
+		},
+		&gmproto.Conversation{
+			ConversationID: "group",
+			Type:           gmproto.ConversationType_RCS,
+			Status:         gmproto.ConversationStatus_ACTIVE,
+			Participants: []*gmproto.Participant{
+				{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "group-a", Type: gmproto.IdentifierType_PHONE, Number: "+12025550001"}},
+				{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "group-b", Type: gmproto.IdentifierType_PHONE, Number: "+12025550002"}},
+			},
+		},
+		&gmproto.Conversation{
+			ConversationID: "self-chat",
+			Type:           gmproto.ConversationType_RCS,
+			Status:         gmproto.ConversationStatus_ACTIVE,
+			Participants: []*gmproto.Participant{{
+				IsVisible: true,
+				IsMe:      true,
+				ID:        &gmproto.SmallInfo{ParticipantID: "self-only", Type: gmproto.IdentifierType_PHONE, Number: "+12025550999"},
+			}},
+		},
+	)
+	var snapshot struct {
+		Code          string `json:"code"`
+		SnapshotToken string `json:"snapshot_token"`
+		Generation    uint64 `json:"generation"`
+		StreamEpoch   uint64 `json:"stream_epoch"`
+		Revision      uint64 `json:"revision"`
+		Complete      bool   `json:"complete"`
+		Conversations []struct {
+			GoogleConversationID string `json:"google_conversation_id"`
+			ConversationType     int32  `json:"conversation_type"`
+			ConversationStatus   int32  `json:"conversation_status"`
+			Classification       string `json:"classification"`
+			Group                bool   `json:"group"`
+			VisibleNonSelfCount  int    `json:"visible_non_self_count"`
+			Participants         []struct {
+				ParticipantID        string `json:"participant_id"`
+				IdentifierType       int32  `json:"identifier_type"`
+				RawNumber            string `json:"raw_number"`
+				FormattedNumber      string `json:"formatted_number"`
+				ParticipantIDPresent bool   `json:"participant_id_present"`
+				NumberPresent        bool   `json:"number_present"`
+				Visible              bool   `json:"visible"`
+				Self                 bool   `json:"self"`
+			} `json:"participants"`
+		} `json:"conversations"`
+	}
+	if err := json.Unmarshal([]byte(link.ConversationCandidateSnapshot()), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Code != "conversation_candidate_snapshot" || !snapshot.Complete || snapshot.SnapshotToken == "" || snapshot.Generation != 7 || snapshot.StreamEpoch != 3 || snapshot.Revision == 0 {
+		t.Fatalf("snapshot envelope = %+v", snapshot)
+	}
+	if len(snapshot.Conversations) != 4 || snapshot.Conversations[0].GoogleConversationID != "eligible" || snapshot.Conversations[1].GoogleConversationID != "group" || snapshot.Conversations[2].GoogleConversationID != "numberless" || snapshot.Conversations[3].GoogleConversationID != "self-chat" {
+		t.Fatalf("snapshot conversations = %+v", snapshot.Conversations)
+	}
+	eligible := snapshot.Conversations[0]
+	if eligible.Classification != "eligible" || eligible.Group || eligible.VisibleNonSelfCount != 1 || len(eligible.Participants) != 2 {
+		t.Fatalf("eligible record = %+v", eligible)
+	}
+	peer := eligible.Participants[0]
+	if peer.ParticipantID != "peer-id" || peer.IdentifierType != int32(gmproto.IdentifierType_PHONE) || peer.RawNumber != "+12025550123" || peer.FormattedNumber != "(202) 555-0123" || !peer.ParticipantIDPresent || !peer.NumberPresent || !peer.Visible || peer.Self {
+		t.Fatalf("eligible peer = %+v", peer)
+	}
+	group := snapshot.Conversations[1]
+	if group.Classification != "unsupported" || !group.Group || group.VisibleNonSelfCount != 2 {
+		t.Fatalf("group record = %+v", group)
+	}
+	numberless := snapshot.Conversations[2]
+	if numberless.Classification != "unknown" || numberless.Group || numberless.VisibleNonSelfCount != 1 || len(numberless.Participants) != 1 {
+		t.Fatalf("numberless record = %+v", numberless)
+	}
+	missing := numberless.Participants[0]
+	if missing.ParticipantID != "numberless-id" || !missing.ParticipantIDPresent || missing.NumberPresent || missing.RawNumber != "" || !missing.Visible || missing.Self {
+		t.Fatalf("numberless peer = %+v", missing)
+	}
+	selfChat := snapshot.Conversations[3]
+	if selfChat.Classification != "unsupported" || selfChat.Group || selfChat.VisibleNonSelfCount != 0 || len(selfChat.Participants) != 1 || !selfChat.Participants[0].Self {
+		t.Fatalf("self-chat record = %+v", selfChat)
+	}
+}
+
+func TestConversationCandidateSnapshotRequiresCurrentCompleteness(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link,
+		stage2Conversation("eligible", stage2Participant("target", true, false)),
+	)
+	if _, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch); !ok {
+		t.Fatal("refresh did not start")
+	}
+	want := `{"code":"conversation_candidate_snapshot_unavailable","snapshot_token":"","generation":0,"stream_epoch":0,"revision":0,"complete":false,"conversations":[]}`
+	if got := link.ConversationCandidateSnapshot(); got != want {
+		t.Fatalf("incomplete snapshot export = %s", got)
+	}
+}

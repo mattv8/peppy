@@ -3,6 +3,8 @@ package gmlink
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sort"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -41,6 +43,37 @@ type conversationResult struct {
 	GoogleConversationID string `json:"google_conversation_id,omitempty"`
 }
 
+type conversationCandidateParticipant struct {
+	ParticipantID        string `json:"participant_id"`
+	IdentifierType       int32  `json:"identifier_type"`
+	RawNumber            string `json:"raw_number"`
+	FormattedNumber      string `json:"formatted_number"`
+	ParticipantIDPresent bool   `json:"participant_id_present"`
+	NumberPresent        bool   `json:"number_present"`
+	Visible              bool   `json:"visible"`
+	Self                 bool   `json:"self"`
+}
+
+type conversationCandidateRecord struct {
+	GoogleConversationID string                             `json:"google_conversation_id"`
+	ConversationType     int32                              `json:"conversation_type"`
+	ConversationStatus   int32                              `json:"conversation_status"`
+	Classification       string                             `json:"classification"`
+	Group                bool                               `json:"group"`
+	VisibleNonSelfCount  int                                `json:"visible_non_self_count"`
+	Participants         []conversationCandidateParticipant `json:"participants"`
+}
+
+type conversationCandidateSnapshot struct {
+	Code          string                        `json:"code"`
+	SnapshotToken string                        `json:"snapshot_token"`
+	Generation    uint64                        `json:"generation"`
+	StreamEpoch   uint64                        `json:"stream_epoch"`
+	Revision      uint64                        `json:"revision"`
+	Complete      bool                          `json:"complete"`
+	Conversations []conversationCandidateRecord `json:"conversations"`
+}
+
 type conversationPageLoader func(context.Context, *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error)
 
 func conversationJSON(code string) string {
@@ -50,6 +83,70 @@ func conversationJSON(code string) string {
 
 func resolvedConversationJSON(id string) string {
 	encoded, _ := json.Marshal(conversationResult{Code: "conversation_found", GoogleConversationID: id})
+	return string(encoded)
+}
+
+func unavailableConversationCandidateSnapshotJSON() string {
+	encoded, _ := json.Marshal(conversationCandidateSnapshot{
+		Code:          "conversation_candidate_snapshot_unavailable",
+		Conversations: make([]conversationCandidateRecord, 0),
+	})
+	return string(encoded)
+}
+
+// ConversationCandidateSnapshot is a sensitive, local-only bridge to core. Its
+// participant facts must never be logged, persisted, included in diagnostics, or synced.
+func (link *Link) ConversationCandidateSnapshot() string {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if !link.hasOwnerVerificationLocked() || !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation || link.pendingConversationEvents != 0 {
+		return unavailableConversationCandidateSnapshotJSON()
+	}
+	ids := make([]string, 0, len(link.conversationRecords))
+	for id := range link.conversationRecords {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	records := make([]conversationCandidateRecord, 0, len(ids))
+	for _, id := range ids {
+		conversation := link.conversationRecords[id]
+		participants := make([]conversationCandidateParticipant, 0, len(conversation.GetParticipants()))
+		for _, participant := range conversation.GetParticipants() {
+			identifier := participant.GetID()
+			participantID := identifier.GetParticipantID()
+			rawNumber := identifier.GetNumber()
+			participants = append(participants, conversationCandidateParticipant{
+				ParticipantID:        participantID,
+				IdentifierType:       int32(identifier.GetType()),
+				RawNumber:            rawNumber,
+				FormattedNumber:      participant.GetFormattedNumber(),
+				ParticipantIDPresent: participantID != "",
+				NumberPresent:        rawNumber != "",
+				Visible:              participant.GetIsVisible(),
+				Self:                 participant.GetIsMe(),
+			})
+		}
+		visibleNonSelfCount := len(visibleOtherParticipants(conversation))
+		records = append(records, conversationCandidateRecord{
+			GoogleConversationID: id,
+			ConversationType:     int32(conversation.GetType()),
+			ConversationStatus:   int32(conversation.GetStatus()),
+			Classification:       classifyConversation(conversation),
+			Group:                visibleNonSelfCount > 1,
+			VisibleNonSelfCount:  visibleNonSelfCount,
+			Participants:         participants,
+		})
+	}
+	snapshot := conversationCandidateSnapshot{
+		Code:          "conversation_candidate_snapshot",
+		SnapshotToken: fmt.Sprintf("%d:%d:%d", link.generation, link.streamEpoch, link.indexRevision),
+		Generation:    link.generation,
+		StreamEpoch:   link.streamEpoch,
+		Revision:      link.indexRevision,
+		Complete:      true,
+		Conversations: records,
+	}
+	encoded, _ := json.Marshal(snapshot)
 	return string(encoded)
 }
 
