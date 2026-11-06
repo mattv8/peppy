@@ -227,7 +227,11 @@ impl Client {
 }
 
 fn valid_token(token: &str) -> bool {
-    !token.is_empty() && token.len() <= 4_096 && token.is_ascii()
+    !token.is_empty()
+        && token.len() <= 4_096
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn next_generation(conn: &Connection, conversation_id: ConversationId) -> Result<i64, Error> {

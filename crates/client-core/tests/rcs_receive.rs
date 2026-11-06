@@ -92,3 +92,20 @@ fn unlink_freezes_link_and_marks_ambiguous_detectors_for_alert() {
         Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale))
     ));
 }
+
+#[test]
+fn history_tokens_are_canonical_opaque_values() {
+    let (_directory, client, conversation_id) = client();
+    assert!(matches!(
+        client.begin_rcs_link_ownership(conversation_id, "not canonical", 1),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.begin_rcs_link_ownership(conversation_id, "", 1),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.begin_rcs_link_ownership(conversation_id, &"a".repeat(4_097), 1),
+        Err(Error::InvalidRequest(_))
+    ));
+}
