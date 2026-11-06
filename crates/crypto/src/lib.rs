@@ -4,6 +4,7 @@ pub mod enrollment;
 pub mod filesystem;
 pub mod passphrase;
 mod stream_format;
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use libsodium_rs::{
     crypto_aead::xchacha20poly1305 as aead, crypto_pwhash::argon2id,
@@ -161,6 +162,8 @@ pub enum KeyPurpose {
     LocalWrap,
     /// Tester registry envelopes bound to an authenticated vault profile.
     TesterRegistry,
+    /// Encrypted compose-draft records. This purpose is intentionally separate from envelopes.
+    Draft,
 }
 impl KeyPurpose {
     fn id(self) -> u64 {
@@ -171,6 +174,7 @@ impl KeyPurpose {
             Self::Compaction => 4,
             Self::LocalWrap => 5,
             Self::TesterRegistry => 6,
+            Self::Draft => 7,
         }
     }
 }
@@ -189,6 +193,7 @@ pub fn compaction_hmac(key: &PurposeKey, domain: &[u8], parts: &[&[u8]]) -> [u8;
     }
     mac.finalize().into_bytes().into()
 }
+#[derive(Clone)]
 pub struct PurposeKey {
     bytes: [u8; ROOT_KEY_BYTES],
     purpose: KeyPurpose,
@@ -255,6 +260,19 @@ pub fn derive_purpose_key(
         purpose,
         profile_fingerprint: profile_fingerprint_bytes(profile)?,
     })
+}
+/// Derives the draft AEAD key from the cacheable event purpose key. This keeps native key caches
+/// format-stable while preserving a domain-separated key for `peppy.draft.v1`.
+pub fn derive_draft_purpose_key(
+    event: &PurposeKey,
+    profile: &KeyProfile,
+) -> Result<PurposeKey, CryptoError> {
+    let mut bytes = [0u8; ROOT_KEY_BYTES];
+    let result = event.with_native_cache_bytes(|key| {
+        Hkdf::<Sha256>::new(Some(b"peppy.draft.v1"), key).expand(b"peppy.draft.v1", &mut bytes)
+    });
+    result.map_err(|_| CryptoError::OperationFailed)?;
+    PurposeKey::import_native_cache(bytes, profile, KeyPurpose::Draft)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
