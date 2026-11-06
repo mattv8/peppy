@@ -199,7 +199,7 @@ describe("layout persistence", () => {
       },
     });
 
-    expect(() => persistLayoutPatch({ listWidth: 320 })).not.toThrow();
+    expect(persistLayoutPatch({ listWidth: 320 })).toBe(false);
     expect(() => persistRecipientPosition(recipientPosition)).not.toThrow();
   });
 });

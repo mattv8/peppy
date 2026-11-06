@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { peppyCopy } from "../generated/peppyCopy";
 import { PRIVACY_POLICY_URL, PrivacySettings } from "./PrivacySettings";
 
 const openUrl = vi.hoisted(() => vi.fn());
@@ -52,5 +53,12 @@ describe("PrivacySettings", () => {
     expect(control).toHaveAttribute("aria-describedby", "settings-share-typing-hint");
     fireEvent.click(control);
     expect(onChange).toHaveBeenCalledWith(false);
+  });
+
+  it("shows the generic setting error when sharing cannot be saved", () => {
+    render(<PrivacySettings browserHost={false} typingShare={{ enabled: true, onChange: vi.fn(), error: true }} />);
+
+    expect(screen.getByRole("alert")).toHaveAttribute("id", "settings-share-typing-error");
+    expect(screen.getByRole("alert")).toHaveTextContent(peppyCopy.toggle_android_phone_read_error);
   });
 });
