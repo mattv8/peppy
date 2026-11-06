@@ -138,20 +138,32 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 	}
 	link.preparedTicket = nil
 	link.sendAdmissionInFlight = true
+	if link.runCtx == nil {
+		link.sendAdmissionInFlight = false
+		link.mu.Unlock()
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	operationCtx, operationCancel := context.WithTimeout(link.runCtx, rcsSendDeadline)
 	link.mu.Unlock()
+	defer operationCancel()
 	defer func() {
 		link.mu.Lock()
 		link.sendAdmissionInFlight = false
 		link.mu.Unlock()
 	}()
 
-	link.rpcMu.Lock()
+	if !link.lockRPC(operationCtx) {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
 	defer link.rpcMu.Unlock()
-	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
+	client, _, generation, streamEpoch, ok := link.activeRuntime()
 	if !ok || generation != ticket.generation || streamEpoch != ticket.streamEpoch {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
-	fetched, fetchCode := link.getConversation(runCtx, client, ticket.request.GoogleConversationID)
+	if !link.ticketCurrent(ticket) {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	fetched, fetchCode := link.getConversation(operationCtx, client, ticket.request.GoogleConversationID)
 	if fetchCode != "" || !proto.Equal(fetched, ticket.conversation) {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
@@ -170,7 +182,7 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 	if effect == nil {
 		effect = client.SendMessage
 	}
-	ctx, cancel := context.WithTimeout(runCtx, rcsSendDeadline)
+	ctx, cancel := context.WithCancel(operationCtx)
 	ctx = context.WithValue(ctx, sendAdmissionContextKey{}, sendAdmission(func() bool { return link.sendAdmissionCurrent(ticket) }))
 	response, err := effect(ctx, payload)
 	cancel()
@@ -187,6 +199,27 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
 	return sendJSON(rcsSendResult{Code: "outcome_unknown"})
+}
+
+func (link *Link) lockRPC(ctx context.Context) bool {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if link.rpcMu.TryLock() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+func (link *Link) ticketCurrent(ticket *preparedRcsTicket) bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	return link.nowForTicketLocked().Before(ticket.expiresAt) && !link.closed && link.generation == ticket.generation && link.runGeneration == ticket.generation && link.streamEpoch == ticket.streamEpoch && link.indexRevision == ticket.revision && link.hasOwnerVerificationLocked()
 }
 
 func (link *Link) sendAdmissionCurrent(ticket *preparedRcsTicket) bool {
