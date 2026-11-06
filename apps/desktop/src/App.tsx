@@ -1709,9 +1709,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [shareTyping, setShareTyping] = useState(readShareTyping);
   const [typingShareError, setTypingShareError] = useState(false);
   const typingShareRequest = useRef(0);
+  const typingLinkAvailable = Boolean(snapshot?.rcsStatus?.gateways.some((gateway) => gateway.state !== "unlinked"));
   useEffect(() => {
-    void bridge.set_typing_sharing?.({ enabled: shareTyping }).catch(() => undefined);
-  }, []);
+    void bridge.set_typing_sharing?.({ enabled: readShareTyping() }).catch(() => undefined);
+  }, [bridge.set_typing_sharing, typingLinkAvailable]);
   const [groupSenderAvatars, setGroupSenderAvatars] = useState(readGroupSenderAvatars);
   const [showReactions, setShowReactions] = useShowReactions();
   const [pendingReactionId, setPendingReactionId] = useState<string>();
@@ -3313,30 +3314,38 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     gatewayId: route.kind === "route" ? route.gateway.id : undefined,
     locked: Boolean(appLock?.locked),
   });
-  const typing = useTypingDisplay(bridge, active?.id, rcsRoute.current, Boolean(content.text.trim()));
-  const typingSender = useTypingSender({
-    bridge,
-    conversationId: active?.id,
-    current: rcsRoute.current,
-    existing: Boolean(active && slotKey && !isLocalDraftKey(slotKey) && !active.draftOnly),
-    sendSupported: Boolean(slotKey),
-    readOnly: false,
-  });
   const mmsRequired = requiresMms(content, active);
   const routeRecipients = recipientCount(content, active);
   const estimateBytes = draftEstimateBytes(content, attachmentViews);
-  const problem = routeProblem(
-    route,
-    gateways,
-    mmsRequired,
-    routeRecipients,
-    estimateBytes,
-  );
+  const problem = routeProblem(route, gateways, mmsRequired, routeRecipients, estimateBytes);
   const isNewConversation = Boolean(slotKey) && (
     isLocalDraftKey(slotKey) ||
     (newComposeKey !== null && store.resolve(newComposeKey) === slotKey) ||
     active?.draftOnly === true
   );
+  const pendingRecipientReason = "finish adding the recipient before sending";
+  const effectivePendingRecipient = pendingRecipient && isNewConversation;
+  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : problem;
+  const draftHydrated = Boolean(slotKey && store.isHydrated(slotKey));
+  const composerReadOnly = Boolean(slotKey && !draftHydrated && !isLocalDraftKey(slotKey));
+  const latestIncomingMessageId = active?.messages.reduce<string | undefined>((latest, message) => message.sender === "other" ? message.id : latest, undefined);
+  const typing = useTypingDisplay(
+    bridge,
+    active?.id,
+    rcsRoute.current,
+    Boolean(content.text.trim()),
+    latestIncomingMessageId,
+    snapshot?.connection.state === "connected",
+    (active?.participants?.length ?? 0) <= 1,
+  );
+  const typingSender = useTypingSender({
+    bridge,
+    conversationId: active?.id,
+    current: rcsRoute.current,
+    existing: Boolean(active && slotKey && !isLocalDraftKey(slotKey) && !active.draftOnly),
+    sendSupported: Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason,
+    readOnly: composerReadOnly,
+  });
 
   const edit = (patch: Partial<DraftContent>) => {
     if (!slotKey || deletingId === slotKey) return;
@@ -4361,17 +4370,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     : undefined;
   const mmsLimitShown =
     mmsRequired && route.kind === "route" && estimateBytes > 0;
-  const pendingRecipientReason = "finish adding the recipient before sending";
-  const effectivePendingRecipient = pendingRecipient && isNewConversation;
-  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : problem;
   const mainWindowRouteRecovery = headPanel && !effectivePendingRecipient && (
     (route.kind === "none" && gateways.length > 0) || route.kind === "stale"
   );
   const composerUnavailableReason = mainWindowRouteRecovery
     ? `${unavailableReason} in the main window`
     : unavailableReason;
-  const draftHydrated = Boolean(slotKey && store.isHydrated(slotKey));
-  const composerReadOnly = Boolean(slotKey && !draftHydrated && !isLocalDraftKey(slotKey));
   const composerResizeHandle = (
     <ResizeHandle
       id="handle-h2"
@@ -4475,7 +4479,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         readOnly={composerReadOnly}
         placeholder={composerReadOnly ? "Loading draft…" : undefined}
         onDraftChange={(text) => {
-          if (!composerReadOnly && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending) typingSender.noteInput(text);
+          typingSender.noteInput(text);
           edit({ text });
         }}
         onSend={() => { typingSender.noteSend(); void send(); }}

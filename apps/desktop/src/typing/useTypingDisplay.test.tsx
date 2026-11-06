@@ -3,11 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DesktopBridge, TypingSignal } from "@peppy/desktop-ui/bridge-contracts";
 import { useTypingDisplay } from "./useTypingDisplay";
 
-function display(overrides: { conversationId?: string; current?: boolean; local?: boolean; subscribe?: boolean } = {}) {
+function display(overrides: { conversationId?: string; current?: boolean; local?: boolean; subscribe?: boolean; incomingMessageId?: string; connected?: boolean; direct?: boolean } = {}) {
   let receive: (signal: TypingSignal) => void = () => undefined;
   const unsubscribe = vi.fn();
   const bridge = { subscribe_typing: overrides.subscribe === false ? undefined : vi.fn(listener => { receive = listener; return unsubscribe; }) } as unknown as DesktopBridge;
-  const hook = renderHook(({ conversationId = "chat-1", current = true, local = false }) => useTypingDisplay(bridge, conversationId, current, local), { initialProps: overrides });
+  const hook = renderHook(({ conversationId = "chat-1", current = true, local = false, incomingMessageId, connected = true, direct = true }) => useTypingDisplay(bridge, conversationId, current, local, incomingMessageId, connected, direct), { initialProps: overrides });
   return { ...hook, receive: (signal: TypingSignal) => act(() => receive(signal)), unsubscribe };
 }
 
@@ -51,6 +51,17 @@ describe("useTypingDisplay", () => {
     expect(result.current.visible).toBe(false);
     unmount();
     expect(unsubscribe).toHaveBeenCalled();
+  });
+
+  it("clears when an incoming direct message arrives or the connection is lost", () => {
+    const { result, receive, rerender } = display();
+    receive({ conversationId: "chat-1", state: "started" });
+    rerender({ conversationId: "chat-1", current: true, local: false, incomingMessageId: "incoming-2", connected: true, direct: true });
+    expect(result.current.visible).toBe(false);
+
+    receive({ conversationId: "chat-1", state: "started" });
+    rerender({ conversationId: "chat-1", current: true, local: false, incomingMessageId: "incoming-2", connected: false, direct: true });
+    expect(result.current.visible).toBe(false);
   });
 
   it("keeps a visible remote indicator when local typing starts", () => {

@@ -673,6 +673,11 @@ describe("desktop UI controls", () => {
     expect(screen.queryByRole("button", { name: /route|transport|send as/i })).toBeNull();
   });
 
+  it("exposes the typing sender state on the shared composer", () => {
+    render(<Composer draft="" attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} typingSendState="active" />);
+    expect(document.getElementById("shared-composer")).toHaveAttribute("data-typing-send", "active");
+  });
+
   it("allows attachment-only sends and explains why sending is unavailable", () => {
     const sent = vi.fn();
     const { rerender } = render(

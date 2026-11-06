@@ -5,13 +5,16 @@ const MAX_DISPLAY_MS = 15_000;
 const ANNOUNCEMENT_DURATION_MS = 5_000;
 export const TYPING_ANNOUNCE_COOLDOWN_MS = 30_000;
 
-export function useTypingDisplay(bridge: DesktopBridge, conversationId: string | undefined, current: boolean, localUserTyping = false) {
+export function useTypingDisplay(bridge: DesktopBridge, conversationId: string | undefined, current: boolean, localUserTyping = false, incomingMessageId?: string, connected = true, direct = true) {
   const [state, setState] = useState({ visible: false, announcement: false });
   const announcements = useRef(new Map<string, number>());
   const localTypingRef = useRef(localUserTyping);
   localTypingRef.current = localUserTyping;
   useEffect(() => {
-    if (!current || !conversationId || !bridge.subscribe_typing) {
+    if (!connected || (direct && incomingMessageId)) setState({ visible: false, announcement: false });
+  }, [connected, direct, incomingMessageId]);
+  useEffect(() => {
+    if (!connected || !current || !conversationId || !bridge.subscribe_typing) {
       setState({ visible: false, announcement: false });
       return;
     }
@@ -43,6 +46,6 @@ export function useTypingDisplay(bridge: DesktopBridge, conversationId: string |
     };
     const unsubscribe = bridge.subscribe_typing(receive);
     return () => { clear(); unsubscribe(); };
-  }, [bridge, conversationId, current]);
+  }, [bridge, connected, conversationId, current]);
   return state;
 }

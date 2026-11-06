@@ -83,6 +83,7 @@ describe("useTypingSender", () => {
   it.each([
     ["conversation switch", { conversationId: "conversation-2" }],
     ["route eligibility loss", { current: false }],
+    ["composer becomes read-only", { readOnly: true }],
   ])("stops on %s", (_reason, next) => {
     const { result, rerender, sendTyping } = renderSender();
     act(() => result.current.noteInput("message"));

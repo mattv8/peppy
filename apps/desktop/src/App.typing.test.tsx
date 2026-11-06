@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { bridge, fixtureBridge, type DesktopSnapshot } from "./bridge/bridge";
@@ -52,8 +52,10 @@ afterEach(() => {
 
 describe("typing sharing", () => {
   it("shows the setting only when a link and typing bridge are available", async () => {
+    const setSharing = vi.spyOn(bridge, "set_typing_sharing").mockResolvedValue();
     render(<App />);
     await screen.findByRole("textbox", { name: "Message" });
+    expect(setSharing).toHaveBeenCalledWith({ enabled: true });
     openSettings();
     expect(await screen.findByRole("checkbox", { name: /Show others/ })).toBeChecked();
     cleanup();
@@ -86,12 +88,39 @@ describe("typing sharing", () => {
     expect(await screen.findByRole("alert")).toHaveAttribute("id", "settings-share-typing-error");
   });
 
+  it("reverts a rejected host preference write and reports the catalog error", async () => {
+    const setSharing = vi.spyOn(bridge, "set_typing_sharing").mockResolvedValue();
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Message" });
+    setSharing.mockClear();
+    setSharing.mockRejectedValueOnce(new Error("rejected"));
+    openSettings();
+    const setting = await screen.findByRole<HTMLInputElement>("checkbox", { name: /Show others/ });
+    fireEvent.click(setting);
+    await waitFor(() => expect(setting).not.toBeChecked());
+    expect(await screen.findByRole("alert")).toHaveAttribute("id", "settings-share-typing-error");
+  });
+
+  it("renders a current chat typing indicator from the bridge", async () => {
+    let receive: (signal: { conversationId: string; state: "started" | "stopped"; expiresAtMs?: string }) => void = () => undefined;
+    vi.spyOn(bridge, "subscribe_typing").mockImplementation(listener => {
+      receive = listener;
+      return () => undefined;
+    });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Message" });
+    await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
+    act(() => receive({ conversationId: snapshot.activeConversationId!, state: "started" }));
+    expect(document.getElementById("typing-indicator")).toHaveAttribute("data-typing-visible", "true");
+  });
+
   it("sends typing only for the current RCS conversation and stops after sharing is disabled", async () => {
     const sendTyping = vi.spyOn(bridge, "send_typing").mockResolvedValue();
     const setSharing = vi.spyOn(bridge, "set_typing_sharing").mockResolvedValue();
     render(<App />);
     const textarea = await screen.findByRole("textbox", { name: "Message" });
     await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
+    expect(document.getElementById("shared-composer")).toHaveAttribute("data-typing-send");
     sendTyping.mockClear();
     fireEvent.change(textarea, { target: { value: "hello" } });
     expect(sendTyping).toHaveBeenCalledWith({ conversationId: snapshot.activeConversationId, state: "started" });
@@ -99,6 +128,7 @@ describe("typing sharing", () => {
     openSettings();
     fireEvent.click(await screen.findByRole("checkbox", { name: /Show others/ }));
     await waitFor(() => expect(setSharing).toHaveBeenCalledWith({ enabled: false }));
+    expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: snapshot.activeConversationId, state: "stopped" });
     sendTyping.mockClear();
     fireEvent.change(textarea, { target: { value: "again" } });
     expect(sendTyping).not.toHaveBeenCalled();
