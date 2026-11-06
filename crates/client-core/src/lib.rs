@@ -72,6 +72,7 @@ mod phone_read;
 mod rcs_capability;
 mod rcs_mapping;
 mod rcs_native;
+mod rcs_receive;
 mod rcs_send;
 mod sms_acquisition;
 mod sms_reconciliation;
@@ -144,6 +145,10 @@ pub use rcs_native::{
     NativeRcsCommitProjection, NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing,
     NativeRcsParticipant, NativeRcsPrepareRequest, NativeRcsSimPayload, NativeRcsTargetClass,
     NativeSettingsCurrentness, NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
+};
+pub use rcs_receive::{
+    RcsCutover, RcsIdentityOutcome, RcsOwnership, RcsProviderDetector, RcsReceiveCode,
+    RcsReceiveOwner,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
