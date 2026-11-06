@@ -83,7 +83,7 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 
 func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Conversation) rcsPageProjection {
 	if page == nil {
-		return rcsPageProjection{Code: "page_missing"}
+		return rcsPageFailure("page_missing")
 	}
 	messages := page.GetMessages()
 	if len(messages) == 0 {
@@ -98,7 +98,7 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 			LastItemTimestamp: time.UnixMicro(lastMessage.GetTimestamp()).UnixMilli(),
 		})
 		if cursor == "" {
-			return rcsPageProjection{Code: "cursor_missing"}
+			return rcsPageFailure("cursor_missing")
 		}
 	}
 	result := rcsPageProjection{
@@ -115,7 +115,7 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 			continue
 		}
 		if projection.Code != "ok" {
-			return rcsPageProjection{Code: projection.Code}
+			return rcsPageFailure(projection.Code)
 		}
 		projection.Record.Cursor = cursor
 		result.Records = append(result.Records, *projection.Record)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -608,6 +609,35 @@ func TestFetchRcsGapRejectsUnsupportedStage2ConversationBeforeRPC(t *testing.T) 
 
 			if got.Code != "conversation_unsupported" || calls != 0 || len(got.Records) != 0 || len(got.Signals) != 0 {
 				t.Fatalf("result = %#v, calls = %d", got, calls)
+			}
+		})
+	}
+}
+
+func TestRcsPageProjectionFailuresUseEmptyArrayEnvelope(t *testing.T) {
+	conversation := typingConversation("conversation-1", true)
+	unsupported := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message
+	unsupported.MessageInfo = []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{}}}}
+	for _, test := range []struct {
+		name string
+		page *gmproto.ListMessagesResponse
+		code string
+	}{
+		{name: "missing page", page: nil, code: "page_missing"},
+		{name: "unsupported message", page: &gmproto.ListMessagesResponse{Messages: []*gmproto.Message{unsupported}, Cursor: &gmproto.Cursor{LastItemID: "cursor", LastItemTimestamp: 1}}, code: "unsupported_message"},
+		{name: "missing cursor", page: &gmproto.ListMessagesResponse{Messages: []*gmproto.Message{{ConversationID: "conversation-1"}}}, code: "cursor_missing"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := projectRcsPage(test.page, conversation)
+			if got.Code != test.code || got.Records == nil || got.Signals == nil || len(got.Records) != 0 || len(got.Signals) != 0 {
+				t.Fatalf("projection = %#v", got)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(encoded), `"records":[]`) || !strings.Contains(string(encoded), `"signals":[]`) {
+				t.Fatalf("envelope = %s", encoded)
 			}
 		})
 	}
