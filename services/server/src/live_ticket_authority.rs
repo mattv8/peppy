@@ -173,6 +173,56 @@ mod tests {
         value
     }
 
+    async fn allocate_connection(pool: &PgPool, vault: Uuid, device: Uuid) -> i64 {
+        let mut tx = crate::scope::begin(pool, vault).await.unwrap();
+        sqlx::query("SELECT 1 FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE")
+            .bind(vault)
+            .bind(device)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let value = allocate_connection_id(&mut tx, vault, device)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        value
+    }
+
+    async fn seed_authority(
+        pool: &PgPool,
+        vault: Uuid,
+        device: Uuid,
+        session: i64,
+        connection: i64,
+    ) {
+        sqlx::query("INSERT INTO live_ticket_device_authority(vault_id,device_id,next_session_incarnation,next_connection_id) VALUES($1,$2,$3,$4)")
+            .bind(vault)
+            .bind(device)
+            .bind(session)
+            .bind(connection)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn counters(pool: &PgPool, vault: Uuid, device: Uuid) -> (i64, i64) {
+        sqlx::query_as("SELECT next_session_incarnation,next_connection_id FROM live_ticket_device_authority WHERE vault_id=$1 AND device_id=$2")
+            .bind(vault)
+            .bind(device)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn insert_device_in_vault(pool: &PgPool, vault: Uuid, device: Uuid) {
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) SELECT $1,$2,'device','{}',profile_fingerprint,1 FROM vaults WHERE vault_id=$1")
+            .bind(vault)
+            .bind(device)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn concurrent_fenced_allocations_are_unique_and_monotonic() {
         let (pool, admin, schema) = test_pool().await;
@@ -278,6 +328,94 @@ mod tests {
             1
         );
         tx.commit().await.unwrap();
+        assert_eq!(counters(&pool, vault, device).await, (0, 1));
+        cleanup(pool, admin, schema).await;
+    }
+
+    #[tokio::test]
+    async fn same_device_uuid_in_distinct_vaults_has_independent_counters() {
+        let (pool, admin, schema) = test_pool().await;
+        let (first_vault, device) = create_device(&pool).await;
+        let (second_vault, _) = create_device(&pool).await;
+        insert_device_in_vault(&pool, second_vault, device).await;
+        assert_eq!(allocate_session(&pool, first_vault, device).await, 1);
+        assert_eq!(allocate_session(&pool, second_vault, device).await, 1);
+        assert_eq!(allocate_session(&pool, first_vault, device).await, 2);
+        assert_eq!(allocate_connection(&pool, second_vault, device).await, 1);
+        assert_eq!(counters(&pool, first_vault, device).await, (2, 0));
+        assert_eq!(counters(&pool, second_vault, device).await, (1, 1));
+        cleanup(pool, admin, schema).await;
+    }
+
+    #[tokio::test]
+    async fn authority_foreign_key_is_exact_and_counters_untouched_before_activation() {
+        let (pool, admin, schema) = test_pool().await;
+        let (vault, device) = create_device(&pool).await;
+        let foreign_keys: Vec<(bool, Vec<String>, Vec<String>, String)> = sqlx::query_as(
+            "SELECT c.confrelid = 'devices'::regclass, \
+             ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum ORDER BY k.ord), \
+             ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord) JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum ORDER BY k.ord), \
+             c.confdeltype::text \
+             FROM pg_constraint c \
+             WHERE c.conrelid = 'live_ticket_device_authority'::regclass AND c.contype = 'f'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            foreign_keys,
+            vec![(
+                true,
+                vec!["vault_id".to_owned(), "device_id".to_owned()],
+                vec!["vault_id".to_owned(), "device_id".to_owned()],
+                "c".to_owned(),
+            )]
+        );
+
+        let orphan_device = Uuid::new_v4();
+        let orphan = sqlx::query("INSERT INTO live_ticket_device_authority(vault_id,device_id,next_session_incarnation,next_connection_id) VALUES($1,$2,0,0)")
+            .bind(vault)
+            .bind(orphan_device)
+            .execute(&pool)
+            .await;
+        assert!(orphan.is_err(), "authority rows must reference a device");
+
+        insert_device_in_vault(&pool, vault, orphan_device).await;
+        seed_authority(&pool, vault, orphan_device, 0, 0).await;
+        sqlx::query("DELETE FROM devices WHERE vault_id=$1 AND device_id=$2")
+            .bind(vault)
+            .bind(orphan_device)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cascaded: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM live_ticket_device_authority WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(vault)
+        .bind(orphan_device)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            cascaded, 0,
+            "device deletion must cascade to its authority row"
+        );
+
+        let before: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM live_ticket_device_authority WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(vault)
+        .bind(device)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(before, 0, "no authority row exists before allocation");
+        assert_eq!(allocate_session(&pool, vault, device).await, 1);
+        assert_eq!(
+            counters(&pool, vault, device).await,
+            (1, 0),
+            "session allocation must not advance the connection counter"
+        );
         cleanup(pool, admin, schema).await;
     }
 
@@ -304,6 +442,8 @@ mod tests {
         let (pool, admin, schema) = test_pool().await;
         let (first_vault, first_device) = create_device(&pool).await;
         let (second_vault, second_device) = create_device(&pool).await;
+        seed_authority(&pool, first_vault, first_device, 5, 0).await;
+        seed_authority(&pool, second_vault, second_device, 9, 0).await;
         let suffix = Uuid::new_v4().simple();
         let role = format!("ticket_r_{suffix}");
         let password = format!("ticket_p_{suffix}");
@@ -323,14 +463,24 @@ mod tests {
             .unwrap();
 
         let mut first = crate::scope::begin(&runtime, first_vault).await.unwrap();
-        let visible: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM live_ticket_device_authority WHERE vault_id=$1",
+        let own_visible: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM live_ticket_device_authority WHERE vault_id=$1 AND device_id=$2",
         )
-        .bind(second_vault)
+        .bind(first_vault)
+        .bind(first_device)
         .fetch_one(&mut *first)
         .await
         .unwrap();
-        assert_eq!(visible, 0);
+        assert_eq!(own_visible, 1);
+        let foreign_visible: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM live_ticket_device_authority WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(second_vault)
+        .bind(second_device)
+        .fetch_one(&mut *first)
+        .await
+        .unwrap();
+        assert_eq!(foreign_visible, 0);
         sqlx::query("SELECT 1 FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE")
             .bind(first_vault)
             .bind(first_device)
@@ -341,7 +491,7 @@ mod tests {
             allocate_session_incarnation(&mut first, first_vault, first_device)
                 .await
                 .unwrap(),
-            1
+            6
         );
         first.commit().await.unwrap();
 
@@ -352,6 +502,8 @@ mod tests {
                 .is_err()
         );
         second.rollback().await.unwrap();
+        assert_eq!(counters(&pool, first_vault, first_device).await, (6, 0));
+        assert_eq!(counters(&pool, second_vault, second_device).await, (9, 0));
         runtime.close().await;
         pool.close().await;
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
