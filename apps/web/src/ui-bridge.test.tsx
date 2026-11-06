@@ -1,6 +1,5 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
-import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../../desktop/src/App";
 import * as desktopBridge from "../../desktop/src/bridge/bridge";
@@ -64,14 +63,15 @@ describe("browser UI bridge", () => {
       subscribe_lifecycle_finished: () => () => undefined,
       set_notification_context: async () => undefined,
       mark_seen: async () => undefined,
-    } as DesktopBridge;
+    } satisfies Partial<DesktopBridge>;
+    const partialBrowserBridge = browserBridge as unknown as DesktopBridge;
     const previousBridge = uiBridge.bridge;
     const previousDesktopBridge = desktopBridge.bridge;
-    uiBridge.installBrowserBridge(browserBridge);
-    installDesktopBrowserBridge(browserBridge);
+    uiBridge.installBrowserBridge(partialBrowserBridge);
+    installDesktopBrowserBridge(partialBrowserBridge);
 
     try {
-      render(createElement(App, { hostKind: "browser" }));
+      render(<App hostKind="browser" />);
 
       await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
     } finally {
