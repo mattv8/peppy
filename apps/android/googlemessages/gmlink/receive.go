@@ -3,6 +3,7 @@ package gmlink
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
@@ -30,8 +31,14 @@ type rcsProjection struct {
 type rcsPageProjection struct {
 	Code       string             `json:"code"`
 	Records    []rcsReceiveRecord `json:"records"`
+	Signals    []rcsPageSignal    `json:"signals"`
 	NextCursor string             `json:"next_cursor,omitempty"`
 	HasMore    bool               `json:"has_more"`
+}
+
+type rcsPageSignal struct {
+	Code                 string `json:"code"`
+	GoogleConversationID string `json:"google_conversation_id"`
 }
 
 func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conversation) rcsProjection {
@@ -64,7 +71,7 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 		GoogleConversationID: message.GetConversationID(),
 		Direction:            direction,
 		Body:                 body,
-		SentAtMS:             message.GetTimestamp(),
+		SentAtMS:             time.UnixMicro(message.GetTimestamp()).UnixMilli(),
 		Status:               status,
 		TmpID:                message.GetTmpID(),
 		RcsReported:          true,
@@ -72,16 +79,32 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 }
 
 func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Conversation) rcsPageProjection {
-	if page == nil || page.GetCursor() == nil {
+	if page == nil {
+		return rcsPageProjection{Code: "page_missing"}
+	}
+	if page.GetCursor() == nil {
+		if len(page.GetMessages()) == 0 {
+			return rcsPageProjection{Code: "ok", Records: []rcsReceiveRecord{}, Signals: []rcsPageSignal{}}
+		}
 		return rcsPageProjection{Code: "cursor_missing"}
 	}
 	cursor := opaquePageToken(page.GetCursor())
 	if cursor == "" {
 		return rcsPageProjection{Code: "cursor_missing"}
 	}
-	result := rcsPageProjection{Code: "ok", Records: make([]rcsReceiveRecord, 0, len(page.GetMessages())), NextCursor: cursor}
+	result := rcsPageProjection{
+		Code:       "ok",
+		Records:    make([]rcsReceiveRecord, 0, len(page.GetMessages())),
+		Signals:    make([]rcsPageSignal, 0),
+		NextCursor: cursor,
+		HasMore:    true,
+	}
 	for _, message := range page.GetMessages() {
 		projection := projectRcsMessage(&libgm.WrappedMessage{Message: message}, conversation)
+		if projection.Code == "protocol_switch" {
+			result.Signals = append(result.Signals, rcsPageSignal{Code: projection.Code, GoogleConversationID: projection.GoogleConversationID})
+			continue
+		}
 		if projection.Code != "ok" {
 			return rcsPageProjection{Code: projection.Code}
 		}

@@ -53,7 +53,7 @@ func TestRcsProjectionProjectsOnlyApprovedTextFields(t *testing.T) {
 	message := &libgm.WrappedMessage{Message: &gmproto.Message{
 		MessageID:      "message-1",
 		ConversationID: "conversation-1",
-		Timestamp:      1234,
+		Timestamp:      1735689600123456,
 		TmpID:          "tmp-1",
 		MessageStatus:  &gmproto.MessageStatus{Status: gmproto.MessageStatusType_OUTGOING_DELIVERED},
 		MessageInfo: []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{
@@ -74,7 +74,7 @@ func TestRcsProjectionProjectsOnlyApprovedTextFields(t *testing.T) {
 		GoogleConversationID: "conversation-1",
 		Direction:            "outgoing",
 		Body:                 "synthetic body",
-		SentAtMS:             1234,
+		SentAtMS:             1735689600123,
 		Status:               "delivered",
 		TmpID:                "tmp-1",
 		RcsReported:          true,
@@ -86,7 +86,7 @@ func TestRcsProjectionProjectsOnlyApprovedTextFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(encoded) != `{"code":"ok","record":{"google_message_id":"message-1","google_conversation_id":"conversation-1","direction":"outgoing","body":"synthetic body","sent_at_ms":1234,"status":"delivered","tmp_id":"tmp-1","rcs_reported":true}}` {
+	if string(encoded) != `{"code":"ok","record":{"google_message_id":"message-1","google_conversation_id":"conversation-1","direction":"outgoing","body":"synthetic body","sent_at_ms":1735689600123,"status":"delivered","tmp_id":"tmp-1","rcs_reported":true}}` {
 		t.Fatalf("JSON = %s", encoded)
 	}
 }
@@ -100,6 +100,8 @@ func TestRcsProjectionRejectsUnsupportedAndUnknownMessages(t *testing.T) {
 	}}
 	if got := projectRcsMessage(media, conversation); got.Code != "unsupported_message" || got.Record != nil {
 		t.Fatalf("media projection = %#v", got)
+	} else {
+		assertRejectedProjectionHasNoBody(t, got)
 	}
 
 	unknown := &libgm.WrappedMessage{Message: &gmproto.Message{
@@ -109,6 +111,62 @@ func TestRcsProjectionRejectsUnsupportedAndUnknownMessages(t *testing.T) {
 	}}
 	if got := projectRcsMessage(unknown, conversation); got.Code != "status_unproven" || got.Record != nil {
 		t.Fatalf("unknown status projection = %#v", got)
+	} else {
+		assertRejectedProjectionHasNoBody(t, got)
+	}
+	missingMessageID := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE)
+	missingMessageID.MessageID = ""
+	if got := projectRcsMessage(missingMessageID, conversation); got.Code != "identity_missing" || got.Record != nil {
+		t.Fatalf("missing message id projection = %#v", got)
+	}
+	missingConversationID := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE)
+	missingConversationID.ConversationID = ""
+	if got := projectRcsMessage(missingConversationID, conversation); got.Code != "identity_missing" || got.Record != nil {
+		t.Fatalf("missing conversation id projection = %#v", got)
+	}
+}
+
+func TestRcsProjectionMapsPinnedStatuses(t *testing.T) {
+	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
+	cases := []struct {
+		name      string
+		status    gmproto.MessageStatusType
+		direction string
+		want      string
+		accepted  bool
+	}{
+		{"incoming", gmproto.MessageStatusType_INCOMING_COMPLETE, "incoming", "sent", true},
+		{"sending", gmproto.MessageStatusType_OUTGOING_SENDING, "outgoing", "sending", true},
+		{"sent", gmproto.MessageStatusType_OUTGOING_COMPLETE, "outgoing", "sent", true},
+		{"delivered", gmproto.MessageStatusType_OUTGOING_DELIVERED, "outgoing", "delivered", true},
+		{"read", gmproto.MessageStatusType_OUTGOING_DISPLAYED, "outgoing", "read", true},
+		{"failure 8", gmproto.MessageStatusType_OUTGOING_FAILED_GENERIC, "outgoing", "failed", true},
+		{"failure 9", gmproto.MessageStatusType_OUTGOING_FAILED_EMERGENCY_NUMBER, "outgoing", "failed", true},
+		{"failure 13", gmproto.MessageStatusType_OUTGOING_FAILED_TOO_LARGE, "outgoing", "failed", true},
+		{"failure 17", gmproto.MessageStatusType_OUTGOING_FAILED_RECIPIENT_LOST_RCS, "outgoing", "failed", true},
+		{"failure 18", gmproto.MessageStatusType_OUTGOING_FAILED_NO_RETRY_NO_FALLBACK, "outgoing", "failed", true},
+		{"failure 19", gmproto.MessageStatusType_OUTGOING_FAILED_RECIPIENT_DID_NOT_DECRYPT, "outgoing", "failed", true},
+		{"failure 21", gmproto.MessageStatusType_OUTGOING_FAILED_RECIPIENT_LOST_ENCRYPTION, "outgoing", "failed", true},
+		{"failure 22", gmproto.MessageStatusType_OUTGOING_FAILED_RECIPIENT_DID_NOT_DECRYPT_NO_MORE_RETRY, "outgoing", "failed", true},
+		{"failure 24", gmproto.MessageStatusType_OUTGOING_FAILED_RECIPIENT_NEGATIVE_DELIVERY, "outgoing", "failed", true},
+		{"failure 25", gmproto.MessageStatusType_MESSAGE_STATUS_OUTGOING_FAILED_EMERGENCY_PROTOCOL_DETERMINATION_MESSAGE, "outgoing", "failed", true},
+		{"failure 26", gmproto.MessageStatusType_OUTGOING_RESTRICTED, "outgoing", "failed", true},
+		{"failure 27", gmproto.MessageStatusType_OUTGOING_FAILED_TO_ENCRYPT, "outgoing", "failed", true},
+		{"not delivered yet", gmproto.MessageStatusType_OUTGOING_NOT_DELIVERED_YET, "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := projectRcsMessage(textMessage(tc.status), conversation)
+			if !tc.accepted {
+				if got.Code != "status_unproven" || got.Record != nil {
+					t.Fatalf("projection = %#v", got)
+				}
+				return
+			}
+			if got.Code != "ok" || got.Record == nil || got.Record.Direction != tc.direction || got.Record.Status != tc.want {
+				t.Fatalf("projection = %#v", got)
+			}
+		})
 	}
 }
 
@@ -141,5 +199,67 @@ func TestFetchRcsGapProjectsOnlyMessagesWithOpaquePageToken(t *testing.T) {
 	}
 	if got.Records[0].Cursor != got.NextCursor {
 		t.Fatalf("record cursor = %q, next cursor = %q", got.Records[0].Cursor, got.NextCursor)
+	}
+	if !got.HasMore {
+		t.Fatalf("continuing page = %#v", got)
+	}
+
+	exhausted := projectRcsPage(&gmproto.ListMessagesResponse{}, conversation)
+	if exhausted.Code != "ok" || exhausted.HasMore || len(exhausted.Records) != 0 || exhausted.NextCursor != "" {
+		t.Fatalf("exhausted page = %#v", exhausted)
+	}
+	malformed := projectRcsPage(&gmproto.ListMessagesResponse{Cursor: &gmproto.Cursor{}}, conversation)
+	if malformed.Code != "cursor_missing" || len(malformed.Records) != 0 || malformed.NextCursor != "" {
+		t.Fatalf("malformed page = %#v", malformed)
+	}
+}
+
+func TestFetchRcsGapKeepsProtocolSwitchSignalsAndText(t *testing.T) {
+	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
+	cases := []struct {
+		name   string
+		status gmproto.MessageStatusType
+	}{
+		{"text", gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_TEXT},
+		{"rcs", gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_RCS},
+		{"encrypted rcs", gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_ENCRYPTED_RCS},
+		{"encrypted text", gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tombstone := textMessage(tc.status)
+			got := projectRcsPage(&gmproto.ListMessagesResponse{
+				Messages: []*gmproto.Message{textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message, tombstone.Message},
+				Cursor:   &gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234},
+			}, conversation)
+			if got.Code != "ok" || !got.HasMore || got.NextCursor == "" || len(got.Records) != 1 {
+				t.Fatalf("page = %#v", got)
+			}
+			if len(got.Signals) != 1 || got.Signals[0] != (rcsPageSignal{Code: "protocol_switch", GoogleConversationID: "conversation-1"}) {
+				t.Fatalf("signals = %#v", got.Signals)
+			}
+		})
+	}
+}
+
+func textMessage(status gmproto.MessageStatusType) *libgm.WrappedMessage {
+	return &libgm.WrappedMessage{Message: &gmproto.Message{
+		MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1735689600123456,
+		MessageStatus: &gmproto.MessageStatus{Status: status},
+		MessageInfo:   []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: "synthetic body"}}}},
+	}}
+}
+
+func assertRejectedProjectionHasNoBody(t *testing.T, projection rcsProjection) {
+	t.Helper()
+	encoded, err := json.Marshal(projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) == "" || string(encoded) == `{"code":"ok"}` || string(encoded) == `{"body":"synthetic body"}` {
+		t.Fatalf("rejected projection = %s", encoded)
+	}
+	if string(encoded) != `{"code":"unsupported_message"}` && string(encoded) != `{"code":"status_unproven"}` {
+		t.Fatalf("rejected projection contains unapproved fields: %s", encoded)
 	}
 }
