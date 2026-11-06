@@ -1,16 +1,16 @@
 use crate::{
+    CommandId, ConversationId, Error, MessagePayload, Transport,
     conversation_match::canonical_address,
     rcs_mapping::{
-        self, RcsConversationType, RcsMapping, RcsMappingClass, RcsMappingObservation, RcsSendMode,
-        RCS_MAPPING_FRESHNESS_MS,
+        self, RCS_MAPPING_FRESHNESS_MS, RcsConversationType, RcsMapping, RcsMappingClass,
+        RcsMappingObservation, RcsSendMode,
     },
     rcs_native::{
         LocalRcsTargetSnapshot, NativeRcsCommitProjection, NativeRcsParticipant,
         NativeRcsTargetClass,
     },
-    CommandId, ConversationId, Error, MessagePayload, Transport,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -18,8 +18,6 @@ const CARRIER_ONLY_PROOF_PREFIX: &str = "rcs_carrier_only_proof_v1/";
 const INTENTIONAL_UNLINK_KEY: &str = "rcs_intentional_unlink_context_v1";
 const RCS_TARGET_IDENTITY_PREFIX: &str = "rcs_target_identity_v1/";
 const ADMISSION_DIAGNOSTIC_PREFIX: &str = "rcs_carrier_admission_diagnostic_v1/";
-/// Supported regional short-code rules. NANP short codes are five or six digits beginning 2–9.
-const SHORT_CODE_REGIONS: &[&str] = &["US", "CA"];
 
 /// A completed, target-scoped local lookup which found no eligible RCS target.
 /// This is intentionally a typed host result: unknown, partial, and failed lookups have no
@@ -81,12 +79,13 @@ pub(crate) fn record_carrier_only_proof(
         .ok_or(Error::InvalidRequest("carrier-only proof is not current"))?;
     if proof.subscription_id.is_empty()
         || rcs_mapping::has_live_mapping(conn, proof.conversation_id)?
-        || !rcs_mapping::context_is_current(
+        || !rcs_mapping::context_matches_carrier_proof(
             conn,
             proof.link_generation,
             proof.session_generation,
             proof.context_revision,
-            true,
+            &proof.identity_region,
+            proof.canonicalizer_revision,
         )?
     {
         return Err(Error::InvalidRequest("carrier-only proof is not current"));
@@ -140,7 +139,9 @@ pub(crate) fn carrier_admission(
         });
     }
     let region = crate::rcs_target::resolved_region(conn).map_err(|_| Error::Database)?;
-    if transport == Transport::Sms && is_short_code(recipients, region.as_deref()) {
+    let current_route = rcs_mapping::carrier_route_is_current(conn, subscription_id, now_ms)?;
+    if current_route && transport == Transport::Sms && is_short_code(recipients, region.as_deref())
+    {
         record_admission_diagnostic(
             conn,
             conversation_id,
@@ -148,7 +149,9 @@ pub(crate) fn carrier_admission(
         )?;
         return Ok(CarrierAdmission::ShortCodeSms);
     }
-    if transport == Transport::Mms
+    if current_route
+        && transport == Transport::Mms
+        && group_recipients_are_provable(recipients, region.as_deref())
         && nonself_recipient_count(conn, recipients, region.as_deref())? > 1
     {
         record_admission_diagnostic(
@@ -203,18 +206,19 @@ pub(crate) fn carrier_admission(
 }
 
 fn is_short_code(recipients: &[String], region: Option<&str>) -> bool {
-    let Some(recipient) = recipients.first().filter(|_| recipients.len() == 1) else {
+    let [recipient] = recipients else {
         return false;
     };
-    let trimmed = recipient.trim();
-    let Some(region) = region else {
-        return false;
-    };
-    SHORT_CODE_REGIONS.contains(&region)
-        && (5..=6).contains(&trimmed.len())
-        && trimmed.bytes().all(|byte| byte.is_ascii_digit())
-        && matches!(trimmed.as_bytes().first(), Some(b'2'..=b'9'))
-        && canonical_address(trimmed, Some(region)) == trimmed
+    crate::rcs_target::is_short_code(recipient, region)
+}
+
+/// Without a singleton region, a national spelling cannot be proven equal to another recipient.
+/// The group exception is then refused instead of counting raw text as distinct recipients.
+fn group_recipients_are_provable(recipients: &[String], region: Option<&str>) -> bool {
+    region.is_some()
+        || recipients
+            .iter()
+            .all(|recipient| recipient.trim().starts_with('+'))
 }
 
 fn nonself_recipient_count(

@@ -143,7 +143,7 @@ pub(crate) fn classify_rcs_target(
         return unknown(token);
     }
     let canonical_target = canonical_address(participant_address, region.as_deref());
-    if is_short_code(participant_address, region.as_deref(), &canonical_target) {
+    if is_short_code(participant_address, region.as_deref()) {
         return RcsTargetClassification::Unsupported {
             snapshot_token: token,
         };
@@ -219,9 +219,16 @@ pub(crate) fn commit_complete_absence(
             "carrier-only proof is not current",
         ));
     }
+    // An empty proof region is the region-independent (plus-prefixed) form: any region matches.
     conn.execute(
-        "UPDATE rcs_conversation_mappings SET invalidated_at_ms=?, invalidation_code='complete_absence' WHERE peppy_conversation_id=? AND invalidated_at_ms IS NULL AND EXISTS(SELECT 1 FROM rcs_mapping_proofs p WHERE p.peppy_conversation_id=rcs_conversation_mappings.peppy_conversation_id AND p.mapping_revision=rcs_conversation_mappings.mapping_revision AND p.canonical_participant=? AND p.identity_region=?)",
-        rusqlite::params![now_ms, proof.conversation_id.to_string(), proof.canonical_recipient, proof.identity_region],
+        "UPDATE rcs_conversation_mappings SET invalidated_at_ms=?, invalidation_code='complete_absence' WHERE peppy_conversation_id=? AND invalidated_at_ms IS NULL AND EXISTS(SELECT 1 FROM rcs_mapping_proofs p WHERE p.peppy_conversation_id=rcs_conversation_mappings.peppy_conversation_id AND p.mapping_revision=rcs_conversation_mappings.mapping_revision AND p.canonical_participant=? AND (?='' OR p.identity_region=?))",
+        rusqlite::params![
+            now_ms,
+            proof.conversation_id.to_string(),
+            proof.canonical_recipient,
+            proof.identity_region,
+            proof.identity_region
+        ],
     )?;
     crate::rcs_send::record_carrier_only_proof(conn, proof, now_ms)
 }
@@ -265,6 +272,8 @@ fn classify_records<'a>(
     }
 }
 
+/// Go's `indexRevision` is bound inside its own token and never compared with core's independent
+/// `context_revision`; core's route binding is checked by the proof and admission paths.
 fn valid_snapshot(
     snapshot: &ConversationCandidateSnapshot,
     route: &ValidatedCarrierRouteContext,
@@ -278,7 +287,6 @@ fn valid_snapshot(
             )
         && snapshot.generation == route.link_generation
         && snapshot.stream_epoch == route.session_generation
-        && snapshot.revision == route.context_revision
         && !route.subscription_id.is_empty()
 }
 
@@ -418,7 +426,9 @@ fn is_valid_phone(address: &str) -> bool {
     address.starts_with('+') && parse(None, address).is_ok_and(|number| number.is_valid())
 }
 
-fn is_short_code(address: &str, region: Option<&str>, canonical: &str) -> bool {
+/// The single short-code recognizer, shared by classification and carrier admission. A short code
+/// needs an explicitly supported singleton region and is never also a valid regular number.
+pub(crate) fn is_short_code(address: &str, region: Option<&str>) -> bool {
     let trimmed = address.trim();
     let Some(region) = region else {
         return false;
@@ -427,7 +437,7 @@ fn is_short_code(address: &str, region: Option<&str>, canonical: &str) -> bool {
         && (5..=6).contains(&trimmed.len())
         && trimmed.bytes().all(|byte| byte.is_ascii_digit())
         && matches!(trimmed.as_bytes().first(), Some(b'2'..=b'9'))
-        && !is_valid_phone(canonical)
+        && !is_valid_phone(&canonical_address(trimmed, Some(region)))
 }
 
 fn unknown(snapshot_token: String) -> RcsTargetClassification {
@@ -610,12 +620,18 @@ mod tests {
         };
 
         assert!(valid_snapshot(&snapshot, &route));
-        let stale = ConversationCandidateSnapshot {
+        let other_index_revision = ConversationCandidateSnapshot {
             revision: 4,
             snapshot_token: "1:2:4".into(),
             ..snapshot.clone()
         };
-        assert!(!valid_snapshot(&stale, &route));
+        assert!(valid_snapshot(&other_index_revision, &route));
+        let other_link = ConversationCandidateSnapshot {
+            generation: 9,
+            snapshot_token: "9:2:3".into(),
+            ..snapshot.clone()
+        };
+        assert!(!valid_snapshot(&other_link, &route));
         let malformed = ConversationCandidateSnapshot {
             snapshot_token: "not-a-token".into(),
             ..snapshot

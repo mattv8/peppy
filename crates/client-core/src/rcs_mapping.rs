@@ -412,6 +412,18 @@ fn native_observation_is_current(
     now_ms: i64,
     own_identity: &str,
 ) -> bool {
+    native_settings_are_current(observation, now_ms, own_identity)
+        && observation.native_evidence.lookup_complete
+        && observation.native_evidence.google_candidate_count == 1
+        && observation.native_evidence.google_candidate_count == observation.google_candidate_count
+}
+
+/// Route authority requires verified native settings even when the target lookup found no match.
+fn native_settings_are_current(
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+    own_identity: &str,
+) -> bool {
     let evidence = &observation.native_evidence;
     let outgoing = &observation.outgoing;
     let joined_cards = evidence
@@ -423,9 +435,6 @@ fn native_observation_is_current(
         return false;
     };
     native_attestation_is_current(observation, now_ms, own_identity)
-        && evidence.lookup_complete
-        && evidence.google_candidate_count == 1
-        && evidence.google_candidate_count == observation.google_candidate_count
         && evidence.settings_currentness == NativeSettingsCurrentness::ContinuousVerifiedFeed
         && outgoing.sim_participant_id == outgoing.outgoing_id
         && canonical_e164(&outgoing.own_identity_raw).as_deref() == Some(own_identity)
@@ -877,13 +886,18 @@ pub(crate) fn context_matches_carrier_proof(
         return Ok(false);
     };
     let context: RcsContext = serde_json::from_str(&value).map_err(|_| Error::Database)?;
+    // An empty proof region marks a region-independent (plus-prefixed) canonical recipient.
     Ok(context.link_state == RcsLinkState::Linked as u8
         && (
             context.link_generation,
             context.session_generation,
             context.context_revision,
         ) == (link_generation, session_generation, context_revision)
-        && context.identity_region == identity_region
+        && (identity_region.is_empty()
+            || (context.identity_region == identity_region
+                && crate::rcs_target::resolved_region(conn)
+                    .map_err(|_| Error::Database)?
+                    .is_none_or(|region| region == identity_region)))
         && context.canonicalizer_revision == canonicalizer_revision)
 }
 
@@ -935,9 +949,34 @@ pub(crate) fn has_live_mapping(
     .map_err(Into::into)
 }
 
+/// Presence of accepted route evidence for the current context; it is not a time fence.
 pub(crate) fn carrier_route_context(
     conn: &Connection,
     subscription_id: Option<&str>,
+) -> Result<Option<crate::ValidatedCarrierRouteContext>, Error> {
+    route_context(conn, subscription_id, None)
+}
+
+/// Accepted route evidence that is also current at `now_ms`. Classification uses this form.
+pub(crate) fn current_carrier_route_context(
+    conn: &Connection,
+    now_ms: i64,
+) -> Result<Option<crate::ValidatedCarrierRouteContext>, Error> {
+    route_context(conn, None, Some(now_ms))
+}
+
+pub(crate) fn carrier_route_is_current(
+    conn: &Connection,
+    subscription_id: &str,
+    now_ms: i64,
+) -> Result<bool, Error> {
+    Ok(route_context(conn, Some(subscription_id), Some(now_ms))?.is_some())
+}
+
+fn route_context(
+    conn: &Connection,
+    subscription_id: Option<&str>,
+    now_ms: Option<i64>,
 ) -> Result<Option<crate::ValidatedCarrierRouteContext>, Error> {
     let Some(value) = conn
         .query_row(
@@ -959,7 +998,9 @@ pub(crate) fn carrier_route_context(
     let Some(route) = accepted_carrier_route(conn)? else {
         return Ok(None);
     };
-    if route.context != context {
+    if route.context != context
+        || now_ms.is_some_and(|now_ms| !is_fresh(now_ms, route.accepted_at_ms))
+    {
         return Ok(None);
     }
     Ok(Some(crate::ValidatedCarrierRouteContext::new(
@@ -977,6 +1018,9 @@ pub(crate) fn carrier_route_context(
 struct AcceptedCarrierRoute {
     context: RcsContext,
     own_identity: String,
+    /// Records written before acceptance times existed read as stale (zero) and must be re-observed.
+    #[serde(default)]
+    accepted_at_ms: i64,
 }
 
 fn accepted_carrier_route(conn: &Connection) -> Result<Option<AcceptedCarrierRoute>, Error> {
@@ -998,7 +1042,7 @@ fn record_accepted_carrier_route(
     let Some(own_identity) = canonical_e164(&observation.selected_sim_own_identity) else {
         return Ok(());
     };
-    if !native_attestation_is_current(observation, now_ms, &own_identity) {
+    if !native_settings_are_current(observation, now_ms, &own_identity) {
         return Ok(());
     }
     let context: RcsContext =
@@ -1009,7 +1053,16 @@ fn record_accepted_carrier_route(
             RCS_ACCEPTED_CARRIER_ROUTE_KEY,
             serde_json::to_string(&AcceptedCarrierRoute {
                 context,
-                own_identity
+                own_identity,
+                accepted_at_ms: [
+                    observation.observed_at_ms,
+                    observation.carrier_binding.route_observed_at_ms,
+                    observation.native_evidence.settings_validated_at_ms,
+                    observation.native_evidence.conversation_observed_at_ms,
+                ]
+                .into_iter()
+                .min()
+                .unwrap_or(now_ms),
             })
             .map_err(|_| Error::Database)?
         ],

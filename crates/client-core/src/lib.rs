@@ -1479,7 +1479,7 @@ impl Client {
         let transaction = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(route) = rcs_mapping::carrier_route_context(&transaction, None)? else {
+        let Some(route) = rcs_mapping::current_carrier_route_context(&transaction, now_ms)? else {
             return Ok(RcsTargetClassification::Unknown {
                 snapshot_token: None,
             });
