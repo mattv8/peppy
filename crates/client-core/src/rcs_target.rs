@@ -159,6 +159,18 @@ pub(crate) fn classify_rcs_target(
         return unknown(token);
     }
 
+    // A confirmed own-identity target is unsupported, not evidence of carrier-only absence.
+    // Self records for a different requested peer remain unrelated nonmatches below.
+    if route_context
+        .confirmed_own_identity
+        .as_deref()
+        .is_some_and(|own| canonical_address(own, region.as_deref()) == canonical_target)
+    {
+        return RcsTargetClassification::Unsupported {
+            snapshot_token: token,
+        };
+    }
+
     let mut records = BTreeMap::new();
     for record in snapshot.conversations {
         if record.google_conversation_id.is_empty() {

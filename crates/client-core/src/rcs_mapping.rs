@@ -897,7 +897,7 @@ pub(crate) fn context_matches_carrier_proof(
             || (context.identity_region == identity_region
                 && crate::rcs_target::resolved_region(conn)
                     .map_err(|_| Error::Database)?
-                    .is_none_or(|region| region == identity_region)))
+                    .is_some_and(|region| region == identity_region)))
         && context.canonicalizer_revision == canonicalizer_revision)
 }
 

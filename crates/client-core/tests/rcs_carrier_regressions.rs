@@ -385,26 +385,57 @@ fn unknown_or_unverifiable_facts_block_absence_without_a_proof() {
     lab.link();
     let mut unknown_identifier = participant(PEER, false);
     unknown_identifier["identifier_type"] = json!(99);
+    let mut missing_participant_id = participant(PEER, false);
+    missing_participant_id["participant_id"] = json!("");
+    missing_participant_id["participant_id_present"] = json!(false);
+    let mut inconsistent_number_flag = participant(PEER, false);
+    inconsistent_number_flag["number_present"] = json!(false);
     let cases = [
         (
             "unknown conversation type",
-            conversation("google", 99, 1, "eligible", vec![participant(PEER, false)]),
+            conversation(
+                "google",
+                99,
+                1,
+                "unsupported",
+                vec![participant(PEER, false)],
+            ),
         ),
         (
             "unknown conversation status",
-            conversation("google", 2, 99, "eligible", vec![participant(PEER, false)]),
+            conversation(
+                "google",
+                2,
+                99,
+                "unsupported",
+                vec![participant(PEER, false)],
+            ),
         ),
         (
             "unknown participant identifier type",
-            conversation("google", 2, 1, "eligible", vec![unknown_identifier]),
+            conversation("google", 1, 1, "unsupported", vec![unknown_identifier]),
         ),
         (
             "unknown classification",
             conversation("google", 2, 1, "unknown", vec![participant(PEER, false)]),
         ),
         (
+            "unsupported missing participant identity",
+            conversation("google", 1, 1, "unsupported", vec![missing_participant_id]),
+        ),
+        (
+            "unsupported inconsistent number flag",
+            conversation(
+                "google",
+                1,
+                1,
+                "unsupported",
+                vec![inconsistent_number_flag],
+            ),
+        ),
+        (
             "numberless peer",
-            conversation("google", 2, 1, "eligible", vec![participant("", false)]),
+            conversation("google", 1, 1, "unsupported", vec![participant("", false)]),
         ),
         (
             "numberless self",
@@ -412,7 +443,7 @@ fn unknown_or_unverifiable_facts_block_absence_without_a_proof() {
                 "google",
                 2,
                 1,
-                "eligible",
+                "unsupported",
                 vec![participant(PEER, false), participant("", true)],
             ),
         ),
@@ -624,6 +655,7 @@ fn failed_explicit_unlink_validation_writes_no_context() {
 #[test]
 fn proof_region_canonicalizer_and_context_revision_gate_admission() {
     let mut lab = Lab::new(PEER);
+    lab.book("home", "US");
     lab.link();
     let blocked_command = lab.command(PEER, SIM);
 
@@ -890,6 +922,7 @@ fn live_mapping_blocks_short_code_and_group_exceptions() {
 #[test]
 fn proof_for_one_sim_never_admits_a_send_on_another_sim() {
     let mut lab = Lab::new(PEER);
+    lab.book("home", "US");
     lab.link();
     let command = lab.command(PEER, OTHER_SIM);
     lab.record_proof(&proof(lab.conversation, PEER, "US", 1, 1));
@@ -906,6 +939,7 @@ fn proof_for_one_sim_never_admits_a_send_on_another_sim() {
 #[test]
 fn proof_expiry_and_clock_rollback_never_admit_a_stale_proof() {
     let mut lab = Lab::new(PEER);
+    lab.book("home", "US");
     lab.link();
     lab.record_proof(&proof(lab.conversation, PEER, "US", 1, 1));
 
@@ -1226,4 +1260,128 @@ fn exception_diagnostics_and_attempts_commit_atomically_on_both_entry_points() {
         assert_eq!(lab.diagnostic().as_deref(), Some(SHORT_CODE_SMS));
         assert_eq!(lab.attempts(command), 1);
     }
+}
+
+// Final review F1 / original F3: losing singleton evidence revokes a region-bound proof, on
+// both public admission paths. The refusal must leave the proof and all effect state unchanged.
+#[test]
+fn region_bound_proof_refuses_ambiguous_or_absent_current_region() {
+    for ambiguous in [true, false] {
+        let mut lab = Lab::new(PEER);
+        lab.book("home", "US");
+        lab.link();
+        let command = lab.command(NATIONAL_PEER, SIM);
+        assert_eq!(
+            lab.classify(NATIONAL_PEER, &snapshot(Vec::new(), 1), 1_000)
+                .unwrap(),
+            RcsTargetDecision::NotFoundComplete {
+                carrier_only_proof: proof(lab.conversation, PEER, "US", 1, 1)
+            }
+        );
+        let proof_key = format!("rcs_carrier_only_proof_v1/{}", lab.conversation);
+        let stored = lab.metadata(&proof_key);
+        if ambiguous {
+            lab.book("work", "CA");
+        } else {
+            lab.gateway
+                .forget_contact_book(&json!({"book_id":"home"}).to_string())
+                .unwrap();
+        }
+        assert_eq!(lab.permit(command, 1_001), blocked());
+        assert_eq!(
+            lab.automatic(command, 1_001),
+            AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+        );
+        assert_eq!(lab.attempts(command), 0);
+        assert_eq!(lab.diagnostic(), None);
+        assert_eq!(lab.metadata(&proof_key), stored);
+    }
+}
+
+// Final review F1 positive control: explicit region-independent plus proofs do not depend on
+// singleton evidence and continue to authorize both entry points when that evidence is lost.
+#[test]
+fn region_independent_plus_proof_survives_ambiguous_or_absent_region() {
+    for ambiguous in [true, false] {
+        let mut lab = Lab::new(PEER);
+        lab.link();
+        let decision = lab.classify(PEER, &snapshot(Vec::new(), 1), 1_000).unwrap();
+        assert_eq!(
+            decision,
+            RcsTargetDecision::NotFoundComplete {
+                carrier_only_proof: proof(lab.conversation, PEER, "", 1, 1)
+            }
+        );
+        if ambiguous {
+            lab.book("home", "US");
+            lab.book("work", "CA");
+        }
+        let legacy = lab.command(PEER, SIM);
+        let automatic = lab.command(PEER, SIM);
+        assert!(matches!(
+            lab.permit(legacy, 1_001),
+            PermitDecision::Permit(_)
+        ));
+        assert!(matches!(
+            lab.automatic(automatic, 1_001),
+            AutomaticPermitDecision::Carrier(_)
+        ));
+        assert_eq!(lab.attempts(legacy), 1);
+        assert_eq!(lab.attempts(automatic), 1);
+        assert_eq!(lab.diagnostic(), None);
+    }
+}
+
+// Final review F2 / original F1: a confirmed own-identity target is unsupported, not a complete
+// absence. Unrelated confirmed self records still do not suppress absence for a different peer.
+#[test]
+fn exact_confirmed_self_target_never_authorizes_carrier_absence() {
+    let self_snapshot = snapshot(
+        vec![conversation(
+            "self",
+            2,
+            1,
+            "unsupported",
+            vec![participant(OWN, true)],
+        )],
+        1,
+    );
+    let mut lab = Lab::new(OWN);
+    lab.book("home", "US");
+    lab.link();
+    let command = lab.command(OWN, SIM);
+    assert_eq!(
+        lab.classify(OWN, &self_snapshot, 1_000).unwrap(),
+        RcsTargetDecision::Unsupported {
+            snapshot_token: TOKEN.into()
+        }
+    );
+    assert!(!lab.proof_stored());
+    assert_eq!(lab.permit(command, 1_000), blocked());
+    assert_eq!(
+        lab.automatic(command, 1_000),
+        AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+    assert_eq!(lab.attempts(command), 0);
+    assert_eq!(lab.diagnostic(), None);
+
+    let mut peer = Lab::new(PEER);
+    peer.book("home", "US");
+    peer.link();
+    assert_eq!(
+        peer.classify(PEER, &self_snapshot, 1_000).unwrap(),
+        RcsTargetDecision::NotFoundComplete {
+            carrier_only_proof: proof(peer.conversation, PEER, "US", 1, 1)
+        }
+    );
+    let legacy = peer.command(PEER, SIM);
+    let automatic = peer.command(PEER, SIM);
+    assert!(matches!(
+        peer.permit(legacy, 1_000),
+        PermitDecision::Permit(_)
+    ));
+    assert!(matches!(
+        peer.automatic(automatic, 1_000),
+        AutomaticPermitDecision::Carrier(_)
+    ));
 }
