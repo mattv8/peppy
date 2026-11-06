@@ -188,15 +188,33 @@ mod tests {
         vault_id: VaultId,
         keys: &BTreeMap<u32, EpochKeys>,
     ) -> EphemeralSignalV2 {
+        seal_frame_at(
+            kind, sender, session_id, epoch, 100, 15_100, 7, plaintext, vault_id, keys,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seal_frame_at(
+        kind: EphemeralSignalV2Kind,
+        sender: DeviceId,
+        session_id: [u8; 16],
+        epoch: u32,
+        sent_at_ms: u64,
+        expires_at_ms: u64,
+        sequence: u64,
+        plaintext: &[u8],
+        vault_id: VaultId,
+        keys: &BTreeMap<u32, EpochKeys>,
+    ) -> EphemeralSignalV2 {
         let mut frame = EphemeralSignalV2 {
             protocol_version: EPHEMERAL_V2_PROTOCOL_VERSION,
             kind,
             sender_device_id: sender,
             key_epoch: epoch,
             session_id: URL_SAFE_NO_PAD.encode(session_id),
-            sent_at_ms: "100".into(),
-            expires_at_ms: "15100".into(),
-            sequence: "7".into(),
+            sent_at_ms: sent_at_ms.to_string(),
+            expires_at_ms: expires_at_ms.to_string(),
+            sequence: sequence.to_string(),
             ciphertext_b64: STANDARD.encode([0]),
         };
         let envelope = encrypt(
@@ -267,7 +285,24 @@ mod tests {
                 &frame,
                 &keys,
             );
-            assert!(decoded.is_some());
+            let decoded = decoded.unwrap();
+            assert_eq!(decoded.sender_device_id, sender);
+            assert_eq!(decoded.session_id, session);
+            assert_eq!(decoded.sequence, 7);
+            assert_eq!(decoded.remaining_ttl_ms, 15_000);
+            assert!(matches!(
+                (kind, decoded.plaintext),
+                (
+                    EphemeralSignalV2Kind::Typing,
+                    AuthenticatedPlaintext::Typing(_)
+                ) | (
+                    EphemeralSignalV2Kind::Challenge,
+                    AuthenticatedPlaintext::Challenge(_)
+                ) | (
+                    EphemeralSignalV2Kind::SessionAck,
+                    AuthenticatedPlaintext::SessionAck(_)
+                )
+            ));
         }
     }
 
@@ -367,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_address_session_kind_extreme_times_and_malformed_ciphertext() {
+    fn rejects_wrong_address_session_kind_and_malformed_ciphertext() {
         let vault_id = vault(20);
         let local = device(21);
         let sender = device(22);
@@ -458,16 +493,113 @@ mod tests {
             &keys
         )
         .is_none());
-        let mut extreme = frame;
-        extreme.sent_at_ms = u64::MAX.to_string();
-        extreme.expires_at_ms = u64::MAX.to_string();
-        assert!(decode_authenticated_frame(
-            u64::MAX,
+    }
+
+    #[test]
+    fn rejects_ack_address_and_local_incarnation_mismatches() {
+        let vault_id = vault(31);
+        let local = device(32);
+        let sender = device(33);
+        let keys = key_map(vault_id, 1, "correct horse battery staple");
+        let session = [34; 16];
+        let local_session = [35; 16];
+        let seal_ack = |responder_device_id, challenger_device_id, challenger_session_id| {
+            seal_frame(
+                EphemeralSignalV2Kind::SessionAck,
+                sender,
+                session,
+                1,
+                &serde_json::to_vec(&SessionAckPlaintextV2 {
+                    version: 2,
+                    responder_device_id,
+                    responder_session_id: URL_SAFE_NO_PAD.encode(session),
+                    challenger_device_id,
+                    challenger_session_id: URL_SAFE_NO_PAD.encode(challenger_session_id),
+                    echoed_nonce_b64: STANDARD.encode([36; 16]),
+                    sequence_floor: "1".into(),
+                })
+                .unwrap(),
+                vault_id,
+                &keys,
+            )
+        };
+        for frame in [
+            seal_ack(device(37), local, local_session),
+            seal_ack(sender, device(38), local_session),
+            seal_ack(sender, local, [39; 16]),
+        ] {
+            assert!(decode_authenticated_frame(
+                100,
+                vault_id,
+                local,
+                local_session,
+                &[sender],
+                &frame,
+                &keys
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn enforces_unsigned_wire_time_boundaries_above_signed_host_range() {
+        let vault_id = vault(40);
+        let local = device(41);
+        let sender = device(42);
+        let keys = key_map(vault_id, 1, "correct horse battery staple");
+        let payload = serde_json::to_vec(&TypingPlaintextV2 {
+            version: 2,
+            origin: TypingOriginV2::VaultDevice,
+            conversation_id: Uuid::from_u128(43),
+            state: TypingStateV2::Started,
+            gateway_device_id: Some(local),
+        })
+        .unwrap();
+        let sent_at_ms = i64::MAX as u64 + 1_000;
+        let expires_at_ms = sent_at_ms + 15_000;
+        let frame = seal_frame_at(
+            EphemeralSignalV2Kind::Typing,
+            sender,
+            [44; 16],
+            1,
+            sent_at_ms,
+            expires_at_ms,
+            45,
+            &payload,
+            vault_id,
+            &keys,
+        );
+        let decoded = decode_authenticated_frame(
+            sent_at_ms,
             vault_id,
             local,
-            [26; 16],
+            [46; 16],
             &[sender],
-            &extreme,
+            &frame,
+            &keys,
+        )
+        .unwrap();
+        assert_eq!(decoded.sender_device_id, sender);
+        assert_eq!(decoded.session_id, [44; 16]);
+        assert_eq!(decoded.sequence, 45);
+        assert_eq!(decoded.remaining_ttl_ms, 15_000);
+        assert!(decode_authenticated_frame(
+            sent_at_ms - 1,
+            vault_id,
+            local,
+            [46; 16],
+            &[sender],
+            &frame,
+            &keys
+        )
+        .is_none());
+        assert!(decode_authenticated_frame(
+            expires_at_ms,
+            vault_id,
+            local,
+            [46; 16],
+            &[sender],
+            &frame,
             &keys
         )
         .is_none());
