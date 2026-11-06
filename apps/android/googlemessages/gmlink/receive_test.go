@@ -204,13 +204,27 @@ func TestFetchRcsGapProjectsOnlyMessagesWithOpaquePageToken(t *testing.T) {
 		t.Fatalf("continuing page = %#v", got)
 	}
 
-	exhausted := projectRcsPage(&gmproto.ListMessagesResponse{}, conversation)
-	if exhausted.Code != "ok" || exhausted.HasMore || len(exhausted.Records) != 0 || exhausted.NextCursor != "" {
-		t.Fatalf("exhausted page = %#v", exhausted)
+	for _, page := range []*gmproto.ListMessagesResponse{
+		{},
+		{Cursor: &gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234}},
+	} {
+		exhausted := projectRcsPage(page, conversation)
+		if exhausted.Code != "ok" || exhausted.HasMore || len(exhausted.Records) != 0 || exhausted.NextCursor != "" {
+			t.Fatalf("exhausted page = %#v", exhausted)
+		}
+	}
+	withoutResponseCursor := projectRcsPage(&gmproto.ListMessagesResponse{
+		Messages: []*gmproto.Message{textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message},
+	}, conversation)
+	if withoutResponseCursor.Code != "ok" || !withoutResponseCursor.HasMore || withoutResponseCursor.NextCursor != "AAABlB8pfHttZXNzYWdlLTE" || len(withoutResponseCursor.Records) != 1 {
+		t.Fatalf("cursor-less page = %#v", withoutResponseCursor)
+	}
+	if withoutResponseCursor.Records[0].Cursor != withoutResponseCursor.NextCursor {
+		t.Fatalf("record cursor = %q, next cursor = %q", withoutResponseCursor.Records[0].Cursor, withoutResponseCursor.NextCursor)
 	}
 	malformed := projectRcsPage(&gmproto.ListMessagesResponse{Cursor: &gmproto.Cursor{}}, conversation)
-	if malformed.Code != "cursor_missing" || len(malformed.Records) != 0 || malformed.NextCursor != "" {
-		t.Fatalf("malformed page = %#v", malformed)
+	if malformed.Code != "ok" || malformed.HasMore || len(malformed.Records) != 0 || malformed.NextCursor != "" {
+		t.Fatalf("empty malformed-cursor page = %#v", malformed)
 	}
 }
 

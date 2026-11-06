@@ -82,24 +82,30 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 	if page == nil {
 		return rcsPageProjection{Code: "page_missing"}
 	}
-	if page.GetCursor() == nil {
-		if len(page.GetMessages()) == 0 {
-			return rcsPageProjection{Code: "ok", Records: []rcsReceiveRecord{}, Signals: []rcsPageSignal{}}
-		}
-		return rcsPageProjection{Code: "cursor_missing"}
+	messages := page.GetMessages()
+	if len(messages) == 0 {
+		return rcsPageProjection{Code: "ok", Records: []rcsReceiveRecord{}, Signals: []rcsPageSignal{}}
 	}
 	cursor := opaquePageToken(page.GetCursor())
 	if cursor == "" {
-		return rcsPageProjection{Code: "cursor_missing"}
+		// The pinned backfill consumer uses the final response message when no cursor is returned.
+		lastMessage := messages[len(messages)-1]
+		cursor = opaquePageToken(&gmproto.Cursor{
+			LastItemID:        lastMessage.GetMessageID(),
+			LastItemTimestamp: time.UnixMicro(lastMessage.GetTimestamp()).UnixMilli(),
+		})
+		if cursor == "" {
+			return rcsPageProjection{Code: "cursor_missing"}
+		}
 	}
 	result := rcsPageProjection{
 		Code:       "ok",
-		Records:    make([]rcsReceiveRecord, 0, len(page.GetMessages())),
+		Records:    make([]rcsReceiveRecord, 0, len(messages)),
 		Signals:    make([]rcsPageSignal, 0),
 		NextCursor: cursor,
 		HasMore:    true,
 	}
-	for _, message := range page.GetMessages() {
+	for _, message := range messages {
 		projection := projectRcsMessage(&libgm.WrappedMessage{Message: message}, conversation)
 		if projection.Code == "protocol_switch" {
 			result.Signals = append(result.Signals, rcsPageSignal{Code: projection.Code, GoogleConversationID: projection.GoogleConversationID})
