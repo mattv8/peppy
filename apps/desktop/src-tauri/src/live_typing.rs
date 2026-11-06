@@ -264,6 +264,8 @@ pub(crate) struct TypingDisplayState {
     peer_device_id: DeviceId,
     #[serde(skip)]
     session_token: u64,
+    #[serde(skip)]
+    generation: LiveEnableGeneration,
 }
 
 #[derive(Default)]
@@ -381,6 +383,7 @@ impl InboundTyping {
                     deadline_mono,
                     peer_device_id,
                     session_token,
+                    generation: outcome.generation,
                 };
                 if state == peppy_protocol::TypingStateV2::Started {
                     self.displays.insert(conversation_id, display.clone());
@@ -441,13 +444,39 @@ fn typing_event_targets(conversation_id: ConversationId) -> [String; 2] {
     ]
 }
 
-fn emit_events(inbound: &mut InboundTyping) {
+fn drain_publishable_events(
+    inbound: &mut InboundTyping,
+    generation: Option<LiveEnableGeneration>,
+    cancelled: bool,
+    mono_ms: u64,
+) -> Vec<TypingDisplayState> {
+    inbound
+        .drain_events()
+        .filter(|event| {
+            event.state == peppy_protocol::TypingStateV2::Stopped
+                || (!cancelled
+                    && Some(event.generation) == generation
+                    && event.deadline_mono > mono_ms)
+        })
+        .collect()
+}
+
+fn emit_events(
+    inbound: &mut InboundTyping,
+    session: &Session,
+    generation: Option<LiveEnableGeneration>,
+) {
+    let events = drain_publishable_events(
+        inbound,
+        generation,
+        session.cancel.is_cancelled(),
+        session.live_typing.mono_ms(),
+    );
     let Some(app) = APP_HANDLE.get() else {
-        inbound.events.clear();
         return;
     };
     use tauri::Emitter as _;
-    for event in inbound.drain_events() {
+    for event in events {
         for target in typing_event_targets(event.conversation_id) {
             let _ = app.emit_to(target, TYPING_EVENT, event.clone());
         }
@@ -587,7 +616,7 @@ fn reevaluate_context(
     }
     session.live_typing.detach();
     inbound.clear();
-    emit_events(inbound);
+    emit_events(inbound, session, state.generation());
     *outbound = generation.map(|_| session.live_typing.attach());
 }
 
@@ -642,7 +671,7 @@ async fn supervise(session: Arc<Session>) {
                     session.live_typing.detach();
                     disable(&mut state, &session);
                     inbound.clear();
-                    emit_events(&mut inbound);
+                    emit_events(&mut inbound, &session, state.generation());
                     let _ = bounded_close(&mut socket, &session.cancel).await;
                     return;
                 }
@@ -673,14 +702,23 @@ async fn supervise(session: Arc<Session>) {
                     }
                 } => {
                     inbound.expire(session.live_typing.mono_ms());
-                    emit_events(&mut inbound);
+                    emit_events(&mut inbound, &session, state.generation());
                 }
                 frame = socket.next() => match frame {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(Message::Text(frame))) => {
                         inbound.push(frame.to_string());
                         while let Some(frame) = inbound.take() {
-                            if let Some(reply) = process_inbound_frame(&session.client, &mut inbound, &frame, state.generation(), session.live_typing.clock()) {
+                            let reply = process_inbound_frame(
+                                &session.client,
+                                &mut inbound,
+                                &frame,
+                                state.generation(),
+                                session.live_typing.clock(),
+                            );
+                            inbound.expire(session.live_typing.mono_ms());
+                            emit_events(&mut inbound, &session, state.generation());
+                            if let Some(reply) = reply {
                                 if !bounded_send(
                                     &mut socket,
                                     &session.cancel,
@@ -689,8 +727,6 @@ async fn supervise(session: Arc<Session>) {
                                     break 'socket;
                                 }
                             }
-                            inbound.expire(session.live_typing.mono_ms());
-                            emit_events(&mut inbound);
                         }
                     }
                     Some(Ok(_)) => {}
@@ -700,7 +736,7 @@ async fn supervise(session: Arc<Session>) {
         session.live_typing.detach();
         disable(&mut state, &session);
         inbound.clear();
-        emit_events(&mut inbound);
+        emit_events(&mut inbound, &session, state.generation());
         if !wait_or_cancel(&session, live_backoff_delay(backoff)).await {
             return;
         }
@@ -1172,6 +1208,46 @@ mod tests {
         );
 
         assert_eq!(inbound.next_deadline(), Some(10));
+    }
+
+    #[test]
+    fn emit_fence_drops_cancelled_stale_and_expired_starts() {
+        let peer = DeviceId::new();
+        let conversation = ConversationId::new();
+        let mut inbound = InboundTyping::default();
+        inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 1,
+        });
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 1, 1, 10),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
+        assert!(
+            drain_publishable_events(&mut inbound, Some(LiveEnableGeneration(2)), false, 1,)
+                .is_empty()
+        );
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 1, 2, 10),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
+        assert!(
+            drain_publishable_events(&mut inbound, Some(LiveEnableGeneration(1)), true, 1,)
+                .is_empty()
+        );
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 1, 3, 10),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
+        assert!(
+            drain_publishable_events(&mut inbound, Some(LiveEnableGeneration(1)), false, 10,)
+                .is_empty()
+        );
     }
 
     #[test]
