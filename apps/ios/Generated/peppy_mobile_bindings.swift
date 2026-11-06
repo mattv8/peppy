@@ -4808,6 +4808,271 @@ public func FfiConverterTypeNativePlaintextHandle_lower(_ value: NativePlaintext
 
 
 
+
+
+/**
+ * Core-issued bytes for one already-admitted attempt.
+ *
+ * Reading these bytes after disposal does not authorize a current effect; a
+ * trusted native consumer forwards the bytes unchanged exactly once.
+ */
+public protocol NativeRcsCommittedSendProtocol: AnyObject, Sendable {
+
+    func commitJson()  -> String
+
+}
+/**
+ * Core-issued bytes for one already-admitted attempt.
+ *
+ * Reading these bytes after disposal does not authorize a current effect; a
+ * trusted native consumer forwards the bytes unchanged exactly once.
+ */
+open class NativeRcsCommittedSend: NativeRcsCommittedSendProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_peppy_mobile_bindings_fn_clone_nativercscommittedsend(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativercscommittedsend(handle, $0) }
+    }
+
+
+
+
+open func commitJson() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_commit_json(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsCommittedSend: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeRcsCommittedSend
+
+    public static func lift(_ handle: UInt64) throws -> NativeRcsCommittedSend {
+        return NativeRcsCommittedSend(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeRcsCommittedSend) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsCommittedSend {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeRcsCommittedSend, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsCommittedSend_lift(_ handle: UInt64) throws -> NativeRcsCommittedSend {
+    return try FfiConverterTypeNativeRcsCommittedSend.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsCommittedSend_lower(_ value: NativeRcsCommittedSend) -> UInt64 {
+    return FfiConverterTypeNativeRcsCommittedSend.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A native-only, single-use preparation. It is not a transport permit.
+ */
+public protocol NativeRcsSendPreparationProtocol: AnyObject, Sendable {
+
+    func begin(observationJson: String, nowMs: Int64) throws  -> NativeRcsCommittedSend
+
+    func factsJson() throws  -> String
+
+}
+/**
+ * A native-only, single-use preparation. It is not a transport permit.
+ */
+open class NativeRcsSendPreparation: NativeRcsSendPreparationProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_peppy_mobile_bindings_fn_clone_nativercssendpreparation(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativercssendpreparation(handle, $0) }
+    }
+
+
+
+
+open func begin(observationJson: String, nowMs: Int64)throws  -> NativeRcsCommittedSend  {
+    return try  FfiConverterTypeNativeRcsCommittedSend_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativercssendpreparation_begin(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(observationJson),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+
+open func factsJson()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativercssendpreparation_facts_json(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsSendPreparation: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeRcsSendPreparation
+
+    public static func lift(_ handle: UInt64) throws -> NativeRcsSendPreparation {
+        return NativeRcsSendPreparation(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeRcsSendPreparation) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsSendPreparation {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeRcsSendPreparation, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsSendPreparation_lift(_ handle: UInt64) throws -> NativeRcsSendPreparation {
+    return try FfiConverterTypeNativeRcsSendPreparation.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsSendPreparation_lower(_ value: NativeRcsSendPreparation) -> UInt64 {
+    return FfiConverterTypeNativeRcsSendPreparation.lower(value)
+}
+
+
+
+
 public struct CapabilityDiagnostic: Equatable, Hashable {
     public var name: String
     public var state: CapabilityState
@@ -15709,6 +15974,19 @@ public func ownerPhoneShouldRotate(stage: NativeOwnerPhoneStage, expiresInSecond
     )
 })
 }
+/**
+ * Captures core-owned stored mapping facts for a trusted native observation.
+ */
+public func gatewayPrepareNativeRcsSend(client: NativeClient, commandId: String, nowMs: Int64)throws  -> NativeRcsSendPreparation  {
+    return try  FfiConverterTypeNativeRcsSendPreparation_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_prepare_native_rcs_send(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -15846,6 +16124,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_owner_phone_should_rotate() != 43566) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() != 22733) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() != 17788) {
@@ -16593,6 +16874,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_metadata() != 35415) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_commit_json() != 35277) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_begin() != 16625) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_facts_json() != 11822) {
         return InitializationResult.apiChecksumMismatch
     }
 

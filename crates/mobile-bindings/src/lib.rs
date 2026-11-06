@@ -28,12 +28,16 @@ mod account_access;
 mod attachment_retention;
 mod hosted;
 pub mod newenrollment;
+mod rcs_native;
 mod rcs_receive;
 #[cfg(test)]
 mod rcs_receive_tests;
 mod rcs_status;
 mod typing;
 
+pub use rcs_native::{
+    NativeRcsCommittedSend, NativeRcsSendPreparation, gateway_prepare_native_rcs_send,
+};
 pub use rcs_status::{
     NativeRcsEligibility, NativeRcsEligibilityProjection, NativeRcsLinkState, NativeRcsLinkStatus,
 };
