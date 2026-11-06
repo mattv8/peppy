@@ -12,8 +12,14 @@ internal fun interface MonotonicClock {
 internal data class LiveTypingEffectIntent(
     val conversationId: String,
     val state: NativeTypingState,
-    val remainingValidityMs: ULong,
+    val deadlineMono: ULong,
+    val clock: MonotonicClock,
+    val isCurrent: LiveTypingCurrency,
 )
+
+internal fun interface LiveTypingCurrency {
+    fun isCurrent(): Boolean
+}
 
 internal fun interface LiveTypingEffect {
     fun setTyping(intent: LiveTypingEffectIntent)
@@ -77,20 +83,22 @@ internal class LiveTypingAdapter(
     }
 
     private fun publishIfCurrent(admitted: AdmittedIntent) = synchronized(this) {
-        if (generation != admitted.generation || sessions[admitted.key.peerDeviceId] != admitted.key.session) return
-        if (sequences[admitted.key] != admitted.sequence) return
-
-        val now = clock.nowMs()
-        if (admitted.deadlineMono <= now) return
-        val remaining = minOf(admitted.deadlineMono - now, MAX_VALIDITY_MS)
-
+        if (!isCurrent(admitted) || admitted.deadlineMono <= clock.nowMs()) return
         effect.setTyping(
             LiveTypingEffectIntent(
                 admitted.key.conversationId,
                 NativeTypingState.STARTED,
-                remaining,
+                admitted.deadlineMono,
+                clock,
+                LiveTypingCurrency { isCurrent(admitted) },
             ),
         )
+    }
+
+    private fun isCurrent(admitted: AdmittedIntent): Boolean = synchronized(this) {
+        generation == admitted.generation &&
+            sessions[admitted.key.peerDeviceId] == admitted.key.session &&
+            sequences[admitted.key] == admitted.sequence
     }
 
     private data class Session(val token: ULong, val revision: ULong)
@@ -108,7 +116,4 @@ internal class LiveTypingAdapter(
         val deadlineMono: ULong,
     )
 
-    private companion object {
-        const val MAX_VALIDITY_MS = 5_000UL
-    }
 }

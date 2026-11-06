@@ -8,6 +8,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import uniffi.peppy_mobile_bindings.NativeTypingState
 
 internal data class LinkHandleLease(val handle: LinkHandle, val generation: Long)
 
@@ -92,13 +93,33 @@ object LinkRuntime {
         }
     }
 
+    /** Forwards an already-admitted typing effect without adding another asynchronous queue. */
+    internal fun setTyping(context: Context, intent: LiveTypingEffectIntent): String {
+        val lease = handleLease(context) ?: return "typing_unavailable"
+        return setTyping(lease, intent)
+    }
+
+    internal fun setTyping(lease: LinkHandleLease, intent: LiveTypingEffectIntent): String = synchronized(nativeOperationLock) {
+        if (!ownsLease(lease)) return@synchronized "typing_stale"
+        if (!intent.isCurrent.isCurrent()) return@synchronized "typing_stale"
+        val request = typingRequest(intent, lease.generation) ?: return@synchronized "typing_expired"
+        try {
+            lease.handle.setTyping(request)
+        } catch (_: Throwable) {
+            "typing_failed"
+        }
+    }
+
     /** Detaches the captured handle only while [lease] owns it. Native close is always outside the runtime monitor. */
-    internal fun detachHandleForServiceStop(lease: LinkHandleLease): LinkHandle? = synchronized(this) {
-        if (lease.generation != handleGeneration || lease.handle !== cachedHandle) return null
-        cachedHandle = null
-        closingHandle = lease.handle
-        handleGeneration += 1
-        lease.handle
+    internal fun detachHandleForServiceStop(lease: LinkHandleLease): LinkHandle? = synchronized(nativeOperationLock) {
+        synchronized(this) {
+            if (lease.generation != handleGeneration || lease.handle !== cachedHandle) null else {
+                cachedHandle = null
+                closingHandle = lease.handle
+                handleGeneration += 1
+                lease.handle
+            }
+        }
     }
 
     internal fun closeHandleForServiceStop(lease: LinkHandleLease) {
@@ -238,12 +259,26 @@ object LinkRuntime {
 
     private fun callbackExecutor(): Executor = LinkRuntimeTestHooks.callbackExecutor ?: callbackExecutor
 
+    private fun ownsLease(lease: LinkHandleLease): Boolean = synchronized(this) {
+        lease.generation == handleGeneration && lease.handle === cachedHandle
+    }
+
     private fun nextHandleGeneration(): Long = synchronized(this) { handleGeneration + 1 }
 
     private fun awaitNoClosingHandle() = synchronized(this) {
         while (closingHandle != null) (this@LinkRuntime as java.lang.Object).wait()
     }
 }
+
+private fun typingRequest(intent: LiveTypingEffectIntent, linkGeneration: Long): LinkTypingRequest? {
+    if (intent.state != NativeTypingState.STARTED || linkGeneration < 1) return null
+    val now = intent.clock.nowMs()
+    if (intent.deadlineMono <= now) return null
+    val remainingValidityMs = minOf(intent.deadlineMono - now, MAX_TYPING_VALIDITY_MS)
+    return LinkTypingRequest(intent.conversationId, NativeTypingState.STARTED, remainingValidityMs, linkGeneration)
+}
+
+private const val MAX_TYPING_VALIDITY_MS = 5_000UL
 
 internal interface LinkStateStorage {
     fun read(): ByteArray

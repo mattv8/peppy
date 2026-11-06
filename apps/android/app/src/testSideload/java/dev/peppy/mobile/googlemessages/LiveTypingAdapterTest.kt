@@ -23,7 +23,10 @@ class LiveTypingAdapterTest {
         adapter.consume(outcome(8UL, action = intent(sequence = 3UL, deadline = 150UL)))
         executor.runAll()
 
-        assertEquals(listOf(LiveTypingEffectIntent("conversation", NativeTypingState.STARTED, 50UL)), effects)
+        assertEquals(1, effects.size)
+        assertEquals("conversation", effects.single().conversationId)
+        assertEquals(NativeTypingState.STARTED, effects.single().state)
+        assertEquals(150UL, effects.single().deadlineMono)
     }
 
     @Test
@@ -137,7 +140,7 @@ class LiveTypingAdapterTest {
     }
 
     @Test
-    fun `remaining validity is recalculated immediately before the effect`() {
+    fun `effect retains the absolute monotonic deadline`() {
         val clock = FakeClock(100UL)
         val executor = QueueExecutor()
         val effects = mutableListOf<LiveTypingEffectIntent>()
@@ -148,11 +151,11 @@ class LiveTypingAdapterTest {
         clock.now = 1_000UL
         executor.runAll()
 
-        assertEquals(4_200UL, effects.single().remainingValidityMs)
+        assertEquals(5_200UL, effects.single().deadlineMono)
     }
 
     @Test
-    fun `fresh long core deadline is bounded to five seconds`() {
+    fun `fresh long core deadline is retained for the native boundary to bound`() {
         val clock = FakeClock(100UL)
         val executor = QueueExecutor()
         val effects = mutableListOf<LiveTypingEffectIntent>()
@@ -162,7 +165,7 @@ class LiveTypingAdapterTest {
         adapter.consume(outcome(7UL, action = intent(sequence = 1UL, deadline = 15_100UL)))
         executor.runAll()
 
-        assertEquals(5_000UL, effects.single().remainingValidityMs)
+        assertEquals(15_100UL, effects.single().deadlineMono)
     }
 
     @Test
@@ -178,6 +181,22 @@ class LiveTypingAdapterTest {
         executor.runAll()
 
         assertEquals(emptyList<LiveTypingEffectIntent>(), effects)
+    }
+
+    @Test
+    fun `published effect currency retires when the live incarnation is disabled`() {
+        val clock = FakeClock(100UL)
+        val executor = QueueExecutor()
+        val effects = mutableListOf<LiveTypingEffectIntent>()
+        val adapter = LiveTypingAdapter(clock, executor) { effects += it }
+        adapter.activate(7UL)
+        adapter.consume(outcome(7UL, update = session()))
+        adapter.consume(outcome(7UL, action = intent(sequence = 1UL, deadline = 150UL)))
+        executor.runAll()
+
+        adapter.disable()
+
+        assertEquals(false, effects.single().isCurrent.isCurrent())
     }
 
     private fun outcome(

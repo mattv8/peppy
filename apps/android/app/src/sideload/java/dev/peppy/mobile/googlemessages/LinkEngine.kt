@@ -2,6 +2,7 @@ package dev.peppy.mobile.googlemessages
 
 import org.json.JSONException
 import org.json.JSONObject
+import uniffi.peppy_mobile_bindings.NativeTypingState
 
 interface LinkHost {
     fun persistState(state: ByteArray)
@@ -24,9 +25,24 @@ interface LinkHandle {
     fun stop()
     fun close()
     fun status(): String
+    fun setTyping(request: LinkTypingRequest): String = "typing_unavailable"
     fun acceptsOutput(generation: Long, revision: Long): Boolean = true
     fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
         acceptsOutput(generation, revision)
+}
+
+data class LinkTypingRequest(
+    val conversationId: String,
+    val state: NativeTypingState,
+    val remainingValidityMs: ULong,
+    val linkGeneration: Long,
+) {
+    fun toJson(): String = JSONObject()
+        .put("conversation_id", conversationId)
+        .put("state", if (state == NativeTypingState.STARTED) "started" else "stopped")
+        .put("remaining_validity_ms", remainingValidityMs.toLong())
+        .put("link_generation", linkGeneration)
+        .toString()
 }
 
 interface LinkEngine {

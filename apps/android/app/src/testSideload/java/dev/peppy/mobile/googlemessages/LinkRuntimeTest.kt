@@ -17,6 +17,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.NativeTypingState
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -66,6 +67,116 @@ class LinkRuntimeTest {
         }
 
         assertTrue(LinkRuntime.handle(context) is LinkOpenResult.Unavailable)
+    }
+
+    @Test
+    fun `typing bridge forwards one admitted intent with the contracted validity field`() {
+        val handle = FakeHandle().apply { typingResult = "ok" }
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+
+        val result = LinkRuntime.setTyping(context, typingIntent())
+
+        assertEquals("ok", result)
+        assertEquals(1, handle.typingRequests.size)
+        val request = handle.typingRequests.single()
+        assertEquals("{\"conversation_id\":\"conversation\",\"state\":\"started\",\"remaining_validity_ms\":25,\"link_generation\":${request.linkGeneration}}", request.toJson())
+        assertTrue(request.linkGeneration > 0)
+    }
+
+    @Test
+    fun `typing bridge preserves native result and maps invocation failure`() {
+        val handle = FakeHandle().apply { typingResult = "typing_refused" }
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+
+        assertEquals("typing_refused", LinkRuntime.setTyping(context, typingIntent()))
+        handle.typingFailure = IllegalStateException()
+
+        assertEquals("typing_failed", LinkRuntime.setTyping(context, typingIntent()))
+    }
+
+    @Test
+    fun `typing bridge is unavailable without the gmlink flavor`() {
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = false
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = error("not called")
+        }
+
+        assertEquals("typing_unavailable", LinkRuntime.setTyping(context, typingIntent()))
+    }
+
+    @Test
+    fun `typing bridge rejects a retired handle lease`() {
+        val handle = FakeHandle()
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        val lease = requireNotNull(LinkRuntime.handleLease(context))
+        val detached = requireNotNull(LinkRuntime.detachHandleForServiceStop(lease))
+
+        try {
+            assertEquals("typing_stale", LinkRuntime.setTyping(lease, typingIntent()))
+            assertTrue(handle.typingRequests.isEmpty())
+        } finally {
+            LinkRuntime.closeDetachedHandle(detached)
+        }
+    }
+
+    @Test
+    fun `typing bridge drops a retired live incarnation before Go`() {
+        val handle = FakeHandle()
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+
+        assertEquals("typing_stale", LinkRuntime.setTyping(context, typingIntent(current = false)))
+        assertTrue(handle.typingRequests.isEmpty())
+    }
+
+    @Test
+    fun `typing bridge recalculates validity after native lock wait`() {
+        val clock = FakeClock(100UL)
+        val handle = BlockingTypingHandle()
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        val lease = requireNotNull(LinkRuntime.handleLease(context))
+        val firstDone = CountDownLatch(1)
+        val secondStarted = CountDownLatch(1)
+        val secondDone = CountDownLatch(1)
+        var firstResult: String? = null
+        var secondResult: String? = null
+
+        Thread {
+            firstResult = LinkRuntime.setTyping(lease, typingIntent(deadlineMono = 500UL, clock = clock))
+            firstDone.countDown()
+        }.start()
+        assertTrue(handle.typingEntered.await(1, TimeUnit.SECONDS))
+        clock.now = 200UL
+        Thread {
+            secondStarted.countDown()
+            secondResult = LinkRuntime.setTyping(lease, typingIntent(deadlineMono = 500UL, clock = clock))
+            secondDone.countDown()
+        }.start()
+        assertTrue(secondStarted.await(1, TimeUnit.SECONDS))
+        assertFalse(secondDone.await(50, TimeUnit.MILLISECONDS))
+
+        handle.allowTyping.countDown()
+
+        assertTrue(firstDone.await(1, TimeUnit.SECONDS))
+        assertTrue(secondDone.await(1, TimeUnit.SECONDS))
+        assertEquals("ok", firstResult)
+        assertEquals("ok", secondResult)
+        assertEquals(2, handle.typingRequests.size)
+        assertEquals(300UL, handle.typingRequests.last().remainingValidityMs)
+    }
+
+    @Test
+    fun `typing bridge drops expiry before Go`() {
+        val handle = FakeHandle()
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+
+        assertEquals("typing_expired", LinkRuntime.setTyping(context, typingIntent(deadlineMono = 100UL, clock = FakeClock(100UL))))
+        assertTrue(handle.typingRequests.isEmpty())
     }
 
     @Test
@@ -455,6 +566,18 @@ class LinkRuntimeTest {
         override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
     }
 
+    private fun typingIntent(
+        deadlineMono: ULong = 125UL,
+        clock: MonotonicClock = FakeClock(100UL),
+        current: Boolean = true,
+    ) = LiveTypingEffectIntent(
+        "conversation",
+        NativeTypingState.STARTED,
+        deadlineMono,
+        clock,
+        LiveTypingCurrency { current },
+    )
+
     private class InMemoryStore(private val unreadable: Boolean = false) : LinkStateStorage {
         var wiped = false
 
@@ -472,6 +595,9 @@ class LinkRuntimeTest {
         private val acceptsStream: (Long, Long, Long) -> Boolean = { generation, revision, _ -> accepts(generation, revision) },
     ) : LinkHandle {
         var closed = false
+        var typingFailure: Throwable? = null
+        var typingResult = "ok"
+        val typingRequests = mutableListOf<LinkTypingRequest>()
         override fun pair(cookiesJson: ByteArray) = Unit
         override fun relink() = Unit
         override fun run() = Unit
@@ -480,6 +606,11 @@ class LinkRuntimeTest {
         override fun stop() = Unit
         override fun close() { closed = true }
         override fun status(): String = """{\"state\":\"unlinked\"}"""
+        open override fun setTyping(request: LinkTypingRequest): String {
+            typingRequests += request
+            typingFailure?.let { throw it }
+            return typingResult
+        }
         override fun acceptsOutput(generation: Long, revision: Long): Boolean = accepts(generation, revision)
         override fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
             acceptsStream(generation, revision, streamEpoch)
@@ -494,6 +625,21 @@ class LinkRuntimeTest {
             allowClose.await()
             super.close()
         }
+    }
+
+    private class BlockingTypingHandle : FakeHandle() {
+        val typingEntered = CountDownLatch(1)
+        val allowTyping = CountDownLatch(1)
+
+        override fun setTyping(request: LinkTypingRequest): String {
+            typingEntered.countDown()
+            allowTyping.await()
+            return super.setTyping(request)
+        }
+    }
+
+    private class FakeClock(@Volatile var now: ULong) : MonotonicClock {
+        override fun nowMs(): ULong = now
     }
 
     private class CountingHandle : FakeHandle() {

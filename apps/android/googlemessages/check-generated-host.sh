@@ -23,3 +23,8 @@ grep -Eq 'showEmoji\(java\.lang\.String, long, long\)' "$signature" || {
 	printf '%s\n' 'generated Host.showEmoji lacks generation/revision' >&2
 	return 1 2>/dev/null || exit 1
 }
+"$javap_cmd" -classpath "$classes" dev.peppy.gmlink.gmlink.Link > "$signature"
+grep -Eq 'setTyping\(java\.lang\.String\)' "$signature" || {
+	printf '%s\n' 'generated Link.setTyping is missing' >&2
+	return 1 2>/dev/null || exit 1
+}
