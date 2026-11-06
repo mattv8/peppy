@@ -48,6 +48,8 @@ const CONTROL_PLANE_TABLES: &[&str] = &[
     "vault_requests",
 ];
 const ADMISSION_TABLES: &[&str] = &["instance_admission_windows", "instance_admission_sources"];
+const LIVE_TICKET_TABLES: &[&str] = &["live_ticket_sessions", "live_tickets"];
+const LIVE_TICKET_RESOLVER: &str = "community_resolve_live_ticket_vault(bytea)";
 const TENANT_SCOPE_POLICY_EXPRESSION: &str =
     "((vault_id)::text = NULLIF(current_setting('peppy.vault_id'::text, true), ''::text))";
 const COMMUNITY_RESOLVERS: &[&str] = &[
@@ -245,6 +247,7 @@ pub async fn validate_runtime_role(pool: &PgPool, community: bool) -> Result<(),
         return Err(RlsError::UnsafeRuntimeRole("role membership"));
     }
     validate_rls_schema(pool, community).await?;
+    validate_live_ticket_runtime_capabilities(pool).await?;
     validate_admission_runtime_privileges(pool).await?;
     if community {
         validate_community_privileges(pool).await?;
@@ -317,6 +320,44 @@ async fn validate_rls_schema(pool: &PgPool, community: bool) -> Result<(), RlsEr
     .await?;
     if can_create_in_search_path {
         return Err(RlsError::UnsafeRuntimeRole("CREATE on active schema"));
+    }
+    Ok(())
+}
+
+/// Validates the ticket pre-scope resolver and scoped table privileges required
+/// by both community and hosted runtime assemblies.
+pub async fn validate_live_ticket_runtime_capabilities(pool: &PgPool) -> Result<(), RlsError> {
+    let (table_count, all_enabled, no_force, scoped_dml): (i64, bool, bool, bool) = sqlx::query_as(
+        "SELECT count(*), COALESCE(bool_and(relrowsecurity), false), COALESCE(bool_and(NOT relforcerowsecurity), false), COALESCE(bool_and(has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'INSERT') AND has_table_privilege(current_user, oid, 'UPDATE') AND has_table_privilege(current_user, oid, 'DELETE') AND NOT has_table_privilege(current_user, oid, 'TRUNCATE') AND NOT has_table_privilege(current_user, oid, 'REFERENCES') AND NOT has_table_privilege(current_user, oid, 'TRIGGER')), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
+    )
+    .bind(LIVE_TICKET_TABLES)
+    .fetch_one(pool)
+    .await?;
+    if table_count != LIVE_TICKET_TABLES.len() as i64 || !all_enabled || !no_force {
+        return Err(RlsError::UnsafeRuntimeRole("live ticket RLS is unsafe"));
+    }
+    if !scoped_dml {
+        return Err(RlsError::UnsafeRuntimeRole(
+            "live ticket runtime DML grant is missing or unsafe",
+        ));
+    }
+    let (security_definer, fixed_search_path, runtime_execute, public_execute, runtime_owns):
+        (bool, bool, bool, bool, bool) = sqlx::query_as(
+            "SELECT p.prosecdef, p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'], has_function_privilege(current_user, $1, 'EXECUTE'), has_function_privilege('public', $1, 'EXECUTE'), p.proowner = (SELECT oid FROM pg_roles WHERE rolname=current_user) FROM pg_proc p WHERE p.oid=to_regprocedure($1)",
+        )
+        .bind(LIVE_TICKET_RESOLVER)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(RlsError::UnsafeRuntimeRole("live ticket resolver is missing"))?;
+    if !security_definer || !fixed_search_path || runtime_owns {
+        return Err(RlsError::UnsafeRuntimeRole(
+            "live ticket resolver is unsafe",
+        ));
+    }
+    if !runtime_execute || public_execute {
+        return Err(RlsError::UnsafeRuntimeRole(
+            "live ticket resolver execute grant is missing",
+        ));
     }
     Ok(())
 }

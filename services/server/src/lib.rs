@@ -186,12 +186,12 @@ impl ServerBuilder {
         let health = HealthState::from_database(&self.config, self.runtime_db.clone()).await?;
         if rls_enforced {
             let maintenance_db = self.maintenance_db.as_ref().expect("checked above");
+            rls::validate_live_ticket_runtime_capabilities(&self.runtime_db).await?;
+            rls::validate_maintenance_role(maintenance_db).await?;
             if self.row_security {
                 rls::validate_admission_runtime_privileges(&self.runtime_db).await?;
-                rls::validate_admission_maintenance_privileges(maintenance_db).await?;
             } else {
                 rls::validate_runtime_role(&self.runtime_db, true).await?;
-                rls::validate_maintenance_role(maintenance_db).await?;
             }
         }
         let maintenance_db = self

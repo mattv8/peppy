@@ -652,6 +652,67 @@ async fn live_ticket_resolver_and_consume_are_runtime_scoped() {
         (consumed.vault_id, consumed.device_id, consumed.session_id),
         (vault_a, device, session)
     );
+
+    let maintenance_device = Uuid::new_v4();
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',$3,1)")
+        .bind(vault_b)
+        .bind(maintenance_device)
+        .bind("f".repeat(64))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    for (vault, device, session_hash, ticket_digest) in [
+        (vault_a, device, vec![41_u8; 32], vec![42_u8; 32]),
+        (
+            vault_b,
+            maintenance_device,
+            vec![43_u8; 32],
+            vec![44_u8; 32],
+        ),
+    ] {
+        sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',clock_timestamp()-interval '1 second')")
+            .bind(vault)
+            .bind(device)
+            .bind(&session_hash)
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO live_tickets(ticket_digest,vault_id,device_id,session_id_hash,issued_at,expires_at) VALUES($1,$2,$3,$4,clock_timestamp()-interval '2 seconds',clock_timestamp()-interval '1 second')")
+            .bind(ticket_digest)
+            .bind(vault)
+            .bind(device)
+            .bind(session_hash)
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+    }
+    let mut server = ServerBuilder::community(fixture.config(), fixture.runtime.clone())
+        .maintenance_database(fixture.maintenance.clone())
+        .rls_enforced(true)
+        .setup_token(SETUP_TOKEN)
+        .build()
+        .await
+        .unwrap();
+    server.start_maintenance().unwrap();
+    for _ in 0..50 {
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE ticket_digest = ANY($1)")
+                .bind(vec![vec![42_u8; 32], vec![44_u8; 32]])
+                .fetch_one(&fixture.migration)
+                .await
+                .unwrap();
+        if remaining == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE ticket_digest = ANY($1)")
+            .bind(vec![vec![42_u8; 32], vec![44_u8; 32]])
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0, "maintenance reaper must cross vault RLS");
     fixture.cleanup().await;
 }
 
@@ -836,6 +897,66 @@ async fn hosted_mode_missing_runtime_admission_grants_fails_closed_and_correct_g
         .unwrap();
 
     drop(server);
+
+    sqlx::raw_sql(&format!(
+        "REVOKE EXECUTE ON FUNCTION community_resolve_live_ticket_vault(bytea) FROM {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let error = ServerBuilder::new(fixture.config(), fixture.runtime.clone())
+        .setup_token(SETUP_TOKEN)
+        .row_security(true)
+        .maintenance_database(fixture.maintenance.clone())
+        .build()
+        .await
+        .err()
+        .expect("hosted startup must reject a missing ticket resolver grant");
+    assert!(error.to_string().contains("live ticket resolver execute"));
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(&format!(
+        "REVOKE DELETE ON TABLE live_tickets FROM {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let error = ServerBuilder::new(fixture.config(), fixture.runtime.clone())
+        .setup_token(SETUP_TOKEN)
+        .row_security(true)
+        .maintenance_database(fixture.maintenance.clone())
+        .build()
+        .await
+        .err()
+        .expect("hosted startup must reject missing live-ticket runtime DML");
+    assert!(error.to_string().contains("live ticket runtime DML"));
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(&format!(
+        "REVOKE DELETE ON TABLE live_tickets FROM {}",
+        fixture.maintenance_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let error = ServerBuilder::new(fixture.config(), fixture.runtime.clone())
+        .setup_token(SETUP_TOKEN)
+        .row_security(true)
+        .maintenance_database(fixture.maintenance.clone())
+        .build()
+        .await
+        .err()
+        .expect("hosted startup must reject missing live-ticket maintenance DML");
+    assert!(error.to_string().contains("requires tenant DML"));
+    rls::grant_maintenance_privileges(&fixture.migration, &fixture.maintenance_role)
+        .await
+        .unwrap();
     fixture.cleanup().await;
 }
 
