@@ -1065,6 +1065,74 @@ async fn live_ticket_consume_is_atomic_and_fails_closed() {
 }
 
 #[tokio::test]
+async fn live_ticket_consume_rejects_closed_or_expired_leases_and_unknown_secrets() {
+    for (value, mutation) in [
+        (
+            25_u8,
+            "state='closed', closed_at=clock_timestamp(), lease_until=NULL",
+        ),
+        (26_u8, "lease_until=clock_timestamp()"),
+    ] {
+        let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+        let session = URL_SAFE_NO_PAD.encode([value; 16]);
+        let ticket = issue_ticket(&server, session.clone()).await;
+        sqlx::query(&format!(
+            "UPDATE live_ticket_sessions SET {mutation} WHERE vault_id=$1 AND device_id=$2"
+        ))
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+        let (session_id, secret) = ticket_parts(&session, &ticket);
+        assert_eq!(
+            consume_live_ticket(&server.pool, session_id, secret)
+                .await
+                .err()
+                .unwrap()
+                .1,
+            "live_ticket_invalid"
+        );
+        server.shutdown().await;
+    }
+
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    assert_eq!(
+        consume_live_ticket(&server.pool, [27; 16], [28; 32])
+            .await
+            .err()
+            .unwrap()
+            .1,
+        "live_ticket_invalid"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_ticket_consume_allows_exactly_one_replica_winner() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session = URL_SAFE_NO_PAD.encode([29_u8; 16]);
+    let ticket = issue_ticket(&server, session.clone()).await;
+    let (session_id, secret) = ticket_parts(&session, &ticket);
+    let one = live_ticket_replica_pool(&server.schema).await;
+    let two = live_ticket_replica_pool(&server.schema).await;
+    let (left, right) = tokio::join!(
+        consume_live_ticket(&one, session_id, secret),
+        consume_live_ticket(&two, session_id, secret)
+    );
+    assert_eq!(
+        [left.is_ok(), right.is_ok()]
+            .into_iter()
+            .filter(|winner| *winner)
+            .count(),
+        1
+    );
+    one.close().await;
+    two.close().await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn expired_provisional_ticket_lease_becomes_terminal() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let session_id = URL_SAFE_NO_PAD.encode([19_u8; 16]);
