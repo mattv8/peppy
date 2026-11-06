@@ -3707,6 +3707,83 @@ describe("draft durability", () => {
     expect(message()).toHaveValue("other window");
   });
 
+  it("follows the authoritative conversation and clears a clean remotely sent draft", async () => {
+    host.conversations = [];
+    host.drafts.set("terminal-source", {
+      id: "draft-terminal-source",
+      conversationId: "terminal-source",
+      text: "sent from another device",
+      recipientIds: ["+15550001"],
+      attachmentIds: ["remote-image-1", "remote-image-2"],
+      revision: "3",
+      attachments: [
+        { id: "remote-image-1", name: "one.png", mediaType: "image/png", byteSize: 10, state: "ready" },
+        { id: "remote-image-2", name: "two.png", mediaType: "image/png", byteSize: 12, state: "ready" },
+      ],
+      sync: { state: "synced", expiresAt: "2026-11-07T00:00:00Z", conflicts: [], notice: null, sendRequiresConnection: false },
+    });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("sent from another device"));
+    expect(screen.getByText("Draft synced")).toBeInTheDocument();
+    expect(document.querySelector('[data-attachment-id="remote-image-1"]')).toBeInTheDocument();
+
+    host.drafts.delete("terminal-source");
+    host.conversations = [{
+      id: "canonical-conversation",
+      name: "Canonical recipient",
+      preview: "sent from another device",
+      unread: 0,
+      messages: [{ id: "sent-message", revision: "1", sender: "self", body: "sent from another device", timestamp: "now", attachments: [] }],
+    }];
+    await act(async () => hint?.());
+
+    await waitFor(() => expect(document.querySelector("[data-header-title]")).toHaveTextContent("Canonical recipient"));
+    expect(message()).toHaveValue("");
+    expect(document.querySelector('[data-attachment-id="remote-image-1"]')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-attachment-id="remote-image-2"]')).not.toBeInTheDocument();
+    expect(screen.queryByText("Draft synced")).not.toBeInTheDocument();
+  });
+
+  it("keeps edits made while a remote terminal refresh is pending", async () => {
+    host.conversations = [];
+    host.drafts.set("terminal-source", {
+      id: "draft-terminal-source",
+      conversationId: "terminal-source",
+      text: "old caption",
+      recipientIds: ["+15550001"],
+      attachmentIds: [],
+      revision: "3",
+    });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("old caption"));
+
+    const pendingSave = deferred<Draft>();
+    vi.mocked(bridge.save_draft).mockReturnValueOnce(pendingSave.promise);
+    type("new local caption");
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Add attachment" }));
+    await waitFor(() => expect(document.querySelector('[data-attachment-id="file-1"]')).toBeInTheDocument());
+
+    host.drafts.delete("terminal-source");
+    host.conversations = [{
+      id: "canonical-conversation",
+      name: "Canonical recipient",
+      preview: "old caption",
+      unread: 0,
+      messages: [{ id: "sent-message", revision: "1", sender: "self", body: "old caption", timestamp: "now", attachments: [] }],
+    }];
+    await act(async () => hint?.());
+
+    expect(message()).toHaveValue("new local caption");
+    expect(document.querySelector('[data-attachment-id="file-1"]')).toBeInTheDocument();
+    expect(document.querySelector("[data-header-title]")).not.toHaveTextContent("Canonical recipient");
+
+    await act(async () => pendingSave.reject({ code: "not-found", message: "Draft no longer exists." }));
+    await screen.findByRole("alert");
+    expect(message()).toHaveValue("new local caption");
+    expect(document.querySelector('[data-attachment-id="file-1"]')).toBeInTheDocument();
+  });
+
   it("keeps local text until explicit recovery recreates a draft deleted elsewhere", async () => {
     host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
     render(<App />);

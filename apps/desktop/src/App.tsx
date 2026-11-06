@@ -2059,6 +2059,20 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (draft) rememberHostDraft(draft);
     store.adopt(conversationId, draft);
   };
+  const reconcileMissingRequestedConversation = (requestedConversationId: string | undefined, state: DesktopSnapshot) => {
+    if (
+      !requestedConversationId ||
+      state.activeConversationId === requestedConversationId ||
+      state.conversations.some((conversation) => conversation.id === requestedConversationId)
+    ) return;
+    adoptHostDraft(requestedConversationId);
+    const missingSlot = store.get(requestedConversationId);
+    if (missingSlot && (isDirty(missingSlot) || missingSlot.held || missingSlot.error)) return;
+    if (!composerConversation && selectedRef.current === requestedConversationId) {
+      choose(state.activeConversationId ?? "");
+      setNewComposeKey((current) => current === requestedConversationId ? null : current);
+    }
+  };
 
   useEffect(() => {
     if (!draftNotice || reviewNoticeSequenceRef.current !== draftNotice.sequence) return;
@@ -2428,6 +2442,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         if (state.draft && store.isHydrated(state.activeConversationId)) applyAuthoritativeDraft(state.draft);
         else adoptHostDraft(state.activeConversationId, state.draft);
       }
+      reconcileMissingRequestedConversation(requestedConversationId, state);
       setRefreshNotice("");
       return;
     }
@@ -2489,6 +2504,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (state.draft && store.isHydrated(state.activeConversationId)) applyAuthoritativeDraft(state.draft);
       else adoptHostDraft(state.activeConversationId, state.draft);
     }
+    reconcileMissingRequestedConversation(requestedConversationId, state);
     setRefreshNotice("");
     if (!composerConversation && !selectedRef.current && state.activeConversationId) choose(state.activeConversationId);
     const responseHasOlder = refreshedDetached?.hasOlder ?? refreshed?.hasOlderMessages ?? false;
