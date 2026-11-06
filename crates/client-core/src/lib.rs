@@ -9373,6 +9373,11 @@ fn compaction_group(
         ]
     };
     Ok(Some(match payload {
+        PrivatePayload::RcsMessageStatus { message_id, .. } => (
+            b"rcs-message-status",
+            vec![message_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::NotificationPosted { notification } => (
             b"notification" as &[u8],
             target(&notification.target),
@@ -9542,6 +9547,9 @@ fn compaction_group(
 /// request and all its results. Dismissals are standalone terminal roots.
 fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
     match payload {
+        PrivatePayload::RcsMessageStatus { message_id, .. } => {
+            Some(format!("rcs-message-status:{message_id}"))
+        }
         PrivatePayload::NotificationPosted { notification } => Some(format!(
             "notification:{}:{}",
             notification.target.source_device_id, notification.target.notification_key

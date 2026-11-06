@@ -46,7 +46,7 @@ use crate::{
     AppFilter, Client, Ctx, Cursor, EnvelopePurpose, Error, MAX_SNAPSHOT_PAGE_BYTES,
     NotificationTarget, NotificationWire, Opened, PrivatePayload, contact_media, contacts,
     conversation_folders, conversation_pinning, conversation_tones, notification_preferences,
-    notifications, open_payload, parse_wire, take_within_budget, to_i64,
+    notifications, open_payload, parse_wire, take_within_budget, to_i64, RcsMessageStatus,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -121,6 +121,12 @@ CREATE TABLE IF NOT EXISTS projection_notification_preferences(generation INTEGE
     message_banners INTEGER NOT NULL, mirrored_banners INTEGER NOT NULL, preview TEXT NOT NULL,
     mute_with_heads INTEGER NOT NULL, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS projection_rcs_message_status(generation INTEGER NOT NULL, message_id TEXT NOT NULL,
+    status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 1 AND 5), PRIMARY KEY(generation,message_id));
+CREATE TABLE IF NOT EXISTS projection_rcs_conversation_metadata(generation INTEGER NOT NULL, conversation_id TEXT NOT NULL,
+    rcs_encryption INTEGER CHECK(rcs_encryption IN (0,1)), rcs_history_gap INTEGER NOT NULL CHECK(rcs_history_gap IN (0,1)),
+    logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, producer_device_id TEXT NOT NULL,
+    source_sequence INTEGER NOT NULL, PRIMARY KEY(generation,conversation_id));
 ",
     )?;
     // One transaction, so a crash cannot create the table without invalidating its
@@ -471,6 +477,33 @@ pub(super) fn reduce(
         return Ok(false);
     };
     match payload {
+        PrivatePayload::RcsMessageStatus { message_id, status } => {
+            let rank = match status {
+                RcsMessageStatus::Sending => 1,
+                RcsMessageStatus::Sent => 2,
+                RcsMessageStatus::Failed => 3,
+                RcsMessageStatus::Delivered => 4,
+                RcsMessageStatus::Read => 5,
+            };
+            conn.execute(
+                "INSERT INTO projection_rcs_message_status(generation,message_id,status_rank) VALUES(?,?,?) ON CONFLICT(generation,message_id) DO UPDATE SET status_rank=MAX(status_rank,excluded.status_rank)",
+                params![generation, message_id.to_string(), rank],
+            )?;
+            Ok(true)
+        }
+        PrivatePayload::RcsConversationMetadata(metadata) => {
+            if metadata.logical_revision == 0
+                || metadata.logical_revision >= i64::MAX as u64
+                || metadata.writer_device_id != producer
+            {
+                return Ok(false);
+            }
+            conn.execute(
+                "INSERT INTO projection_rcs_conversation_metadata(generation,conversation_id,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(generation,conversation_id) DO UPDATE SET rcs_encryption=excluded.rcs_encryption,rcs_history_gap=excluded.rcs_history_gap,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>projection_rcs_conversation_metadata.logical_revision OR (excluded.logical_revision=projection_rcs_conversation_metadata.logical_revision AND excluded.writer_device_id>projection_rcs_conversation_metadata.writer_device_id)",
+                params![generation, metadata.conversation_id.to_string(), metadata.rcs_encryption.map(i64::from), metadata.rcs_history_gap, to_i64(metadata.logical_revision)?, metadata.writer_device_id, producer, sequence],
+            )?;
+            Ok(true)
+        }
         // Own contact books are local truth, rebuilt by rescanning the OS provider.
         PrivatePayload::ContactBookState { .. }
         | PrivatePayload::ContactUpserted { .. }
@@ -908,6 +941,17 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
         params![me, generation],
     )?;
     notifications::prune_banners(conn)?;
+
+    conn.execute("DELETE FROM rcs_message_status", [])?;
+    conn.execute(
+        "INSERT INTO rcs_message_status(message_id,status_rank) SELECT message_id,status_rank FROM projection_rcs_message_status WHERE generation=?",
+        [generation],
+    )?;
+    conn.execute("DELETE FROM rcs_conversation_metadata", [])?;
+    conn.execute(
+        "INSERT INTO rcs_conversation_metadata(conversation_id,transport,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) SELECT conversation_id,'rcs',rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence FROM projection_rcs_conversation_metadata WHERE generation=?",
+        [generation],
+    )?;
 
     // App filters (any source, any writer). This device's own write is kept while there is
     // no proof the snapshot covers it: its outbox row's echo is not journaled at or below the
