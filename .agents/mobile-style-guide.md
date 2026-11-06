@@ -7,6 +7,29 @@ from [desktop CSS tokens](../packages/desktop-ui/src/peppy-tokens.css);
 [mobile token mappings](../packages/mobile-design/src/tokens.mjs) own the
 semantic Kotlin and Swift names.
 
+## Progressive disclosure and plain language
+
+Applies to all Peppy screens: desktop, browser, account website, Android and iOS,
+not just Settings.
+
+- Show primary actions, current status and everyday choices first. Put secondary
+  controls, detailed diagnostics and uncommon options on clearly named details
+  pages or behind disclosure.
+- Put an (i) immediately after the relevant label for optional help. Clicking or
+  tapping opens a titled modal dialog, scrollable if needed, with explicit
+  dismissal. Do not substitute long inline helper paragraphs or hover-only
+  tooltips. Preserve an accessible contextual name, keyboard, TalkBack and
+  VoiceOver access, and platform touch targets.
+- Write for average users: use short familiar words and direct, actionable state
+  messages. Prefer concrete user effects over implementation terms such as
+  reconciliation, acquisition, provider scan or vault recovery capacity. Keep
+  standard terms such as SMS/MMS when clearer than vague alternatives. Do not
+  promise connection, progress or completion without state evidence.
+- Keep urgent failures, pending approvals and needed next steps visible in root
+  summaries. Keep full required permission, privacy, security and consent
+  disclosures at the point of decision, not behind (i). Never obscure destructive
+  consequences.
+
 ## Generated native API
 
 - Android imports `dev.peppy.mobile.ui.theme.PeppyTokens` and chooses
