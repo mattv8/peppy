@@ -308,6 +308,21 @@ test("desktop override keys are catalog keys or explicit desktop-only additions"
   }
 });
 
+test("RCS badge and typing sharing copy remain scoped to their supported clients", () => {
+  const shared = ["typing_share_label", "typing_share_hint"];
+  const desktopOnly = ["rcs_badge_label", "rcs_badge_description"];
+
+  for (const key of shared) {
+    assert.ok(catalog[key]);
+    assert.ok(nativeCatalog[key]);
+  }
+  for (const key of desktopOnly) {
+    assert.ok(desktopCatalog[key]);
+    assert.ok(desktopOnlyKeys.includes(key));
+    assert.ok(!(key in nativeCatalog));
+  }
+});
+
 test("retired desktop overrides fall back to shared copy", () => {
   const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
   for (const key of ["hosted_subscribe_restore", "hosted_subscribe_legal", "hosted_purchase_pending_body"]) {

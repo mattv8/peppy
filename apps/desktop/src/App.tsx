@@ -137,6 +137,9 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 import { GatewayPicker } from "./setup/GatewayPicker";
 import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars } from "./shell/layout-persistence";
+import { readShareTyping } from "./shell/layout-persistence";
+import { RcsBadge } from "./rcs/RcsBadge";
+import { useRcsRoute } from "./rcs/useRcsRoute";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { conversationContactAddress } from "./contacts/conversation-contact";
 import { hiddenTimeIds } from "./conversation/timestamp-bursts";
@@ -1093,6 +1096,8 @@ function SettingsView({
   canRevealVaultSecret = false,
   serverOffline = false,
   accountReadOnly = false,
+  typingShare,
+  onTypingShare,
   requestedSection,
   onRequestedSectionConsumed,
   onAccountDeleted,
@@ -1137,6 +1142,8 @@ function SettingsView({
   canRevealVaultSecret?: boolean;
   serverOffline?: boolean;
   accountReadOnly?: boolean;
+  typingShare?: boolean;
+  onTypingShare(enabled: boolean): void;
   requestedSection?: string;
   onRequestedSectionConsumed?(): void;
   onAccountDeleted(result: { outcome: "deleted" | "pending"; provider: "none" | "stripe" | "apple" }): void;
@@ -1474,7 +1481,7 @@ function SettingsView({
         {browserHost && accountUrl && <a id="settings-account-portal-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">{peppyCopy.account_portal_cta}<span className="visually-hidden"> (opens in a new tab)</span></a>}
         {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
       </section>}
-      <PrivacySettings browserHost={browserHost} />
+      <PrivacySettings browserHost={browserHost} typingShare={typingShare === undefined ? undefined : { enabled: typingShare, onChange: onTypingShare }} />
       </div>
       </div>
     </section>
@@ -1695,6 +1702,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   });
   const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
+  const [shareTyping, setShareTyping] = useState(readShareTyping);
   const [groupSenderAvatars, setGroupSenderAvatars] = useState(readGroupSenderAvatars);
   const [showReactions, setShowReactions] = useShowReactions();
   const [pendingReactionId, setPendingReactionId] = useState<string>();
@@ -2041,6 +2049,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const changeCompactTimestamps = (enabled: boolean) => {
     setCompactTimestamps(enabled);
     persistLayout({ compactTimestamps: enabled });
+  };
+  const changeTypingShare = (enabled: boolean) => {
+    setShareTyping(enabled);
+    persistLayout({ shareTyping: enabled });
   };
   const changeGroupSenderAvatars = (enabled: boolean) => {
     setGroupSenderAvatars(enabled);
@@ -3272,6 +3284,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const content = slot?.content ?? blankContent();
   const gateways = snapshot?.gateways ?? [];
   const route = resolveRoute(content, gateways);
+  const rcsRoute = useRcsRoute({
+    snapshot: snapshot ?? undefined,
+    activeConversationId: active?.id,
+    gatewayId: route.kind === "route" ? route.gateway.id : undefined,
+    locked: Boolean(appLock?.locked),
+  });
   const mmsRequired = requiresMms(content, active);
   const routeRecipients = recipientCount(content, active);
   const estimateBytes = draftEstimateBytes(content, attachmentViews);
@@ -4418,6 +4436,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         draft={content.text}
         attachments={attachments}
         sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending}
+        hideSmsCounter={rcsRoute.current}
         unavailableReason={sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly}
         placeholder={composerReadOnly ? "Loading draft…" : undefined}
@@ -4910,7 +4929,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <h1 data-header-title>Contacts</h1>
               ) : (
                 <div className="header-copy-details">
-                  <b data-header-title>{title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>
+                  <div data-header-title-row><b data-header-title>{title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!headPanel && rcsRoute.current && <RcsBadge />}</div>
                   {active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
                 </div>
               )}
@@ -5031,7 +5050,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               accountUrl={accountUrl}
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
                serverOffline={serverOffline}
-                accountReadOnly={accountReadOnly}
+               accountReadOnly={accountReadOnly}
+               typingShare={snapshot?.rcsStatus?.gateways.some((gateway) => gateway.state !== "unlinked") ? shareTyping : undefined}
+               onTypingShare={changeTypingShare}
                 requestedSection={notificationSettingsRequested ? "notifications" : undefined}
                 onRequestedSectionConsumed={() => setNotificationSettingsRequested(false)}
                 onAccountDeleted={result => {

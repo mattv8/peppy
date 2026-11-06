@@ -39,4 +39,18 @@ describe("PrivacySettings", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Privacy Policy could not be opened.");
     expect(screen.queryByText("sensitive native failure")).not.toBeInTheDocument();
   });
+
+  it("shows the typing sharing preference only when it is available", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(<PrivacySettings browserHost={false} />);
+
+    expect(document.querySelector("#settings-share-typing")).toBeNull();
+
+    rerender(<PrivacySettings browserHost={false} typingShare={{ enabled: true, onChange }} />);
+    const control = document.querySelector<HTMLInputElement>("#settings-share-typing")!;
+    expect(control).toBeChecked();
+    expect(control).toHaveAttribute("aria-describedby", "settings-share-typing-hint");
+    fireEvent.click(control);
+    expect(onChange).toHaveBeenCalledWith(false);
+  });
 });

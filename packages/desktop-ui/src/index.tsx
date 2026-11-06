@@ -1301,6 +1301,7 @@ export function Composer({
   placeholder,
   composerUserSized = false,
   maxAutoGrowHeight = 176,
+  hideSmsCounter = false,
   platform,
 }: {
   draft: string;
@@ -1323,6 +1324,7 @@ export function Composer({
   composerUserSized?: boolean;
   /** CSS max-height: 176px remains the hard ceiling (8 lines); this can only lower auto-grow. */
   maxAutoGrowHeight?: number;
+  hideSmsCounter?: boolean;
   platform?: "macos" | "windows" | "linux";
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1448,7 +1450,7 @@ export function Composer({
         </button>
         {gatewaySlot}
         <div className="composer-toolbar-spacer" />
-        {counter && (
+        {!hideSmsCounter && counter && (
           <span id="sms-counter" aria-live="polite" aria-label="SMS character count">
             {counter}
           </span>

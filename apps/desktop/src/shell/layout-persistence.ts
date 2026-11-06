@@ -12,6 +12,7 @@ type LayoutPatch = {
   popoutMode?: PopoutMode;
   contactsDetailWidth?: number;
   compactTimestamps?: boolean;
+  shareTyping?: boolean;
   theme?: "light" | "dark" | "system";
   groupSenderAvatars?: boolean;
 };
@@ -31,6 +32,10 @@ export function readContactsDetailWidth(): number | undefined {
 
 export function readCompactTimestamps(): boolean {
   return readLayoutBoolean("compactTimestamps");
+}
+
+export function readShareTyping(): boolean {
+  return readLayoutBoolean("shareTyping");
 }
 
 export function readGroupSenderAvatars(): boolean {

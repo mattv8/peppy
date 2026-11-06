@@ -673,6 +673,21 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 .header-copy-details {
   display: grid;
 }
+[data-header-title-row] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+[data-header-title-row] [data-header-title] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#conversation-rcs-badge {
+  flex: none;
+  border: 1px solid var(--peppy-accent);
+  border-radius: var(--peppy-radius-pill);
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+  padding: 2px 6px;
+}
 .header-copy-details small {
   color: var(--peppy-text-secondary);
   font-size: 11px;
@@ -1086,6 +1101,9 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   :is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span::before {
     background: HighlightText;
   }
+}
+@media (forced-colors: active) {
+  #conversation-rcs-badge { border-color: CanvasText; color: CanvasText; }
 }
 .settings-control-row label {
   display: grid;

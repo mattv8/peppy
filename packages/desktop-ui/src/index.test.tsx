@@ -659,6 +659,14 @@ describe("desktop UI controls", () => {
     expect(changed).toHaveBeenCalledWith("hi");
   });
 
+  it("hides the SMS counter without adding transport controls", () => {
+    render(<Composer draft={"a".repeat(161)} attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} hideSmsCounter />);
+
+    expect(document.querySelector("#sms-counter")).toBeNull();
+    expect(document.querySelectorAll("#composer-toolbar button")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /route|transport|send as/i })).toBeNull();
+  });
+
   it("allows attachment-only sends and explains why sending is unavailable", () => {
     const sent = vi.fn();
     const { rerender } = render(

@@ -8,7 +8,7 @@ export async function openPrivacyPolicy(): Promise<void> {
   await openUrl(PRIVACY_POLICY_URL);
 }
 
-export function PrivacySettings({ browserHost }: { browserHost: boolean }) {
+export function PrivacySettings({ browserHost, typingShare }: { browserHost: boolean; typingShare?: { enabled: boolean; onChange(next: boolean): void; error?: boolean } }) {
   const [openError, setOpenError] = useState(false);
 
   const openPolicy = async () => {
@@ -33,5 +33,13 @@ export function PrivacySettings({ browserHost }: { browserHost: boolean }) {
       </button>
     )}
     {openError && <p id="settings-privacy-policy-error" className="settings-error" role="alert">Privacy Policy could not be opened.</p>}
+    {typingShare && <div id="settings-share-typing-group">
+      <label className="settings-check">
+        <input id="settings-share-typing" type="checkbox" checked={typingShare.enabled} aria-describedby="settings-share-typing-hint" onChange={(event) => typingShare.onChange(event.target.checked)} />
+        {peppyCopy.typing_share_label}
+      </label>
+      <p id="settings-share-typing-hint" className="settings-field-hint">{peppyCopy.typing_share_hint}</p>
+      {typingShare.error && <p id="settings-share-typing-error" className="settings-error" role="alert">Something went wrong. Try again.</p>}
+    </div>}
   </section>;
 }

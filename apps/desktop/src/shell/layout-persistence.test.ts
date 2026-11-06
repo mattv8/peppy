@@ -6,6 +6,7 @@ import {
   readCompactTimestamps,
   readContactsDetailWidth,
   readGroupSenderAvatars,
+  readShareTyping,
 } from "./layout-persistence";
 
 const LAYOUT_KEY = "peppy.layout.v1";
@@ -93,6 +94,12 @@ describe("layout persistence", () => {
 
     persistLayoutPatch({ compactTimestamps: true });
     expect(readCompactTimestamps()).toBe(true);
+  });
+
+  it("defaults typing sharing on and reloads an explicit preference", () => {
+    expect(readShareTyping()).toBe(true);
+    persistLayoutPatch({ shareTyping: false });
+    expect(readShareTyping()).toBe(false);
   });
 
   it("merges compact timestamp preferences with existing layout keys", () => {

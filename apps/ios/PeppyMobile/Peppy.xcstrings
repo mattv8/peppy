@@ -1,6 +1,26 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "peppy.typing_share_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show others when I am typing"
+          }
+        }
+      }
+    },
+    "peppy.typing_share_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In chats that use your Google Messages link, the other person sees that you are typing. Their view may take a few seconds to clear after you stop."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_account_loading": {
       "localizations": {
         "en": {
