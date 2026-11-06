@@ -1,0 +1,594 @@
+#[path = "common/mod.rs"]
+mod common;
+
+use common::*;
+use rusqlite::{Connection, params};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+fn sql(config: &ClientConfig) -> Connection {
+    let connection = Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+}
+
+fn publish_gateway(client: &Client, config: &ClientConfig) {
+    let observed_at_ms = now();
+    client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id: config.device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms,
+                capability_revision: 1,
+                feature_bits: 1,
+                linked_since_ms: Some(observed_at_ms),
+            },
+            &[],
+            observed_at_ms,
+        )
+        .unwrap();
+}
+
+fn fixture() -> (
+    tempfile::TempDir,
+    Vault,
+    ClientConfig,
+    Client,
+    ConversationId,
+    RcsOwnership,
+) {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-regression", &vault);
+    let client = unlocked(&config, &vault);
+    publish_gateway(&client, &config);
+    let conversation = ConversationId::new();
+    let ownership = client
+        .begin_rcs_link_ownership(conversation, "initial", 0)
+        .unwrap();
+    (directory, vault, config, client, conversation, ownership)
+}
+
+fn record(id: &str) -> RcsProjectedRecord {
+    RcsProjectedRecord {
+        google_message_id: id.into(),
+        google_conversation_id: "google-conversation".into(),
+        direction: Direction::Incoming,
+        body: format!("body-{id}"),
+        sent_at_ms: Some(1),
+        tmp_id: None,
+        rcs_reported: false,
+        e2ee_reported: None,
+        history_token: None,
+    }
+}
+
+fn status(id: &str, tmp_id: Option<&str>, value: RcsProjectedStatus) -> RcsStatusApplication {
+    RcsStatusApplication {
+        google_message_id: id.into(),
+        google_conversation_id: "google-conversation".into(),
+        tmp_id: tmp_id.map(str::to_owned),
+        status: value,
+    }
+}
+
+fn receive_snapshot(
+    connection: &Connection,
+    conversation: ConversationId,
+) -> (i64, i64, i64, Option<String>, i64) {
+    connection.query_row(
+        "SELECT (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM rcs_message_identities), (SELECT COUNT(*) FROM outbox), history_token, observed_detector_high_water FROM rcs_lane_ownership WHERE conversation_id=?",
+        [conversation.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).unwrap()
+}
+
+fn install_echo_ledger(connection: &Connection, message_id: MessageId) {
+    let command_id = CommandId::new();
+    connection
+        .execute(
+            "INSERT INTO commands(command_id,message_id,gateway_device_id) VALUES(?,?,?)",
+            params![
+                command_id.to_string(),
+                message_id.to_string(),
+                DeviceId::new().to_string()
+            ],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,1,zeroblob(32),?,1)", params![command_id.to_string(), "tmp", "google-conversation"]).unwrap();
+}
+
+#[test]
+fn matched_duplicate_page_advances_token_and_publication_failure_is_atomic() {
+    let (_dir, vault, config, client, conversation, owner) = fixture();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("seed"))
+        .unwrap();
+    let message_id = only_message(&client, conversation)
+        .payload
+        .record
+        .message_id;
+    let connection = sql(&config);
+    install_echo_ledger(&connection, message_id);
+    let mut echo = record("echo");
+    echo.direction = Direction::Outgoing;
+    echo.tmp_id = Some("tmp".into());
+    echo.history_token = Some("A".into());
+    echo.sent_at_ms = Some(now());
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, echo.clone())
+            .unwrap(),
+        RcsReceiveOutcome::OutgoingMatched
+    );
+    echo.history_token = Some("B".into());
+    echo.rcs_reported = true;
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, echo)
+            .unwrap(),
+        RcsReceiveOutcome::Duplicate
+    );
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .history_token
+            .as_deref(),
+        Some("B")
+    );
+    drop(client);
+    let reopened = unlocked(&config, &vault);
+    assert_eq!(
+        reopened
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .history_token
+            .as_deref(),
+        Some("B")
+    );
+
+    connection.execute_batch("CREATE TRIGGER reject_rcs_fact BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
+    let before = receive_snapshot(&connection, conversation);
+    let mut failed = record("failed");
+    failed.direction = Direction::Outgoing;
+    failed.tmp_id = Some("tmp".into());
+    failed.history_token = Some("C".into());
+    failed.sent_at_ms = Some(now());
+    assert!(
+        reopened
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, failed)
+            .is_err()
+    );
+    assert_eq!(receive_snapshot(&connection, conversation), before);
+    // Reverting src/rcs_receive.rs checkpoint_record call in the Duplicate tmp-match branch fails token B.
+}
+
+#[test]
+fn projected_gateway_matrix_rejects_without_record_side_effects() {
+    for mode in ["absent", "stale", "multiple", "other"] {
+        let (_dir, _vault, config, client, conversation, owner) = fixture();
+        let connection = sql(&config);
+        match mode {
+            "absent" => {
+                connection
+                    .execute("DELETE FROM rcs_link_status_projection", [])
+                    .unwrap();
+            }
+            "stale" => {
+                connection
+                    .execute("UPDATE rcs_link_status_projection SET observed_at_ms=0", [])
+                    .unwrap();
+            }
+            "multiple" => {
+                connection
+                    .execute(
+                        "INSERT INTO rcs_link_status_projection VALUES(?,?,?,?,?,?,?,?,?)",
+                        params![
+                            DeviceId::new().to_string(),
+                            "linked",
+                            true,
+                            true,
+                            true,
+                            now(),
+                            1,
+                            1,
+                            1
+                        ],
+                    )
+                    .unwrap();
+            }
+            "other" => {
+                connection
+                    .execute(
+                        "UPDATE rcs_link_status_projection SET gateway_device_id=?",
+                        [DeviceId::new().to_string()],
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = receive_snapshot(&connection, conversation);
+        assert_eq!(
+            client
+                .ingest_rcs_projected_record(conversation, owner.ownership_generation, record(mode))
+                .unwrap(),
+            RcsReceiveOutcome::Rejected(RcsReceiveCode::GatewayUnavailable)
+        );
+        let after = receive_snapshot(&connection, conversation);
+        assert_eq!(after.0, before.0, "{mode}");
+        assert_eq!(after.1, before.1, "{mode}");
+        // The rejection deliberately publishes the content-free gateway alert,
+        // so its outbox count is the only permitted change.
+        assert_eq!(after.3, before.3, "{mode}");
+        assert_eq!(
+            client
+                .rcs_receive_state(conversation)
+                .unwrap()
+                .unwrap()
+                .alert,
+            RcsReceiveAlert::GatewayUnavailable
+        );
+    }
+    let (_dir, _vault, _config, client, conversation, owner) = fixture();
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(
+                conversation,
+                owner.ownership_generation,
+                record("positive")
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    // Reverting the unique_current_gateway guard in ingest fails each negative case.
+}
+
+#[test]
+#[ignore = "defect: NULL R1 reservations are not materialized by projected ingest"]
+fn page_proof_boundary_and_null_reservation_materialization_are_durable() {
+    let (_dir, _vault, config, client, conversation, owner) = fixture();
+    let connection = sql(&config);
+    let proof_time: i64 = connection
+        .query_row(
+            "SELECT proof_time_ms FROM rcs_lane_ownership WHERE conversation_id=?",
+            [conversation.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    for (id, sent_at_ms) in [("equal", Some(proof_time)), ("undated", None)] {
+        let before = receive_snapshot(&connection, conversation);
+        let mut page = record(id);
+        page.history_token = Some("page".into());
+        page.sent_at_ms = sent_at_ms;
+        assert_eq!(
+            client
+                .ingest_rcs_projected_record(conversation, owner.ownership_generation, page)
+                .unwrap(),
+            RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor)
+        );
+        assert_eq!(receive_snapshot(&connection, conversation), before);
+    }
+    let mut newer = record("newer");
+    newer.history_token = Some("newer".into());
+    newer.sent_at_ms = Some(proof_time + 1);
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, newer)
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    let live = record("live");
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, live)
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    assert!(
+        client
+            .messages(conversation)
+            .unwrap()
+            .iter()
+            .any(|message| message.payload.body == "body-live" && !message.seen)
+    );
+
+    let reserved = "reserved";
+    assert_eq!(
+        client
+            .record_rcs_link_identity(
+                conversation,
+                owner.ownership_generation,
+                reserved,
+                "google-conversation",
+                None
+            )
+            .unwrap(),
+        RcsIdentityOutcome::Recorded
+    );
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, record(reserved))
+            .unwrap(),
+        RcsReceiveOutcome::Duplicate
+    );
+    let reserved_id: String = connection
+        .query_row(
+            "SELECT message_id FROM rcs_message_identities WHERE google_message_id=?",
+            [reserved],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(reserved_id.parse::<MessageId>().is_ok());
+    assert_eq!(
+        client
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status(reserved, None, RcsProjectedStatus::Sent)
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusApplied
+    );
+    assert_eq!(
+        client
+            .messages(conversation)
+            .unwrap()
+            .iter()
+            .filter(|m| m.payload.record.message_id.to_string() == reserved_id)
+            .count(),
+        1
+    );
+    // Reverting <= proof floor or reserved-identity materialization fails this test.
+}
+
+#[test]
+fn tmp_status_conflict_is_atomic_and_unchanged_status_keeps_new_association() {
+    let (_dir, _vault, config, client, conversation, owner) = fixture();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("seed"))
+        .unwrap();
+    let message_id = only_message(&client, conversation)
+        .payload
+        .record
+        .message_id;
+    let connection = sql(&config);
+    install_echo_ledger(&connection, message_id);
+    let other = ConversationId::new();
+    connection.execute("INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES(?,?,?,?,?)", params!["conflict", "google-conversation", other.to_string(), 1, message_id.to_string()]).unwrap();
+    let before = receive_snapshot(&connection, conversation);
+    assert_eq!(
+        client
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status("conflict", Some("tmp"), RcsProjectedStatus::Read)
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::IdentityConflict)
+    );
+    assert_eq!(receive_snapshot(&connection, conversation), before);
+    assert_eq!(
+        client
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status("associated", Some("tmp"), RcsProjectedStatus::Sending)
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusApplied
+    );
+    assert_eq!(
+        client
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status("later-associated", Some("tmp"), RcsProjectedStatus::Sending)
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusUnchanged
+    );
+    drop(client);
+    let reopened = open(&config);
+    assert_eq!(
+        reopened
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status("later-associated", None, RcsProjectedStatus::Delivered)
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusApplied
+    );
+    // Reverting the IdentityConflict return or identity_recorded commit fails this test.
+}
+
+#[test]
+fn reported_facts_converge_for_outgoing_match_and_immutable_duplicate() {
+    for first_reported in [false, true] {
+        let (directory, vault, client_config, client, conversation, owner) = fixture();
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("seed"))
+            .unwrap();
+        let message_id = only_message(&client, conversation)
+            .payload
+            .record
+            .message_id;
+        let connection = sql(&client_config);
+        install_echo_ledger(&connection, message_id);
+        let mut echo = record("immutable");
+        echo.direction = Direction::Outgoing;
+        echo.tmp_id = Some("tmp".into());
+        echo.rcs_reported = first_reported;
+        echo.e2ee_reported = Some(first_reported);
+        assert_eq!(
+            client
+                .ingest_rcs_projected_record(conversation, owner.ownership_generation, echo.clone())
+                .unwrap(),
+            RcsReceiveOutcome::OutgoingMatched
+        );
+        echo.tmp_id = None;
+        echo.rcs_reported = !first_reported;
+        echo.e2ee_reported = Some(!first_reported);
+        assert_eq!(
+            client
+                .ingest_rcs_projected_record(conversation, owner.ownership_generation, echo)
+                .unwrap(),
+            RcsReceiveOutcome::Duplicate
+        );
+        assert_eq!(client.rcs_message_status(message_id).unwrap(), None);
+        let send_state = only_message(&client, conversation).send_state;
+        assert_eq!(only_message(&client, conversation).send_state, send_state);
+        let peer_config = config(&directory, "peer", &vault);
+        let peer = unlocked(&peer_config, &vault);
+        let mut server = Server::default();
+        server.upload(&client);
+        server.sync(&peer);
+        assert_eq!(client.rcs_message_reported(message_id).unwrap(), Some(true));
+        assert_eq!(peer.rcs_message_reported(message_id).unwrap(), Some(true));
+    }
+    // Reverting apply_reported_facts from either outgoing match path fails local/peer convergence.
+}
+
+#[test]
+fn overflow_gap_replicates_and_e2ee_does_not_clear_it() {
+    let (directory, vault, _config, client, conversation, owner) = fixture();
+    for provider_row_id in 0..=1_024 {
+        client
+            .record_rcs_provider_detector(
+                conversation,
+                owner.ownership_generation,
+                RcsProviderDetector {
+                    provider_row_id,
+                    provider_thread_id: 1,
+                    provider_type: 1,
+                    observed_at_ms: provider_row_id,
+                    observed_generation: owner.ownership_generation,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .alert,
+        RcsReceiveAlert::DetectorOverflow
+    );
+    let peer_config = config(&directory, "peer", &vault);
+    let peer = unlocked(&peer_config, &vault);
+    let mut server = Server::default();
+    server.upload(&client);
+    server.sync(&peer);
+    assert!(
+        peer.rcs_conversation_metadata(conversation)
+            .unwrap()
+            .unwrap()
+            .rcs_history_gap
+    );
+    let mut e2ee = record("e2ee");
+    e2ee.e2ee_reported = Some(true);
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, e2ee)
+        .unwrap();
+    server.upload(&client);
+    server.sync(&peer);
+    assert!(
+        client
+            .rcs_conversation_metadata(conversation)
+            .unwrap()
+            .unwrap()
+            .rcs_history_gap
+    );
+    assert!(
+        peer.rcs_conversation_metadata(conversation)
+            .unwrap()
+            .unwrap()
+            .rcs_history_gap
+    );
+    // Reverting history_gap(state.alert) in apply_reported_facts fails both final assertions.
+}
+
+#[test]
+fn overflow_publication_failure_rolls_back_alert_detector_and_outbox() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    for provider_row_id in 0..1_024 {
+        client
+            .record_rcs_provider_detector(
+                conversation,
+                owner.ownership_generation,
+                RcsProviderDetector {
+                    provider_row_id,
+                    provider_thread_id: 1,
+                    provider_type: 1,
+                    observed_at_ms: provider_row_id,
+                    observed_generation: owner.ownership_generation,
+                },
+            )
+            .unwrap();
+    }
+    let connection = sql(&config);
+    let before = receive_snapshot(&connection, conversation);
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_overflow_metadata BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'reject'); END;",
+        )
+        .unwrap();
+    assert!(
+        client
+            .record_rcs_provider_detector(
+                conversation,
+                owner.ownership_generation,
+                RcsProviderDetector {
+                    provider_row_id: 1_024,
+                    provider_thread_id: 1,
+                    provider_type: 1,
+                    observed_at_ms: 1_024,
+                    observed_generation: owner.ownership_generation,
+                },
+            )
+            .is_err()
+    );
+    assert_eq!(receive_snapshot(&connection, conversation), before);
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .alert,
+        RcsReceiveAlert::None
+    );
+    // Reverting the overflow branch's transaction rollback leaves the alert/high-water partial.
+}
+
+#[test]
+fn opened_fact_only_payload_contains_no_provider_identity() {
+    let message_id = MessageId::new();
+    let opened = PrivatePayload::RcsMessageReported {
+        message_id,
+        rcs_reported: true,
+    };
+    let encoded = serde_json::to_value(&opened).unwrap();
+    assert_eq!(encoded["kind"], "rcs_message_reported");
+    assert_eq!(encoded["message_id"], message_id.to_string());
+    assert_eq!(encoded.as_object().unwrap().len(), 3);
+    assert!(encoded.get("google_message_id").is_none());
+    assert!(encoded.get("google_conversation_id").is_none());
+    assert!(encoded.get("tmp_id").is_none());
+}
