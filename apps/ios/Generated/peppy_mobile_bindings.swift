@@ -1165,6 +1165,12 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
 
     func unlock(profileJson: String, headerJson: String, passphrase: String) throws
 
+    func gatewayApplyRcsStatusJson(conversationId: String, ownershipGeneration: UInt64, statusJson: String) throws  -> String
+
+    func gatewayCheckpointRcsHistory(conversationId: String, ownershipGeneration: UInt64, historyToken: String) throws  -> String
+
+    func gatewayIngestRcsRecordJson(conversationId: String, ownershipGeneration: UInt64, recordJson: String) throws  -> String
+
 }
 open class NativeClient: NativeClientProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -3324,6 +3330,42 @@ open func unlock(profileJson: String, headerJson: String, passphrase: String)thr
         FfiConverterString.lower(passphrase),uniffiCallStatus
     )
 }
+}
+
+open func gatewayApplyRcsStatusJson(conversationId: String, ownershipGeneration: UInt64, statusJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_apply_rcs_status_json(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterUInt64.lower(ownershipGeneration),
+        FfiConverterString.lower(statusJson),uniffiCallStatus
+    )
+})
+}
+
+open func gatewayCheckpointRcsHistory(conversationId: String, ownershipGeneration: UInt64, historyToken: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_checkpoint_rcs_history(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterUInt64.lower(ownershipGeneration),
+        FfiConverterString.lower(historyToken),uniffiCallStatus
+    )
+})
+}
+
+open func gatewayIngestRcsRecordJson(conversationId: String, ownershipGeneration: UInt64, recordJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_rcs_record_json(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterUInt64.lower(ownershipGeneration),
+        FfiConverterString.lower(recordJson),uniffiCallStatus
+    )
+})
 }
 
 
@@ -16270,6 +16312,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_unlock() != 27497) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_apply_rcs_status_json() != 28431) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_checkpoint_rcs_history() != 17731) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_record_json() != 37536) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeplaintexthandle_dispose() != 40845) {

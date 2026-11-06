@@ -20,8 +20,6 @@ pub fn message_view(
             RcsMessageStatus::Failed => "failed-confirmed",
         });
         view.rcs_reported = status.rcs_reported;
-    } else {
-        view.status = None;
     }
     Ok(view)
 }

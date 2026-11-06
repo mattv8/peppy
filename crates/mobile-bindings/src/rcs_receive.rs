@@ -120,6 +120,7 @@ fn identity_outcome(value: RcsIdentityOutcome) -> String {
     }
 }
 
+#[uniffi::export]
 impl NativeClient {
     pub fn gateway_ingest_rcs_record_json(
         &self,
@@ -127,6 +128,9 @@ impl NativeClient {
         ownership_generation: u64,
         record_json: String,
     ) -> Result<String, MobileBindingsError> {
+        if record_json.len() > 65_536 {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
         let record: ProjectedRecord =
             serde_json::from_str(&record_json).map_err(|_| MobileBindingsError::InvalidRequest)?;
         let direction = match record.direction.as_str() {
@@ -161,6 +165,9 @@ impl NativeClient {
         ownership_generation: u64,
         status_json: String,
     ) -> Result<String, MobileBindingsError> {
+        if status_json.len() > 65_536 {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
         let status: StatusRecord =
             serde_json::from_str(&status_json).map_err(|_| MobileBindingsError::InvalidRequest)?;
         let projected_status = match status.status.as_str() {
@@ -193,6 +200,9 @@ impl NativeClient {
         ownership_generation: u64,
         history_token: String,
     ) -> Result<String, MobileBindingsError> {
+        if history_token.len() > 4_096 {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
         with_client(&self.client, |client| {
             client.checkpoint_rcs_history(
                 conversation_id.parse().map_err(|_| {
