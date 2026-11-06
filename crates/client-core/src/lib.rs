@@ -149,7 +149,8 @@ pub use rcs_native::{
 pub use rcs_receive::{
     RcsConversationMetadata, RcsConversationTransport, RcsCutover, RcsIdentityOutcome,
     RcsOwnership, RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsReceiveAlert,
-    RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState, RcsStatusApplication,
+    RcsMessageStatusProjection, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner,
+    RcsReceiveState, RcsStatusApplication,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};

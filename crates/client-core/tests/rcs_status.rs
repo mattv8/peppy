@@ -154,6 +154,43 @@ fn rcs_conversation_metadata_omits_encryption_until_reported() {
 }
 
 #[test]
+fn rcs_read_accessors_expose_google_reported_status_and_metadata_facts() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let owner = client
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
+        .unwrap();
+    let message_id = only_message(&client, conversation).payload.record.message_id;
+    assert_eq!(client.rcs_message_status(message_id).unwrap(), None);
+    client
+        .apply_rcs_projected_status(
+            conversation,
+            owner.ownership_generation,
+            status(RcsProjectedStatus::Delivered),
+        )
+        .unwrap();
+    assert_eq!(
+        client.rcs_message_status(message_id).unwrap(),
+        Some(RcsMessageStatusProjection {
+            status: RcsMessageStatus::Delivered,
+            rcs_reported: true,
+        })
+    );
+    client
+        .publish_rcs_conversation_metadata(conversation, owner.ownership_generation, Some(true))
+        .unwrap();
+    let metadata = client.rcs_conversation_metadata(conversation).unwrap().unwrap();
+    assert_eq!(metadata.rcs_encryption, Some(true));
+    assert!(!metadata.rcs_history_gap);
+}
+
+#[test]
 fn rcs_metadata_replicates_a_history_gap_through_cutover_and_relink() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();

@@ -112,6 +112,12 @@ pub struct RcsConversationMetadata {
     pub writer_device_id: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RcsMessageStatusProjection {
+    pub status: RcsMessageStatus,
+    pub rcs_reported: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RcsStatusApplication {
     pub google_message_id: String,
@@ -210,6 +216,26 @@ impl Client {
                         rcs_history_gap: row.get::<_, bool>(1)?,
                         logical_revision: u64::try_from(row.get::<_, i64>(2)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
                         writer_device_id: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn rcs_message_status(
+        &self,
+        message_id: MessageId,
+    ) -> Result<Option<RcsMessageStatusProjection>, Error> {
+        self.lock()?
+            .conn
+            .query_row(
+                "SELECT status_rank FROM rcs_message_status WHERE message_id=?",
+                [message_id.to_string()],
+                |row| {
+                    Ok(RcsMessageStatusProjection {
+                        status: status_from_rank(row.get(0)?)?,
+                        rcs_reported: true,
                     })
                 },
             )
@@ -728,6 +754,17 @@ fn apply_status(
     }
     conn.execute("INSERT INTO rcs_message_status(message_id,status_rank) VALUES(?,?) ON CONFLICT(message_id) DO UPDATE SET status_rank=excluded.status_rank", params![message_id.to_string(), rank(status)])?;
     Ok(true)
+}
+
+fn status_from_rank(rank: i64) -> Result<RcsMessageStatus, rusqlite::Error> {
+    match rank {
+        1 => Ok(RcsMessageStatus::Sending),
+        2 => Ok(RcsMessageStatus::Sent),
+        3 => Ok(RcsMessageStatus::Failed),
+        4 => Ok(RcsMessageStatus::Delivered),
+        5 => Ok(RcsMessageStatus::Read),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 
 pub(crate) fn apply_replicated_status(
