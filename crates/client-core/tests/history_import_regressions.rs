@@ -85,6 +85,7 @@ fn remove_rcs_mapping_schema(connection: &rusqlite::Connection) {
               DROP TABLE rcs_message_identities;
               DROP TABLE rcs_message_status;
               DROP TABLE rcs_lane_ownership;
+              DROP TABLE rcs_conversation_metadata;
               DROP TABLE rcs_send_ledger;
               DROP TABLE rcs_mapping_proofs;
               DROP TABLE rcs_conversation_mappings;

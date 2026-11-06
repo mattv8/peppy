@@ -1049,6 +1049,7 @@ mod tests {
                    DROP TABLE rcs_message_identities;
                    DROP TABLE rcs_message_status;
                    DROP TABLE rcs_lane_ownership;
+                   DROP TABLE rcs_conversation_metadata;
                    ALTER TABLE attempts DROP COLUMN finalized_transport;
                    DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark');
                  UPDATE schema_meta SET version=34;",

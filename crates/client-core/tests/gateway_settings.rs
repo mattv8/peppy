@@ -142,6 +142,7 @@ fn remove_rcs_mapping_schema(conn: &rusqlite::Connection) {
          DROP TABLE rcs_message_identities;
          DROP TABLE rcs_message_status;
          DROP TABLE rcs_lane_ownership;
+         DROP TABLE rcs_conversation_metadata;
          DROP TABLE rcs_send_ledger;
          DROP TABLE rcs_mapping_proofs;
          DROP TABLE rcs_conversation_mappings;
@@ -482,6 +483,7 @@ fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
          DROP TABLE rcs_message_identities;
          DROP TABLE rcs_message_status;
          DROP TABLE rcs_lane_ownership;
+         DROP TABLE rcs_conversation_metadata;
          DROP TABLE rcs_capability_published;
          DROP TABLE rcs_link_eligibility_projection;
          DROP TABLE rcs_link_status_projection;

@@ -695,6 +695,7 @@ mod tests {
               DROP TABLE rcs_message_identities;
               DROP TABLE rcs_message_status;
               DROP TABLE rcs_lane_ownership;
+              DROP TABLE rcs_conversation_metadata;
               ALTER TABLE attempts DROP COLUMN finalized_transport;
               UPDATE schema_meta SET version=42;",
         )

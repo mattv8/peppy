@@ -1,5 +1,5 @@
 use crate::{
-    Client, ConversationId, Ctx, Direction, EnvelopePurpose, Error, Inserted, MessageId,
+    Client, ConversationId, Ctx, DeviceId, Direction, EnvelopePurpose, Error, Inserted, MessageId,
     MessagePayload, MessageRecord, PrivatePayload, RcsMessageStatus, Transport, enqueue,
     insert_message, next_source_sequence,
 };
@@ -94,6 +94,22 @@ pub enum RcsProjectedStatus {
     Read,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RcsConversationTransport {
+    Rcs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RcsConversationMetadata {
+    pub conversation_id: ConversationId,
+    pub transport: RcsConversationTransport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcs_encryption: Option<bool>,
+    pub logical_revision: u64,
+    pub writer_device_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RcsStatusApplication {
     pub google_message_id: String,
@@ -146,6 +162,73 @@ pub struct RcsReceiveState {
 }
 
 impl Client {
+    pub fn publish_rcs_conversation_metadata(
+        &self,
+        conversation_id: ConversationId,
+        ownership_generation: u64,
+        rcs_encryption: Option<bool>,
+    ) -> Result<bool, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(ownership) = load_ownership(&tx, conversation_id)? else {
+            return Err(Error::InvalidRequest(
+                "stale RCS conversation metadata writer",
+            ));
+        };
+        if ownership.owner != RcsReceiveOwner::Link
+            || ownership.ownership_generation != ownership_generation
+        {
+            return Err(Error::InvalidRequest(
+                "stale RCS conversation metadata writer",
+            ));
+        }
+        let revision = metadata_clock(&tx, conversation_id)?
+            .checked_add(1)
+            .ok_or(Error::Database)?;
+        let metadata = RcsConversationMetadata {
+            conversation_id,
+            transport: RcsConversationTransport::Rcs,
+            rcs_encryption,
+            logical_revision: revision,
+            writer_device_id: ctx.device_id.to_string(),
+        };
+        let (_, sequence) = enqueue(
+            &tx,
+            &ctx,
+            EnvelopePurpose::Event,
+            None,
+            None,
+            &PrivatePayload::RcsConversationMetadata(metadata.clone()),
+        )?;
+        apply_metadata(&tx, &metadata, ctx.device_id, sequence)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn rcs_conversation_metadata(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<RcsConversationMetadata>, Error> {
+        self.lock()?
+            .conn
+            .query_row(
+                "SELECT rcs_encryption,logical_revision,writer_device_id FROM rcs_conversation_metadata WHERE conversation_id=?",
+                [conversation_id.to_string()],
+                |row| {
+                    Ok(RcsConversationMetadata {
+                        conversation_id,
+                        transport: RcsConversationTransport::Rcs,
+                        rcs_encryption: row.get::<_, Option<i64>>(0)?.map(|value| value != 0),
+                        logical_revision: u64::try_from(row.get::<_, i64>(1)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        writer_device_id: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Records proof-time link ownership without importing pre-proof provider history.
     pub fn begin_rcs_link_ownership(
         &self,
@@ -663,6 +746,52 @@ pub(crate) fn apply_replicated_status(
     apply_status(conn, message_id, status)
 }
 
+pub(crate) fn apply_replicated_metadata(
+    conn: &Connection,
+    metadata: &RcsConversationMetadata,
+    producer: DeviceId,
+    sequence: u64,
+) -> Result<bool, Error> {
+    apply_metadata(conn, metadata, producer, sequence)
+}
+
+fn metadata_clock(conn: &Connection, conversation_id: ConversationId) -> Result<u64, Error> {
+    let current: Option<i64> = conn
+        .query_row(
+            "SELECT logical_revision FROM rcs_conversation_metadata WHERE conversation_id=?",
+            [conversation_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    current
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| Error::Database)
+        .map(|value| value.unwrap_or(0))
+}
+
+fn apply_metadata(
+    conn: &Connection,
+    metadata: &RcsConversationMetadata,
+    producer: DeviceId,
+    sequence: u64,
+) -> Result<bool, Error> {
+    if metadata.logical_revision == 0
+        || metadata.logical_revision >= i64::MAX as u64
+        || metadata.writer_device_id != producer.to_string()
+        || metadata.writer_device_id.parse::<DeviceId>().is_err()
+    {
+        return Ok(false);
+    }
+    let revision = i64::try_from(metadata.logical_revision).map_err(|_| Error::Database)?;
+    let sequence = i64::try_from(sequence).map_err(|_| Error::Database)?;
+    conn.execute(
+        "INSERT INTO rcs_conversation_metadata(conversation_id,transport,rcs_encryption,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(?,'rcs',?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET rcs_encryption=excluded.rcs_encryption,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>rcs_conversation_metadata.logical_revision OR (excluded.logical_revision=rcs_conversation_metadata.logical_revision AND excluded.writer_device_id>rcs_conversation_metadata.writer_device_id)",
+        params![metadata.conversation_id.to_string(), metadata.rcs_encryption.map(i64::from), revision, metadata.writer_device_id, producer.to_string(), sequence],
+    )?;
+    Ok(true)
+}
+
 fn next_generation(conn: &Connection, conversation_id: ConversationId) -> Result<i64, Error> {
     let previous: Option<i64> = conn
         .query_row(
@@ -752,6 +881,7 @@ mod tests {
                 "INSERT INTO rcs_link_status_projection VALUES('gateway','linked',1,1,1,1,1,1,1);
                  DROP TABLE rcs_message_status;
                  DROP TABLE rcs_lane_ownership;
+                 DROP TABLE rcs_conversation_metadata;
                  DROP TABLE rcs_message_identities;
                  DROP TABLE rcs_provider_detectors;
                  UPDATE schema_meta SET version=48;",

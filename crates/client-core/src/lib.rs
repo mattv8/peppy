@@ -147,9 +147,9 @@ pub use rcs_native::{
     NativeSettingsCurrentness, NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
 };
 pub use rcs_receive::{
-    RcsCutover, RcsIdentityOutcome, RcsOwnership, RcsProjectedRecord, RcsProjectedStatus,
-    RcsProviderDetector, RcsReceiveAlert, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner,
-    RcsReceiveState, RcsStatusApplication,
+    RcsConversationMetadata, RcsConversationTransport, RcsCutover, RcsIdentityOutcome,
+    RcsOwnership, RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsReceiveAlert,
+    RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState, RcsStatusApplication,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
@@ -397,6 +397,7 @@ pub enum RcsMessageStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrivatePayload {
+    RcsConversationMetadata(RcsConversationMetadata),
     RcsMessageStatus {
         message_id: MessageId,
         status: RcsMessageStatus,
@@ -6627,6 +6628,15 @@ CREATE TABLE rcs_message_status(
   message_id TEXT PRIMARY KEY,
   status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 1 AND 5)
 );
+CREATE TABLE rcs_conversation_metadata(
+  conversation_id TEXT PRIMARY KEY,
+  transport TEXT NOT NULL CHECK(transport='rcs'),
+  rcs_encryption INTEGER CHECK(rcs_encryption IN (0,1)),
+  logical_revision INTEGER NOT NULL CHECK(logical_revision > 0),
+  writer_device_id TEXT NOT NULL,
+  producer_device_id TEXT NOT NULL,
+  source_sequence INTEGER NOT NULL
+);
 ";
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
@@ -7663,7 +7673,8 @@ fn open_payload(ctx: &Ctx, envelope: &Envelope) -> Result<Opened, QuarantineReas
 fn is_known_private_payload_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "rcs_link_status"
+        "rcs_conversation_metadata"
+            | "rcs_link_status"
             | "rcs_link_eligibility"
             | "message"
             | "send_command"
@@ -7748,6 +7759,16 @@ fn apply_record(
         other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
+        (EnvelopePurpose::Event, PrivatePayload::RcsConversationMetadata(metadata)) => {
+            if !rcs_receive::apply_replicated_metadata(
+                conn,
+                &metadata,
+                producer,
+                envelope.producer_sequence.0,
+            )? {
+                return Ok(Some(Q::InvalidPayload));
+            }
+        }
         (EnvelopePurpose::Event, PrivatePayload::RcsMessageStatus { message_id, status }) => {
             if !rcs_receive::apply_replicated_status(conn, message_id, status)? {
                 return Ok(None);
@@ -9409,6 +9430,11 @@ fn compaction_group(
         PrivatePayload::NotificationPreferences { .. } => {
             (b"notification-preferences", vec![b"vault".to_vec()], false)
         }
+        PrivatePayload::RcsConversationMetadata(metadata) => (
+            b"rcs-conversation-metadata",
+            vec![metadata.conversation_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::RcsLinkStatus(status) => (
             b"rcs-link-status",
             vec![status.status.gateway_device_id.to_string().into_bytes()],
@@ -9544,6 +9570,10 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
         PrivatePayload::NotificationPreferences { .. } => {
             Some(notification_preferences::IDENTITY.to_owned())
         }
+        PrivatePayload::RcsConversationMetadata(metadata) => Some(format!(
+            "rcs-conversation-metadata:{}",
+            metadata.conversation_id
+        )),
         PrivatePayload::RcsLinkStatus(status) => Some(format!(
             "rcs-link-status:{}",
             status.status.gateway_device_id
@@ -10967,6 +10997,7 @@ mod tests {
               DROP TABLE rcs_capability_published;
               DROP TABLE rcs_message_status;
               DROP TABLE rcs_lane_ownership;
+              DROP TABLE rcs_conversation_metadata;
               DROP TABLE rcs_message_identities;
               DROP TABLE rcs_provider_detectors;
               ALTER TABLE attempts DROP COLUMN finalized_transport;",
@@ -11055,6 +11086,7 @@ mod tests {
                 .execute_batch(
                     "DROP TABLE rcs_message_status;
                      DROP TABLE rcs_lane_ownership;
+                     DROP TABLE rcs_conversation_metadata;
                  DROP TABLE rcs_message_identities;
                  DROP TABLE rcs_provider_detectors;
                  UPDATE schema_meta SET version=48;",
@@ -11243,6 +11275,7 @@ mod tests {
                  DROP TABLE rcs_message_identities;
                  DROP TABLE rcs_message_status;
                  DROP TABLE rcs_lane_ownership;
+                 DROP TABLE rcs_conversation_metadata;
                  ALTER TABLE attempts DROP COLUMN finalized_transport;
                  UPDATE schema_meta SET version=46;",
                 )

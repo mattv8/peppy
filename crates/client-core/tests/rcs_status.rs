@@ -45,6 +45,114 @@ fn record(body: &str) -> RcsProjectedRecord {
 }
 
 #[test]
+fn rcs_conversation_metadata_converges_out_of_order_without_provider_identifiers() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let first_config = config(&directory, "first", &vault);
+    let second_config = config(&directory, "second", &vault);
+    let first = unlocked(&first_config, &vault);
+    let second = unlocked(&second_config, &vault);
+    let conversation = ConversationId::new();
+    let first_owner = first
+        .begin_rcs_link_ownership(conversation, "first", 0)
+        .unwrap();
+
+    assert!(first
+        .publish_rcs_conversation_metadata(
+            conversation,
+            first_owner.ownership_generation,
+            None,
+        )
+        .unwrap());
+    assert!(
+        first
+            .publish_rcs_conversation_metadata(
+                conversation,
+                first_owner.ownership_generation,
+                Some(true),
+            )
+            .unwrap()
+    );
+
+    let mut envelopes = first.pending_outbox().unwrap();
+    assert_eq!(envelopes.len(), 2);
+    envelopes.reverse();
+    for (index, envelope) in envelopes.iter().enumerate() {
+        assert!(!serde_json::to_string(envelope).unwrap().contains("google_"));
+        assert!(matches!(
+            second
+                .ingest(envelope, Cursor(u64::try_from(index + 1).unwrap()))
+                .unwrap(),
+            IngestResult::Journaled
+        ));
+    }
+    second.apply_pending(100).unwrap();
+    let metadata = second
+        .rcs_conversation_metadata(conversation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata.transport, RcsConversationTransport::Rcs);
+    assert_eq!(metadata.rcs_encryption, Some(true));
+    assert_eq!(metadata.logical_revision, 2);
+    assert!(
+        !serde_json::to_string(&metadata)
+            .unwrap()
+            .contains("provider-")
+    );
+}
+
+#[test]
+fn stale_metadata_generation_is_rejected_without_writing() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let owner = client
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
+
+    assert_eq!(
+        client
+            .publish_rcs_conversation_metadata(
+                conversation,
+                owner.ownership_generation + 1,
+                Some(true),
+            )
+            .unwrap_err(),
+        Error::InvalidRequest("stale RCS conversation metadata writer")
+    );
+    assert_eq!(
+        client.rcs_conversation_metadata(conversation).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn rcs_conversation_metadata_omits_encryption_until_reported() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let owner = client
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
+
+    client
+        .publish_rcs_conversation_metadata(conversation, owner.ownership_generation, None)
+        .unwrap();
+    assert_eq!(
+        client
+            .rcs_conversation_metadata(conversation)
+            .unwrap()
+            .unwrap()
+            .rcs_encryption,
+        None
+    );
+}
+
+#[test]
 fn deterministic_rcs_message_ids_converge_without_exposing_provider_identity() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
