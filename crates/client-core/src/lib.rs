@@ -401,6 +401,10 @@ pub enum RcsMessageStatus {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrivatePayload {
     RcsConversationMetadata(RcsConversationMetadata),
+    RcsMessageReported {
+        message_id: MessageId,
+        rcs_reported: bool,
+    },
     RcsMessageStatus {
         message_id: MessageId,
         status: RcsMessageStatus,
@@ -7812,6 +7816,9 @@ fn apply_record(
         other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
+        (EnvelopePurpose::Event, PrivatePayload::RcsMessageReported { message_id, rcs_reported }) => {
+            rcs_receive::apply_replicated_reported(conn, message_id, rcs_reported)?;
+        }
         (EnvelopePurpose::Event, PrivatePayload::RcsConversationMetadata(metadata)) => {
             if !rcs_receive::apply_replicated_metadata(
                 conn,

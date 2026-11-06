@@ -477,6 +477,16 @@ pub(super) fn reduce(
         return Ok(false);
     };
     match payload {
+        PrivatePayload::RcsMessageReported {
+            message_id,
+            rcs_reported,
+        } => {
+            conn.execute(
+                "INSERT INTO projection_rcs_message_status(generation,message_id,status_rank,rcs_reported) VALUES(?,?,?,?) ON CONFLICT(generation,message_id) DO UPDATE SET rcs_reported=MAX(rcs_reported,excluded.rcs_reported)",
+                params![generation, message_id.to_string(), 0, rcs_reported],
+            )?;
+            Ok(true)
+        }
         PrivatePayload::RcsMessageStatus {
             message_id,
             status,

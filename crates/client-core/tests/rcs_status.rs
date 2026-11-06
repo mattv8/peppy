@@ -191,6 +191,30 @@ fn rcs_conversation_metadata_omits_encryption_until_reported() {
 }
 
 #[test]
+fn reported_rcs_fact_replicates_without_a_delivery_status() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let first_config = config(&directory, "first", &vault);
+    let second_config = config(&directory, "second", &vault);
+    let first = unlocked(&first_config, &vault);
+    let second = unlocked(&second_config, &vault);
+    let conversation = ConversationId::new();
+    let owner = first
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
+    first
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
+        .unwrap();
+    let message_id = only_message(&first, conversation).payload.record.message_id;
+
+    let mut server = Server::default();
+    server.upload(&first);
+    server.sync(&second);
+    assert_eq!(second.rcs_message_reported(message_id).unwrap(), Some(true));
+    assert_eq!(second.rcs_message_status(message_id).unwrap(), None);
+}
+
+#[test]
 fn rcs_read_accessors_expose_google_reported_status_and_metadata_facts() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();

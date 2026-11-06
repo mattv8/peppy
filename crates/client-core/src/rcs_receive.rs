@@ -473,6 +473,17 @@ impl Client {
                     None,
                     &PrivatePayload::Message(payload),
                 )?;
+                enqueue(
+                    &tx,
+                    &ctx,
+                    EnvelopePurpose::Event,
+                    None,
+                    None,
+                    &PrivatePayload::RcsMessageReported {
+                        message_id,
+                        rcs_reported: record.rcs_reported,
+                    },
+                )?;
                 if unmatched_outgoing {
                     let count: i64 = tx.query_row(
                         "SELECT COALESCE(CAST(v AS INTEGER),0) FROM metadata WHERE k='rcs_unmatched_outgoing_count'",
@@ -867,6 +878,18 @@ pub(crate) fn apply_replicated_status(
     rcs_reported: bool,
 ) -> Result<bool, Error> {
     apply_status(conn, message_id, status, rcs_reported)
+}
+
+pub(crate) fn apply_replicated_reported(
+    conn: &Connection,
+    message_id: MessageId,
+    rcs_reported: bool,
+) -> Result<bool, Error> {
+    conn.execute(
+        "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?) ON CONFLICT(message_id) DO UPDATE SET rcs_reported=MAX(rcs_reported,excluded.rcs_reported)",
+        params![message_id.to_string(), 0, rcs_reported],
+    )?;
+    Ok(true)
 }
 
 pub(crate) fn apply_replicated_metadata(
