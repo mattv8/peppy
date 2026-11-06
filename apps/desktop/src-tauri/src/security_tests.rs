@@ -331,6 +331,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let computer_enrollment = include_str!("enrollment/computer.rs");
     let history_search = include_str!("search_history.rs");
     let notification_activation = include_str!("notification_activation.rs");
+    let live_typing = include_str!("live_typing.rs");
     for command in &commands {
         assert!(
             registered.contains(&format!("enrollment::{command},"))
@@ -348,6 +349,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
                     computer_enrollment,
                     history_search,
                     notification_activation,
+                    live_typing,
                 ]
                 .iter()
                 .any(|source| {
