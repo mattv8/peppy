@@ -69,7 +69,7 @@ fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
             settings_validated_at_ms: 1_000,
             conversation_observed_at_ms: 1_000,
         },
-        identity_region: "ZZ".into(),
+        identity_region: "US".into(),
         observed_at_ms: 1_000,
         context_revision: 1,
         link_generation: 1,

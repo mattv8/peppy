@@ -37,6 +37,10 @@ path = "tests/rcs_receive_regressions.rs"
 name = "rcs_target"
 path = "tests/rcs_target.rs"
 
+[[test]]
+name = "rcs_carrier_regressions"
+path = "tests/rcs_carrier_regressions.rs"
+
 [dependencies]
 base64.workspace = true
 peppy-crypto.workspace = true
