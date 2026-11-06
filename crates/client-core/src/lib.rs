@@ -74,6 +74,7 @@ mod rcs_mapping;
 mod rcs_native;
 mod rcs_receive;
 mod rcs_send;
+mod rcs_target;
 mod sms_acquisition;
 mod sms_reconciliation;
 mod snapshot_projection;
@@ -153,6 +154,7 @@ pub use rcs_receive::{
     RcsReceiveState, RcsStatusApplication,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
+pub use rcs_target::{RcsTargetClassification, ValidatedCarrierRouteContext, classify_rcs_target};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -6602,8 +6604,9 @@ CREATE TABLE rcs_lane_ownership(
   ownership_generation INTEGER NOT NULL CHECK(ownership_generation > 0),
   history_token TEXT,
   detector_floor INTEGER NOT NULL,
+  proof_time_ms INTEGER NOT NULL,
   observed_detector_high_water INTEGER NOT NULL,
-  alert_code TEXT CHECK(alert_code IN ('ambiguous_provider_window','detector_overflow'))
+  alert_code TEXT CHECK(alert_code IN ('ambiguous_provider_window','detector_overflow','gateway_unavailable'))
 );
 CREATE INDEX rcs_lane_ownership_owner_generation ON rcs_lane_ownership(owner,ownership_generation);
 CREATE TABLE rcs_message_identities(

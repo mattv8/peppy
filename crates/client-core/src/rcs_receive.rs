@@ -39,6 +39,7 @@ pub struct RcsOwnership {
     pub ownership_generation: u64,
     pub history_token: Option<String>,
     pub detector_floor: i64,
+    pub proof_time_ms: i64,
     pub observed_detector_high_water: i64,
 }
 
@@ -59,6 +60,7 @@ pub enum RcsReceiveCode {
     IdentityConflict,
     CursorInvalid,
     ProviderFloor,
+    GatewayUnavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,6 +148,7 @@ pub enum RcsReceiveAlert {
     None,
     AmbiguousProviderWindow,
     DetectorOverflow,
+    GatewayUnavailable,
 }
 
 impl RcsReceiveAlert {
@@ -154,6 +157,7 @@ impl RcsReceiveAlert {
             None => Ok(Self::None),
             Some("ambiguous_provider_window") => Ok(Self::AmbiguousProviderWindow),
             Some("detector_overflow") => Ok(Self::DetectorOverflow),
+            Some("gateway_unavailable") => Ok(Self::GatewayUnavailable),
             Some(_) => Err(Error::Database),
         }
     }
@@ -165,6 +169,7 @@ pub struct RcsReceiveState {
     pub ownership_generation: u64,
     pub history_token: Option<String>,
     pub detector_floor: i64,
+    pub proof_time_ms: i64,
     pub observed_detector_high_water: i64,
     pub alert: RcsReceiveAlert,
 }
@@ -258,9 +263,9 @@ impl Client {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = next_generation(&tx, conversation_id)?;
         tx.execute(
-            "INSERT INTO rcs_lane_ownership(conversation_id,owner,ownership_generation,history_token,detector_floor,observed_detector_high_water,alert_code) VALUES(?,?,?,?,?,?,NULL)
-             ON CONFLICT(conversation_id) DO UPDATE SET owner=excluded.owner,ownership_generation=excluded.ownership_generation,history_token=excluded.history_token,detector_floor=excluded.detector_floor,observed_detector_high_water=excluded.observed_detector_high_water,alert_code=NULL",
-            params![conversation_id.to_string(), RcsReceiveOwner::Link.code(), generation, initial_history_token, provider_floor, provider_floor],
+            "INSERT INTO rcs_lane_ownership(conversation_id,owner,ownership_generation,history_token,detector_floor,proof_time_ms,observed_detector_high_water,alert_code) VALUES(?,?,?,?,?,?,?,NULL)
+             ON CONFLICT(conversation_id) DO UPDATE SET owner=excluded.owner,ownership_generation=excluded.ownership_generation,history_token=excluded.history_token,detector_floor=excluded.detector_floor,proof_time_ms=excluded.proof_time_ms,observed_detector_high_water=excluded.observed_detector_high_water,alert_code=NULL",
+            params![conversation_id.to_string(), RcsReceiveOwner::Link.code(), generation, initial_history_token, provider_floor, crate::notifications::now_ms(), provider_floor],
         )?;
         publish_metadata(&tx, &ctx, conversation_id, None, false)?;
         tx.commit()?;
@@ -270,6 +275,7 @@ impl Client {
             ownership_generation: generation as u64,
             history_token: Some(initial_history_token.into()),
             detector_floor: provider_floor,
+            proof_time_ms: crate::notifications::now_ms(),
             observed_detector_high_water: provider_floor,
         })
     }
@@ -356,10 +362,16 @@ impl Client {
         {
             return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::OwnershipStale));
         }
+        if !unique_current_gateway(&tx, ctx.device_id)? {
+            tx.execute(
+                "UPDATE rcs_lane_ownership SET alert_code='gateway_unavailable' WHERE conversation_id=?",
+                [conversation_id.to_string()],
+            )?;
+            tx.commit()?;
+            return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::GatewayUnavailable));
+        }
         if record.history_token.is_some()
-            && record
-                .sent_at_ms
-                .is_some_and(|sent_at_ms| sent_at_ms <= ownership.detector_floor)
+            && record.sent_at_ms.is_none_or(|sent_at_ms| sent_at_ms <= ownership.proof_time_ms)
         {
             return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor));
         }
@@ -383,6 +395,7 @@ impl Client {
                     Some(message_id),
                 )? {
                     RcsIdentityOutcome::Recorded => {
+                        checkpoint_record(&tx, conversation_id, ownership_generation, record.history_token.as_deref())?;
                         tx.commit()?;
                         Ok(RcsReceiveOutcome::OutgoingMatched)
                     }
@@ -456,10 +469,7 @@ impl Client {
             RcsIdentityOutcome::Rejected(code) => return Ok(RcsReceiveOutcome::Rejected(code)),
         };
         if let Some(token) = record.history_token {
-            tx.execute(
-                "UPDATE rcs_lane_ownership SET history_token=? WHERE conversation_id=? AND ownership_generation=?",
-                params![token, conversation_id.to_string(), ownership_generation],
-            )?;
+            checkpoint_record(&tx, conversation_id, ownership_generation, Some(&token))?;
         }
         tx.commit()?;
         Ok(outcome)
@@ -680,6 +690,31 @@ fn valid_token(token: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+fn unique_current_gateway(conn: &Connection, device_id: DeviceId) -> Result<bool, Error> {
+    let now_ms = crate::notifications::now_ms();
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM rcs_link_status_projection WHERE state='linked' AND availability=1 AND health=1 AND phone_responsive=1 AND observed_at_ms<=? AND observed_at_ms>=?",
+        params![now_ms, now_ms - crate::rcs_capability::RCS_CAPABILITY_STALE_MS],
+        |row| row.get(0),
+    )?;
+    Ok(count == 1 && crate::rcs_capability::current_gateway(conn, device_id, now_ms)?)
+}
+
+fn checkpoint_record(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    ownership_generation: u64,
+    history_token: Option<&str>,
+) -> Result<(), Error> {
+    if let Some(token) = history_token {
+        conn.execute(
+            "UPDATE rcs_lane_ownership SET history_token=? WHERE conversation_id=? AND ownership_generation=?",
+            params![token, conversation_id.to_string(), ownership_generation],
+        )?;
+    }
+    Ok(())
+}
+
 fn record_identity(
     conn: &Connection,
     conversation_id: ConversationId,
@@ -688,19 +723,25 @@ fn record_identity(
     google_conversation_id: &str,
     message_id: Option<MessageId>,
 ) -> Result<RcsIdentityOutcome, Error> {
-    let existing: Option<String> = conn
+    let existing: Option<(String, Option<String>)> = conn
         .query_row(
-            "SELECT conversation_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=?",
+            "SELECT conversation_id,message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=?",
             params![google_message_id, google_conversation_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if let Some(existing) = existing {
-        return Ok(if existing == conversation_id.to_string() {
-            RcsIdentityOutcome::Duplicate
-        } else {
-            RcsIdentityOutcome::Rejected(RcsReceiveCode::IdentityConflict)
-        });
+    if let Some((existing_conversation, existing_message)) = existing {
+        if existing_conversation != conversation_id.to_string() {
+            return Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::IdentityConflict));
+        }
+        if existing_message.is_none() && message_id.is_some() {
+            conn.execute(
+                "UPDATE rcs_message_identities SET ownership_generation=?,message_id=? WHERE google_message_id=? AND google_conversation_id=?",
+                params![ownership_generation, message_id.map(|id| id.to_string()), google_message_id, google_conversation_id],
+            )?;
+            return Ok(RcsIdentityOutcome::Recorded);
+        }
+        return Ok(RcsIdentityOutcome::Duplicate);
     }
     conn.execute(
         "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES(?,?,?,?,?)",
@@ -875,10 +916,10 @@ fn load_ownership(
     conn: &Connection,
     conversation_id: ConversationId,
 ) -> Result<Option<RcsOwnership>, Error> {
-    let row: Option<(String, i64, Option<String>, i64, i64)> = conn.query_row(
-        "SELECT owner,ownership_generation,history_token,detector_floor,observed_detector_high_water FROM rcs_lane_ownership WHERE conversation_id=?",
+    let row: Option<(String, i64, Option<String>, i64, i64, i64)> = conn.query_row(
+        "SELECT owner,ownership_generation,history_token,detector_floor,proof_time_ms,observed_detector_high_water FROM rcs_lane_ownership WHERE conversation_id=?",
         [conversation_id.to_string()],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
     )
     .optional()?;
     row.map(
@@ -887,6 +928,7 @@ fn load_ownership(
             ownership_generation,
             history_token,
             detector_floor,
+            proof_time_ms,
             observed_detector_high_water,
         )| {
             Ok(RcsOwnership {
@@ -895,6 +937,7 @@ fn load_ownership(
                 ownership_generation: ownership_generation as u64,
                 history_token,
                 detector_floor,
+                proof_time_ms,
                 observed_detector_high_water,
             })
         },
@@ -907,17 +950,18 @@ fn load_receive_state(
     conversation_id: ConversationId,
 ) -> Result<Option<RcsReceiveState>, Error> {
     conn.query_row(
-        "SELECT owner,ownership_generation,history_token,detector_floor,observed_detector_high_water,alert_code FROM rcs_lane_ownership WHERE conversation_id=?",
+            "SELECT owner,ownership_generation,history_token,detector_floor,proof_time_ms,observed_detector_high_water,alert_code FROM rcs_lane_ownership WHERE conversation_id=?",
         [conversation_id.to_string()],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get::<_, Option<String>>(5)?)),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get::<_, Option<String>>(6)?)),
     )
     .optional()?
-    .map(|(owner, ownership_generation, history_token, detector_floor, observed_detector_high_water, alert_code)| {
+    .map(|(owner, ownership_generation, history_token, detector_floor, proof_time_ms, observed_detector_high_water, alert_code)| {
         Ok(RcsReceiveState {
             owner: RcsReceiveOwner::from_code(&owner)?,
             ownership_generation: ownership_generation as u64,
             history_token,
             detector_floor,
+            proof_time_ms,
             observed_detector_high_water,
             alert: RcsReceiveAlert::from_code(alert_code.as_deref())?,
         })
