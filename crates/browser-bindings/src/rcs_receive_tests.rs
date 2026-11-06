@@ -171,6 +171,64 @@ fn assert_no_sentinels(value: &Value) {
 }
 
 #[test]
+fn rcs_window_projection_failure_returns_closed_error_without_a_success_view() {
+    let (directory, client, conversation_id, _, message_id) = core();
+    let mut browser = browser(client);
+    let args =
+        json!({"direction": "around", "conversationId": conversation_id, "messageId": message_id});
+    let healthy = dispatch(&mut browser, "load_message_window", args.clone());
+    assert_eq!(healthy["messages"][0]["transport"], "rcs");
+    assert_eq!(healthy["messages"][0]["status"], "delivery-confirmed");
+
+    let connection = rusqlite::Connection::open(directory.path().join("client.db")).unwrap();
+    connection
+        .pragma_update(None, "key", format!("x'{}'", "07".repeat(32)))
+        .unwrap();
+    connection
+        .execute_batch("DROP TABLE rcs_message_status")
+        .unwrap();
+    let version_before: i64 = connection
+        .query_row("PRAGMA data_version", [], |row| row.get(0))
+        .unwrap();
+    let messages_before = format!(
+        "{:?}",
+        browser.client().unwrap().messages(conversation_id).unwrap()
+    );
+    let request: peppy_desktop_api::MessageWindowRequestView =
+        serde_json::from_value(args.clone()).unwrap();
+    let base_window = browser
+        .client()
+        .unwrap()
+        .load_message_window(request.into())
+        .unwrap();
+    assert_eq!(
+        base_window.messages.len(),
+        healthy["messages"].as_array().unwrap().len()
+    );
+
+    let response: Value = serde_json::from_str(
+        &browser.dispatch(&json!({"command": "load_message_window", "args": args}).to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        response,
+        json!({"ok": false, "error": {"code": "core", "message": "The local core rejected the operation."}})
+    );
+    assert_no_sentinels(&response);
+    assert_eq!(
+        format!(
+            "{:?}",
+            browser.client().unwrap().messages(conversation_id).unwrap()
+        ),
+        messages_before
+    );
+    let version_after: i64 = connection
+        .query_row("PRAGMA data_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version_after, version_before);
+}
+
+#[test]
 fn rcs_snapshot_history_and_window_project_status_without_leaking_identity() {
     let (_directory, client, conversation_id, _, message_id) = core();
     let mut browser = browser(client);
@@ -345,6 +403,7 @@ fn browser_projections_preserve_media_meta_on_all_paths() {
         sms.message_id,
     );
     assert_eq!(sms_view["attachments"], json!([]), "{sms_view}");
+    assert_eq!(find_message(&window["messages"], sms.message_id), sms_view);
 }
 
 #[test]

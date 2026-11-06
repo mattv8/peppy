@@ -4,7 +4,7 @@
 //! filesystem and must checkpoint it before acknowledging mutating calls.
 use peppy_client_core::{
     AttachmentId, Client, ClientConfig, ConversationFolder, ConversationId, DatabaseKey, DeviceId,
-    Error as CoreError, Message, MessageId, NotificationPreferences, VaultId,
+    Error as CoreError, MessageId, NotificationPreferences, VaultId,
 };
 use peppy_crypto::{KeyProfile, VaultCheckHeader};
 use peppy_desktop_api::{
@@ -730,10 +730,9 @@ impl BrowserCore {
             serde_json::from_value(args).map_err(|_| invalid())?;
         let client = self.client()?;
         let window = client.load_message_window(input.into()).map_err(core)?;
-        serde_json::to_value(dto::message_window_view(window, |message| {
+        serde_json::to_value(dto::try_message_window_view(window, |message| {
             rcs_receive::message_view(client, &message)
-                .unwrap_or_else(|_| message_view(client, &message))
-        }))
+        })?)
         .map_err(|_| core(CoreError::Database))
     }
     fn save_draft(&self, args: Value) -> Result<Value, Failure> {
@@ -823,36 +822,6 @@ fn now_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn message_view(client: &Client, message: &Message) -> dto::MessageView {
-    let attachments = message
-        .payload
-        .record
-        .attachments
-        .iter()
-        .filter_map(|reference| {
-            client
-                .attachment_info(reference.attachment_id)
-                .ok()
-                .map(|info| {
-                    let mut view = dto::snapshot_attachment_view(
-                        &info,
-                        None,
-                        client.deferred_media_status(info.attachment_id),
-                    );
-                    view.media_meta = dto::message_attachment_media_metadata_view(
-                        client,
-                        message.payload.record.message_id,
-                        info.attachment_id,
-                    )
-                    .ok()
-                    .flatten()
-                    .map(Box::new);
-                    view
-                })
-        })
-        .collect();
-    dto::message_view(message, attachments)
-}
 fn args_value(raw: Option<&RawValue>) -> Result<Value, Failure> {
     raw.map_or(Ok(Value::Null), |raw| {
         serde_json::from_str(raw.get()).map_err(|_| invalid())
