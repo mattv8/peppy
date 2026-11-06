@@ -410,3 +410,68 @@ fn unmatched_foreign_outgoing_is_inserted_once_without_a_command() {
         assert!(!serialized.contains("provider-conversation"));
     }
 }
+
+#[test]
+fn outgoing_tmp_echo_binds_existing_message_and_replays_after_reopen() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let owner = client
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
+    let mut existing = record("existing");
+    existing.google_message_id = "existing-message".into();
+    existing.google_conversation_id = "existing-conversation".into();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, existing)
+        .unwrap();
+    let message_id = only_message(&client, conversation)
+        .payload
+        .record
+        .message_id;
+    let command_id = CommandId::new();
+    let connection = Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO commands(command_id,message_id,gateway_device_id) VALUES(?,?,?)",
+            [
+                command_id.to_string(),
+                message_id.to_string(),
+                DeviceId::new().to_string(),
+            ],
+        )
+        .unwrap();
+    connection.execute(
+        "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,1,zeroblob(32),?,1)",
+        [command_id.to_string(), "tmp".into(), "provider-conversation".into()],
+    ).unwrap();
+    drop(connection);
+    let mut echo = record("echo");
+    echo.direction = Direction::Outgoing;
+    echo.tmp_id = Some("tmp".into());
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, echo.clone())
+            .unwrap(),
+        RcsReceiveOutcome::OutgoingMatched
+    );
+    assert_eq!(client.messages(conversation).unwrap().len(), 1);
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, echo)
+            .unwrap(),
+        RcsReceiveOutcome::Duplicate
+    );
+    drop(client);
+    let reopened = unlocked(&config, &vault);
+    let mut server = Server::default();
+    server.upload(&reopened);
+    assert_eq!(reopened.messages(conversation).unwrap().len(), 1);
+}
