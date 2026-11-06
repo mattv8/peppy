@@ -10,7 +10,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use peppy_domain::VaultId;
-use peppy_protocol::{EphemeralSignalV1, LiveHelloV1};
+use peppy_protocol::{EphemeralSignalV2, LiveHelloV2};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{
@@ -65,7 +65,7 @@ impl crate::live::LiveBackend for FakeLiveBackend {
     fn publish(
         &self,
         _vault_id: VaultId,
-        _frame: EphemeralSignalV1,
+        _frame: EphemeralSignalV2,
     ) -> Pin<Box<dyn Future<Output = Result<(), crate::live::LiveBackendError>> + Send + '_>> {
         Box::pin(async move {
             let mut drop_acknowledgement = PublishDropAcknowledgement {
@@ -292,6 +292,26 @@ fn signal(sender: Uuid) -> String {
 }
 
 fn signal_with_ciphertext(sender: Uuid, ciphertext_b64: &str) -> String {
+    signal_with_kind_and_ciphertext(sender, "typing", ciphertext_b64)
+}
+
+fn signal_with_kind_and_ciphertext(sender: Uuid, kind: &str, ciphertext_b64: &str) -> String {
+    let now = live_now_ms();
+    serde_json::json!({
+        "protocol_version": 2,
+        "kind": kind,
+        "sender_device_id": sender,
+        "key_epoch": 1,
+        "session_id": "AAAAAAAAAAAAAAAAAAAAAA",
+        "sent_at_ms": now.to_string(),
+        "expires_at_ms": (now + 15_000).to_string(),
+        "sequence": "1",
+        "ciphertext_b64": ciphertext_b64
+    })
+    .to_string()
+}
+
+fn legacy_v1_signal(sender: Uuid) -> String {
     let now = live_now_ms();
     serde_json::json!({
         "protocol_version": 1,
@@ -301,7 +321,7 @@ fn signal_with_ciphertext(sender: Uuid, ciphertext_b64: &str) -> String {
         "sent_at_ms": now.to_string(),
         "expires_at_ms": (now + 15_000).to_string(),
         "sequence": "1",
-        "ciphertext_b64": ciphertext_b64
+        "ciphertext_b64": "AQ=="
     })
     .to_string()
 }
@@ -322,16 +342,16 @@ async fn expect_strict_hello(
         panic!("hello was not the first text frame")
     };
     assert_eq!(
-        serde_json::from_str::<LiveHelloV1>(&text).unwrap(),
-        LiveHelloV1::new()
+        serde_json::from_str::<LiveHelloV2>(&text).unwrap(),
+        LiveHelloV2::new()
     );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&text).unwrap(),
         serde_json::json!({
             "type": "hello",
-            "protocol_version": 1,
+            "protocol_version": 2,
             "max_ttl_ms": 15000,
-            "max_ciphertext_bytes": 5700
+            "max_ciphertext_bytes": 5400
         })
     );
 }
@@ -436,6 +456,50 @@ async fn authenticated_live_socket_receives_strict_hello_as_first_frame() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let mut socket = server.connect().await;
     expect_strict_hello(&mut socket).await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_v1_frame_is_rejected_without_publication() {
+    let backend = FakeLiveBackend::immediate();
+    let server = LiveTestServer::start(backend.clone(), true).await;
+    let mut socket = server.connect().await;
+    expect_strict_hello(&mut socket).await;
+    socket
+        .send(tungstenite::Message::Text(
+            legacy_v1_signal(server.owner_device).into(),
+        ))
+        .await
+        .unwrap();
+    let close = next_close(&mut socket).await;
+    assert_eq!(close.code, CloseCode::Policy);
+    assert_eq!(close.reason, "invalid_live_frame");
+    assert_eq!(backend.started.load(Ordering::SeqCst), 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn canonical_controls_forward_exact_v2_fields() {
+    let backend = FakeLiveBackend::immediate();
+    let server = LiveTestServer::start(backend.clone(), true).await;
+    let mut sender = server.connect().await;
+    expect_strict_hello(&mut sender).await;
+    let mut peer = server.connect_peer().await;
+    expect_strict_hello(&mut peer).await;
+
+    for (kind, ciphertext) in [("challenge", "Ag=="), ("session_ack", "Aw==")] {
+        let frame = signal_with_kind_and_ciphertext(server.owner_device, kind, ciphertext);
+        sender
+            .send(tungstenite::Message::Text(frame.clone().into()))
+            .await
+            .unwrap();
+        let received = next_text(&mut peer).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&received).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&frame).unwrap()
+        );
+    }
+    wait_for_count(&backend.completed, 2).await;
     server.shutdown().await;
 }
 
@@ -555,6 +619,48 @@ async fn unavailable_backend_rejects_authenticated_upgrade_with_503() {
 }
 
 #[tokio::test]
+async fn v2_per_kind_ciphertext_caps_apply_at_socket_boundary() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    for (kind, limit) in [
+        ("typing", 5_400_usize),
+        ("challenge", 512),
+        ("session_ack", 512),
+    ] {
+        let backend = FakeLiveBackend::immediate();
+        let server = LiveTestServer::start(backend.clone(), true).await;
+        let mut socket = server.connect().await;
+        expect_strict_hello(&mut socket).await;
+
+        let at_limit = signal_with_kind_and_ciphertext(
+            server.owner_device,
+            kind,
+            &STANDARD.encode(vec![0_u8; limit]),
+        );
+        socket
+            .send(tungstenite::Message::Text(at_limit.into()))
+            .await
+            .unwrap();
+        wait_for_count(&backend.completed, 1).await;
+
+        let oversized = signal_with_kind_and_ciphertext(
+            server.owner_device,
+            kind,
+            &STANDARD.encode(vec![0_u8; limit + 1]),
+        );
+        socket
+            .send(tungstenite::Message::Text(oversized.into()))
+            .await
+            .unwrap();
+        let close = next_close(&mut socket).await;
+        assert_eq!(close.code, CloseCode::Policy, "{kind}");
+        assert_eq!(close.reason, "invalid_live_frame", "{kind}");
+        assert_eq!(backend.started.load(Ordering::SeqCst), 1, "{kind}");
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn native_message_limit_rejects_oversized_valid_json_before_publication() {
     let backend = FakeLiveBackend::immediate();
     let server = LiveTestServer::start(backend.clone(), true).await;
@@ -595,17 +701,23 @@ async fn delivered_live_signal_does_not_change_authenticated_snapshot() {
     expect_strict_hello(&mut sender).await;
     let mut peer = server.connect_peer().await;
     expect_strict_hello(&mut peer).await;
-    let frame = signal(server.owner_device);
-    sender
-        .send(tungstenite::Message::Text(frame.clone().into()))
-        .await
-        .unwrap();
-    let received = next_text(&mut peer).await;
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&received).unwrap(),
-        serde_json::from_str::<serde_json::Value>(&frame).unwrap()
-    );
-    wait_for_count(&backend.completed, 1).await;
+    for (kind, ciphertext) in [
+        ("typing", "AQ=="),
+        ("challenge", "Ag=="),
+        ("session_ack", "Aw=="),
+    ] {
+        let frame = signal_with_kind_and_ciphertext(server.owner_device, kind, ciphertext);
+        sender
+            .send(tungstenite::Message::Text(frame.clone().into()))
+            .await
+            .unwrap();
+        let received = next_text(&mut peer).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&received).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&frame).unwrap()
+        );
+    }
+    wait_for_count(&backend.completed, 3).await;
 
     let after = server.snapshot().await;
     // Snapshot start has no clock, connection, or request fields; every field is
@@ -618,6 +730,10 @@ async fn delivered_live_signal_does_not_change_authenticated_snapshot() {
 async fn live_publish_receive_invalid_and_error_paths_do_not_log_sensitive_data() {
     const SUCCESS_CIPHERTEXT: &str = "U1VDQ0VTU19QQVRIX0NBTkFSWQ==";
     const SUCCESS_PLAINTEXT: &str = "SUCCESS_PATH_CANARY";
+    const CHALLENGE_CIPHERTEXT: &str = "Q0hBTExFTkdFX1BBVEhfQ0FOQVJZ";
+    const CHALLENGE_PLAINTEXT: &str = "CHALLENGE_PATH_CANARY";
+    const ACK_CIPHERTEXT: &str = "U0VTU0lPTl9BQ0tfUEFUSF9DQU5BUlk=";
+    const ACK_PLAINTEXT: &str = "SESSION_ACK_PATH_CANARY";
     const INVALID_CIPHERTEXT: &str = "SU5WQUxJRF9QQVRIX0NBTkFSWQ==";
     const INVALID_PLAINTEXT: &str = "INVALID_PATH_CANARY";
     const ERROR_CIPHERTEXT: &str = "RVJST1JfUEFUSF9DQU5BUlk=";
@@ -651,17 +767,23 @@ async fn live_publish_receive_invalid_and_error_paths_do_not_log_sensitive_data(
     let mut peer = server.connect_peer().await;
     expect_strict_hello(&mut peer).await;
 
-    let success_frame = signal_with_ciphertext(server.owner_device, SUCCESS_CIPHERTEXT);
-    sender
-        .send(tungstenite::Message::Text(success_frame.clone().into()))
-        .await
-        .unwrap();
-    let received = next_text(&mut peer).await;
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&received).unwrap(),
-        serde_json::from_str::<serde_json::Value>(&success_frame).unwrap()
-    );
-    wait_for_count(&backend.completed, 1).await;
+    let success_frames = [
+        signal_with_kind_and_ciphertext(server.owner_device, "typing", SUCCESS_CIPHERTEXT),
+        signal_with_kind_and_ciphertext(server.owner_device, "challenge", CHALLENGE_CIPHERTEXT),
+        signal_with_kind_and_ciphertext(server.owner_device, "session_ack", ACK_CIPHERTEXT),
+    ];
+    for success_frame in &success_frames {
+        sender
+            .send(tungstenite::Message::Text(success_frame.clone().into()))
+            .await
+            .unwrap();
+        let received = next_text(&mut peer).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&received).unwrap(),
+            serde_json::from_str::<serde_json::Value>(success_frame).unwrap()
+        );
+    }
+    wait_for_count(&backend.completed, 3).await;
 
     let mismatched_sender = Uuid::new_v4();
     let invalid_frame = signal_with_ciphertext(mismatched_sender, INVALID_CIPHERTEXT);
@@ -672,7 +794,7 @@ async fn live_publish_receive_invalid_and_error_paths_do_not_log_sensitive_data(
     let invalid_close = next_close(&mut sender).await;
     assert_eq!(invalid_close.code, CloseCode::Policy);
     assert_eq!(invalid_close.reason, "invalid_live_frame");
-    assert_eq!(backend.started.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.started.load(Ordering::SeqCst), 3);
 
     backend.fail.store(true, Ordering::SeqCst);
     let error_frame = signal_with_ciphertext(server.peer_device, ERROR_CIPHERTEXT);
@@ -682,8 +804,8 @@ async fn live_publish_receive_invalid_and_error_paths_do_not_log_sensitive_data(
     let error_close = next_close(&mut peer).await;
     assert_eq!(error_close.code, CloseCode::Error);
     assert_eq!(error_close.reason, "live_unavailable");
-    assert_eq!(backend.started.load(Ordering::SeqCst), 2);
-    assert_eq!(backend.completed.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.started.load(Ordering::SeqCst), 4);
+    assert_eq!(backend.completed.load(Ordering::SeqCst), 3);
 
     let captured = logs.text();
     assert!(captured.contains(TRACE_COLLECTOR_SENTINEL));
@@ -695,7 +817,13 @@ async fn live_publish_receive_invalid_and_error_paths_do_not_log_sensitive_data(
     for secret in [
         SUCCESS_CIPHERTEXT,
         SUCCESS_PLAINTEXT,
-        success_frame.as_str(),
+        CHALLENGE_CIPHERTEXT,
+        CHALLENGE_PLAINTEXT,
+        ACK_CIPHERTEXT,
+        ACK_PLAINTEXT,
+        success_frames[0].as_str(),
+        success_frames[1].as_str(),
+        success_frames[2].as_str(),
         INVALID_CIPHERTEXT,
         INVALID_PLAINTEXT,
         invalid_frame.as_str(),

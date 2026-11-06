@@ -241,7 +241,7 @@ use peppy_hosted_api::{
         InstanceSession, VaultMaterial,
     },
 };
-use peppy_protocol::{Envelope, EnvelopePurpose, LiveFrameV1, LiveHelloV1};
+use peppy_protocol::{Envelope, EnvelopePurpose, LiveFrameV2, LiveHelloV2};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -2812,7 +2812,7 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
         mut cancellation,
         mut readiness,
     } = session;
-    let hello = match serde_json::to_string(&LiveHelloV1::new()) {
+    let hello = match serde_json::to_string(&LiveHelloV2::new()) {
         Ok(hello) => hello,
         Err(_) => return live_close(&mut socket, 1011, "live_unavailable").await,
     };
@@ -2870,7 +2870,7 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
                 }
                 Some(Ok(Message::Binary(_))) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
                 Some(Ok(Message::Text(text))) => {
-                    let Ok(frame) = serde_json::from_str::<LiveFrameV1>(&text) else {
+                    let Ok(frame) = serde_json::from_str::<LiveFrameV2>(&text) else {
                         return live_close(&mut socket, 1008, "invalid_live_frame").await;
                     };
                     let allowed = state.live_rate_limiter.lock().expect("live rate limiter lock poisoned")
@@ -2936,7 +2936,7 @@ struct LiveSession {
     peer: Option<IpAddr>,
     backend: Arc<dyn crate::live::LiveBackend>,
     generation: u64,
-    outgoing: tokio::sync::mpsc::Receiver<LiveFrameV1>,
+    outgoing: tokio::sync::mpsc::Receiver<LiveFrameV2>,
     cancellation: tokio::sync::watch::Receiver<bool>,
     readiness: tokio::sync::watch::Receiver<bool>,
 }
@@ -2950,7 +2950,7 @@ fn live_now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn live_frame_is_current(frame: &LiveFrameV1, now_ms: u64) -> bool {
+fn live_frame_is_current(frame: &LiveFrameV2, now_ms: u64) -> bool {
     crate::live::LiveHub::validate_current(frame, now_ms).is_ok()
 }
 
@@ -2985,7 +2985,7 @@ const LIVE_PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
 async fn live_publish(
     backend: &dyn crate::live::LiveBackend,
     vault_id: VaultId,
-    frame: LiveFrameV1,
+    frame: LiveFrameV2,
     cancellation: &mut tokio::sync::watch::Receiver<bool>,
     readiness: &mut tokio::sync::watch::Receiver<bool>,
     #[cfg(test)] publish_timeout: Duration,

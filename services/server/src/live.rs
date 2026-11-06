@@ -1,5 +1,5 @@
 use peppy_domain::{DeviceId, VaultId};
-use peppy_protocol::EphemeralSignalV1;
+use peppy_protocol::EphemeralSignalV2;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -18,7 +18,7 @@ pub(crate) trait LiveBackend: Send + Sync {
     fn publish(
         &self,
         vault_id: VaultId,
-        frame: EphemeralSignalV1,
+        frame: EphemeralSignalV2,
     ) -> Pin<Box<dyn Future<Output = Result<(), LiveBackendError>> + Send + '_>>;
 }
 
@@ -38,13 +38,13 @@ struct LiveHubInner {
 
 struct LiveSink {
     generation: u64,
-    sender: mpsc::Sender<EphemeralSignalV1>,
+    sender: mpsc::Sender<EphemeralSignalV2>,
     cancellation: watch::Sender<bool>,
 }
 
 pub(crate) struct LiveRegistration {
     pub(crate) generation: u64,
-    pub(crate) receiver: mpsc::Receiver<EphemeralSignalV1>,
+    pub(crate) receiver: mpsc::Receiver<EphemeralSignalV2>,
     pub(crate) cancellation: watch::Receiver<bool>,
 }
 
@@ -170,7 +170,7 @@ impl LiveHub {
         &self,
         vault_id: VaultId,
         authenticated_device_id: DeviceId,
-        frame: EphemeralSignalV1,
+        frame: EphemeralSignalV2,
         now_ms: u64,
     ) -> Result<usize, LiveReject> {
         Self::validate_frame(authenticated_device_id, &frame, now_ms)?;
@@ -190,7 +190,7 @@ impl LiveHub {
         vault_id: VaultId,
         authenticated_device_id: DeviceId,
         generation: u64,
-        frame: EphemeralSignalV1,
+        frame: EphemeralSignalV2,
         now_ms: u64,
     ) -> Result<Option<usize>, LiveReject> {
         Self::validate_frame(authenticated_device_id, &frame, now_ms)?;
@@ -213,7 +213,7 @@ impl LiveHub {
         sinks: &HashMap<(VaultId, DeviceId), LiveSink>,
         vault_id: VaultId,
         authenticated_device_id: DeviceId,
-        frame: EphemeralSignalV1,
+        frame: EphemeralSignalV2,
     ) -> usize {
         let mut accepted = 0;
         for (&(sink_vault, sink_device), sink) in sinks.iter() {
@@ -229,7 +229,7 @@ impl LiveHub {
 
     pub(crate) fn validate_frame(
         authenticated_device_id: DeviceId,
-        frame: &EphemeralSignalV1,
+        frame: &EphemeralSignalV2,
         now_ms: u64,
     ) -> Result<(), LiveReject> {
         if frame.sender_device_id != authenticated_device_id {
@@ -239,7 +239,7 @@ impl LiveHub {
     }
 
     pub(crate) fn validate_current(
-        frame: &EphemeralSignalV1,
+        frame: &EphemeralSignalV2,
         now_ms: u64,
     ) -> Result<(), LiveReject> {
         frame.validate().map_err(|_| LiveReject::InvalidFrame)?;
@@ -266,7 +266,7 @@ mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use peppy_domain::{DeviceId, VaultId};
-    use peppy_protocol::EphemeralSignalV1;
+    use peppy_protocol::{EphemeralSignalV2, EphemeralSignalV2Kind};
     use tokio::sync::mpsc::error::TryRecvError;
     use uuid::Uuid;
 
@@ -278,12 +278,13 @@ mod tests {
         DeviceId(Uuid::from_u128(n))
     }
 
-    fn frame() -> EphemeralSignalV1 {
-        EphemeralSignalV1 {
-            protocol_version: 1,
-            kind: "typing".into(),
+    fn frame() -> EphemeralSignalV2 {
+        EphemeralSignalV2 {
+            protocol_version: 2,
+            kind: EphemeralSignalV2Kind::Typing,
             sender_device_id: device(1),
             key_epoch: 1,
+            session_id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
             sent_at_ms: "100000".into(),
             expires_at_ms: "115000".into(),
             sequence: "1".into(),
@@ -338,7 +339,13 @@ mod tests {
         let mut peer = hub.register(vault(1), device(2));
         let mut invalid = Vec::new();
         let mut value = frame();
-        value.protocol_version = 2;
+        value.protocol_version = 1;
+        invalid.push(value);
+        let mut value = frame();
+        value.session_id = "not-canonical".into();
+        invalid.push(value);
+        let mut value = frame();
+        value.sequence = "0".into();
         invalid.push(value);
         let mut value = frame();
         value.sent_at_ms = "0100000".into();
@@ -350,7 +357,7 @@ mod tests {
         value.ciphertext_b64 = "!".into();
         invalid.push(value);
         let mut value = frame();
-        value.ciphertext_b64 = STANDARD.encode([0_u8; 5701]);
+        value.ciphertext_b64 = STANDARD.encode([0_u8; 5401]);
         invalid.push(value);
         for value in invalid {
             assert_eq!(

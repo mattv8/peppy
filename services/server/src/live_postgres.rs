@@ -1,6 +1,6 @@
 use crate::live::{LiveBackend, LiveBackendError, LiveHub};
 use peppy_domain::{DeviceId, VaultId};
-use peppy_protocol::EphemeralSignalV1;
+use peppy_protocol::EphemeralSignalV2;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, postgres::PgListener};
 use std::{
@@ -15,7 +15,7 @@ use std::{
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-const LIVE_NOTIFY_CHANNEL: &str = "peppy_live_v1";
+const LIVE_NOTIFY_CHANNEL: &str = "peppy_live_v2";
 const MAX_NOTIFY_PAYLOAD_BYTES: usize = 8_000;
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const LISTEN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -25,7 +25,7 @@ const LISTEN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 struct Notify {
     instance_id: Uuid,
     vault_id: Uuid,
-    frame: EphemeralSignalV1,
+    frame: EphemeralSignalV2,
 }
 
 struct Inner {
@@ -88,7 +88,7 @@ impl PgLiveBackend {
     async fn publish_inner(
         &self,
         vault_id: VaultId,
-        frame: EphemeralSignalV1,
+        frame: EphemeralSignalV2,
     ) -> Result<(), LiveBackendError> {
         if !self.inner.ready.load(Ordering::Acquire) {
             return Err(LiveBackendError);
@@ -123,7 +123,7 @@ impl LiveBackend for PgLiveBackend {
     fn publish(
         &self,
         vault_id: VaultId,
-        frame: EphemeralSignalV1,
+        frame: EphemeralSignalV2,
     ) -> Pin<Box<dyn Future<Output = Result<(), LiveBackendError>> + Send + '_>> {
         Box::pin(self.publish_inner(vault_id, frame))
     }
@@ -208,6 +208,7 @@ mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use futures_util::FutureExt;
+    use peppy_protocol::EphemeralSignalV2Kind;
     use std::{str::FromStr, sync::Arc};
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::{
@@ -217,7 +218,7 @@ mod tests {
     };
     use url::Url;
 
-    fn frame(sender_device_id: DeviceId, expires_at_ms: u64) -> EphemeralSignalV1 {
+    fn frame(sender_device_id: DeviceId, expires_at_ms: u64) -> EphemeralSignalV2 {
         frame_at(sender_device_id, live_now_ms(), expires_at_ms)
     }
 
@@ -225,16 +226,67 @@ mod tests {
         sender_device_id: DeviceId,
         sent_at_ms: u64,
         expires_at_ms: u64,
-    ) -> EphemeralSignalV1 {
-        EphemeralSignalV1 {
-            protocol_version: 1,
-            kind: "typing".into(),
+    ) -> EphemeralSignalV2 {
+        EphemeralSignalV2 {
+            protocol_version: 2,
+            kind: EphemeralSignalV2Kind::Typing,
             sender_device_id,
             key_epoch: 1,
+            session_id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
             sent_at_ms: sent_at_ms.to_string(),
             expires_at_ms: expires_at_ms.to_string(),
             sequence: "1".into(),
             ciphertext_b64: STANDARD.encode([0_u8; 32]),
+        }
+    }
+
+    fn maximum_notify_payload(kind: EphemeralSignalV2Kind, ciphertext_bytes: usize) -> String {
+        serde_json::to_string(&Notify {
+            instance_id: Uuid::from_u128(u128::MAX),
+            vault_id: Uuid::from_u128(u128::MAX),
+            frame: EphemeralSignalV2 {
+                protocol_version: 2,
+                kind,
+                sender_device_id: DeviceId(Uuid::from_u128(u128::MAX)),
+                key_epoch: u32::MAX,
+                session_id: "_____________________w".into(),
+                sent_at_ms: u64::MAX.to_string(),
+                expires_at_ms: u64::MAX.to_string(),
+                sequence: u64::MAX.to_string(),
+                ciphertext_b64: STANDARD.encode(vec![0_u8; ciphertext_bytes]),
+            },
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn v2_notify_payload_maxima_include_the_real_relay_wrapper() {
+        use peppy_protocol::{
+            MAX_EPHEMERAL_V2_CONTROL_CIPHERTEXT_BYTES, MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES,
+        };
+
+        let cases = [
+            (
+                EphemeralSignalV2Kind::Typing,
+                MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES,
+                7_599,
+            ),
+            (
+                EphemeralSignalV2Kind::Challenge,
+                MAX_EPHEMERAL_V2_CONTROL_CIPHERTEXT_BYTES,
+                1_086,
+            ),
+            (
+                EphemeralSignalV2Kind::SessionAck,
+                MAX_EPHEMERAL_V2_CONTROL_CIPHERTEXT_BYTES,
+                1_088,
+            ),
+        ];
+
+        for (kind, ciphertext_bytes, expected_payload_bytes) in cases {
+            let payload = maximum_notify_payload(kind, ciphertext_bytes);
+            assert_eq!(payload.len(), expected_payload_bytes, "{kind:?}");
+            assert!(payload.len() < MAX_NOTIFY_PAYLOAD_BYTES, "{kind:?}");
         }
     }
 
@@ -409,6 +461,27 @@ mod tests {
         assert_eq!(local_receiver.try_recv(), Err(TryRecvError::Empty));
         assert_eq!(foreign_receiver.try_recv(), Err(TryRecvError::Empty));
 
+        for (kind, ciphertext) in [
+            (EphemeralSignalV2Kind::Challenge, [2_u8; 32]),
+            (EphemeralSignalV2Kind::SessionAck, [3_u8; 32]),
+        ] {
+            let mut control = frame(sender_device_id, live_now_ms() + 10_000);
+            control.kind = kind;
+            control.ciphertext_b64 = STANDARD.encode(ciphertext);
+            local_backend
+                .publish(vault_id, control.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), remote_receiver.recv())
+                    .await
+                    .unwrap(),
+                Some(control)
+            );
+            assert_eq!(local_receiver.try_recv(), Err(TryRecvError::Empty));
+            assert_eq!(foreign_receiver.try_recv(), Err(TryRecvError::Empty));
+        }
+
         let now = live_now_ms();
         let expired = frame_at(sender_device_id, now - 2_000, now - 1_000);
         assert!(expired.validate().is_ok());
@@ -441,28 +514,35 @@ mod tests {
         );
 
         let mut oversized = frame(sender_device_id, live_now_ms() + 10_000);
-        oversized.ciphertext_b64 = STANDARD.encode(vec![0_u8; MAX_NOTIFY_PAYLOAD_BYTES]);
-        assert_eq!(
-            local_backend.publish(vault_id, oversized).await,
-            Err(LiveBackendError)
-        );
+        oversized.ciphertext_b64.clear();
+        let wrapper_bytes = serde_json::to_string(&Notify {
+            instance_id: local_backend.inner.instance_id,
+            vault_id: vault_id.0,
+            frame: oversized.clone(),
+        })
+        .unwrap()
+        .len();
+        oversized.ciphertext_b64 = "A".repeat(MAX_NOTIFY_PAYLOAD_BYTES - wrapper_bytes);
+        for expected_bytes in [MAX_NOTIFY_PAYLOAD_BYTES, MAX_NOTIFY_PAYLOAD_BYTES + 1] {
+            let serialized_bytes = serde_json::to_string(&Notify {
+                instance_id: local_backend.inner.instance_id,
+                vault_id: vault_id.0,
+                frame: oversized.clone(),
+            })
+            .unwrap()
+            .len();
+            assert_eq!(serialized_bytes, expected_bytes);
+            assert_eq!(
+                local_backend.publish(vault_id, oversized.clone()).await,
+                Err(LiveBackendError)
+            );
+            oversized.ciphertext_b64.push('A');
+        }
         assert!(
             tokio::time::timeout(Duration::from_millis(100), remote_receiver.recv())
                 .await
                 .is_err()
         );
-
-        let mut largest = frame(sender_device_id, live_now_ms() + 10_000);
-        largest.key_epoch = u32::MAX;
-        largest.sequence = u64::MAX.to_string();
-        largest.ciphertext_b64 = STANDARD.encode(vec![0_u8; 5_700]);
-        let serialized = serde_json::to_string(&Notify {
-            instance_id: Uuid::from_u128(5),
-            vault_id: vault_id.0,
-            frame: largest,
-        })
-        .unwrap();
-        assert!(serialized.len() < MAX_NOTIFY_PAYLOAD_BYTES);
 
         drop(remote_backend);
         let remote_reconnected = PgLiveBackend::new(pool.clone(), remote_hub.clone());
