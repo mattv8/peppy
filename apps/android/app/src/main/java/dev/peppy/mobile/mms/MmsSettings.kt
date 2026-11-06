@@ -9,9 +9,12 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -26,6 +29,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -473,25 +478,10 @@ private fun RestrictedMessageAccessControls(
     feedback: String?,
     startRescan: () -> Unit,
 ) {
-    val status = when (access) {
-        RestrictedMessageAccess.ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_allowed)
-        RestrictedMessageAccess.NOT_ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_not_allowed)
-        RestrictedMessageAccess.UNSUPPORTED -> stringResource(R.string.peppy_mms_restricted_status_unsupported)
-        RestrictedMessageAccess.UNKNOWN -> stringResource(R.string.peppy_mms_restricted_status_unknown)
-    }
     val command = remember(context.packageName) { restrictedMessageAppOpCommand(context.packageName) }
     var commandCopied by remember { mutableStateOf(false) }
     if (showAccessStatus) {
-        StatusRow(
-            "mms-restricted-message-access",
-            stringResource(R.string.peppy_mms_restricted_title),
-            status,
-        )
-        Text(
-            stringResource(R.string.peppy_mms_restricted_help),
-            Modifier.testTag("mms-restricted-message-help"),
-            style = MaterialTheme.typography.bodySmall,
-        )
+        RestrictedMessageAccessStatus(access)
     }
     if (access == RestrictedMessageAccess.ALLOWED) {
         OutlinedButton(
@@ -514,15 +504,56 @@ private fun RestrictedMessageAccessControls(
             modifier = Modifier.testTag("mms-restricted-message-copy-command"),
         ) { Text(stringResource(R.string.peppy_mms_restricted_copy_command)) }
     }
-    if (showAccessStatus && access == RestrictedMessageAccess.UNSUPPORTED) {
-        Text(
-            stringResource(R.string.peppy_mms_restricted_unsupported_help),
-            Modifier.testTag("mms-restricted-message-unsupported-help"),
-            style = MaterialTheme.typography.bodySmall,
-        )
-    }
     if (showAccessStatus && commandCopied) Text(stringResource(R.string.peppy_mms_restricted_command_copied), Modifier.testTag("mms-restricted-message-command-copied"), style = MaterialTheme.typography.bodySmall)
     feedback?.let { Text(it, Modifier.testTag("mms-restricted-message-feedback"), style = MaterialTheme.typography.bodySmall) }
+}
+
+@Composable
+internal fun RestrictedMessageAccessStatus(access: RestrictedMessageAccess) {
+    val title = stringResource(R.string.peppy_mms_restricted_title)
+    val status = when (access) {
+        RestrictedMessageAccess.ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_allowed)
+        RestrictedMessageAccess.NOT_ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_not_allowed)
+        RestrictedMessageAccess.UNSUPPORTED -> stringResource(R.string.peppy_mms_restricted_status_unsupported)
+        RestrictedMessageAccess.UNKNOWN -> stringResource(R.string.peppy_mms_restricted_status_unknown)
+    }
+    val help = buildString {
+        append(stringResource(R.string.peppy_mms_restricted_help))
+        if (access == RestrictedMessageAccess.UNSUPPORTED) {
+            append("\n\n")
+            append(stringResource(R.string.peppy_mms_restricted_unsupported_help))
+        }
+    }
+    val density = LocalDensity.current
+    BoxWithConstraints(Modifier.testTag("mms-restricted-message-access")) {
+        val compact = maxWidth < 360.dp || density.fontScale > 1.15f
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (compact) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RestrictedMessageAccessLabel(title, help)
+                }
+                Text(status, style = MaterialTheme.typography.bodySmall)
+            } else {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    RestrictedMessageAccessLabel(title, help, Modifier.weight(1f))
+                    Text(status, Modifier.widthIn(max = 160.dp), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RestrictedMessageAccessLabel(title: String, help: String, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text(title, Modifier.weight(1f, fill = false))
+        InfoButton(
+            topic = title,
+            title = title,
+            body = help,
+            tag = "info-mms-restricted-message-access",
+        )
+    }
 }
 
 @Composable
