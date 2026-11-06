@@ -41,6 +41,7 @@ pub(crate) fn install_events(app: &tauri::AppHandle) {
 pub(crate) struct LiveTypingHost {
     outbound: Mutex<Option<mpsc::Sender<String>>>,
     sharing: AtomicBool,
+    retirement_requested: AtomicBool,
     started: Instant,
 }
 
@@ -49,6 +50,7 @@ impl Default for LiveTypingHost {
         Self {
             outbound: Mutex::new(None),
             sharing: AtomicBool::new(true),
+            retirement_requested: AtomicBool::new(false),
             started: Instant::now(),
         }
     }
@@ -88,6 +90,14 @@ impl LiveTypingHost {
 
     fn set_sharing(&self, enabled: bool) {
         self.sharing.store(enabled, Ordering::Release);
+    }
+
+    fn request_retirement(&self) {
+        self.retirement_requested.store(true, Ordering::Release);
+    }
+
+    fn take_retirement(&self) -> bool {
+        self.retirement_requested.swap(false, Ordering::AcqRel)
     }
 
     fn clock(&self) -> LiveClock {
@@ -483,6 +493,15 @@ fn emit_events(
     }
 }
 
+fn request_retirement_on_clock(error: LiveError, session: &Session) -> bool {
+    if error != LiveError::Clock {
+        return false;
+    }
+    session.live_typing.request_retirement();
+    session.live_context_wake.notify_one();
+    true
+}
+
 fn send_typing_for_session(
     session: &Session,
     conversation_id: ConversationId,
@@ -507,17 +526,17 @@ fn send_typing_for_session(
         return false;
     };
     session.live_typing.send_with(|| {
-        let outbound = session
-            .client
-            .seal_typing_signal_v2(
-                conversation_id,
-                gateway,
-                peppy_protocol::TypingOriginV2::VaultDevice,
-                state,
-                clock,
-            )
-            .ok()??;
-        serde_json::to_string(&outbound.signal).ok()
+        match session.client.seal_typing_signal_v2(
+            conversation_id,
+            gateway,
+            peppy_protocol::TypingOriginV2::VaultDevice,
+            state,
+            clock,
+        ) {
+            Ok(Some(outbound)) => serde_json::to_string(&outbound.signal).ok(),
+            Err(error) if request_retirement_on_clock(error, session) => None,
+            Ok(None) | Err(_) => None,
+        }
     })
 }
 
@@ -594,12 +613,32 @@ fn live_enable_context(session: &Session) -> Option<LiveEnableContext> {
     )
 }
 
+fn apply_pending_retirement(
+    state: &mut LiveTypingState,
+    inbound: &mut InboundTyping,
+    session: &Session,
+    outbound: &mut Option<mpsc::Receiver<String>>,
+) -> bool {
+    if !session.live_typing.take_retirement() {
+        return false;
+    }
+    session.live_typing.detach();
+    disable(state, session);
+    inbound.clear();
+    emit_events(inbound, session, state.generation());
+    *outbound = None;
+    true
+}
+
 fn reevaluate_context(
     state: &mut LiveTypingState,
     inbound: &mut InboundTyping,
     session: &Session,
     outbound: &mut Option<mpsc::Receiver<String>>,
 ) {
+    if apply_pending_retirement(state, inbound, session, outbound) {
+        return;
+    }
     let previous_generation = state.generation();
     let generation = apply_enable_context(
         state,
@@ -709,13 +748,25 @@ async fn supervise(session: Arc<Session>) {
                     Some(Ok(Message::Text(frame))) => {
                         inbound.push(frame.to_string());
                         while let Some(frame) = inbound.take() {
-                            let reply = process_inbound_frame(
+                            let reply = match process_inbound_frame(
                                 &session.client,
                                 &mut inbound,
                                 &frame,
                                 state.generation(),
                                 session.live_typing.clock(),
-                            );
+                            ) {
+                                Ok(reply) => reply,
+                                Err(error) if request_retirement_on_clock(error, &session) => {
+                                    apply_pending_retirement(
+                                        &mut state,
+                                        &mut inbound,
+                                        &session,
+                                        &mut outbound,
+                                    );
+                                    None
+                                }
+                                Err(_) => None,
+                            };
                             inbound.expire(session.live_typing.mono_ms());
                             emit_events(&mut inbound, &session, state.generation());
                             if let Some(reply) = reply {
@@ -750,11 +801,11 @@ fn process_inbound_frame(
     frame_json: &str,
     generation: Option<LiveEnableGeneration>,
     clock: LiveClock,
-) -> Option<String> {
-    let outcome = client.open_typing_signal_v2_json(frame_json, clock).ok()?;
+) -> Result<Option<String>, LiveError> {
+    let outcome = client.open_typing_signal_v2_json(frame_json, clock)?;
     let reply = inbound.publish(outcome, generation, clock);
     inbound.expire(clock.mono_ms);
-    reply
+    Ok(reply)
 }
 
 async fn bounded_send<S>(
@@ -860,7 +911,7 @@ fn wall_ms() -> i64 {
 }
 
 fn disable(state: &mut LiveTypingState, session: &Session) {
-    let _ = state.apply(&session.client, None, clock(Instant::now()));
+    let _ = state.apply(&session.client, None, session.live_typing.clock());
 }
 
 async fn wait_or_cancel(session: &Session, delay: Duration) -> bool {
@@ -1404,6 +1455,7 @@ mod tests {
                 mono_ms: 1_001,
             },
         )
+        .unwrap()
         .unwrap();
         let ack = process_inbound_frame(
             &sender,
@@ -1415,6 +1467,7 @@ mod tests {
                 mono_ms: 1_002,
             },
         )
+        .unwrap()
         .unwrap();
         assert_eq!(
             process_inbound_frame(
@@ -1427,7 +1480,7 @@ mod tests {
                     mono_ms: 1_003,
                 },
             ),
-            None
+            Ok(None)
         );
         let second = sender
             .seal_typing_signal_v2(
@@ -1453,7 +1506,7 @@ mod tests {
                     mono_ms: 4_001,
                 },
             ),
-            None
+            Ok(None)
         );
         assert!(inbound.displays.contains_key(&conversation));
     }
@@ -1477,6 +1530,42 @@ mod tests {
         let second = session.live_typing.clock();
 
         assert!(second.mono_ms > first.mono_ms);
+    }
+
+    #[test]
+    fn open_clock_error_is_retired_by_the_serial_supervisor_path() {
+        let (fixture, session, _) = session_with_linked_eligible_gateway();
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        install_gateway(&session, &fixture.binding.device_id);
+        let mut state = LiveTypingState::default();
+        let mut inbound = InboundTyping::default();
+        let context = {
+            let status = session.status.lock().unwrap();
+            enable_context(&status, inputs(&session))
+        };
+        apply_enable_context(&mut state, &session, context, clock()).unwrap();
+        let mut outbound = Some(session.live_typing.attach());
+        assert!(state.generation().is_some());
+
+        let error = process_inbound_frame(
+            &session.client,
+            &mut inbound,
+            "{}",
+            state.generation(),
+            LiveClock {
+                wall_ms: NOW_MS - 1,
+                mono_ms: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(request_retirement_on_clock(error, &session));
+        apply_pending_retirement(&mut state, &mut inbound, &session, &mut outbound);
+
+        assert_eq!(state.generation(), None);
+        assert_eq!(
+            session.client.set_typing_sharing(true),
+            Err(LiveError::Disabled)
+        );
     }
 
     #[test]
