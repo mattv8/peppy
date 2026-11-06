@@ -1600,7 +1600,6 @@ dependencies = [
  "referencing",
  "regex",
  "regex-syntax 0.8.11",
- "reqwest",
  "serde",
  "serde_json",
  "uuid-simd",
@@ -2792,7 +2791,6 @@ checksum = "9d0946410b9f7b082a427e4ef5c8ff541a88b357bc6c637c40db3a68ac70a36f"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
