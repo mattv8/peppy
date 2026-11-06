@@ -164,7 +164,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 48;
+const SCHEMA_VERSION: i64 = 49;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -6518,6 +6518,36 @@ CREATE TABLE rcs_capability_published(
   identity TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL, published_at_ms INTEGER NOT NULL
 );
 ";
+/// Version 48 -> 49: local-only RCS receive ownership and immutable identities.
+const MIGRATION_49: &str = "
+CREATE TABLE rcs_lane_ownership(
+  conversation_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL CHECK(owner IN ('link','provider')),
+  ownership_generation INTEGER NOT NULL CHECK(ownership_generation > 0),
+  history_token TEXT,
+  detector_floor INTEGER NOT NULL,
+  alert_code TEXT CHECK(alert_code IN ('ambiguous_provider_window'))
+);
+CREATE INDEX rcs_lane_ownership_owner_generation ON rcs_lane_ownership(owner,ownership_generation);
+CREATE TABLE rcs_message_identities(
+  google_message_id TEXT NOT NULL,
+  google_conversation_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  ownership_generation INTEGER NOT NULL,
+  PRIMARY KEY(google_message_id,google_conversation_id)
+);
+CREATE TABLE rcs_provider_detectors(
+  conversation_id TEXT NOT NULL,
+  provider_row_id INTEGER NOT NULL,
+  provider_thread_id INTEGER NOT NULL,
+  provider_type INTEGER NOT NULL,
+  observed_at_ms INTEGER NOT NULL,
+  observed_generation INTEGER NOT NULL,
+  resolved INTEGER NOT NULL DEFAULT 0 CHECK(resolved IN (0,1)),
+  PRIMARY KEY(conversation_id,provider_row_id)
+);
+CREATE INDEX rcs_provider_detectors_unresolved ON rcs_provider_detectors(conversation_id,resolved,provider_row_id);
+";
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "outbox", "origin_tag TEXT")
@@ -6693,6 +6723,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_46)?;
             tx.execute_batch(MIGRATION_47)?;
             tx.execute_batch(MIGRATION_48)?;
+            tx.execute_batch(MIGRATION_49)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -6701,7 +6732,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=47)) => {
+        Some(version @ (4..=48)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -6830,6 +6861,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 47 {
                 tx.execute_batch(MIGRATION_48)?;
+            }
+            if version <= 48 {
+                tx.execute_batch(MIGRATION_49)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -10787,9 +10821,51 @@ mod tests {
               DROP TABLE rcs_link_status_projection;
               DROP TABLE rcs_link_eligibility_projection;
               DROP TABLE rcs_capability_published;
+              DROP TABLE rcs_lane_ownership;
+              DROP TABLE rcs_message_identities;
+              DROP TABLE rcs_provider_detectors;
               ALTER TABLE attempts DROP COLUMN finalized_transport;",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn version_48_upgrade_preserves_rows_and_rejects_downgrade() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-49.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let client = Client::open(config.clone(), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute_batch(
+                "INSERT INTO rcs_link_status_projection VALUES('gateway','linked',1,1,1,1,1,1,1);
+                 DROP TABLE rcs_lane_ownership;
+                 DROP TABLE rcs_message_identities;
+                 DROP TABLE rcs_provider_detectors;
+                 UPDATE schema_meta SET version=48;",
+            ).unwrap();
+        }
+        drop(client);
+        let upgraded = Client::open(config.clone(), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
+        let store = upgraded.lock().unwrap();
+        let state: String = store.conn.query_row(
+            "SELECT state FROM rcs_link_status_projection WHERE gateway_device_id='gateway'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(state, "linked");
+        let table: String = store.conn.query_row(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='rcs_lane_ownership'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(table, "rcs_lane_ownership");
+        store.conn.execute("UPDATE schema_meta SET version=50", []).unwrap();
+        drop(store);
+        drop(upgraded);
+        assert!(matches!(
+            Client::open(config, DatabaseKey::new(&[17; 32]).unwrap()),
+            Err(Error::UnsupportedSchema)
+        ));
     }
 
     #[test]
