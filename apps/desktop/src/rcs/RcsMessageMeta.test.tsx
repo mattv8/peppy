@@ -4,10 +4,16 @@ import { describe, expect, it } from "vitest";
 import { RcsMessageMeta } from "./RcsMessageMeta";
 
 describe("RcsMessageMeta", () => {
-  it("renders only reported RCS outcome detail without upgrading submitted delivery", () => {
+  it("does not infer delivery from submitted and renders the reported RCS outcomes", () => {
     const { rerender } = render(<RcsMessageMeta messageId="submitted" status="submitted" />);
     expect(screen.queryByText("Read")).not.toBeInTheDocument();
     expect(document.querySelector('[data-message-route-hint="submitted"]')).toBeNull();
+
+    rerender(<RcsMessageMeta messageId="sent" status="sent" />);
+    expect(screen.queryByText("Read")).not.toBeInTheDocument();
+
+    rerender(<RcsMessageMeta messageId="delivered" status="delivery-confirmed" />);
+    expect(document.querySelector('[data-message-read="delivered"]')).toBeNull();
 
     rerender(<RcsMessageMeta messageId="read" status="read" />);
     expect(screen.getByText("Read")).toHaveAttribute("data-message-read", "read");
