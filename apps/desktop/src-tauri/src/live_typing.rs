@@ -246,6 +246,7 @@ impl LiveTypingState {
 
 const LIVE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 const LIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LIVE_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const LIVE_MAX_FRAME: usize = 64 * 1024;
 const INBOUND_QUEUE_LIMIT: usize = 64;
@@ -612,23 +613,23 @@ async fn supervise(session: Arc<Session>) {
                         .await;
                 }
                 disable(&mut state, &session);
-                if !wait_or_cancel(&session, jitter(backoff)).await {
+                if !wait_or_cancel(&session, live_backoff_delay(backoff)).await {
                     return;
                 }
-                backoff = (backoff * 2).min(LIVE_MAX_BACKOFF);
+                backoff = next_live_backoff(backoff);
                 continue;
             }
         };
-        probed = false;
-        backoff = Duration::from_secs(1);
         if !server_hello(&mut socket, &session).await {
             disable(&mut state, &session);
-            if !wait_or_cancel(&session, jitter(backoff)).await {
+            if !wait_or_cancel(&session, live_backoff_delay(backoff)).await {
                 return;
             }
-            backoff = (backoff * 2).min(LIVE_MAX_BACKOFF);
+            backoff = next_live_backoff(backoff);
             continue;
         }
+        probed = false;
+        backoff = Duration::from_secs(1);
         let mut outbound = None;
         reevaluate_context(&mut state, &mut inbound, &session, &mut outbound);
         'socket: loop {
@@ -700,10 +701,10 @@ async fn supervise(session: Arc<Session>) {
         disable(&mut state, &session);
         inbound.clear();
         emit_events(&mut inbound);
-        if !wait_or_cancel(&session, jitter(backoff)).await {
+        if !wait_or_cancel(&session, live_backoff_delay(backoff)).await {
             return;
         }
-        backoff = (backoff * 2).min(LIVE_MAX_BACKOFF);
+        backoff = next_live_backoff(backoff);
     }
 }
 
@@ -789,9 +790,20 @@ async fn server_hello(
     socket: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     session: &Session,
 ) -> bool {
+    server_hello_with_timeout(socket, &session.cancel, LIVE_HELLO_TIMEOUT).await
+}
+
+async fn server_hello_with_timeout<S>(
+    socket: &mut WebSocketStream<S>,
+    cancel: &tokio_util::sync::CancellationToken,
+    deadline: Duration,
+) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let next = tokio::select! {
-        _ = session.cancel.cancelled() => return false,
-        frame = socket.next() => frame,
+        _ = cancel.cancelled() => return false,
+        frame = timeout(deadline, socket.next()) => frame.ok().flatten(),
     };
     matches!(next, Some(Ok(Message::Text(text))) if serde_json::from_str::<LiveHelloV2>(&text).ok() == Some(LiveHelloV2::new()))
 }
@@ -817,6 +829,10 @@ fn disable(state: &mut LiveTypingState, session: &Session) {
 
 async fn wait_or_cancel(session: &Session, delay: Duration) -> bool {
     tokio::select! { _ = session.cancel.cancelled() => false, _ = sleep(delay) => true }
+}
+
+fn live_backoff_delay(backoff: Duration) -> Duration {
+    jitter(backoff).min(LIVE_MAX_BACKOFF)
 }
 
 fn next_live_backoff(backoff: Duration) -> Duration {
@@ -952,11 +968,19 @@ mod tests {
 
     #[test]
     fn probe_failure_backoff_is_jittered_and_capped() {
-        let capped = next_live_backoff(LIVE_MAX_BACKOFF);
-        assert_eq!(capped, LIVE_MAX_BACKOFF);
-        let delay = jitter(capped);
-        assert!(delay >= capped);
-        assert!(delay <= capped + capped / 4);
+        assert_eq!(next_live_backoff(LIVE_MAX_BACKOFF), LIVE_MAX_BACKOFF);
+        assert!(live_backoff_delay(LIVE_MAX_BACKOFF) <= LIVE_MAX_BACKOFF);
+    }
+
+    #[tokio::test]
+    async fn silent_peer_misses_the_hello_deadline() {
+        let (stream, _silent_peer) = tokio::io::duplex(64);
+        let mut socket =
+            WebSocketStream::from_raw_socket(stream, tungstenite::protocol::Role::Client, None)
+                .await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        assert!(!server_hello_with_timeout(&mut socket, &cancel, Duration::from_millis(10),).await);
     }
 
     #[test]
