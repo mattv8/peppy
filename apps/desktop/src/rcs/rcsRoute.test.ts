@@ -52,4 +52,24 @@ describe("currentRcsRoute", () => {
     expect(currentRcsRoute({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", nowMs: 150, locked: false }))
       .toEqual({ current: false });
   });
+
+  it.each([
+    ["locked encryption", (value: DesktopSnapshot) => { value.encryption.state = "locked"; }],
+    ["fixture mode", (value: DesktopSnapshot) => { value.mode = "fixture"; }],
+    ["recipientless draft", (value: DesktopSnapshot) => { value.conversations[0].recipientlessDraft = true; }],
+    ["unlinked gateway", (value: DesktopSnapshot) => { value.rcsStatus!.gateways[0].state = "unlinked"; }],
+    ["unknown eligibility", (value: DesktopSnapshot) => { value.rcsStatus!.eligibilities[0].eligibility = "unknown"; }],
+    ["negative gateway expiry", (value: DesktopSnapshot) => { value.rcsStatus!.gateways[0].expiresAtMs = "-1"; }],
+  ])("rejects %s", (_label, change) => {
+    const value = snapshot();
+    change(value);
+    expect(currentRcsRoute({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", nowMs: 149, locked: false })).toEqual({ current: false });
+  });
+
+  it("uses the gateway expiry and ignores observed timestamps", () => {
+    const value = snapshot();
+    value.rcsStatus!.gateways[0].expiresAtMs = "140";
+    value.rcsStatus!.gateways[0].observedAtMs = "999999";
+    expect(currentRcsRoute({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", nowMs: 139, locked: false })).toEqual({ current: true, expiresAtMs: 140 });
+  });
 });
