@@ -596,6 +596,66 @@ async fn community_runtime_is_rls_scoped_and_control_plane_http_flows_work() {
 }
 
 #[tokio::test]
+async fn live_ticket_resolver_and_consume_are_runtime_scoped() {
+    let fixture = Fixture::new().await;
+    let vault_a = Uuid::new_v4();
+    let vault_b = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    let session = [31_u8; 16];
+    let secret = [32_u8; 32];
+    let session_hash = Sha256::digest(session).to_vec();
+    let ticket_digest = Sha256::digest(secret).to_vec();
+    for (vault, username) in [(vault_a, "ownera"), (vault_b, "ownerb")] {
+        sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,'{}',$2,1,$3)")
+            .bind(vault).bind([1_u8].as_slice()).bind("f".repeat(64)).execute(&fixture.migration).await.unwrap();
+        sqlx::query("INSERT INTO vault_owners(vault_id,username,password_hash,is_admin,operation_id,request_digest) VALUES($1,$2,'hash',FALSE,$3,$4)")
+            .bind(vault).bind(username).bind(Uuid::new_v4()).bind([8_u8; 32].as_slice()).execute(&fixture.migration).await.unwrap();
+    }
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',$3,1)")
+        .bind(vault_a).bind(device).bind("f".repeat(64)).execute(&fixture.migration).await.unwrap();
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind([9_u8; 32].as_slice())
+        .bind(vault_a)
+        .bind(device)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',clock_timestamp()+interval '90 seconds')")
+        .bind(vault_a).bind(device).bind(&session_hash).execute(&fixture.migration).await.unwrap();
+    sqlx::query("INSERT INTO live_tickets(ticket_digest,vault_id,device_id,session_id_hash,issued_at,expires_at) VALUES($1,$2,$3,$4,clock_timestamp(),clock_timestamp()+interval '30 seconds')")
+        .bind(&ticket_digest).bind(vault_a).bind(device).bind(&session_hash).execute(&fixture.migration).await.unwrap();
+    let resolved: Option<Uuid> =
+        sqlx::query_scalar("SELECT vault_id FROM community_resolve_live_ticket_vault($1)")
+            .bind(&ticket_digest)
+            .fetch_optional(&fixture.runtime)
+            .await
+            .unwrap();
+    assert_eq!(resolved, Some(vault_a));
+    let mut b = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault_b.to_string())
+        .execute(&mut *b)
+        .await
+        .unwrap();
+    let hidden: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM live_tickets WHERE ticket_digest=$1")
+            .bind(&ticket_digest)
+            .fetch_optional(&mut *b)
+            .await
+            .unwrap();
+    assert_eq!(hidden, None);
+    b.commit().await.unwrap();
+    let consumed = peppy_server::__test_consume_live_ticket(&fixture.runtime, session, secret)
+        .await
+        .unwrap();
+    assert_eq!(
+        (consumed.vault_id, consumed.device_id, consumed.session_id),
+        (vault_a, device, session)
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn startup_validation_rejects_grant_policy_and_execute_drift() {
     let fixture = Fixture::new().await;
 

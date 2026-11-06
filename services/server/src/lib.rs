@@ -16,6 +16,24 @@ pub mod web_client;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
+/// Minimal ticket-consumption result for database integration tests.
+#[doc(hidden)]
+pub struct ConsumedTicketIds {
+    pub vault_id: uuid::Uuid,
+    pub device_id: uuid::Uuid,
+    pub session_id: [u8; 16],
+}
+
+/// Exercises the resolver-first ticket consume path without exposing credentials.
+#[doc(hidden)]
+pub async fn __test_consume_live_ticket(
+    pool: &PgPool,
+    session_id: [u8; 16],
+    secret: [u8; 32],
+) -> Result<ConsumedTicketIds, &'static str> {
+    api::__test_consume_live_ticket(pool, session_id, secret).await
+}
+
 /// Serves a router while attaching each TCP peer address to request extensions.
 pub async fn serve<S>(
     listener: tokio::net::TcpListener,

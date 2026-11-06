@@ -2860,6 +2860,22 @@ async fn consume_live_ticket(
     })
 }
 
+#[doc(hidden)]
+pub async fn __test_consume_live_ticket(
+    pool: &PgPool,
+    session_id: [u8; 16],
+    secret: [u8; 32],
+) -> Result<crate::ConsumedTicketIds, &'static str> {
+    let principal = consume_live_ticket(pool, session_id, secret)
+        .await
+        .map_err(|_| "live_ticket_invalid")?;
+    Ok(crate::ConsumedTicketIds {
+        vault_id: principal.vault,
+        device_id: principal.device,
+        session_id,
+    })
+}
+
 async fn live_ticket_tx(
     state: &ApiState,
     p: &Principal,
