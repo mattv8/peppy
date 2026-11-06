@@ -78,7 +78,7 @@ func scanConversationPages(ctx context.Context, load conversationPageLoader) ([]
 				return nil, "conversation_lookup_failed"
 			}
 			response, err := load(ctx, &gmproto.ListConversationsRequest{Count: conversationPageSize, Folder: folder, Cursor: cursor})
-			if err != nil || response == nil {
+			if err != nil || response == nil || ctx.Err() != nil {
 				return nil, "conversation_lookup_failed"
 			}
 			for _, conversation := range response.GetConversations() {
@@ -203,9 +203,13 @@ func (link *Link) removeConversationLocked(id string) {
 }
 
 func (link *Link) replaceConversationIndexFor(generation, streamEpoch, revision uint64, conversations []*gmproto.Conversation) bool {
+	return link.replaceConversationIndexForContext(context.Background(), generation, streamEpoch, revision, conversations)
+}
+
+func (link *Link) replaceConversationIndexForContext(ctx context.Context, generation, streamEpoch, revision uint64, conversations []*gmproto.Conversation) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || revision != link.indexRevision || link.pendingConversationEvents != 0 || !link.hasOwnerVerificationLocked() {
+	if ctx.Err() != nil || link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || revision != link.indexRevision || link.pendingConversationEvents != 0 || !link.hasOwnerVerificationLocked() {
 		return false
 	}
 	link.conversationCandidates = make(map[string][]conversationSummary)

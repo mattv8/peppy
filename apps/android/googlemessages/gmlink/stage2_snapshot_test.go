@@ -366,3 +366,35 @@ func TestEquivalentNumberFormatsNeverProveCompleteAbsenceOrUniqueness(t *testing
 		t.Fatalf("potential false uniqueness code = %s", code)
 	}
 }
+
+func TestFinalPageSuccessAfterCancellationIsRejected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	_, code := scanConversationPages(ctx, func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		calls++
+		if calls == 3 {
+			cancel()
+		}
+		return &gmproto.ListConversationsResponse{}, nil
+	})
+	if code != "conversation_lookup_failed" {
+		t.Fatalf("scan code = %s", code)
+	}
+}
+
+func TestCancellationAtPublicationBoundaryRejectsSnapshot(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	revision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok {
+		t.Fatal("refresh did not start")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if link.replaceConversationIndexForContext(ctx, generation, streamEpoch, revision, nil) {
+		t.Fatal("cancelled operation published a complete snapshot")
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("lookup code = %s", code)
+	}
+}

@@ -563,7 +563,7 @@ func (link *Link) RefreshConversationIndex() error {
 	if code != "" {
 		return errors.New(code)
 	}
-	if !link.replaceConversationIndexFor(generation, streamEpoch, indexRevision, conversations) {
+	if !link.replaceConversationIndexForContext(ctx, generation, streamEpoch, indexRevision, conversations) {
 		return errors.New("conversation_lookup_stale")
 	}
 	return nil
