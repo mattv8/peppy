@@ -11,9 +11,11 @@ import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -35,7 +37,6 @@ import dev.peppy.mobile.MmsCapture
 import dev.peppy.mobile.MmsCaptureWork
 import dev.peppy.mobile.R
 import dev.peppy.mobile.Section
-import dev.peppy.mobile.StatusRow
 import dev.peppy.mobile.enrollment.ConsentEffect
 import dev.peppy.mobile.enrollment.ConsentGatedToggle
 import dev.peppy.mobile.enrollment.ConsentPhase
@@ -49,6 +50,8 @@ import dev.peppy.mobile.restrictedsetup.restrictedSetupAvailable
 import dev.peppy.mobile.telephony.OwnNumberSettings
 import dev.peppy.mobile.telephony.SimRoutes
 import dev.peppy.mobile.ui.ConsentSheet
+import dev.peppy.mobile.ui.DetailsStatusRow as StatusRow
+import dev.peppy.mobile.ui.InfoButton
 import dev.peppy.mobile.ui.SettingToggleRow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -68,9 +71,32 @@ internal data class MmsHealth(
     val reasons: List<String> = emptyList(),
     val transferReasons: List<String> = emptyList(),
     val databaseUnavailable: Boolean = false,
-    val backfillStatus: String? = null,
+    val backfillStatus: MmsBackfillStatus? = null,
     val quarantinedCount: Long = 0L,
 )
+
+internal sealed interface MmsBackfillStatus {
+    data object PausedPhoneStorage : MmsBackfillStatus
+    data object OlderPausedHistoryLimit : MmsBackfillStatus
+    data object PausedHistoryLimit : MmsBackfillStatus
+    data object OlderPausedServerStorage : MmsBackfillStatus
+    data object GettingReady : MmsBackfillStatus
+    data object CopyingOlder : MmsBackfillStatus
+    data class Copying(val count: ULong) : MmsBackfillStatus
+    data object UpToDate : MmsBackfillStatus
+}
+
+@Composable
+private fun MmsBackfillStatus.text(): String = when (this) {
+    MmsBackfillStatus.PausedPhoneStorage -> stringResource(R.string.peppy_toggle_android_mms_status_paused_phone_storage)
+    MmsBackfillStatus.OlderPausedHistoryLimit -> stringResource(R.string.peppy_toggle_android_mms_status_older_paused_history_limit)
+    MmsBackfillStatus.PausedHistoryLimit -> stringResource(R.string.peppy_toggle_android_mms_status_paused_history_limit)
+    MmsBackfillStatus.OlderPausedServerStorage -> stringResource(R.string.peppy_toggle_android_mms_status_older_paused_server_storage)
+    MmsBackfillStatus.GettingReady -> stringResource(R.string.peppy_toggle_android_mms_status_getting_ready)
+    MmsBackfillStatus.CopyingOlder -> stringResource(R.string.peppy_toggle_android_mms_status_copying_older)
+    is MmsBackfillStatus.Copying -> stringResource(R.string.peppy_toggle_android_mms_status_copying_count, count.toLong())
+    MmsBackfillStatus.UpToDate -> stringResource(R.string.peppy_toggle_android_mms_status_up_to_date)
+}
 
 /** Bounded, content-free transfer failures shown only on this phone. */
 internal class MmsTransferHealth(context: Context) {
@@ -127,15 +153,15 @@ internal fun mmsHealthFromNative(
 ): MmsHealth {
     val incomplete = acquisitions.filter { it.state != NativeMmsAcquisitionState.COMPLETE }
     val status = when (backfill.pause) {
-        NativeMmsBackfillPause.LOCAL_CAPACITY -> "Paused: phone storage capacity"
-        NativeMmsBackfillPause.RECOVERY_CAPACITY -> "History paused: recovery capacity"
-        NativeMmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY -> "Capture paused to keep your vault recoverable"
-        NativeMmsBackfillPause.REMOTE_STORAGE -> "History paused: vault storage capacity"
+        NativeMmsBackfillPause.LOCAL_CAPACITY -> MmsBackfillStatus.PausedPhoneStorage
+        NativeMmsBackfillPause.RECOVERY_CAPACITY -> MmsBackfillStatus.OlderPausedHistoryLimit
+        NativeMmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY -> MmsBackfillStatus.PausedHistoryLimit
+        NativeMmsBackfillPause.REMOTE_STORAGE -> MmsBackfillStatus.OlderPausedServerStorage
         null -> when {
-            !backfill.baselineInitialized -> "Waiting for the first provider scan"
-            !backfill.historyComplete -> "Scanning MMS history"
-            backfill.pendingCount > 0uL -> "Processing ${backfill.pendingCount} pending MMS"
-            else -> "MMS capture is up to date"
+            !backfill.baselineInitialized -> MmsBackfillStatus.GettingReady
+            !backfill.historyComplete -> MmsBackfillStatus.CopyingOlder
+            backfill.pendingCount > 0uL -> MmsBackfillStatus.Copying(backfill.pendingCount)
+            else -> MmsBackfillStatus.UpToDate
         }
     }
     return MmsHealth(
@@ -239,26 +265,23 @@ internal fun MmsSettings(
         restrictedAccess = withContext(Dispatchers.IO) { restrictedMessageAccess(context) }
     }
 
-    Section(if (detailsOnly) "mms-details-section" else "mms-settings-section", stringResource(R.string.peppy_toggle_android_mms_title), helpBody = stringResource(R.string.peppy_help_android_mms_wifi)) {
-        if (!detailsOnly) {
-        MmsCaptureControls(
-            enabled = enabled && receiveGranted,
-            onEnabledChanged = { value ->
-                if (!value) {
-                    preferences.enabled = false
-                    enabled = preferences.enabled
-                    MmsCaptureWork.onPermissionOrForeground(context)
-                    onChanged()
-                } else consent = consent.requestEnable()
-            },
-            hint = permissionHint,
-        )
-        }
-        if (detailsOnly) StatusRow("mms-sim-status", "Current SIM", route?.label ?: "No default SMS SIM")
-        if (detailsOnly) {
-        OwnNumberSettings(context, databaseOpen, route)
-        }
-        if (!detailsOnly) {
+    if (!detailsOnly) {
+        Column(
+            Modifier.fillMaxWidth().testTag("mms-settings-section"),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            MmsCaptureControls(
+                enabled = enabled && receiveGranted,
+                onEnabledChanged = { value ->
+                    if (!value) {
+                        preferences.enabled = false
+                        enabled = preferences.enabled
+                        MmsCaptureWork.onPermissionOrForeground(context)
+                        onChanged()
+                    } else consent = consent.requestEnable()
+                },
+                hint = permissionHint,
+            )
             SettingToggleRow(
                 title = stringResource(R.string.peppy_media_wifi_only),
                 checked = mediaWifiOnly == true,
@@ -273,92 +296,123 @@ internal fun MmsSettings(
                     }
                 },
                 tag = "mms-wifi-only-row",
+                titleTrailing = {
+                    InfoButton(
+                        topic = stringResource(R.string.peppy_media_wifi_only),
+                        title = stringResource(R.string.peppy_media_wifi_only),
+                        body = stringResource(R.string.peppy_help_android_mms_wifi),
+                        tag = "info-mms-wifi",
+                    )
+                },
             )
         }
-        if (detailsOnly) {
-        OutlinedButton(
-            onClick = { MmsCaptureWork.refresh(context); onChanged() },
-            enabled = enabled && receiveGranted,
-            modifier = Modifier.testTag("mms-refresh-pending"),
-        ) { Text("Refresh pending MMS") }
-        RestrictedMessageAccessControls(
-            context = context,
-            access = restrictedAccess,
-            showAccessStatus = !hasAdvancedFeaturesSetup,
-            enabled = canRequestProviderRescan(enabled, receiveGranted, databaseOpen, restrictedAccess),
-            pending = rescanPending,
-            feedback = rescanFeedback,
-            startRescan = {
-                rescanPending = true
-                scope.launch {
-                    val outcome = withContext(Dispatchers.IO) {
-                        val currentAccess = restrictedMessageAccess(context)
-                        if (!canRequestProviderRescan(preferences.enabled, mmsReceiveGranted(context), databaseOpen, currentAccess) ||
-                            GatewayPolicyHost(context).decision()?.captureMms != true
-                        ) {
-                            ProviderRescanRequestOutcome.UNAVAILABLE
-                        } else {
-                            val client = NativeGateway.producerClient(context)
-                                ?: return@withContext ProviderRescanRequestOutcome.UNAVAILABLE
-                            requestProviderRescan(
-                                currentAccess,
-                                observedMaxId = { MmsCapture.currentHighWater(context) },
-                                request = { observedMaxId ->
-                                    if (!canRequestProviderRescan(
-                                            preferences.enabled,
-                                            mmsReceiveGranted(context),
-                                            databaseOpen,
-                                            restrictedMessageAccess(context),
-                                        ) || GatewayPolicyHost(context).decision()?.captureMms != true ||
-                                        NativeGateway.producerClient(context) !== client
-                                    ) {
-                                        throw SecurityException("MMS capture is no longer available")
-                                    }
-                                    client.requestMmsProviderRescan(
-                                        preferences.sourceGeneration,
-                                        MmsCapture.PROVIDER_SCOPE,
-                                        observedMaxId,
-                                    )
-                                },
-                                enqueue = { MmsCaptureWork.enqueue(context.applicationContext) },
-                            )
-                        }
-                    }
-                    restrictedAccess = withContext(Dispatchers.IO) { restrictedMessageAccess(context) }
-                    rescanFeedback = when (outcome) {
-                        ProviderRescanRequestOutcome.QUEUED -> rescanQueued
-                        ProviderRescanRequestOutcome.ALREADY_QUEUED -> rescanAlreadyQueued
-                        ProviderRescanRequestOutcome.UNAVAILABLE -> rescanUnavailable
-                        ProviderRescanRequestOutcome.FAILED -> rescanFailed
-                    }
-                    rescanPending = false
+    } else {
+        Section(
+            "mms-details-section",
+            stringResource(R.string.peppy_toggle_android_mms_title),
+            helpBody = stringResource(R.string.peppy_help_android_mms_capture),
+        ) {
+            StatusRow(
+                "mms-sim-status",
+                stringResource(R.string.peppy_toggle_android_mms_sim_label),
+                route?.label ?: stringResource(R.string.peppy_toggle_android_sim_missing),
+            )
+            OwnNumberSettings(
+                context,
+                databaseOpen,
+                route,
+                trailingAction = {
+                    TextButton(
+                        onClick = { MmsCaptureWork.refresh(context); onChanged() },
+                        enabled = enabled && receiveGranted,
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("mms-refresh-pending"),
+                    ) { Text(stringResource(R.string.peppy_toggle_android_mms_refresh)) }
+                },
+            )
+            Column(Modifier.fillMaxWidth().testTag("mms-health-list"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (health.databaseUnavailable) {
+                    Text(stringResource(R.string.peppy_toggle_android_mms_health_locked))
+                } else {
+                    StatusRow(
+                        "mms-backfill-status",
+                        stringResource(R.string.peppy_toggle_android_mms_status_label),
+                        health.backfillStatus?.text().orEmpty(),
+                    )
+                    if (health.pending > 0) Text(stringResource(R.string.peppy_toggle_android_mms_health_waiting, health.pending), Modifier.testTag("mms-health-count"), style = MaterialTheme.typography.bodySmall)
+                    if (health.blocked > 0) Text(stringResource(R.string.peppy_toggle_android_mms_health_stuck, health.blocked), Modifier.testTag("mms-health-count"), style = MaterialTheme.typography.bodySmall)
+                    if (health.unavailable > 0) Text(stringResource(R.string.peppy_toggle_android_mms_health_unavailable, health.unavailable), Modifier.testTag("mms-health-count"), style = MaterialTheme.typography.bodySmall)
                 }
-            },
-        )
-        Column(Modifier.fillMaxWidth().testTag("mms-health-list"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            when {
-                health.databaseUnavailable -> Text("Encrypted database unavailable. Acquisition health cannot be read.")
-                health.pending == 0 && health.blocked == 0 && health.unavailable == 0 -> Text("No pending acquisitions.")
-                else -> Text("Phone-only acquisition health: ${health.pending} pending, ${health.blocked} blocked, ${health.unavailable} unavailable.")
+                if (health.quarantinedCount > 0L) {
+                    Text(
+                        stringResource(R.string.peppy_toggle_android_mms_quarantine_status, health.quarantinedCount),
+                        Modifier.testTag("mms-quarantine-status"),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        stringResource(R.string.peppy_toggle_android_mms_quarantine_explanation),
+                        Modifier.testTag("mms-quarantine-explanation"),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                health.reasons.forEach { Text(it, Modifier.testTag("mms-health-reason"), style = MaterialTheme.typography.bodySmall) }
+                health.transferReasons.forEach { Text("Transfer $it", Modifier.testTag("mms-transfer-health-reason"), style = MaterialTheme.typography.bodySmall) }
             }
-            health.backfillStatus?.let { Text(it, Modifier.testTag("mms-backfill-status"), style = MaterialTheme.typography.bodySmall) }
-            if (health.quarantinedCount > 0L) {
-                Text(
-                    "Quarantined records: ${health.quarantinedCount}",
-                    Modifier.testTag("mms-quarantine-status"),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    "These phone records were skipped because they could not be matched safely. Existing messages were kept.",
-                    Modifier.testTag("mms-quarantine-explanation"),
-                    style = MaterialTheme.typography.bodySmall,
-                )
+            RestrictedMessageAccessControls(
+                context = context,
+                access = restrictedAccess,
+                showAccessStatus = !hasAdvancedFeaturesSetup,
+                enabled = canRequestProviderRescan(enabled, receiveGranted, databaseOpen, restrictedAccess),
+                pending = rescanPending,
+                feedback = rescanFeedback,
+                startRescan = {
+                    rescanPending = true
+                    scope.launch {
+                        val outcome = withContext(Dispatchers.IO) {
+                            val currentAccess = restrictedMessageAccess(context)
+                            if (!canRequestProviderRescan(preferences.enabled, mmsReceiveGranted(context), databaseOpen, currentAccess) ||
+                                GatewayPolicyHost(context).decision()?.captureMms != true
+                            ) {
+                                ProviderRescanRequestOutcome.UNAVAILABLE
+                            } else {
+                                val client = NativeGateway.producerClient(context)
+                                    ?: return@withContext ProviderRescanRequestOutcome.UNAVAILABLE
+                                requestProviderRescan(
+                                    currentAccess,
+                                    observedMaxId = { MmsCapture.currentHighWater(context) },
+                                    request = { observedMaxId ->
+                                        if (!canRequestProviderRescan(
+                                                preferences.enabled,
+                                                mmsReceiveGranted(context),
+                                                databaseOpen,
+                                                restrictedMessageAccess(context),
+                                            ) || GatewayPolicyHost(context).decision()?.captureMms != true ||
+                                            NativeGateway.producerClient(context) !== client
+                                        ) {
+                                            throw SecurityException("MMS capture is no longer available")
+                                        }
+                                        client.requestMmsProviderRescan(
+                                            preferences.sourceGeneration,
+                                            MmsCapture.PROVIDER_SCOPE,
+                                            observedMaxId,
+                                        )
+                                    },
+                                    enqueue = { MmsCaptureWork.enqueue(context.applicationContext) },
+                                )
+                            }
+                        }
+                        restrictedAccess = withContext(Dispatchers.IO) { restrictedMessageAccess(context) }
+                        rescanFeedback = when (outcome) {
+                            ProviderRescanRequestOutcome.QUEUED -> rescanQueued
+                            ProviderRescanRequestOutcome.ALREADY_QUEUED -> rescanAlreadyQueued
+                            ProviderRescanRequestOutcome.UNAVAILABLE -> rescanUnavailable
+                            ProviderRescanRequestOutcome.FAILED -> rescanFailed
+                        }
+                        rescanPending = false
+                    }
+                },
+            )
             }
-            health.reasons.forEach { Text(it, Modifier.testTag("mms-health-reason"), style = MaterialTheme.typography.bodySmall) }
-            health.transferReasons.forEach { Text("Transfer $it", Modifier.testTag("mms-transfer-health-reason"), style = MaterialTheme.typography.bodySmall) }
         }
-        }
-    }
     if (consent.phase == ConsentPhase.DISCLOSURE) ConsentSheet(
         title = stringResource(R.string.peppy_toggle_android_mms_consent_title),
         body = stringResource(R.string.peppy_mms_capture_disclosure),

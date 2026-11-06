@@ -15,6 +15,29 @@ class SmsSettingsStateTest {
     }
 
     @Test
+    fun syncOffTakesPriorityOverMissingReadPermission() {
+        assertEquals(SmsHistoryState.SYNC_OFF, smsHistoryState(false, false, true))
+    }
+
+    @Test
+    fun offPresentationHidesPermissionRepairAndKeepsOffStatus() {
+        val presentation = smsHistoryPresentation(false, SmsHistoryState.WAITING_FOR_PERMISSION, false)
+
+        assertEquals(SmsHistoryState.SYNC_OFF, presentation.state)
+        assertEquals(false, presentation.showPermission)
+        assertEquals(false, presentation.showRepair)
+    }
+
+    @Test
+    fun enabledMissingReadPermissionShowsRepair() {
+        val presentation = smsHistoryPresentation(true, SmsHistoryState.WAITING_FOR_PERMISSION, false)
+
+        assertEquals(SmsHistoryState.WAITING_FOR_PERMISSION, presentation.state)
+        assertEquals(true, presentation.showPermission)
+        assertEquals(true, presentation.showRepair)
+    }
+
+    @Test
     fun coreStatusPrioritizesProviderErrorsAndUnresolvedRows() {
         assertEquals(
             SmsHistoryState.UNAVAILABLE,

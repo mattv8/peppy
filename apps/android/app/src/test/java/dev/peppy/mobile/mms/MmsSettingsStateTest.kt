@@ -46,7 +46,46 @@ class MmsSettingsStateTest {
         val health = mmsHealthFromNative(emptyList(), status, emptyList())
 
         assertEquals(3L, health.quarantinedCount)
-        assertEquals("History paused: vault storage capacity", health.backfillStatus)
+        assertEquals(MmsBackfillStatus.OlderPausedServerStorage, health.backfillStatus)
+    }
+
+    @Test
+    fun generatedBackfillStatusMapsProgressStatesIntoHealth() {
+        fun status(
+            baselineInitialized: Boolean = true,
+            historyComplete: Boolean = true,
+            pendingCount: ULong = 0uL,
+        ) = NativeMmsBackfillStatus(
+            baselineInitialized = baselineInitialized,
+            historyUpperBound = "42",
+            historyComplete = historyComplete,
+            pause = null,
+            pendingCount = pendingCount,
+            quarantinedCount = 0uL,
+            recheckCursor = null,
+        )
+
+        assertEquals(MmsBackfillStatus.GettingReady, mmsHealthFromNative(emptyList(), status(baselineInitialized = false), emptyList()).backfillStatus)
+        assertEquals(MmsBackfillStatus.UpToDate, mmsHealthFromNative(emptyList(), status(), emptyList()).backfillStatus)
+        assertEquals(MmsBackfillStatus.Copying(3uL), mmsHealthFromNative(emptyList(), status(pendingCount = 3uL), emptyList()).backfillStatus)
+        assertEquals(MmsBackfillStatus.CopyingOlder, mmsHealthFromNative(emptyList(), status(historyComplete = false), emptyList()).backfillStatus)
+    }
+
+    @Test
+    fun generatedBackfillStatusMapsCapacityPausesIntoHealth() {
+        fun status(pause: NativeMmsBackfillPause) = NativeMmsBackfillStatus(
+            baselineInitialized = true,
+            historyUpperBound = "42",
+            historyComplete = false,
+            pause = pause,
+            pendingCount = 0uL,
+            quarantinedCount = 0uL,
+            recheckCursor = null,
+        )
+
+        assertEquals(MmsBackfillStatus.PausedPhoneStorage, mmsHealthFromNative(emptyList(), status(NativeMmsBackfillPause.LOCAL_CAPACITY), emptyList()).backfillStatus)
+        assertEquals(MmsBackfillStatus.OlderPausedHistoryLimit, mmsHealthFromNative(emptyList(), status(NativeMmsBackfillPause.RECOVERY_CAPACITY), emptyList()).backfillStatus)
+        assertEquals(MmsBackfillStatus.PausedHistoryLimit, mmsHealthFromNative(emptyList(), status(NativeMmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY), emptyList()).backfillStatus)
     }
 
 }
