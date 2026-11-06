@@ -40,7 +40,7 @@ pub(crate) fn install_events(app: &tauri::AppHandle) {
 
 pub(crate) struct LiveTypingHost {
     outbound: Mutex<Option<mpsc::Sender<String>>>,
-    sharing: AtomicBool,
+    sharing: Mutex<bool>,
     retirement_requested: AtomicBool,
     started: Instant,
 }
@@ -49,7 +49,7 @@ impl Default for LiveTypingHost {
     fn default() -> Self {
         Self {
             outbound: Mutex::new(None),
-            sharing: AtomicBool::new(true),
+            sharing: Mutex::new(true),
             retirement_requested: AtomicBool::new(false),
             started: Instant::now(),
         }
@@ -85,11 +85,36 @@ impl LiveTypingHost {
     }
 
     fn sharing(&self) -> bool {
-        self.sharing.load(Ordering::Acquire)
+        *self
+            .sharing
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    fn set_sharing(&self, enabled: bool) {
-        self.sharing.store(enabled, Ordering::Release);
+    fn set_sharing(&self, client: &Client, enabled: bool) -> Result<(), LiveError> {
+        let mut sharing = self
+            .sharing
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *sharing = enabled;
+        client.set_typing_sharing(enabled)
+    }
+
+    fn apply_sharing_with(
+        &self,
+        client: &Client,
+        before_apply: impl FnOnce(),
+    ) -> Result<(), LiveError> {
+        let sharing = self
+            .sharing
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        before_apply();
+        client.set_typing_sharing(*sharing)
+    }
+
+    fn apply_sharing(&self, client: &Client) -> Result<(), LiveError> {
+        self.apply_sharing_with(client, || {})
     }
 
     fn request_retirement(&self) {
@@ -579,8 +604,7 @@ pub(crate) async fn set_typing_sharing(
 ) -> BridgeResult<()> {
     crate::require_main_or_composer(window.label())?;
     let session = app_state.require_session().await?;
-    session.live_typing.set_sharing(enabled);
-    let _ = session.client.set_typing_sharing(enabled);
+    let _ = session.live_typing.set_sharing(&session.client, enabled);
     Ok(())
 }
 
@@ -592,9 +616,7 @@ fn apply_enable_context(
 ) -> Result<Option<LiveEnableGeneration>, LiveError> {
     let generation = state.apply(&session.client, context, clock)?;
     if generation.is_some() {
-        session
-            .client
-            .set_typing_sharing(session.live_typing.sharing())?;
+        session.live_typing.apply_sharing(&session.client)?;
     }
     Ok(generation)
 }
@@ -1569,9 +1591,48 @@ mod tests {
     }
 
     #[test]
+    fn sharing_toggle_serializes_after_enable_reapply() {
+        let (fixture, session, _) = session_with_linked_eligible_gateway();
+        enable_test_session(&session, &fixture);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let session_ref = &session;
+            let toggle = scope.spawn(move || {
+                started_rx.recv().unwrap();
+                session_ref
+                    .live_typing
+                    .set_sharing(&session_ref.client, false)
+                    .unwrap();
+            });
+            session
+                .live_typing
+                .apply_sharing_with(&session.client, || {
+                    started_tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(20));
+                })
+                .unwrap();
+            toggle.join().unwrap();
+        });
+
+        assert!(!session.live_typing.sharing());
+        assert!(session
+            .client
+            .seal_typing_signal_v2(
+                ConversationId::new(),
+                fixture.binding.device_id.parse().unwrap(),
+                peppy_protocol::TypingOriginV2::VaultDevice,
+                peppy_protocol::TypingStateV2::Started,
+                clock(),
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn sharing_off_produces_no_outbound_frame() {
         let (fixture, session, conversation) = session_with_linked_eligible_gateway();
-        session.live_typing.set_sharing(false);
+        let _ = session.live_typing.set_sharing(&session.client, false);
         enable_test_session(&session, &fixture);
         let mut outbound = session.live_typing.attach();
 
