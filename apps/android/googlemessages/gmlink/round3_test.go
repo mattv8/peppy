@@ -62,6 +62,12 @@ func TestUnlinkClosedBeforeUnpairSendsNothing(t *testing.T) {
 	link, host := openSafetyLink(t, nil)
 	setSafetyState(link, stateNeedsRelink, auth)
 	reached, release := host.holdNextPersist(statePairing)
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
 	relinkResult := make(chan error, 1)
 	go func() { relinkResult <- link.Relink() }()
 	select {
@@ -82,8 +88,13 @@ func TestUnlinkClosedBeforeUnpairSendsNothing(t *testing.T) {
 		link.Close()
 		close(closed)
 	}()
-	// Pair refuses only after Close has set closed, so this call is the sync point.
+	awaitSafety(t, "Close to revoke the link", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.closed
+	})
 	expectErrorCode(t, callWithin(t, "Pair after Close", func() error { return link.Pair(canaryCookieJSON(t)) }), "link_closed")
+	released = true
 	close(release)
 	<-closed
 
