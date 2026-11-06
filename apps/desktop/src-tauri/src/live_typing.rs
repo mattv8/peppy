@@ -403,6 +403,13 @@ impl InboundTyping {
     }
 }
 
+fn typing_event_targets(conversation_id: ConversationId) -> [String; 2] {
+    [
+        crate::tray::MAIN.to_owned(),
+        format!("{}{}", crate::tray::COMPOSER_PREFIX, conversation_id),
+    ]
+}
+
 fn emit_events(inbound: &mut InboundTyping) {
     let Some(app) = APP_HANDLE.get() else {
         inbound.events.clear();
@@ -410,7 +417,9 @@ fn emit_events(inbound: &mut InboundTyping) {
     };
     use tauri::Emitter as _;
     for event in inbound.drain_events() {
-        let _ = app.emit(TYPING_EVENT, event);
+        for target in typing_event_targets(event.conversation_id) {
+            let _ = app.emit_to(target, TYPING_EVENT, event.clone());
+        }
     }
 }
 
@@ -1001,6 +1010,19 @@ mod tests {
         assert_eq!(
             inbound.displays[&conversation].expires_at_ms.as_deref(),
             Some("10009")
+        );
+    }
+
+    #[test]
+    fn typing_events_target_only_main_and_the_matching_composer() {
+        let conversation_id = ConversationId::new();
+
+        assert_eq!(
+            typing_event_targets(conversation_id),
+            [
+                crate::tray::MAIN.to_owned(),
+                format!("{}{}", crate::tray::COMPOSER_PREFIX, conversation_id),
+            ]
         );
     }
 
