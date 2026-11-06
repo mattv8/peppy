@@ -722,6 +722,7 @@ mod tests {
             let store = client.lock().unwrap();
             store.conn.execute_batch(
                 "INSERT INTO rcs_link_status_projection VALUES('gateway','linked',1,1,1,1,1,1,1);
+                 DROP TABLE rcs_message_status;
                  DROP TABLE rcs_lane_ownership;
                  DROP TABLE rcs_message_identities;
                  DROP TABLE rcs_provider_detectors;

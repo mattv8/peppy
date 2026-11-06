@@ -140,6 +140,7 @@ fn remove_rcs_mapping_schema(conn: &rusqlite::Connection) {
     conn.execute_batch(
         "DROP TABLE rcs_provider_detectors;
          DROP TABLE rcs_message_identities;
+         DROP TABLE rcs_message_status;
          DROP TABLE rcs_lane_ownership;
          DROP TABLE rcs_send_ledger;
          DROP TABLE rcs_mapping_proofs;
@@ -479,6 +480,7 @@ fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
     conn.execute_batch(
         "DROP TABLE rcs_provider_detectors;
          DROP TABLE rcs_message_identities;
+         DROP TABLE rcs_message_status;
          DROP TABLE rcs_lane_ownership;
          DROP TABLE rcs_capability_published;
          DROP TABLE rcs_link_eligibility_projection;

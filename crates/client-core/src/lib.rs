@@ -147,8 +147,8 @@ pub use rcs_native::{
     NativeSettingsCurrentness, NativeSettingsProvenance, restricted_native_rcs_handoff_schema,
 };
 pub use rcs_receive::{
-    RcsCutover, RcsIdentityOutcome, RcsOwnership, RcsProjectedRecord, RcsProviderDetector,
-    RcsProjectedStatus, RcsReceiveAlert, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner,
+    RcsCutover, RcsIdentityOutcome, RcsOwnership, RcsProjectedRecord, RcsProjectedStatus,
+    RcsProviderDetector, RcsReceiveAlert, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner,
     RcsReceiveState, RcsStatusApplication,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
@@ -10965,6 +10965,7 @@ mod tests {
               DROP TABLE rcs_link_status_projection;
               DROP TABLE rcs_link_eligibility_projection;
               DROP TABLE rcs_capability_published;
+              DROP TABLE rcs_message_status;
               DROP TABLE rcs_lane_ownership;
               DROP TABLE rcs_message_identities;
               DROP TABLE rcs_provider_detectors;
@@ -11052,7 +11053,8 @@ mod tests {
             store
                 .conn
                 .execute_batch(
-                    "DROP TABLE rcs_lane_ownership;
+                    "DROP TABLE rcs_message_status;
+                     DROP TABLE rcs_lane_ownership;
                  DROP TABLE rcs_message_identities;
                  DROP TABLE rcs_provider_detectors;
                  UPDATE schema_meta SET version=48;",
@@ -11239,6 +11241,7 @@ mod tests {
                  DROP TABLE rcs_capability_published;
                  DROP TABLE rcs_provider_detectors;
                  DROP TABLE rcs_message_identities;
+                 DROP TABLE rcs_message_status;
                  DROP TABLE rcs_lane_ownership;
                  ALTER TABLE attempts DROP COLUMN finalized_transport;
                  UPDATE schema_meta SET version=46;",
