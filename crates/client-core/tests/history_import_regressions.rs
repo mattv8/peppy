@@ -81,7 +81,10 @@ fn imported_sms_plan_is_paused(client: &Client) -> bool {
 fn remove_rcs_mapping_schema(connection: &rusqlite::Connection) {
     connection
         .execute_batch(
-            "DROP TABLE rcs_send_ledger;
+            "DROP TABLE rcs_provider_detectors;
+              DROP TABLE rcs_message_identities;
+              DROP TABLE rcs_lane_ownership;
+              DROP TABLE rcs_send_ledger;
               DROP TABLE rcs_mapping_proofs;
               DROP TABLE rcs_conversation_mappings;
                ALTER TABLE attempts DROP COLUMN finalized_transport;
@@ -156,7 +159,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 48);
+    assert_eq!(version, 49);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -263,7 +266,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 48);
+    assert_eq!(version, 49);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
