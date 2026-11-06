@@ -5,7 +5,7 @@
 //! after its reply has been successfully sealed.
 
 use crate::{ConversationId, DeviceId};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const CHALLENGE_TIMEOUT_MS: u64 = 10_000;
 const CHALLENGE_SPACING_MS: u64 = 3_000;
@@ -409,8 +409,10 @@ impl EphemeralV2SessionState {
         self.pending.retain(|_, pending| {
             now_ms.saturating_sub(pending.issued_mono_ms) < CHALLENGE_TIMEOUT_MS
         });
-        self.validated
-            .retain(|_, session| now_ms < session.lease_deadline_mono_ms);
+        let pending_peers: HashSet<_> = self.pending.keys().copied().collect();
+        self.validated.retain(|peer, session| {
+            now_ms < session.lease_deadline_mono_ms || pending_peers.contains(peer)
+        });
         let validated = &self.validated;
         self.records.retain(|(peer, _), record| {
             record
@@ -863,23 +865,25 @@ mod tests {
                     peer_session,
                     conversation(id),
                     101,
-                    SessionTypingState::Stopped,
+                    SessionTypingState::Started,
                     1,
                 ))
                 .unwrap();
         }
+        let records_before = state.records.len();
         assert!(state
             .observe_typing(typing(
                 peer,
                 peer_session,
                 conversation(999),
                 101,
-                SessionTypingState::Stopped,
+                SessionTypingState::Started,
                 1
             ))
             .unwrap()
             .action
             .is_none());
+        assert_eq!(state.records.len(), records_before);
         assert!(state
             .observe_typing(typing(
                 peer,
@@ -887,7 +891,7 @@ mod tests {
                 conversation(0),
                 102,
                 SessionTypingState::Started,
-                2
+                3_001
             ))
             .unwrap()
             .action
@@ -931,31 +935,53 @@ mod tests {
             let peer = device(peer_id);
             let peer_session = session(peer_id as u8);
             validate(&mut state, peer, peer_session, 0);
-            for conversation_id in 0..MAX_PEER_RECORDS as u128 {
+            let count = if peer_id == 16 {
+                MAX_PEER_RECORDS - 1
+            } else {
+                MAX_PEER_RECORDS
+            };
+            for conversation_id in 0..count as u128 {
                 state
                     .observe_typing(typing(
                         peer,
                         peer_session,
                         conversation(conversation_id),
                         101,
-                        SessionTypingState::Stopped,
+                        SessionTypingState::Started,
                         1,
                     ))
                     .unwrap();
             }
-            assert!(state
-                .observe_typing(typing(
-                    peer,
-                    peer_session,
-                    conversation(999),
-                    101,
-                    SessionTypingState::Stopped,
-                    1
-                ))
-                .unwrap()
-                .action
-                .is_none());
         }
+        let peer_sixteen = device(16);
+        assert!(state
+            .observe_typing(typing(
+                peer_sixteen,
+                session(16),
+                conversation(999),
+                101,
+                SessionTypingState::Started,
+                1
+            ))
+            .unwrap()
+            .action
+            .is_some());
+        let records_before = state.records.len();
+        let peer_seventeen = device(17);
+        validate(&mut state, peer_seventeen, session(17), 0);
+        assert!(state
+            .observe_typing(typing(
+                peer_seventeen,
+                session(17),
+                conversation(0),
+                101,
+                SessionTypingState::Started,
+                1
+            ))
+            .unwrap()
+            .action
+            .is_none());
+        assert_eq!(state.records.len(), records_before);
         let peer = device(1);
         let intent = state
             .observe_typing(typing(
@@ -964,7 +990,7 @@ mod tests {
                 conversation(999),
                 101,
                 SessionTypingState::Started,
-                LEASE_MS + 1,
+                QUOTA_WINDOW_MS + 1,
             ))
             .unwrap()
             .challenge
@@ -977,7 +1003,7 @@ mod tests {
                 challenger_session: session(9),
                 nonce: nonce(2),
                 sequence_floor: AuthenticatedSequence(100),
-                received_mono_ms: MonoTime(LEASE_MS + 2),
+                received_mono_ms: MonoTime(QUOTA_WINDOW_MS + 2),
             })
             .unwrap();
         assert!(state
@@ -987,10 +1013,102 @@ mod tests {
                 conversation(999),
                 101,
                 SessionTypingState::Started,
-                LEASE_MS + 3
+                QUOTA_WINDOW_MS + 3
             ))
             .unwrap()
             .action
             .is_some());
+    }
+
+    #[test]
+    fn expired_lease_with_pending_renewal_preserves_same_session_authority() {
+        let peer = device(1);
+        let peer_session = session(2);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        let challenge = state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                1,
+                SessionTypingState::Started,
+                0,
+            ))
+            .unwrap()
+            .challenge
+            .unwrap();
+        state.record_challenge(challenge, nonce(1)).unwrap();
+        state
+            .accept_ack(AuthenticatedAck {
+                peer,
+                session: peer_session,
+                challenger_session: session(9),
+                nonce: nonce(1),
+                sequence_floor: AuthenticatedSequence(5),
+                received_mono_ms: MonoTime(1),
+            })
+            .unwrap();
+        let renewal = state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                99,
+                SessionTypingState::Started,
+                10_000,
+            ))
+            .unwrap()
+            .challenge
+            .unwrap();
+        state.record_challenge(renewal, nonce(2)).unwrap();
+        state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                102,
+                SessionTypingState::Started,
+                10_001,
+            ))
+            .unwrap();
+        state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                103,
+                SessionTypingState::Stopped,
+                10_002,
+            ))
+            .unwrap();
+        let renewal_ack = state
+            .accept_ack(AuthenticatedAck {
+                peer,
+                session: peer_session,
+                challenger_session: session(9),
+                nonce: nonce(2),
+                sequence_floor: AuthenticatedSequence(100),
+                received_mono_ms: MonoTime(16_000),
+            })
+            .unwrap();
+        assert_eq!(renewal_ack.session_update, None);
+        let validated = state.validated[&peer];
+        assert_eq!(
+            (validated.token, validated.revision, validated.floor),
+            (1, 1, 100)
+        );
+        assert_eq!(state.records[&(peer, conversation(1))].high_water, 103);
+        assert!(state
+            .observe_typing(typing(
+                peer,
+                peer_session,
+                conversation(1),
+                102,
+                SessionTypingState::Started,
+                16_001
+            ))
+            .unwrap()
+            .action
+            .is_none());
     }
 }
