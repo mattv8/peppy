@@ -19,7 +19,7 @@ sync_source() {
     fi
   done
   find "$workspace" -mindepth 1 -maxdepth 1 ! -name target ! -name node_modules -exec rm -rf {} +
-  (cd "$source_root" && tar -X infra/dev/source-excludes.txt -cf - .) | (cd "$workspace" && tar -xf -)
+  (cd "$source_root" && tar -X infra/dev/source-excludes.txt -cf - .) | (cd "$workspace" && tar -xmf -)
   if [[ -f "$source_root/.env.example" ]]; then cp "$source_root/.env.example" "$workspace/.env.example"; fi
 }
 
