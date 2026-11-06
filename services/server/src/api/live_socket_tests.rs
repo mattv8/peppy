@@ -1283,6 +1283,65 @@ async fn ticket_socket_recheck_closes_closed_or_expired_lease() {
 }
 
 #[tokio::test]
+async fn stale_g1_recheck_cannot_renew_a_replaced_ticket_socket_lease() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([42_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (session, _) = ticket_parts(&session_id, &ticket);
+    let g1 = server.live_hub.register_ticket(
+        VaultId(server.vault),
+        DeviceId(server.owner_device),
+        session,
+    );
+    let g2 = server.live_hub.register_ticket(
+        VaultId(server.vault),
+        DeviceId(server.owner_device),
+        session,
+    );
+    let principal = Principal {
+        vault: server.vault,
+        device: server.owner_device,
+        role: "owner".into(),
+        token_digest: Vec::new(),
+    };
+    let hash = Sha256::digest(session).to_vec();
+    let before: i64 = sqlx::query_scalar("SELECT (extract(epoch FROM lease_until)*1000000)::bigint FROM live_ticket_sessions WHERE session_id_hash=$1")
+        .bind(&hash)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert!(
+        !renew_live_ticket_lease(
+            &server.pool,
+            &server.live_hub,
+            &principal,
+            session,
+            g1.generation
+        )
+        .await
+        .unwrap()
+    );
+    let stale_after: i64 = sqlx::query_scalar("SELECT (extract(epoch FROM lease_until)*1000000)::bigint FROM live_ticket_sessions WHERE session_id_hash=$1")
+        .bind(&hash)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(stale_after, before);
+    assert!(
+        renew_live_ticket_lease(
+            &server.pool,
+            &server.live_hub,
+            &principal,
+            session,
+            g2.generation
+        )
+        .await
+        .unwrap()
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn delayed_ticket_cancel_for_g1_leaves_g2_open() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let session_id = URL_SAFE_NO_PAD.encode([37_u8; 16]);

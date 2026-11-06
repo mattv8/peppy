@@ -3464,16 +3464,38 @@ async fn live_ticket_revalidate(
     cancellation: &mut tokio::sync::watch::Receiver<bool>,
     readiness: &mut tokio::sync::watch::Receiver<bool>,
 ) -> LiveRevalidation {
-    if state.live_hub.ticket_generation(
+    let renewed = renew_live_ticket_lease(
+        &state.db,
+        &state.live_hub,
+        principal,
+        session_id,
+        generation,
+    )
+    .await;
+    match renewed {
+        Ok(true) => live_revalidate(state, principal, cancellation, readiness).await,
+        Ok(false) => LiveRevalidation::Unauthorized,
+        Err(_) => LiveRevalidation::Unavailable,
+    }
+}
+
+async fn renew_live_ticket_lease(
+    db: &PgPool,
+    hub: &crate::live::LiveHub,
+    principal: &Principal,
+    session_id: [u8; 16],
+    generation: u64,
+) -> Result<bool, sqlx::Error> {
+    if hub.ticket_generation(
         VaultId(principal.vault),
         DeviceId(principal.device),
         session_id,
     ) != Some(generation)
     {
-        return LiveRevalidation::Unauthorized;
+        return Ok(false);
     }
     let session_hash = Sha256::digest(session_id);
-    let renewed = match scope::begin(&state.db, principal.vault).await {
+    match scope::begin(db, principal.vault).await {
         Ok(mut tx) => match sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()+interval '90 seconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open' AND lease_until>now()")
             .bind(principal.vault)
             .bind(principal.device)
@@ -3485,11 +3507,6 @@ async fn live_ticket_revalidate(
             Err(error) => Err(error),
         },
         Err(error) => Err(error),
-    };
-    match renewed {
-        Ok(true) => live_revalidate(state, principal, cancellation, readiness).await,
-        Ok(false) => LiveRevalidation::Unauthorized,
-        Err(_) => LiveRevalidation::Unavailable,
     }
 }
 
