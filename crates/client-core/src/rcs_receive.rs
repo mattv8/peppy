@@ -411,17 +411,28 @@ impl Client {
                     Some(message_id),
                 )? {
                     RcsIdentityOutcome::Recorded => {
+                        apply_reported_facts(
+                            &tx,
+                            &ctx,
+                            conversation_id,
+                            message_id,
+                            record.rcs_reported,
+                            record.e2ee_reported,
+                        )?;
                         checkpoint_record(&tx, conversation_id, ownership_generation, record.history_token.as_deref())?;
                         tx.commit()?;
                         Ok(RcsReceiveOutcome::OutgoingMatched)
                     }
                     RcsIdentityOutcome::Duplicate => {
-                        checkpoint_record(
+                        apply_reported_facts(
                             &tx,
+                            &ctx,
                             conversation_id,
-                            ownership_generation,
-                            record.history_token.as_deref(),
+                            message_id,
+                            record.rcs_reported,
+                            record.e2ee_reported,
                         )?;
+                        checkpoint_record(&tx, conversation_id, ownership_generation, record.history_token.as_deref())?;
                         tx.commit()?;
                         Ok(RcsReceiveOutcome::Duplicate)
                     }
@@ -471,9 +482,6 @@ impl Client {
                     "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?)",
                     params![message_id.to_string(), 0, record.rcs_reported],
                 )?;
-                if record.e2ee_reported.is_some() {
-                    publish_metadata(&tx, &ctx, conversation_id, record.e2ee_reported, false)?;
-                }
                 enqueue(
                     &tx,
                     &ctx,
@@ -481,17 +489,6 @@ impl Client {
                     None,
                     None,
                     &PrivatePayload::Message(payload),
-                )?;
-                enqueue(
-                    &tx,
-                    &ctx,
-                    EnvelopePurpose::Event,
-                    None,
-                    None,
-                    &PrivatePayload::RcsMessageReported {
-                        message_id,
-                        rcs_reported: record.rcs_reported,
-                    },
                 )?;
                 if unmatched_outgoing {
                     let count: i64 = tx.query_row(
@@ -511,6 +508,26 @@ impl Client {
             RcsIdentityOutcome::Duplicate => RcsReceiveOutcome::Duplicate,
             RcsIdentityOutcome::Rejected(code) => return Ok(RcsReceiveOutcome::Rejected(code)),
         };
+        let reported_message_id = tx
+            .query_row(
+                "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=? AND conversation_id=?",
+                params![record.google_message_id, record.google_conversation_id, conversation_id.to_string()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|id| id.parse().map_err(|_| Error::Database))
+            .transpose()?;
+        if let Some(reported_message_id) = reported_message_id {
+            apply_reported_facts(
+                &tx,
+                &ctx,
+                conversation_id,
+                reported_message_id,
+                record.rcs_reported,
+                record.e2ee_reported,
+            )?;
+        }
         if let Some(token) = record.history_token {
             checkpoint_record(&tx, conversation_id, ownership_generation, Some(&token))?;
         }
@@ -888,6 +905,35 @@ fn status_from_rank(rank: i64) -> Result<RcsMessageStatus, rusqlite::Error> {
         5 => Ok(RcsMessageStatus::Read),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
+}
+
+fn apply_reported_facts(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    conversation_id: ConversationId,
+    message_id: MessageId,
+    rcs_reported: bool,
+    e2ee_reported: Option<bool>,
+) -> Result<(), Error> {
+    apply_replicated_reported(conn, message_id, rcs_reported)?;
+    enqueue(
+        conn,
+        ctx,
+        EnvelopePurpose::Event,
+        None,
+        None,
+        &PrivatePayload::RcsMessageReported {
+            message_id,
+            rcs_reported,
+        },
+    )?;
+    if e2ee_reported.is_some() {
+        let history_gap = load_receive_state(conn, conversation_id)?
+            .map(|state| history_gap(state.alert))
+            .unwrap_or(false);
+        publish_metadata(conn, ctx, conversation_id, e2ee_reported, history_gap)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn apply_replicated_status(
