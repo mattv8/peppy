@@ -2985,9 +2985,31 @@ async fn issue_live_ticket(
             sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',now()+interval '90 seconds')").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_session_insert"))?;
         }
     }
-    let lease_active: bool = sqlx::query_scalar("SELECT lease_until > now() FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3").bind(p.vault).bind(p.device).bind(&session).fetch_one(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_lease"))?;
+    let lease_active: bool = sqlx::query_scalar("SELECT lease_until > clock_timestamp() FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
+        .bind(p.vault)
+        .bind(p.device)
+        .bind(&session)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| database_unavailable(&e, "live_ticket_lease"))?;
     if !lease_active {
-        sqlx::query("UPDATE live_ticket_sessions SET state='terminal',closed_at=now() WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open'").bind(p.vault).bind(p.device).bind(&session).execute(&mut *tx).await.map_err(|e| database_unavailable(&e, "live_ticket_terminal"))?;
+        sqlx::query("UPDATE live_ticket_sessions SET state='terminal',closed_at=clock_timestamp(),lease_until=NULL WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open'")
+            .bind(p.vault)
+            .bind(p.device)
+            .bind(&session)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| database_unavailable(&e, "live_ticket_terminal"))?;
+        sqlx::query("DELETE FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND consumed_at IS NULL")
+            .bind(p.vault)
+            .bind(p.device)
+            .bind(&session)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| database_unavailable(&e, "live_ticket_terminal_tickets"))?;
+        tx.commit()
+            .await
+            .map_err(|e| database_unavailable(&e, "live_ticket_terminal_commit"))?;
         return Err(ApiError(
             StatusCode::CONFLICT,
             "live_ticket_session_terminal",

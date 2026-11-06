@@ -1834,27 +1834,82 @@ async fn live_ticket_consume_allows_exactly_one_replica_winner() {
 }
 
 #[tokio::test]
-async fn expired_provisional_ticket_lease_becomes_terminal() {
+async fn expired_provisional_ticket_lease_terminalizes_persistently_after_lock_delay() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let session_id = URL_SAFE_NO_PAD.encode([19_u8; 16]);
-    assert_eq!(
-        live_ticket_request(&server, reqwest::Method::POST, session_id.clone())
-            .await
-            .status(),
-        reqwest::StatusCode::CREATED
-    );
-    sqlx::query("UPDATE live_ticket_sessions SET lease_until=now()-interval '1 second' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let session_hash = Sha256::digest(URL_SAFE_NO_PAD.decode(&session_id).unwrap()).to_vec();
+    sqlx::query("UPDATE live_ticket_sessions SET lease_until=clock_timestamp()+interval '100 milliseconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3")
         .bind(server.vault)
         .bind(server.owner_device)
-        .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&session_id).unwrap()).to_vec())
+        .bind(&session_hash)
         .execute(&server.pool)
         .await
         .unwrap();
-    let rejected = live_ticket_request(&server, reqwest::Method::POST, session_id).await;
+
+    let mut device_lock = server.pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&mut *device_lock)
+        .await
+        .unwrap();
+    let base_url = server.base_url.clone();
+    let owner_token = server.owner_token.clone();
+    let blocked_session = session_id.clone();
+    let request = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("{base_url}/v1/live/tickets"))
+            .bearer_auth(owner_token)
+            .json(&serde_json::json!({"session_id": blocked_session}))
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    device_lock.commit().await.unwrap();
+
+    let rejected = request.await.unwrap();
     assert_eq!(rejected.status(), reqwest::StatusCode::CONFLICT);
     assert_eq!(
         rejected.json::<serde_json::Value>().await.unwrap()["code"],
         "live_ticket_session_terminal"
+    );
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .bind(&session_hash)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "terminal");
+    let outstanding: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND consumed_at IS NULL",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .bind(&session_hash)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(outstanding, 0);
+    assert_eq!(
+        server
+            .ticket_upgrade_status(&session_id, &ticket, Some("https://web.peppy.test"), false)
+            .await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        live_ticket_request(
+            &server,
+            reqwest::Method::POST,
+            URL_SAFE_NO_PAD.encode([20_u8; 16]),
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
     );
     server.shutdown().await;
 }
