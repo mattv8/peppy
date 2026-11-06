@@ -875,18 +875,6 @@ pub(crate) fn current_link_state(conn: &Connection) -> Result<Option<bool>, Erro
         .transpose()
 }
 
-pub(crate) fn has_proven_mapping(
-    conn: &Connection,
-    conversation_id: ConversationId,
-) -> Result<bool, Error> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM rcs_mapping_proofs WHERE peppy_conversation_id=?)",
-        [conversation_id.to_string()],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
-}
-
 pub(crate) fn has_live_mapping(
     conn: &Connection,
     conversation_id: ConversationId,

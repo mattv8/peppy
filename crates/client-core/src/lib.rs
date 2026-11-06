@@ -3818,6 +3818,7 @@ impl Client {
             &tx,
             message.record.conversation_id,
             &message.recipients,
+            message.transport,
             &subscription_id,
             now_ms,
         )?;
@@ -4022,6 +4023,7 @@ impl Client {
             &tx,
             message.record.conversation_id,
             &message.recipients,
+            message.transport,
             &subscription_id,
             now_ms,
         )?;
@@ -4032,7 +4034,12 @@ impl Client {
                 PermitBlock::CarrierOnlyProofUnavailable,
             ));
         }
-        if !matches!(admission, rcs_send::CarrierAdmission::Permitted) {
+        if !matches!(
+            admission,
+            rcs_send::CarrierAdmission::Permitted
+                | rcs_send::CarrierAdmission::ShortCodeSms
+                | rcs_send::CarrierAdmission::GroupMmsPreM4
+        ) {
             return Ok(AutomaticPermitDecision::Blocked(
                 PermitBlock::CarrierOnlyProofUnavailable,
             ));

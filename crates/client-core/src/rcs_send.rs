@@ -1,6 +1,6 @@
 use crate::{
-    CommandId, ConversationId, Error, MessagePayload,
-    conversation_match::canonical_address,
+    CommandId, ConversationId, Error, MessagePayload, Transport,
+    conversation_match::{canonical_address, identity_region, recipient_set},
     rcs_mapping::{
         self, RCS_MAPPING_FRESHNESS_MS, RcsConversationType, RcsMapping, RcsMappingClass,
         RcsMappingObservation, RcsSendMode,
@@ -17,6 +17,9 @@ use std::collections::BTreeSet;
 const CARRIER_ONLY_PROOF_PREFIX: &str = "rcs_carrier_only_proof_v1/";
 const INTENTIONAL_UNLINK_KEY: &str = "rcs_intentional_unlink_context_v1";
 const RCS_TARGET_IDENTITY_PREFIX: &str = "rcs_target_identity_v1/";
+const ADMISSION_DIAGNOSTIC_PREFIX: &str = "rcs_carrier_admission_diagnostic_v1/";
+/// Supported regional short-code rules. NANP short codes are five or six digits beginning 2–9.
+const SHORT_CODE_REGIONS: &[&str] = &["US", "CA"];
 
 /// A completed, target-scoped local lookup which found no eligible RCS target.
 /// This is intentionally a typed host result: unknown, partial, and failed lookups have no
@@ -57,6 +60,8 @@ struct StoredCarrierOnlyProof {
 
 pub(crate) enum CarrierAdmission {
     Permitted,
+    ShortCodeSms,
+    GroupMmsPreM4,
     Blocked,
     InvalidateProof,
 }
@@ -115,10 +120,11 @@ pub(crate) fn carrier_admission(
     conn: &Connection,
     conversation_id: ConversationId,
     recipients: &[String],
+    transport: Transport,
     subscription_id: &str,
     now_ms: i64,
 ) -> Result<CarrierAdmission, Error> {
-    if rcs_mapping::has_proven_mapping(conn, conversation_id)? {
+    if rcs_mapping::has_live_mapping(conn, conversation_id)? {
         return Ok(CarrierAdmission::Blocked);
     }
     let Some(linked) = rcs_mapping::current_link_state(conn)? else {
@@ -130,6 +136,23 @@ pub(crate) fn carrier_admission(
         } else {
             CarrierAdmission::Blocked
         });
+    }
+    let region = identity_region(conn)?;
+    if transport == Transport::Sms && is_short_code(recipients, &region) {
+        record_admission_diagnostic(
+            conn,
+            conversation_id,
+            "rcs_carrier_admission_short_code_sms",
+        )?;
+        return Ok(CarrierAdmission::ShortCodeSms);
+    }
+    if transport == Transport::Mms && recipient_set(recipients, Some(&region)).len() > 1 {
+        record_admission_diagnostic(
+            conn,
+            conversation_id,
+            "rcs_carrier_admission_group_mms_pre_m4",
+        )?;
+        return Ok(CarrierAdmission::GroupMmsPreM4);
     }
     let Some(value) = conn
         .query_row(
@@ -169,6 +192,33 @@ pub(crate) fn carrier_admission(
             CarrierAdmission::Blocked
         },
     )
+}
+
+fn is_short_code(recipients: &[String], region: &str) -> bool {
+    let Some(recipient) = recipients.first().filter(|_| recipients.len() == 1) else {
+        return false;
+    };
+    let trimmed = recipient.trim();
+    SHORT_CODE_REGIONS.contains(&region)
+        && (5..=6).contains(&trimmed.len())
+        && trimmed.bytes().all(|byte| byte.is_ascii_digit())
+        && matches!(trimmed.as_bytes().first(), Some(b'2'..=b'9'))
+        && canonical_address(trimmed, Some(region)) == trimmed
+}
+
+fn record_admission_diagnostic(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    code: &str,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![
+            format!("{ADMISSION_DIAGNOSTIC_PREFIX}{conversation_id}"),
+            code
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn invalidate_carrier_only_proof(
