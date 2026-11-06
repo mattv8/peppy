@@ -139,7 +139,10 @@ mod tests {
     #[test]
     fn expiry_uses_canonical_stale_window_for_normal_timestamps() {
         let view = link_status_view(projection(RcsCapabilityState::Linked, 1_000, true));
-        assert_eq!(view.expires_at_ms, Some(1_000 + RCS_CAPABILITY_STALE_MS + 1));
+        assert_eq!(
+            view.expires_at_ms,
+            Some(1_000 + RCS_CAPABILITY_STALE_MS + 1)
+        );
         assert!(view.current);
     }
 
@@ -171,7 +174,10 @@ mod tests {
     #[test]
     fn stale_status_retains_deadline_and_is_not_current() {
         let view = link_status_view(projection(RcsCapabilityState::Linked, 1_000, false));
-        assert_eq!(view.expires_at_ms, Some(1_000 + RCS_CAPABILITY_STALE_MS + 1));
+        assert_eq!(
+            view.expires_at_ms,
+            Some(1_000 + RCS_CAPABILITY_STALE_MS + 1)
+        );
         assert!(!view.current);
     }
 
@@ -179,7 +185,10 @@ mod tests {
     fn fresh_terminal_state_is_current_with_time_expiry_separate_from_capability() {
         let view = link_status_view(projection(RcsCapabilityState::Unlinked, 1_000, true));
         assert_eq!(view.state, NativeRcsLinkState::Unlinked);
-        assert_eq!(view.expires_at_ms, Some(1_000 + RCS_CAPABILITY_STALE_MS + 1));
+        assert_eq!(
+            view.expires_at_ms,
+            Some(1_000 + RCS_CAPABILITY_STALE_MS + 1)
+        );
         assert!(view.current);
         assert!(!view.availability);
         assert!(!view.health);

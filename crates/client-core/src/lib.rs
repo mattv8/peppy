@@ -7816,7 +7816,13 @@ fn apply_record(
         other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
-        (EnvelopePurpose::Event, PrivatePayload::RcsMessageReported { message_id, rcs_reported }) => {
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::RcsMessageReported {
+                message_id,
+                rcs_reported,
+            },
+        ) => {
             rcs_receive::apply_replicated_reported(conn, message_id, rcs_reported)?;
         }
         (EnvelopePurpose::Event, PrivatePayload::RcsConversationMetadata(metadata)) => {

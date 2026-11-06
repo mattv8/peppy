@@ -108,11 +108,7 @@ impl Client {
         let mut capabilities = Self::gateway_capabilities(platform, facts);
         let store = self.lock()?;
         capabilities.rcs_supported = platform == GatewayPlatform::Android
-            && super::rcs_capability::current_gateway(
-                &store.conn,
-                store.config.device_id,
-                now_ms,
-            )?;
+            && super::rcs_capability::current_gateway(&store.conn, store.config.device_id, now_ms)?;
         Ok(capabilities)
     }
 

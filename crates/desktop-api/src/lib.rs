@@ -2,8 +2,8 @@
 //! serialized: no credentials, tokens, keys, file keys, raw paths or core records.
 use peppy_client_core::{
     AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft,
-    ConversationFolder, ConversationFolderReason, DeferredMediaStatus, Direction, Error, GatewayRoute,
-    MediaPage, MediaPageAround, Message, MessageId, MirroredNotification, SendState,
+    ConversationFolder, ConversationFolderReason, DeferredMediaStatus, Direction, Error,
+    GatewayRoute, MediaPage, MediaPageAround, Message, MessageId, MirroredNotification, SendState,
     SenderUnblockStatus, Transport,
 };
 pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Preview};
