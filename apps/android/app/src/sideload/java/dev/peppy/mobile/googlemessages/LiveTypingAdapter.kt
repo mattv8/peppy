@@ -51,22 +51,24 @@ internal class LiveTypingAdapter(
             if (outcome.generation != generation) return@synchronized null
 
             outcome.sessionUpdate?.let { update ->
-                sessions[update.peerDeviceId] = Session(update.currentSessionToken, update.validationRevision)
-                sequences.keys.removeAll { it.peerDeviceId == update.peerDeviceId }
+                val current = sessions[update.peerDeviceId]
+                if (current == null || update.validationRevision > current.revision) {
+                    sessions[update.peerDeviceId] = Session(update.currentSessionToken, update.validationRevision)
+                    sequences.keys.removeAll { it.peerDeviceId == update.peerDeviceId }
+                }
             }
 
             val action = outcome.action as? NativeLiveAction.GatewayTypingIntent ?: return@synchronized null
-            if (action.state != NativeTypingState.STARTED) return@synchronized null
             val session = sessions[action.peerDeviceId]
                 ?.takeIf { it.token == action.sessionToken }
                 ?: return@synchronized null
-            if (action.deadlineMono <= clock.nowMs()) return@synchronized null
 
             val sequenceKey = SequenceKey(action.peerDeviceId, action.conversationId, session)
             val previous = sequences[sequenceKey]
             if (previous != null && action.sequence <= previous) return@synchronized null
             sequences[sequenceKey] = action.sequence
-            AdmittedIntent(outcome.generation, sequenceKey, action.deadlineMono)
+            if (action.state != NativeTypingState.STARTED || action.deadlineMono <= clock.nowMs()) return@synchronized null
+            AdmittedIntent(outcome.generation, sequenceKey, action.sequence, action.deadlineMono)
         } ?: return
 
         callbackExecutor.execute {
@@ -76,11 +78,11 @@ internal class LiveTypingAdapter(
 
     private fun publishIfCurrent(admitted: AdmittedIntent) = synchronized(this) {
         if (generation != admitted.generation || sessions[admitted.key.peerDeviceId] != admitted.key.session) return
+        if (sequences[admitted.key] != admitted.sequence) return
 
         val now = clock.nowMs()
         if (admitted.deadlineMono <= now) return
-        val remaining = admitted.deadlineMono - now
-        if (remaining > MAX_VALIDITY_MS) return
+        val remaining = minOf(admitted.deadlineMono - now, MAX_VALIDITY_MS)
 
         effect.setTyping(
             LiveTypingEffectIntent(
@@ -102,6 +104,7 @@ internal class LiveTypingAdapter(
     private data class AdmittedIntent(
         val generation: ULong,
         val key: SequenceKey,
+        val sequence: ULong,
         val deadlineMono: ULong,
     )
 

@@ -42,6 +42,39 @@ class LiveTypingAdapterTest {
     }
 
     @Test
+    fun `rollback session update cannot revive retired authority`() {
+        val clock = FakeClock(100UL)
+        val executor = QueueExecutor()
+        val effects = mutableListOf<LiveTypingEffectIntent>()
+        val adapter = LiveTypingAdapter(clock, executor) { effects += it }
+        adapter.activate(7UL)
+        adapter.consume(outcome(7UL, update = session(token = 8UL, revision = 1UL)))
+        adapter.consume(outcome(7UL, action = intent(sequence = 102UL, deadline = 150UL)))
+        adapter.consume(outcome(7UL, update = session(token = 9UL, revision = 2UL)))
+        adapter.consume(outcome(7UL, update = session(token = 8UL, revision = 1UL)))
+        adapter.consume(outcome(7UL, action = intent(sequence = 103UL, deadline = 150UL)))
+        executor.runAll()
+
+        assertEquals(emptyList<LiveTypingEffectIntent>(), effects)
+    }
+
+    @Test
+    fun `equal session update does not clear sequence fences`() {
+        val clock = FakeClock(100UL)
+        val executor = QueueExecutor()
+        val effects = mutableListOf<LiveTypingEffectIntent>()
+        val adapter = LiveTypingAdapter(clock, executor) { effects += it }
+        adapter.activate(7UL)
+        adapter.consume(outcome(7UL, update = session()))
+        adapter.consume(outcome(7UL, action = intent(sequence = 102UL, deadline = 150UL)))
+        adapter.consume(outcome(7UL, update = session()))
+        adapter.consume(outcome(7UL, action = intent(sequence = 102UL, deadline = 150UL)))
+        executor.runAll()
+
+        assertEquals(1, effects.size)
+    }
+
+    @Test
     fun `lower or equal sequence is admitted at most once`() {
         val clock = FakeClock(100UL)
         val executor = QueueExecutor()
@@ -52,6 +85,37 @@ class LiveTypingAdapterTest {
         adapter.consume(outcome(7UL, action = intent(sequence = 2UL, deadline = 150UL)))
         adapter.consume(outcome(7UL, action = intent(sequence = 2UL, deadline = 150UL)))
         adapter.consume(outcome(7UL, action = intent(sequence = 1UL, deadline = 150UL)))
+        executor.runAll()
+
+        assertEquals(1, effects.size)
+    }
+
+    @Test
+    fun `stopped intent retires queued start without a stop effect`() {
+        val clock = FakeClock(100UL)
+        val executor = QueueExecutor()
+        val effects = mutableListOf<LiveTypingEffectIntent>()
+        val adapter = LiveTypingAdapter(clock, executor) { effects += it }
+        adapter.activate(7UL)
+        adapter.consume(outcome(7UL, update = session()))
+        adapter.consume(outcome(7UL, action = intent(sequence = 102UL, deadline = 150UL)))
+        adapter.consume(outcome(7UL, action = intent(sequence = 103UL, deadline = 150UL, state = NativeTypingState.STOPPED)))
+        executor.runAll()
+
+        assertEquals(emptyList<LiveTypingEffectIntent>(), effects)
+    }
+
+    @Test
+    fun `reverse executor order never publishes an older sequence`() {
+        val clock = FakeClock(100UL)
+        val executor = QueueExecutor()
+        val effects = mutableListOf<LiveTypingEffectIntent>()
+        val adapter = LiveTypingAdapter(clock, executor) { effects += it }
+        adapter.activate(7UL)
+        adapter.consume(outcome(7UL, update = session()))
+        adapter.consume(outcome(7UL, action = intent(sequence = 102UL, deadline = 150UL)))
+        adapter.consume(outcome(7UL, action = intent(sequence = 104UL, deadline = 150UL)))
+        executor.runLast()
         executor.runAll()
 
         assertEquals(1, effects.size)
@@ -88,6 +152,20 @@ class LiveTypingAdapterTest {
     }
 
     @Test
+    fun `fresh long core deadline is bounded to five seconds`() {
+        val clock = FakeClock(100UL)
+        val executor = QueueExecutor()
+        val effects = mutableListOf<LiveTypingEffectIntent>()
+        val adapter = LiveTypingAdapter(clock, executor) { effects += it }
+        adapter.activate(7UL)
+        adapter.consume(outcome(7UL, update = session()))
+        adapter.consume(outcome(7UL, action = intent(sequence = 1UL, deadline = 15_100UL)))
+        executor.runAll()
+
+        assertEquals(5_000UL, effects.single().remainingValidityMs)
+    }
+
+    @Test
     fun `disable retires pending callbacks without replay`() {
         val clock = FakeClock(100UL)
         val executor = QueueExecutor()
@@ -111,8 +189,13 @@ class LiveTypingAdapterTest {
     private fun session(token: ULong = 8UL, revision: ULong = 1UL) =
         NativeLiveSessionUpdate("peer", null, token, revision)
 
-    private fun intent(sequence: ULong, deadline: ULong) = NativeLiveAction.GatewayTypingIntent(
-        "peer", 8UL, sequence, "conversation", NativeTypingState.STARTED, deadline,
+    private fun intent(
+        token: ULong = 8UL,
+        sequence: ULong,
+        deadline: ULong,
+        state: NativeTypingState = NativeTypingState.STARTED,
+    ) = NativeLiveAction.GatewayTypingIntent(
+        "peer", token, sequence, "conversation", state, deadline,
     )
 
     private fun display(sequence: ULong, deadline: ULong) = NativeLiveAction.Display(
@@ -132,6 +215,10 @@ class LiveTypingAdapterTest {
 
         fun runAll() {
             while (tasks.isNotEmpty()) tasks.removeAt(0).run()
+        }
+
+        fun runLast() {
+            tasks.removeAt(tasks.lastIndex).run()
         }
     }
 }
