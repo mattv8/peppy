@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DesktopBridge } from "@peppy/desktop-ui/bridge-contracts";
 import { readShareTyping } from "../shell/layout-persistence";
 
@@ -15,9 +15,11 @@ type TypingSenderInput = {
 };
 
 export function useTypingSender(input: TypingSenderInput) {
+  const [state, setState] = useState<"idle" | "active" | "suppressed">("idle");
   const activeConversationId = useRef<string | undefined>(undefined);
   const refreshTimer = useRef<number | undefined>(undefined);
   const idleTimer = useRef<number | undefined>(undefined);
+  const lastInputAt = useRef(0);
   const inputRef = useRef(input);
   inputRef.current = input;
 
@@ -33,6 +35,7 @@ export function useTypingSender(input: TypingSenderInput) {
     if (!conversationId) return;
     activeConversationId.current = undefined;
     clearTimers();
+    setState("idle");
     void inputRef.current.bridge.send_typing?.({ conversationId, state: "stopped" }).catch(() => undefined);
   };
 
@@ -44,16 +47,23 @@ export function useTypingSender(input: TypingSenderInput) {
   const refresh = () => {
     const conversationId = activeConversationId.current;
     if (!conversationId || !canSend()) return stop();
+    if (Date.now() - lastInputAt.current >= REFRESH_MS) {
+      if (refreshTimer.current !== undefined) window.clearInterval(refreshTimer.current);
+      refreshTimer.current = undefined;
+      return;
+    }
     void inputRef.current.bridge.send_typing?.({ conversationId, state: "started" }).catch(() => undefined);
   };
 
   const noteInput = (text: string) => {
     if (!text.trim()) return stop();
-    if (!canSend()) return;
+    if (!canSend()) { setState("suppressed"); return; }
     const conversationId = inputRef.current.conversationId;
     if (!conversationId) return;
+    lastInputAt.current = Date.now();
     if (!activeConversationId.current) {
       activeConversationId.current = conversationId;
+      setState("active");
       void inputRef.current.bridge.send_typing?.({ conversationId, state: "started" }).catch(() => undefined);
       refreshTimer.current = window.setInterval(refresh, REFRESH_MS);
     }
@@ -86,5 +96,5 @@ export function useTypingSender(input: TypingSenderInput) {
     };
   }, [input.conversationId, input.current, input.existing, input.sendSupported, input.readOnly, input.bridge]);
 
-  return { noteInput, noteSend: stop, setFocused: (focused: boolean) => { if (!focused) stop(); } };
+  return { noteInput, noteSend: stop, state };
 }

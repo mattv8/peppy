@@ -1,23 +1,45 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DesktopBridge, TypingSignal } from "@peppy/desktop-ui/bridge-contracts";
 
 const MAX_DISPLAY_MS = 15_000;
+const ANNOUNCEMENT_DURATION_MS = 5_000;
+export const TYPING_ANNOUNCE_COOLDOWN_MS = 30_000;
 
-export function useTypingDisplay(bridge: DesktopBridge, conversationId: string | undefined, current: boolean) {
-  const [state, setState] = useState({ visible: false, announcement: "" });
+export function useTypingDisplay(bridge: DesktopBridge, conversationId: string | undefined, current: boolean, localUserTyping = false) {
+  const [state, setState] = useState({ visible: false, announcement: false });
+  const announcements = useRef(new Map<string, number>());
   useEffect(() => {
-    if (!current || !conversationId || !bridge.subscribe_typing) return;
-    let timeout: number | undefined;
-    const clear = () => { if (timeout) window.clearTimeout(timeout); timeout = undefined; setState({ visible: false, announcement: "" }); };
+    if (!current || !conversationId || !bridge.subscribe_typing) {
+      setState({ visible: false, announcement: false });
+      return;
+    }
+    let displayTimer: number | undefined;
+    let announcementTimer: number | undefined;
+    const clear = () => {
+      if (displayTimer !== undefined) window.clearTimeout(displayTimer);
+      if (announcementTimer !== undefined) window.clearTimeout(announcementTimer);
+      displayTimer = undefined;
+      announcementTimer = undefined;
+      setState({ visible: false, announcement: false });
+    };
     const receive = (signal: TypingSignal) => {
-      if (signal.conversationId !== conversationId || signal.state === "stopped") return clear();
-      const expires = Number(signal.expiresAtMs);
-      const deadline = Math.min(Number.isFinite(expires) ? expires : Date.now() + MAX_DISPLAY_MS, Date.now() + MAX_DISPLAY_MS);
-      setState((current) => ({ visible: true, announcement: current.visible ? "" : "start" }));
-      timeout = window.setTimeout(clear, Math.max(0, deadline - Date.now()));
+      if (signal.conversationId !== conversationId) return;
+      if (signal.state === "stopped") return clear();
+      const expiresAtMs = Number(signal.expiresAtMs);
+      const deadline = Math.min(Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + MAX_DISPLAY_MS, Date.now() + MAX_DISPLAY_MS);
+      if (deadline <= Date.now()) return clear();
+      if (displayTimer !== undefined) window.clearTimeout(displayTimer);
+      const announce = !localUserTyping && (announcements.current.get(conversationId) ?? 0) + TYPING_ANNOUNCE_COOLDOWN_MS <= Date.now();
+      if (announce) announcements.current.set(conversationId, Date.now());
+      setState(previous => ({ visible: true, announcement: previous.announcement || announce }));
+      if (announce) {
+        if (announcementTimer !== undefined) window.clearTimeout(announcementTimer);
+        announcementTimer = window.setTimeout(() => setState(previous => ({ ...previous, announcement: false })), ANNOUNCEMENT_DURATION_MS);
+      }
+      displayTimer = window.setTimeout(clear, deadline - Date.now());
     };
     const unsubscribe = bridge.subscribe_typing(receive);
     return () => { clear(); unsubscribe(); };
-  }, [bridge, conversationId, current]);
+  }, [bridge, conversationId, current, localUserTyping]);
   return state;
 }

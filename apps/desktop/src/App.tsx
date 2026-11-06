@@ -1708,6 +1708,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
   const [shareTyping, setShareTyping] = useState(readShareTyping);
   const [typingShareError, setTypingShareError] = useState(false);
+  const typingShareRequest = useRef(0);
   useEffect(() => {
     void bridge.set_typing_sharing?.({ enabled: shareTyping }).catch(() => undefined);
   }, []);
@@ -2060,6 +2061,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const changeTypingShare = (enabled: boolean) => {
     const previous = shareTyping;
+    const request = ++typingShareRequest.current;
     setShareTyping(enabled);
     setTypingShareError(false);
     if (!persistLayout({ shareTyping: enabled })) {
@@ -2068,10 +2070,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       return;
     }
     void bridge.set_typing_sharing?.({ enabled }).catch(() => {
+      if (request !== typingShareRequest.current) return;
       persistLayout({ shareTyping: previous });
       setShareTyping(previous);
       setTypingShareError(true);
     });
+    if (!enabled) typingSender.noteSend();
   };
   const changeGroupSenderAvatars = (enabled: boolean) => {
     setGroupSenderAvatars(enabled);
@@ -3309,7 +3313,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     gatewayId: route.kind === "route" ? route.gateway.id : undefined,
     locked: Boolean(appLock?.locked),
   });
-  const typing = useTypingDisplay(bridge, active?.id, rcsRoute.current);
+  const typing = useTypingDisplay(bridge, active?.id, rcsRoute.current, Boolean(content.text.trim()));
   const typingSender = useTypingSender({
     bridge,
     conversationId: active?.id,
@@ -4465,7 +4469,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         attachments={attachments}
         sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending}
         hideSmsCounter={rcsRoute.current}
-        typingSlot={<><TypingIndicator visible={typing.visible} label={peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? peppyCopy.typing_announce_direct : ""} /></>}
+        typingSlot={<><TypingIndicator visible={typing.visible} scope={(active?.participants?.length ?? 0) > 1 ? "group" : "direct"} label={(active?.participants?.length ?? 0) > 1 ? peppyCopy.typing_indicator_group : peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? peppyCopy.typing_announce_direct : ""} /></>}
+        typingSendState={typingSender.state}
         unavailableReason={sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly}
         placeholder={composerReadOnly ? "Loading draft…" : undefined}

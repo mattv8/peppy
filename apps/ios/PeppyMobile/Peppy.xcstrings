@@ -2611,6 +2611,16 @@
         }
       }
     },
+    "peppy.setting_update_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not update this setting. Try again."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_phone_read_access_denied": {
       "localizations": {
         "en": {

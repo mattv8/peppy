@@ -261,6 +261,7 @@ export const catalog = Object.freeze({
   toggle_android_phone_read_sms_read_paused: "Paused: SMS read access is needed.",
   toggle_android_phone_read_saving: "Saving…",
   toggle_android_phone_read_error: "Could not update this setting. Try again.",
+  setting_update_error: "Could not update this setting. Try again.",
   toggle_android_phone_read_access_denied: "Notification access was not allowed. Phone reads still sync to Peppy.",
   toggle_android_phone_read_open_access: "Open notification access",
   toggle_android_phone_read_consent_title: "Sync read status with your phone?",

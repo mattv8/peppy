@@ -62,18 +62,20 @@ describe("useTypingSender", () => {
     const { result, sendTyping } = renderSender();
 
     act(() => result.current.noteInput("message"));
-    act(() => vi.advanceTimersByTime(3_200));
+    act(() => vi.advanceTimersByTime(3_000));
+    act(() => result.current.noteInput("message"));
+    act(() => vi.advanceTimersByTime(200));
     expect(sendTyping).toHaveBeenNthCalledWith(2, { conversationId: "conversation-1", state: "started" });
 
-    act(() => vi.advanceTimersByTime(2_800));
+    act(() => vi.advanceTimersByTime(6_000));
     expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
   });
 
-  it.each(["noteSend", "setFocused"] as const)("stops once on %s", (method) => {
+  it("stops once when sending", () => {
     const { result, sendTyping } = renderSender();
     act(() => result.current.noteInput("message"));
-    act(() => method === "noteSend" ? result.current.noteSend() : result.current.setFocused(false));
-    act(() => method === "noteSend" ? result.current.noteSend() : result.current.setFocused(false));
+    act(() => result.current.noteSend());
+    act(() => result.current.noteSend());
     expect(sendTyping).toHaveBeenCalledTimes(2);
     expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
   });

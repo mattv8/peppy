@@ -1303,6 +1303,7 @@ export function Composer({
   maxAutoGrowHeight = 176,
   hideSmsCounter = false,
   typingSlot,
+  typingSendState = "idle",
   platform,
 }: {
   draft: string;
@@ -1327,6 +1328,7 @@ export function Composer({
   maxAutoGrowHeight?: number;
   hideSmsCounter?: boolean;
   typingSlot?: ReactNode;
+  typingSendState?: "idle" | "active" | "suppressed";
   platform?: "macos" | "windows" | "linux";
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1365,6 +1367,7 @@ export function Composer({
       id="shared-composer"
       className="composer"
       aria-label="Message composer"
+      data-typing-send={typingSendState}
     >
       <div id="composer-field">
         <div id="composer-banner-row" hidden={!bannerSlot}>
