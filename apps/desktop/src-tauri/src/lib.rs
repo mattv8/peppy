@@ -681,13 +681,13 @@ impl AppState {
         true
     }
 
-    async fn close_session_preserving_heads(&self, preserve_heads: bool) {
+    async fn close_session_preserving_heads(&self, preserve_heads: bool) -> bool {
         let _opening = self.session_open_lock.lock().await;
-        let _ = self.retire_session_preserving_heads(preserve_heads).await;
+        self.retire_session_preserving_heads(preserve_heads).await
     }
 
     async fn close_session(&self) {
-        self.close_session_preserving_heads(false).await;
+        let _ = self.close_session_preserving_heads(false).await;
     }
 
     /// The session for the active binding, opened on demand. A session for any other binding is
@@ -740,6 +740,12 @@ impl AppState {
         let retiring = {
             let mut current = self.session.lock().await;
             if let Some(existing) = current.as_ref() {
+                if existing.binding == binding && existing.is_revoked() {
+                    return Err(BridgeError::new(
+                        "revoked",
+                        "This device credential has been revoked.",
+                    ));
+                }
                 if existing.binding == binding && !existing.cancel.is_cancelled() {
                     return Ok(Some(existing.clone()));
                 }
@@ -967,6 +973,58 @@ fn locked_snapshot(checking: bool, storage_available: bool) -> Snapshot {
     snapshot
 }
 
+fn revoked_snapshot(origin: Option<String>) -> Snapshot {
+    let mut snapshot = empty_snapshot(origin);
+    snapshot.connection.state = "error";
+    snapshot.connection.error_code = Some("revoked");
+    snapshot
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SnapshotFinalization {
+    Locked,
+    Revoked,
+    Empty,
+    Publish,
+}
+
+async fn finalize_snapshot(
+    state: &AppState,
+    session: &Arc<Session>,
+) -> BridgeResult<SnapshotFinalization> {
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(SnapshotFinalization::Locked);
+    }
+    let current = state.session.lock().await;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(SnapshotFinalization::Locked);
+    }
+    let _config = state
+        .config_lock
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    let active_binding = load_config(&state.config_path)?.active_binding().cloned();
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(SnapshotFinalization::Locked);
+    }
+    let installed = current
+        .as_ref()
+        .is_some_and(|installed| Arc::ptr_eq(installed, session));
+    let cancelled = session.cancel.is_cancelled();
+    let status = session
+        .status
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if installed && active_binding.as_ref() == Some(&session.binding) && status.revoked {
+        return Ok(SnapshotFinalization::Revoked);
+    }
+    if installed && active_binding.as_ref() == Some(&session.binding) && !cancelled {
+        Ok(SnapshotFinalization::Publish)
+    } else {
+        Ok(SnapshotFinalization::Empty)
+    }
+}
+
 struct LoadStateOptions {
     conversation_id: Option<String>,
     history_from_message_id: Option<String>,
@@ -1067,8 +1125,11 @@ async fn load_state(
         ));
     }
     let origin = state.config()?.origin;
-    let Some(session) = state.session_admitted(&operation).await? else {
-        return Ok(empty_snapshot(origin));
+    let session = match state.session_admitted(&operation).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return Ok(empty_snapshot(origin)),
+        Err(error) if error.code == "revoked" => return Ok(revoked_snapshot(origin)),
+        Err(error) => return Err(error),
     };
     session.consume_deferred_follow_up();
     let preferences = {
@@ -1083,20 +1144,22 @@ async fn load_state(
         LoadStateOptions {
             conversation_id,
             history_from_message_id,
-            origin,
+            origin: origin.clone(),
             preferences,
             metadata_only: metadata_only.unwrap_or(false),
         },
     )
     .await?;
-    if state.app_locked.load(Ordering::Acquire) {
-        return Ok(locked_snapshot(
-            state.app_lock_checking.load(Ordering::Acquire),
-            state.app_lock_storage_available.load(Ordering::Acquire),
-        ));
-    }
-    if !session_is_current(&state, &session).await {
-        return Ok(empty_snapshot(state.config()?.origin));
+    match finalize_snapshot(&state, &session).await? {
+        SnapshotFinalization::Locked => {
+            return Ok(locked_snapshot(
+                state.app_lock_checking.load(Ordering::Acquire),
+                state.app_lock_storage_available.load(Ordering::Acquire),
+            ));
+        }
+        SnapshotFinalization::Revoked => return Ok(revoked_snapshot(origin)),
+        SnapshotFinalization::Empty => return Ok(empty_snapshot(state.config()?.origin)),
+        SnapshotFinalization::Publish => {}
     }
     let (pinned_conversation_ids, panel) = heads_runtime::snapshot(&app, window.label());
     snapshot.head.pinned_conversation_ids = Some(pinned_conversation_ids);
@@ -1691,14 +1754,21 @@ async fn activate_import_locked(
         config.remember(&binding);
         config.active = Some(binding.clone());
     })?;
-    state.close_session_preserving_heads(preserve_heads).await;
-    let open_session = match operation {
-        Some(operation) => {
-            state
-                .session_admitted_for_computer(operation, computer_attempt)
-                .await
+    let closed = state.close_session_preserving_heads(preserve_heads).await;
+    let open_session = if !closed {
+        Err(BridgeError::new(
+            "session-draining",
+            "Peppy is still finishing the previous account session.",
+        ))
+    } else {
+        match operation {
+            Some(operation) => {
+                state
+                    .session_admitted_for_computer(operation, computer_attempt)
+                    .await
+            }
+            None => state.session().await,
         }
-        None => state.session().await,
     };
     if let Err(error) = open_session {
         let rollback = previous.clone();

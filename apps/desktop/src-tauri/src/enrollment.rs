@@ -331,8 +331,13 @@ async fn gateway_presence(state: &AppState, origin: &str) -> BridgeResult<Option
     {
         return Ok(None);
     }
-    let Some(session) = state.session().await? else {
-        return Ok(None);
+    let session = match state.session().await {
+        Ok(Some(session)) => session,
+        Ok(None)
+        | Err(BridgeError {
+            code: "revoked", ..
+        }) => return Ok(None),
+        Err(error) => return Err(error),
     };
     if session.binding.origin != origin {
         return Ok(None);
@@ -1307,8 +1312,7 @@ pub async fn enrollment_discover(
     }
     let discovery_epoch = cancel_owner_operation(&state.enrollment)?;
     let response = fetch_instance(selected.clone()).await?;
-    let saved_identity = saved_identity_for_origin(&state, &selected)?;
-    let existing = existing_identity(&state, &selected).await?;
+    let (saved_identity, existing, has_gateway) = discovery_identity(&state, &selected).await?;
     let existing_role = existing.as_ref().map(ExistingIdentity::role);
     let hosted_account_session = response.mode == DeploymentMode::Hosted
         && existing_role.is_none()
@@ -1346,7 +1350,6 @@ pub async fn enrollment_discover(
             }
         }
     }
-    let has_gateway = gateway_presence(&state, &selected).await?;
     let can_resume_pending = can_restore_owner_checkpoint(response.mode, existing.is_some());
     let pending_owner = if can_resume_pending {
         restore_pending_owner(&*state.store, &selected)?
@@ -1407,6 +1410,16 @@ pub async fn enrollment_discover(
     );
     controller.hosted_account_session = hosted_account_session;
     Ok(controller.view())
+}
+
+async fn discovery_identity(
+    state: &AppState,
+    selected: &str,
+) -> BridgeResult<(bool, Option<ExistingIdentity>, Option<bool>)> {
+    let saved_identity = saved_identity_for_origin(state, selected)?;
+    let existing = existing_identity(state, selected).await?;
+    let has_gateway = gateway_presence(state, selected).await?;
+    Ok((saved_identity, existing, has_gateway))
 }
 
 #[tauri::command]
@@ -1477,8 +1490,13 @@ async fn existing_identity(
     {
         return Ok(None);
     }
-    let Some(session) = state.session().await? else {
-        return Ok(None);
+    let session = match state.session().await {
+        Ok(Some(session)) => session,
+        Ok(None)
+        | Err(BridgeError {
+            code: "revoked", ..
+        }) => return Ok(None),
+        Err(error) => return Err(error),
     };
     let role = session
         .status
@@ -7235,6 +7253,34 @@ mod owner_retry_tests {
 
         let error = gateway_presence(&state, ORIGIN).await.err().unwrap();
         assert_eq!(error.code, "secure-store-unavailable");
+    }
+
+    #[tokio::test]
+    async fn discovery_identity_treats_an_installed_revoked_binding_as_absent() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::default());
+        let binding = active_binding();
+        crate::credentials::store_credential(
+            &*store,
+            &crate::credentials::ImportedCredential {
+                version: 1,
+                origin: binding.origin.clone(),
+                vault_id: binding.vault_id.clone(),
+                device_id: binding.device_id.clone(),
+                device_token: crate::credentials::tests::TOKEN.into(),
+            },
+        )
+        .unwrap();
+        let state = state_with_active_binding(&root, store, &binding);
+        let session = state.session().await.unwrap().unwrap();
+        session.set_status(|status| status.revoked = true);
+        session.cancel.cancel();
+
+        let (saved, existing, gateway) = discovery_identity(&state, ORIGIN).await.unwrap();
+
+        assert!(saved);
+        assert!(existing.is_none());
+        assert_eq!(gateway, None);
     }
 
     #[test]
