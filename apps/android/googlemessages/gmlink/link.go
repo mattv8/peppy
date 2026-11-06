@@ -63,15 +63,19 @@ type Link struct {
 	stateRevision       uint64
 	pendingCompletion   *terminalCompletion
 	completionWG        sync.WaitGroup
-	authCaptureRevision atomic.Uint64
+	authCaptureMu       sync.Mutex
+	authCaptureRevision uint64
 	authPersistRevision uint64
+	authSnapshot        func(*libgm.AuthData) (*libgm.AuthData, error)
 
-	outputMu     sync.Mutex
-	outputCond   *sync.Cond
-	outputQueue  []hostOutput
-	outputClosed bool
-	outputActive int
-	closeReady   bool
+	outputMu              sync.Mutex
+	outputCond            *sync.Cond
+	outputQueue           []hostOutput
+	outputClosed          bool
+	outputActive          int
+	closeReady            bool
+	outputStart           func(hostOutput)
+	completionOutputReady func()
 
 	changes            chan any
 	conversationEvents []conversationEvent
@@ -245,27 +249,33 @@ func (link *Link) Relink() error {
 // before any pairing request is sent.
 func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (err error) {
 	for {
+		link.outputMu.Lock()
 		link.mu.Lock()
 		pending := link.pendingCompletion
 		if pending == nil {
 			break
 		}
 		link.mu.Unlock()
+		link.outputMu.Unlock()
 		<-pending.done
 	}
 	previous := link.state
 	if link.closed {
 		link.mu.Unlock()
+		link.outputMu.Unlock()
 		return errLinkClosed
 	}
 	if link.unlinking {
 		link.mu.Unlock()
+		link.outputMu.Unlock()
 		return errors.New("unlink_in_progress")
 	}
 	if (!relink && previous != stateUnlinked && previous != stateSignedOut) || (relink && previous != stateNeedsRelink) {
 		link.mu.Unlock()
+		link.outputMu.Unlock()
 		return errors.New("pair_refused")
 	}
+	link.stateRevision++
 	link.revokeLocked()
 	owner := link.generation
 	link.state, link.pairingFrom, link.stopCode = statePairing, previous, ""
@@ -273,6 +283,7 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 	done := make(chan struct{})
 	link.pairCancel, link.pairDone, link.pairOwner = cancel, done, owner
 	link.mu.Unlock()
+	link.outputMu.Unlock()
 	completed := false
 	defer func() {
 		cancel()
@@ -790,8 +801,7 @@ func (link *Link) newRuntimeClient(auth *libgm.AuthData, generation uint64) *lib
 	client := libgm.NewClient(auth, nil, zerolog.Nop(), newGuardedSettings(auth, persist, stop))
 	client.SetEventHandler(func(event any) {
 		if _, ok := event.(*events.AuthTokenRefreshed); ok {
-			revision := link.authCaptureRevision.Add(1)
-			snapshot, err := cloneAuthData(auth)
+			revision, snapshot, err := link.captureRuntimeAuth(auth)
 			go func() {
 				if err == nil {
 					err = link.persistRuntimeAuthSnapshot(generation, revision, snapshot)
@@ -814,9 +824,21 @@ func cloneAuthData(auth *libgm.AuthData) (*libgm.AuthData, error) {
 	return auth.Snapshot()
 }
 
+func (link *Link) captureRuntimeAuth(candidate *libgm.AuthData) (uint64, *libgm.AuthData, error) {
+	link.authCaptureMu.Lock()
+	defer link.authCaptureMu.Unlock()
+	link.authCaptureRevision++
+	revision := link.authCaptureRevision
+	snapshot := link.authSnapshot
+	if snapshot == nil {
+		snapshot = cloneAuthData
+	}
+	captured, err := snapshot(candidate)
+	return revision, captured, err
+}
+
 func (link *Link) persistRuntimeAuth(generation uint64, candidate *libgm.AuthData) error {
-	revision := link.authCaptureRevision.Add(1)
-	snapshot, err := cloneAuthData(candidate)
+	revision, snapshot, err := link.captureRuntimeAuth(candidate)
 	if err != nil {
 		return errPersistFailed
 	}
@@ -1129,6 +1151,9 @@ func (link *Link) completeTerminal(completion *terminalCompletion) {
 	link.mu.Unlock()
 	close(completion.done)
 	link.completionWG.Done()
+	if current && err == nil && link.completionOutputReady != nil {
+		link.completionOutputReady()
+	}
 	if current && err == nil {
 		link.enqueueOutput(hostOutput{kind: completion.kind, code: completion.code, revision: completion.revision, requireRevision: true})
 	}
@@ -1513,8 +1538,10 @@ func (link *Link) consumeOutputs() {
 			continue
 		}
 		link.outputActive++
+		started := make(chan struct{})
+		go link.deliverOutput(output, started)
+		<-started
 		link.outputMu.Unlock()
-		go link.deliverOutput(output)
 	}
 }
 
@@ -1545,7 +1572,11 @@ func (link *Link) deliverUnmanagedOutput(output hostOutput) {
 	}
 }
 
-func (link *Link) deliverOutput(output hostOutput) {
+func (link *Link) deliverOutput(output hostOutput, started chan<- struct{}) {
+	if link.outputStart != nil {
+		link.outputStart(output)
+	}
+	close(started)
 	if output.emoji != "" {
 		link.host.ShowEmoji(output.emoji)
 	} else {
