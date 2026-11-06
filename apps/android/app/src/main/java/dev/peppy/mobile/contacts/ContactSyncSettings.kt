@@ -5,16 +5,18 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -28,29 +30,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.GatewayScheduler
 import dev.peppy.mobile.R
-import dev.peppy.mobile.Section
-import dev.peppy.mobile.StatusRow
 import dev.peppy.mobile.enrollment.ConsentEffect
 import dev.peppy.mobile.enrollment.ConsentGatedToggle
 import dev.peppy.mobile.enrollment.ConsentPhase
 import dev.peppy.mobile.enrollment.ConsentTransition
-import dev.peppy.mobile.granted
 import dev.peppy.mobile.ui.ConsentSheet
+import dev.peppy.mobile.ui.DetailsNavigationRow
 import dev.peppy.mobile.ui.HeroBanner
 import dev.peppy.mobile.ui.ScreenBody
 import dev.peppy.mobile.ui.SettingToggleRow
+import dev.peppy.mobile.ui.theme.PeppyTokens
+import androidx.compose.foundation.isSystemInDarkTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Contacts policy is durable only after explicit in-app consent and a successful readback. */
 @Composable
-internal fun ContactSyncSettings(context: Context, refresh: Int, onChanged: () -> Unit) {
+internal fun ContactSyncSettings(context: Context, refresh: Int, onChanged: () -> Unit, onDetailsChanged: (Boolean) -> Unit = {}) {
     val scope = rememberCoroutineScope()
     var reload by remember { mutableIntStateOf(0) }
     var busy by remember { mutableStateOf(false) }
@@ -60,7 +61,7 @@ internal fun ContactSyncSettings(context: Context, refresh: Int, onChanged: () -
     var selectedRemoteEdits by remember { mutableStateOf<String?>(null) }
     var readSettingsPending by remember { mutableStateOf(false) }
     var writeSettingsPending by remember { mutableStateOf(false) }
-    var detailsExpanded by remember { mutableStateOf(false) }
+    var detailsOpen by remember { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
     val state by produceState<ContactSettingsState?>(null, refresh, reload) {
         value = withContext(Dispatchers.IO) { runCatching { ContactSyncHost.settingsState(context) }.getOrNull() }
@@ -120,12 +121,32 @@ internal fun ContactSyncSettings(context: Context, refresh: Int, onChanged: () -
             }
         }
     }
-    fun act(block: () -> Unit) {
+    fun act(block: () -> Boolean) {
         busy = true
         scope.launch {
-            withContext(Dispatchers.IO) { runCatching(block) }
-            reloadAfterAction()
+            try {
+                if (!withContext(Dispatchers.IO) { block() }) {
+                    actionError = "Couldn't save this change. Try again."
+                }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (_: Exception) {
+                actionError = "Couldn't save this change. Try again."
+            } finally {
+                reloadAfterAction()
+            }
         }
+    }
+    fun selectRemoteEdits(mode: String) {
+        selectedRemoteEdits = mode
+        if (mode == "off") {
+            writeConsent = writeConsent.cancel()
+            writeSettingsPending = false
+            applyRemoteEdits()
+        } else if (writeConsent.phase != ConsentPhase.IDLE || writeSettingsPending) {
+            selectedRemoteEdits = null
+        } else if (ContactSyncHost.access(context).write) applyRemoteEdits()
+        else writeConsent = writeConsent.requestEnable()
     }
     fun consumeReadResult(granted: Boolean) {
         ContactSyncHost.onPermissionOrForeground(context)
@@ -181,16 +202,35 @@ internal fun ContactSyncSettings(context: Context, refresh: Int, onChanged: () -
             writeSettingsPending = false
         }
     }
+    DisposableEffect(detailsOpen) {
+        onDetailsChanged(detailsOpen)
+        onDispose { onDetailsChanged(false) }
+    }
 
     val current = state
     Column(Modifier.testTag("contacts-tab-screen")) {
-        HeroBanner(
+        if (!detailsOpen || current == null) HeroBanner(
             title = stringResource(R.string.peppy_toggle_android_contacts_hero_title),
             body = stringResource(R.string.peppy_toggle_android_contacts_hero_body),
             tag = "contacts-hero",
         )
-        ScreenBody("contacts-screen-body") {
-        Section("contacts-section", "Contact sync", showDivider = false) {
+        ScreenBody(if (detailsOpen && current != null) "contacts-details-screen" else "contacts-screen-body") {
+        if (detailsOpen && current != null) {
+            ContactSyncDetailsContent(
+                current = current,
+                busy = busy,
+                readSettingsPending = readSettingsPending,
+                writeSettingsPending = writeSettingsPending || writeConsent.phase != ConsentPhase.IDLE,
+                onBack = { detailsOpen = false },
+                onOpenReadSettings = { openSettings { readSettingsLauncher.launch(it) } },
+                onOpenWriteSettings = { openSettings { writeSettingsLauncher.launch(it) } },
+                onSelectRemoteEdits = ::selectRemoteEdits,
+                onSelectAccount = { id -> act { ContactSyncHost.withCoordinator(context) { it.setDefaultAccount(id) } } },
+                onDecide = { item, approve -> act { ContactSyncHost.withCoordinator(context) { it.decide(item, approve = approve) } } },
+                onResolveUnknown = { item -> act { ContactSyncHost.withCoordinator(context) { it.resolveUnknown(item.id) } } },
+                actionError = actionError,
+            )
+        } else Column(Modifier.fillMaxWidth().testTag("contacts-section"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             val enabled = current?.enabled == true
             SettingToggleRow(
                 title = stringResource(R.string.peppy_toggle_android_contacts_label),
@@ -202,42 +242,45 @@ internal fun ContactSyncSettings(context: Context, refresh: Int, onChanged: () -
                 tag = "contact-sync-row",
                 subtitle = when {
                     current == null -> null
+                    enabled && current.readGranted && current.overview?.lastFullScanAt != null -> stringResource(
+                        R.string.peppy_toggle_android_contacts_on_last_checked,
+                        current.overview.lastFullScanAt.let { android.text.format.DateUtils.getRelativeTimeSpanString(it).toString() },
+                    )
                     enabled && !current.readGranted -> stringResource(R.string.peppy_toggle_android_contacts_paused_hint)
                     !current.readGranted -> "Contacts access is needed to sync."
                     else -> null
                 },
             )
             if (current != null) ContactStatus(current)
+            current?.overview?.pending?.takeIf { it.isNotEmpty() }?.let { pending ->
+                val colors = if (isSystemInDarkTheme()) PeppyTokens.Dark else PeppyTokens.Light
+                Surface(
+                    Modifier.fillMaxWidth().testTag("contact-pending-summary"),
+                    shape = RoundedCornerShape(12.dp),
+                    color = colors.warningSurface,
+                    contentColor = colors.warningText,
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            if (pending.size == 1) stringResource(R.string.peppy_toggle_android_contacts_pending_summary_one)
+                            else stringResource(R.string.peppy_toggle_android_contacts_pending_summary_many, pending.size),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        OutlinedButton({ detailsOpen = true }, Modifier.heightIn(min = 48.dp).testTag("contact-pending-review")) {
+                            Text(stringResource(R.string.peppy_toggle_android_contacts_review))
+                        }
+                    }
+                }
+            }
             if (retireConfirm) ContactRetireConfirmation(
                 busy = busy,
                 onCancel = { retireConfirm = false },
-                onConfirm = { retireConfirm = false; act { ContactSyncHost.stopAndRetire(context) } },
+                onConfirm = { retireConfirm = false; act { ContactSyncHost.stopAndRetire(context); true } },
             )
             actionError?.let { Text(it, Modifier.testTag("contact-action-error"), style = MaterialTheme.typography.bodySmall) }
-            OutlinedButton({ detailsExpanded = !detailsExpanded }, Modifier.testTag("contact-details-row"), enabled = current != null && !busy) {
-                Text(stringResource(if (detailsExpanded) R.string.peppy_toggle_android_contacts_hide_details else R.string.peppy_toggle_android_contacts_details))
+            DetailsNavigationRow("contact-details-row", stringResource(R.string.peppy_toggle_android_contacts_details), null) {
+                if (current != null && !busy) detailsOpen = true
             }
-            if (current != null && detailsExpanded) ContactDetails(
-                current = current,
-                busy = busy,
-                readSettingsPending = readSettingsPending,
-                writeSettingsPending = writeSettingsPending || writeConsent.phase != ConsentPhase.IDLE,
-                onOpenReadSettings = { openSettings { readSettingsLauncher.launch(it) } },
-                onOpenWriteSettings = { openSettings { writeSettingsLauncher.launch(it) } },
-                onSelectRemoteEdits = { mode ->
-                    selectedRemoteEdits = mode
-                    if (mode == "off") {
-                        writeConsent = writeConsent.cancel()
-                        writeSettingsPending = false
-                        applyRemoteEdits()
-                    } else if (writeConsent.phase != ConsentPhase.IDLE || writeSettingsPending) {
-                        selectedRemoteEdits = null
-                    } else if (ContactSyncHost.access(context).write) applyRemoteEdits()
-                    else writeConsent = writeConsent.requestEnable()
-                },
-                act = ::act,
-                context = context,
-            )
         }
         }
     }
@@ -303,81 +346,6 @@ private fun ContactRetireConfirmation(busy: Boolean, onCancel: () -> Unit, onCon
 }
 
 @Composable
-private fun ContactDetails(
-    current: ContactSettingsState,
-    busy: Boolean,
-    readSettingsPending: Boolean,
-    writeSettingsPending: Boolean,
-    onOpenReadSettings: () -> Unit,
-    onOpenWriteSettings: () -> Unit,
-    onSelectRemoteEdits: (String) -> Unit,
-    act: (() -> Unit) -> Unit,
-    context: Context,
-) {
-    StatusRow(
-        "contact-access-status",
-        "Contacts access",
-        when {
-            current.readGranted && current.writeGranted -> stringResource(R.string.peppy_contacts_access_read_write)
-            current.readGranted -> stringResource(R.string.peppy_contacts_access_read_only)
-            else -> stringResource(R.string.peppy_contacts_access_not_allowed)
-        },
-    )
-    if (!current.readGranted) {
-        Text(stringResource(R.string.peppy_contacts_access_denied), Modifier.testTag("contact-denied-status"), style = MaterialTheme.typography.bodySmall)
-        if (readSettingsPending) OutlinedButton(onOpenReadSettings, Modifier.testTag("contact-open-settings-button"), enabled = !busy) { Text(stringResource(R.string.peppy_contacts_open_settings)) }
-    }
-    if (!current.writeGranted) Text(
-        stringResource(R.string.peppy_contacts_allow_edits_footer),
-        Modifier.testTag("contact-allow-edits-footer"),
-        style = MaterialTheme.typography.bodySmall,
-    )
-    val overview = current.overview ?: return
-    overview.contactCount?.let { StatusRow("contact-sync-count", stringResource(R.string.peppy_contacts_read_label), it.toString()) }
-    val writable = overview.accounts.filter { it.writable }
-    if (writable.isNotEmpty()) {
-        Text("Save new contacts to", style = MaterialTheme.typography.labelMedium)
-        Column(Modifier.testTag("contact-account-list"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            writable.forEach { account ->
-                val selected = overview.defaultAccountId == account.id
-                OutlinedButton(
-                    { act { ContactSyncHost.withCoordinator(context) { it.setDefaultAccount(account.id) } } },
-                    Modifier.semantics { this.selected = selected }.testTag("contact-account-${account.id}"),
-                    enabled = !busy,
-                ) { Text((if (selected) "✓ " else "") + account.name) }
-            }
-        }
-    }
-    Text(stringResource(R.string.peppy_toggle_android_contacts_edits_label), Modifier.testTag("remote-edits-row"), style = MaterialTheme.typography.labelMedium)
-    if (writeSettingsPending && !current.writeGranted) {
-        OutlinedButton(onOpenWriteSettings, Modifier.testTag("contact-write-open-settings-button"), enabled = !busy) {
-            Text(stringResource(R.string.peppy_contacts_open_settings))
-        }
-    }
-    Text(
-        when (overview.remoteEdits) {
-            "auto" -> stringResource(R.string.peppy_toggle_android_contacts_auto_policy)
-            "off" -> stringResource(R.string.peppy_toggle_android_contacts_off_policy)
-            else -> stringResource(R.string.peppy_toggle_android_contacts_confirm_policy)
-        },
-        style = MaterialTheme.typography.bodySmall,
-        modifier = Modifier.testTag("remote-edits-policy-description"),
-    )
-    Column(Modifier.testTag("remote-edits-policy"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        listOf("off" to stringResource(R.string.peppy_toggle_android_contacts_off_label), "confirm" to stringResource(R.string.peppy_toggle_android_contacts_confirm_label), "auto" to stringResource(R.string.peppy_toggle_android_contacts_auto_label)).forEach { (mode, label) ->
-            OutlinedButton(
-                { onSelectRemoteEdits(mode) },
-                Modifier.semantics { selected = overview.remoteEdits == mode }.testTag("remote-edits-$mode"),
-                enabled = !busy && !writeSettingsPending,
-            ) { Text((if (overview.remoteEdits == mode) "✓ " else "") + label) }
-        }
-    }
-    if (overview.pending.isNotEmpty()) Column(Modifier.testTag("contact-pending-list"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        overview.pending.forEach { PendingRow(it, busy, context, act) }
-    }
-}
-
-@Composable
 private fun ContactStatus(current: ContactSettingsState) {
     when {
         current.retirePending -> Text("Retirement will be published the next time the vault is unlocked.", Modifier.testTag("contact-retire-pending"), style = MaterialTheme.typography.bodySmall)
@@ -390,32 +358,5 @@ private fun ContactStatus(current: ContactSettingsState) {
     }
     current.overview?.let { overview ->
         if (overview.bookId == null && current.enabled) Text("Waiting for the first contact scan.", Modifier.testTag("contact-sync-status"), style = MaterialTheme.typography.bodySmall)
-        else if (overview.bookId != null) StatusRow("contact-sync-status", "Last full scan", overview.lastFullScanAt?.let { DateUtils.getRelativeTimeSpanString(it).toString() } ?: "Not yet")
-        if (overview.pending.isNotEmpty()) Text(
-            if (overview.pending.size == 1) stringResource(R.string.peppy_toggle_android_contacts_pending_summary_one)
-            else stringResource(R.string.peppy_toggle_android_contacts_pending_summary_many, overview.pending.size),
-            Modifier.testTag("contact-pending-summary"),
-            style = MaterialTheme.typography.bodySmall,
-        )
-    }
-}
-
-@Composable
-private fun PendingRow(item: ContactPendingItem, busy: Boolean, context: Context, act: (() -> Unit) -> Unit) {
-    val tag = if (item.isHold) "contact-hold-${item.id}" else "contact-request-${item.id}"
-    Column(Modifier.fillMaxWidth().testTag(tag), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        val description = when {
-            item.isHold -> "${item.count ?: 0} contacts disappeared from this phone. Remove them from your other devices?"
-            item.state == "outcome_unknown" -> "This phone could not confirm a desktop ${item.kind} of ${item.displayName ?: "a contact"}. Check the contact, then dismiss."
-            else -> "Desktop ${item.kind}: ${item.displayName ?: "contact"}" + item.fieldPaths.takeIf { it.isNotEmpty() }?.let { " (${it.joinToString()})" }.orEmpty()
-        }
-        Text(description, style = MaterialTheme.typography.bodySmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (item.state == "outcome_unknown") OutlinedButton({ act { ContactSyncHost.withCoordinator(context) { it.resolveUnknown(item.id) } } }, Modifier.testTag("$tag-resolve"), enabled = !busy) { Text("Dismiss") }
-            else if (item.isHold || item.state in setOf("requested", "awaiting_approval")) {
-                Button({ act { ContactSyncHost.withCoordinator(context) { it.decide(item, approve = true) } } }, Modifier.testTag("$tag-approve"), enabled = !busy) { Text("Approve") }
-                OutlinedButton({ act { ContactSyncHost.withCoordinator(context) { it.decide(item, approve = false) } } }, Modifier.testTag("$tag-reject"), enabled = !busy) { Text("Reject") }
-            }
-        }
     }
 }

@@ -28,6 +28,12 @@ class AccountAccessPolicyTest {
         assertEquals(RibbonSlot.ServerOffline, resolveRibbonSlot(serverOffline = true, notice = warning, snoozedKeys = emptySet(), nowMs = now))
     }
 
+    @Test fun syncStoppedPreemptsEveryOtherRibbonState() {
+        assertEquals(RibbonSlot.SyncStopped, resolveRibbonSlot(serverOffline = true, notice = null, snoozedKeys = emptySet(), nowMs = now, syncStopped = true))
+        assertEquals(RibbonSlot.SyncStopped, resolveRibbonSlot(serverOffline = false, notice = notice(), snoozedKeys = emptySet(), nowMs = now, syncStopped = true))
+        assertEquals(RibbonSlot.SyncStopped, resolveRibbonSlot(serverOffline = false, notice = warning, snoozedKeys = emptySet(), nowMs = now, syncStopped = true))
+    }
+
     @Test fun readOnlyErrorBeatsWarningAndReturnsWhenReachable() {
         assertEquals(RibbonSlot.Account(notice()), resolveRibbonSlot(false, notice(), emptySet(), now))
         assertEquals(RibbonSlot.Account(warning), resolveRibbonSlot(false, warning, emptySet(), now))
