@@ -640,6 +640,7 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 .message-meta[data-status="failed-confirmed"] { color: var(--peppy-error-text); }
 .message-meta[data-status="unknown"] { color: var(--peppy-warning-text); }
 .message-meta-separator { color: var(--peppy-text-muted); }
+.message-meta [data-message-route-hint] { margin: 0; flex: 1 0 100%; }
 .message-bubble .message-subject {
   color: var(--peppy-text-secondary);
   font-size: 11px;
@@ -679,7 +680,7 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   gap: 6px;
   min-width: 0;
 }
-[data-header-title-row] [data-header-title] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-header-title-row] [data-header-title] { flex: 0 1 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #conversation-rcs-badge, #conversation-rcs-e2ee-badge {
   flex: none;
   border: 1px solid var(--peppy-accent);
@@ -690,6 +691,7 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   padding: 2px 6px;
   white-space: nowrap;
 }
+#conversation-rcs-e2ee-badge { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; border-color: var(--peppy-border-strong); }
 #typing-indicator { display: inline-flex; align-items: center; gap: 6px; color: var(--peppy-text-secondary); font-size: 12px; white-space: nowrap; }
 #typing-indicator[hidden] { display: none; }
 .composer-toolbar-spacer { display: flex; min-width: 0; overflow: hidden; }

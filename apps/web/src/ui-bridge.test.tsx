@@ -7,7 +7,7 @@ import { installBrowserBridge as installDesktopBrowserBridge } from "../../deskt
 import { BrowserBridge } from "./browser-bridge";
 import * as uiBridge from "./ui-bridge";
 import { renewHostedSession } from "./ui-bridge";
-import type { DesktopBridge, DesktopRcsSnapshot } from "./ui-bridge";
+import type { DesktopBridge, DesktopSnapshot } from "./ui-bridge";
 
 afterEach(() => cleanup());
 
@@ -36,7 +36,7 @@ describe("browser UI bridge", () => {
   });
 
   it("passes reported RCS fields from a browser bridge snapshot to the shared renderer", async () => {
-    const snapshot: DesktopRcsSnapshot = {
+    const snapshot: DesktopSnapshot = {
       version: "1",
       mode: "browser",
       connection: { state: "connected" },
@@ -59,7 +59,11 @@ describe("browser UI bridge", () => {
     Object.assign(snapshot.conversations[0], {
       rcsEncryption: true,
       rcsHistoryGap: true,
-      messages: [{ id: "message-browser", revision: "1", sender: "self", body: "", timestamp: "0", status: "unknown", transport: "rcs", rcsReported: false, attachments: [] }],
+      messages: [
+        { id: "message-browser", revision: "1", sender: "self", body: "", timestamp: "0", status: "unknown", transport: "rcs", rcsReported: false, attachments: [] },
+        { id: "message-read", revision: "1", sender: "self", body: "", timestamp: "0", status: "read", statusAt: "1788434520000", transport: "rcs", attachments: [] },
+        { id: "message-failed", revision: "1", sender: "self", body: "", timestamp: "0", status: "failed-confirmed", transport: "rcs", rcsReported: true, attachments: [] },
+      ],
     });
     const browserBridge = {
       load_state: async () => snapshot,
@@ -82,6 +86,8 @@ describe("browser UI bridge", () => {
         expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument();
         expect(document.getElementById("conversation-rcs-e2ee-badge")).toBeInTheDocument();
         expect(document.querySelector('[data-message-route-hint="message-browser"]')).toHaveAttribute("data-hint", "unknown");
+        expect(document.querySelector('[data-message-read="message-read"]')).toHaveTextContent("Read");
+        expect(document.querySelector('[data-message-route-hint="message-failed"]')).toHaveAttribute("data-hint", "failed-reported");
         expect(document.getElementById("conversation-rcs-notice")).not.toBeEmptyDOMElement();
       });
     } finally {

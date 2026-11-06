@@ -323,6 +323,37 @@ test("RCS badge and typing sharing copy remain scoped to their supported clients
   }
 });
 
+test("RCS message and encryption copy is desktop-only, contiguous, and wording-clean", () => {
+  const keys = [
+    "rcs_badge_label",
+    "rcs_badge_description",
+    "rcs_message_failed_reported",
+    "rcs_message_failed_unreported",
+    "rcs_message_unknown_hint",
+    "rcs_history_gap_notice",
+    "rcs_e2ee_badge_label",
+    "rcs_e2ee_badge_description",
+  ];
+  const maturity = /experimental|beta|preview|early access|labs|trial|unstable/i;
+  const lines = readFileSync(path("packages/mobile-design/src/catalog.mjs"), "utf8").split("\n");
+  const positions = keys.map(key => lines.findIndex(line => line.startsWith(`  ${key}:`)));
+
+  for (const key of keys) {
+    assert.ok(desktopCatalog[key], `${key} must exist in desktop copy`);
+    assert.ok(desktopOnlyKeys.includes(key), `${key} must be listed in desktopOnlyKeys`);
+    assert.ok(!(key in catalog), `${key} must be absent from the shared catalog`);
+    assert.ok(!(key in nativeCatalog), `${key} must be absent from native copy`);
+    assert.doesNotMatch(desktopCatalog[key], /[%{]/, `${key} must not contain % or {`);
+    assert.doesNotMatch(desktopCatalog[key], maturity, `${key} must avoid maturity wording`);
+  }
+  for (const key of keys.filter(key => key !== "rcs_badge_label" && key !== "rcs_badge_description")) {
+    assert.doesNotMatch(desktopCatalog[key], /\bRCS\b/, `${key} must not name RCS`);
+  }
+  assert.ok(positions.every(position => position >= 0), "every RCS key must be a catalog line");
+  assert.equal(Math.max(...positions) - Math.min(...positions), keys.length - 1, "RCS keys must form one contiguous block");
+  assert.match(desktopCatalog.rcs_e2ee_badge_label, /^Google: end-to-end encrypted$/);
+});
+
 test("retired desktop overrides fall back to shared copy", () => {
   const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
   for (const key of ["hosted_subscribe_restore", "hosted_subscribe_legal", "hosted_purchase_pending_body"]) {

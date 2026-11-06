@@ -13,3 +13,14 @@ it("exposes the current route through visible and accessible badge text", () => 
   expect(badge.querySelector(".visually-hidden")).toHaveTextContent("RCS. New messages in this chat are sent through Google Messages as RCS.");
   expect(badge.closest("[role=status], [aria-live]")).toBeNull();
 });
+
+it("omits the encryption pill unless Google reported encryption", () => {
+  const { container } = render(<RcsBadge />);
+  expect(container.querySelector("#conversation-rcs-e2ee-badge")).toBeNull();
+
+  const { container: reported } = render(<RcsBadge encryptionReported />);
+  const pill = reported.querySelector("#conversation-rcs-e2ee-badge")!;
+  expect(pill).toHaveAttribute("data-rcs-e2ee-badge", "reported");
+  expect(pill).toHaveTextContent("Google: end-to-end encrypted");
+  expect(pill.querySelector(".visually-hidden")).toHaveTextContent("Google Messages reports end-to-end encryption for this chat.");
+});

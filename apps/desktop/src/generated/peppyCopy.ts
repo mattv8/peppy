@@ -947,6 +947,12 @@ export const peppyCopy = {
   enrollment_error_manual_owner_limited: "Too many connection attempts. Wait a moment and try again.",
   rcs_badge_label: "RCS",
   rcs_badge_description: "New messages in this chat are sent through Google Messages as RCS.",
+  rcs_message_failed_reported: "Google Messages reported that this message could not be delivered.",
+  rcs_message_failed_unreported: "This message could not be sent.",
+  rcs_message_unknown_hint: "Peppy can't tell whether this was sent. It will not send it again by itself.",
+  rcs_history_gap_notice: "Some messages from around when this chat switched how it connects may be missing here. Peppy could not tell which were already saved, so it did not import any of them.",
+  rcs_e2ee_badge_label: "Google: end-to-end encrypted",
+  rcs_e2ee_badge_description: "Google Messages reports end-to-end encryption for this chat. This is Google's report and is separate from how Peppy protects your vault.",
   admin_password_length: "Admin password must be 12–1024 bytes long (usually one byte per character).",
   family_vaults_invite_body: "Generate a one-time link to invite someone to create their own vault on this server.",
   family_vaults_invite_share_body: "Share this link with the person you are inviting. It can only be used once.",
@@ -1146,11 +1152,6 @@ export const peppyCopy = {
   reenrol_drafts_warning: "Drafts you hadn't sent on this computer may not come back.",
   reenrol_start_cta: "Show connection code",
   reenrol_still_unavailable: "The protected key is still unavailable.",
-  rcs_message_failed_reported: "Google Messages reported that this message could not be delivered.",
-  rcs_message_unknown_hint: "Peppy can't tell whether this was sent. It will not send it again by itself.",
-  rcs_history_gap_notice: "Some messages from around when this chat switched how it connects may be missing here. Peppy could not tell which were already saved, so it did not import any of them.",
-  rcs_e2ee_badge_label: "End-to-end encrypted",
-  rcs_e2ee_badge_description: "Google Messages reports end-to-end encryption for this chat. This is Google's report and is separate from how Peppy protects your vault.",
 } as const;
 
 export type PeppyCopyKey = keyof typeof peppyCopy;

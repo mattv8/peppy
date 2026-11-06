@@ -81,8 +81,6 @@ import {
   type AttachmentView,
   type ConversationView,
   type DesktopSnapshot,
-  type DesktopRcsSnapshot,
-  type RcsConversationMetadata,
   type GatewayView,
   type MessageStatus,
   type MessageView,
@@ -654,19 +652,19 @@ function MessageMeta({ message, hideTime = false }: { message: MessageView; hide
     : deliveryTimeUnavailable
       ? "Delivery confirmed; time unavailable"
       : "Delivery confirmed";
-  const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
-  const showTextStatus = !read && !deliveryConfirmed && Boolean(message.status) && (!compactStatus || !validTime);
+  const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : message.status === "read" ? <CheckCheck size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
+  const showTextStatus = !read && !deliveryConfirmed && Boolean(statusLabel) && (!compactStatus || !validTime);
   const showCompactStatus = !deliveryConfirmed && Boolean(compactStatus && validTime);
   if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read) return null;
   return <div className="message-meta" data-message-meta={message.id} data-status={message.status} aria-live={rcsMessage ? "off" : undefined}>
     {showTextStatus && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
     {read && <RcsMessageMeta messageId={message.id} status={message.status} />}
-    {showTextStatus && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
+    {(showTextStatus || read) && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
     {showTime && <time dateTime={isoTime}>{formattedTime}</time>}
     {showCompactStatus && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
-    {rcsMessage && !read && <RcsMessageMeta messageId={message.id} status={message.status} />}
+    {rcsMessage && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} />}
   </div>;
 }
 
@@ -1609,7 +1607,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
-  const [snapshot, setSnapshot] = useState<DesktopRcsSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
   const [conversationTab, setConversationTab] = useState<ConversationTab>("messages");
   const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);
   const [lightboxAttachmentId, setLightboxAttachmentId] = useState<string>();
@@ -4979,7 +4977,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <h1 data-header-title>Contacts</h1>
               ) : (
                 <div className="header-copy-details">
-                  <div data-header-title-row><b data-header-title>{title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!headPanel && rcsRoute.current && <RcsBadge encryptionReported={(active as RcsConversationMetadata | undefined)?.rcsEncryption === true} />}</div>
+                  <div data-header-title-row><b data-header-title>{title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!headPanel && rcsRoute.current && <RcsBadge encryptionReported={active?.rcsEncryption === true} />}</div>
                   {active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
                 </div>
               )}
@@ -5047,7 +5045,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             </button>}
           </header>
           {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationSpamNotice folder={active.folder} folderReason={active.folderReason} unblock={active.unblock} />}
-          {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationRcsNotice historyGap={(active as RcsConversationMetadata).rcsHistoryGap} />}
+          {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationRcsNotice historyGap={active.rcsHistoryGap} />}
           {senderUnblockConfirmation && <SenderUnblockConfirmation
             name={senderUnblockConfirmation.name}
             canUnblock={senderUnblockConfirmation.canUnblock}

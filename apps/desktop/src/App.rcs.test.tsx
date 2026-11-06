@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { bridge, fixtureBridge, type DesktopSnapshot } from "./bridge/bridge";
+import { peppyCopy } from "./generated/peppyCopy";
 
 let snapshot: DesktopSnapshot;
 
@@ -149,5 +150,80 @@ describe("RCS conversation route", () => {
     render(<App />);
     await screen.findByRole("textbox", { name: "Message" });
     expectNoBadge();
+  });
+});
+
+describe("RCS conversation metadata", () => {
+  beforeEach(() => window.history.replaceState({}, "", "/"));
+
+  const withActive = (change: Partial<DesktopSnapshot["conversations"][number]>): DesktopSnapshot => ({
+    ...snapshot,
+    conversations: snapshot.conversations.map((conversation) => conversation.id === snapshot.activeConversationId ? { ...conversation, ...change } : conversation),
+  });
+
+  it("shows the attributed encryption pill only when Google reports encryption for the current chat", async () => {
+    snapshot = withActive({ rcsEncryption: true });
+    render(<App />);
+
+    await expectBadge();
+    const pill = document.getElementById("conversation-rcs-e2ee-badge");
+    expect(pill).toHaveAttribute("data-rcs-e2ee-badge", "reported");
+    expect(pill).toHaveTextContent(peppyCopy.rcs_e2ee_badge_label);
+    expect(peppyCopy.rcs_e2ee_badge_label).toBe("Google: end-to-end encrypted");
+    expect(pill?.querySelector(".visually-hidden")).toHaveTextContent(peppyCopy.rcs_e2ee_badge_description);
+  });
+
+  it.each([
+    ["no encryption fact", {}],
+    ["a false encryption fact", { rcsEncryption: false }],
+  ])("omits the encryption pill for %s", async (_label, change) => {
+    snapshot = withActive(change);
+    render(<App />);
+
+    await expectBadge();
+    expect(document.getElementById("conversation-rcs-e2ee-badge")).toBeNull();
+  });
+
+  it("omits the encryption pill when the route is not current", async () => {
+    snapshot = { ...withActive({ rcsEncryption: true }), encryption: { state: "locked" as const } };
+    render(<App />);
+
+    await screen.findByRole("textbox", { name: "Message" });
+    expectNoBadge();
+    expect(document.getElementById("conversation-rcs-e2ee-badge")).toBeNull();
+  });
+
+  it("shows the history-gap notice only when core reports a gap for the current chat", async () => {
+    snapshot = withActive({ rcsHistoryGap: true });
+    render(<App />);
+
+    const notice = await waitFor(() => {
+      const element = document.getElementById("conversation-rcs-notice");
+      expect(element).toHaveAttribute("data-rcs-notice", "history-gap");
+      return element!;
+    });
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice).toHaveTextContent(peppyCopy.rcs_history_gap_notice);
+  });
+
+  it("keeps the history-gap notice empty and collapsed when there is no gap", async () => {
+    render(<App />);
+
+    await expectBadge();
+    const notice = document.getElementById("conversation-rcs-notice");
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice).not.toHaveAttribute("data-rcs-notice");
+    expect(notice).toBeEmptyDOMElement();
+  });
+
+  it("hides the history-gap notice on the settings screen", async () => {
+    snapshot = withActive({ rcsHistoryGap: true });
+    render(<App />);
+
+    await waitFor(() => expect(document.getElementById("conversation-rcs-notice")).toHaveAttribute("data-rcs-notice", "history-gap"));
+    fireEvent.click(document.querySelector<HTMLButtonElement>('[data-rail-item="settings"]')!);
+
+    await waitFor(() => expect(document.getElementById("conversation-pane")).toHaveAttribute("data-view", "settings"));
+    expect(document.getElementById("conversation-rcs-notice")).toBeNull();
   });
 });
