@@ -1103,6 +1103,105 @@ async fn live_ticket_caps_bound_fresh_session_creation_and_tombstones() {
     server.shutdown().await;
 }
 
+async fn live_ticket_replica_pool(schema: &str) -> PgPool {
+    let database_url = std::env::var("TEST_DATABASE_URL").unwrap();
+    let mut isolated: url::Url = database_url.parse().unwrap();
+    isolated
+        .query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema}"));
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect(isolated.as_str())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn live_ticket_concurrent_issue_on_replicas_keeps_one_open_session() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let replica_one = live_ticket_replica_pool(&server.schema).await;
+    let replica_two = live_ticket_replica_pool(&server.schema).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let first = URL_SAFE_NO_PAD.encode([21_u8; 16]);
+    let second = URL_SAFE_NO_PAD.encode([22_u8; 16]);
+    let first_request = async {
+        barrier.wait().await;
+        live_ticket_request(&server, reqwest::Method::POST, first)
+            .await
+            .status()
+    };
+    let second_request = async {
+        barrier.wait().await;
+        live_ticket_request(&server, reqwest::Method::POST, second)
+            .await
+            .status()
+    };
+    let (first_status, second_status) = tokio::join!(first_request, second_request);
+    assert!(matches!(
+        first_status,
+        reqwest::StatusCode::CREATED | reqwest::StatusCode::TOO_MANY_REQUESTS
+    ));
+    assert!(matches!(
+        second_status,
+        reqwest::StatusCode::CREATED | reqwest::StatusCode::TOO_MANY_REQUESTS
+    ));
+    let open_one: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE state='open'")
+            .fetch_one(&replica_one)
+            .await
+            .unwrap();
+    let open_two: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE state='open'")
+            .fetch_one(&replica_two)
+            .await
+            .unwrap();
+    assert_eq!(open_one, open_two);
+    assert!(open_one <= 1);
+    replica_one.close().await;
+    replica_two.close().await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_ticket_issue_delete_race_never_leaves_an_open_session_after_delete() {
+    for value in 0_u8..20 {
+        let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+        let replica_one = live_ticket_replica_pool(&server.schema).await;
+        let replica_two = live_ticket_replica_pool(&server.schema).await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let session = URL_SAFE_NO_PAD.encode([value; 16]);
+        let post = async {
+            barrier.wait().await;
+            live_ticket_request(&server, reqwest::Method::POST, session.clone())
+                .await
+                .status()
+        };
+        let delete = async {
+            barrier.wait().await;
+            live_ticket_request(&server, reqwest::Method::DELETE, session.clone())
+                .await
+                .status()
+        };
+        let (_post, deleted) = tokio::join!(post, delete);
+        assert_eq!(deleted, reqwest::StatusCode::NO_CONTENT);
+        let open: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE state='open'")
+                .fetch_one(&replica_one)
+                .await
+                .unwrap();
+        assert_eq!(open, 0);
+        let open: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE state='open'")
+                .fetch_one(&replica_two)
+                .await
+                .unwrap();
+        assert_eq!(open, 0);
+        replica_one.close().await;
+        replica_two.close().await;
+        server.shutdown().await;
+    }
+}
+
 #[tokio::test]
 async fn readiness_loss_disconnects_established_socket_as_unavailable() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
