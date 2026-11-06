@@ -19,11 +19,13 @@ const (
 	preparedRcsTicketTTL = 30 * time.Second
 	rcsSendDeadline      = 5 * time.Second
 	maxRcsBodyBytes      = 4096
-	maxPrepareJSONBytes  = 4608
-	maxCommitJSONBytes   = 5120
-	maxOpaqueIDBytes     = 256
-	snapshotTokenBytes   = 64
-	proofDigestBytes     = 44
+	// JSON may encode every content byte as a six-byte escape. These caps retain
+	// the 4096-byte text contract plus fully escaped bounded metadata.
+	maxPrepareJSONBytes = 27000
+	maxCommitJSONBytes  = 29000
+	maxOpaqueIDBytes    = 256
+	snapshotTokenBytes  = 64
+	proofDigestBytes    = 44
 )
 
 type rcsSendRequest struct {
@@ -295,6 +297,9 @@ func decodeFixedJSON(input string, output any) bool {
 		}
 		var value json.RawMessage
 		if decoder.Decode(&value) != nil {
+			return false
+		}
+		if bytes.Equal(value, []byte("null")) {
 			return false
 		}
 		values[key] = value

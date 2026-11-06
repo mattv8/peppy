@@ -258,6 +258,36 @@ func TestPreparedRcsMapsEveryLibgmStatusConservatively(t *testing.T) {
 	}
 }
 
+func TestPrepareRcsStrictJSONAcceptsWorstCaseEscapedBody(t *testing.T) {
+	body := strings.Repeat("\"", maxRcsBodyBytes)
+	request := `{"tmp_id":"00000000-0000-4000-8000-000000000000","google_conversation_id":"synthetic-conversation","snapshot_token":"1:1:1","content":"` + strings.ReplaceAll(body, `"`, `\"`) + `"}`
+	var decoded prepareRcsRequest
+	if !decodeFixedJSON(request, &decoded) || decoded.Content != body || !validPrepareRcsRequest(decoded) {
+		t.Fatal("worst-case escaped prepare body was refused")
+	}
+	overLimit := strings.Repeat("x", maxRcsBodyBytes+1)
+	request = `{"tmp_id":"00000000-0000-4000-8000-000000000000","google_conversation_id":"synthetic-conversation","snapshot_token":"1:1:1","content":"` + overLimit + `"}`
+	if !decodeFixedJSON(request, &decoded) || validPrepareRcsRequest(decoded) {
+		t.Fatal("over-limit decoded body was accepted")
+	}
+}
+
+func TestPrepareRcsStrictJSONRejectsAliasesDuplicatesAndTrailingData(t *testing.T) {
+	valid := `{"tmp_id":"00000000-0000-4000-8000-000000000000","google_conversation_id":"synthetic-conversation","snapshot_token":"1:1:1","content":"body"}`
+	for _, input := range []string{
+		strings.Replace(valid, `"tmp_id"`, `"Tmp_ID"`, 1),
+		strings.Replace(valid, `"content":"body"`, `"content":"body","content":"again"`, 1),
+		strings.Replace(valid, `"content":"body"`, `"content":null`, 1),
+		strings.Replace(valid, `"content":"body"`, `"unknown":true,"content":"body"`, 1),
+		valid + ` {}`,
+	} {
+		var decoded prepareRcsRequest
+		if decodeFixedJSON(input, &decoded) {
+			t.Fatalf("accepted malformed envelope: %s", input)
+		}
+	}
+}
+
 func TestPrepareRcsBindsOneTicketToTheCurrentStage2Target(t *testing.T) {
 	auth := linkedSafetyAuth()
 	fixture := newPhoneFixture(t, auth)
