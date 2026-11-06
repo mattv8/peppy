@@ -1,8 +1,9 @@
-import { throwIfFatalTransferError, transferContactPhotoUploads, transferMedia, type MediaTransferResult, type WorkerMediaBridge } from "./scheduler-media.js";
+import { throwIfFatalTransferError, transferContactPhotoUploads, transferDraftUploads, transferMedia, type MediaTransferResult, type WorkerMediaBridge } from "./scheduler-media.js";
 import { SchedulerProtocol, type VaultRefresh } from "./scheduler-protocol.js";
 import { TransportError } from "./transport.js";
 import { CoreRejectedError } from "./core.js";
 import type { AttachmentRetentionDriver } from "./attachment-retention.js";
+import { DraftTransport, type DraftChangesResponse, type DraftPushWire } from "./drafts.js";
 
 const PAGE_LIMIT = 100;
 const OUTBOX_LIMIT = 32;
@@ -22,9 +23,10 @@ export interface SchedulerSession {
   query(command: string, args: Record<string, unknown>): Promise<unknown>;
   mutate(command: string, args: Record<string, unknown>): Promise<unknown>;
   hydrate(id: string): Promise<void>;
+  hydrateDraftMedia?(): Promise<void>;
 }
 export interface SchedulerTransport {
-  json(path: string, request: { method: "GET" | "POST" | "DELETE"; body?: unknown; signal?: AbortSignal; limit?: number }): Promise<unknown>;
+  json(path: string, request: { method: "GET" | "POST" | "PUT" | "DELETE"; body?: unknown; signal?: AbortSignal; limit?: number }): Promise<unknown>;
   upload(path: string, bytes: Uint8Array, request?: { signal?: AbortSignal }): Promise<void>;
   download(path: string, request: { signal?: AbortSignal; limit?: number }): Promise<Uint8Array>;
   discard?(path: string, request: { method: "POST" | "DELETE"; body?: unknown; signal?: AbortSignal }): Promise<void>;
@@ -138,6 +140,13 @@ export class BrowserScheduler {
       } else if (this.transport.discard === undefined || !negotiationResolved) {
         this.recordMediaTransfer(await transferMedia(this.session, this.transport, this.options.media, signal, this.deferredMediaIds, negotiationResolved && uploadsAllowed));
       }
+      if (this.transport.discard) {
+        try {
+          await this.syncDrafts(signal);
+        } catch (error) {
+          throwIfFatalDraftError(error, signal);
+        }
+      }
       await this.sendOutbox(signal);
       if (negotiationResolved) {
         await this.replay(signal);
@@ -162,6 +171,55 @@ export class BrowserScheduler {
       deviceId: requiredString(identity.deviceId),
     });
     return this.protocol;
+  }
+
+  private async syncDrafts(signal: AbortSignal): Promise<void> {
+    if (!this.transport.discard) return;
+    const drafts = new DraftTransport({
+      json: (path: string, request: { method: "GET" | "POST" | "PUT"; body?: unknown; signal?: AbortSignal; limit?: number }) => this.transport.json(path, request),
+      discard: (path, request) => this.transport.discard!(path, request),
+    });
+    const bootstrap = object(await this.session.query("_worker_draft_bootstrap_required", {})).required === true;
+    const cursor = bootstrap ? "0" : stringField(await this.session.query("_worker_draft_sync_cursor", {}), "cursor");
+    const seenDraftIds = new Set<string>();
+    let after = cursor;
+    try {
+      for (;;) {
+        const changes = await drafts.draftChanges(after, signal);
+        await this.session.mutate("_worker_draft_sync_supported", { supported: true });
+        collectDraftIds(changes, seenDraftIds);
+        const applied = object(await this.session.mutate("_worker_draft_apply_changes", changes));
+        await this.session.hydrateDraftMedia?.();
+        after = stringField(applied, "nextAfter");
+        if (applied.more !== true) break;
+      }
+    } catch (error) {
+      if (await isUnsupportedDraftRoute(error, drafts, signal)) {
+        await this.session.mutate("_worker_draft_sync_supported", { supported: false });
+        return;
+      }
+      throw error;
+    }
+    if (bootstrap) {
+      await this.session.hydrateDraftMedia?.();
+      await this.session.mutate("_worker_draft_finish_bootstrap", { draftIds: [...seenDraftIds] });
+    }
+    const uploads = await transferDraftUploads(this.session, this.transport, this.options.media, signal);
+    this.recordMediaTransfer(uploads);
+    const pendingPushes = object(await this.session.query("_worker_draft_pending_pushes", {})).pushes;
+    if (!Array.isArray(pendingPushes)) throw new TransportError("invalid");
+    for (const push of pendingPushes) {
+      const input = draftPush(push);
+      const outcome = await drafts.putDraft(input, signal);
+      await this.session.mutate("_worker_draft_record_push", { draftId: input.draftId, revisionId: input.revisionId, outcome });
+    }
+    const pendingDiscards = object(await this.session.query("_worker_draft_pending_discards", {})).draftIds;
+    if (!Array.isArray(pendingDiscards)) throw new TransportError("invalid");
+    for (const draftId of pendingDiscards) {
+      if (typeof draftId !== "string" || draftId.length === 0) throw new TransportError("invalid");
+      await drafts.discardDraft(draftId, signal);
+      await this.session.mutate("_worker_draft_record_discard", { draftId });
+    }
   }
 
   private async hasPendingProjectionWork(): Promise<boolean> {
@@ -428,6 +486,11 @@ function isCancelled(error: unknown): boolean {
   return error instanceof TransportError && error.kind === "cancelled";
 }
 
+function throwIfFatalDraftError(error: unknown, signal: AbortSignal): void {
+  if (signal.aborted || isCancelled(error) || !(error instanceof TransportError)
+    || error.kind === "revoked" || (error.kind === "status" && error.status === 401)) throw error;
+}
+
 function isUnavailableStatus(status: number | undefined): boolean {
   return status === 502 || status === 503 || status === 504;
 }
@@ -444,6 +507,25 @@ function isResync(error: unknown): boolean {
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TransportError("invalid");
   return value as Record<string, unknown>;
+}
+function stringField(value: unknown, key: string): string { return requiredString(object(value)[key]); }
+function collectDraftIds(response: DraftChangesResponse, seen: Set<string>): void {
+  for (const change of response.changes) seen.add(stringField(change, "draft_id"));
+}
+function draftPush(value: unknown): DraftPushWire {
+  const push = object(value);
+  return {
+    draftId: requiredString(push.draftId),
+    revisionId: requiredString(push.revisionId),
+    request: object(push.request),
+  };
+}
+async function isUnsupportedDraftRoute(error: unknown, drafts: DraftTransport, signal: AbortSignal): Promise<boolean> {
+  if (!(error instanceof TransportError) || error.kind !== "status") return false;
+  if ((error.status === 404 || error.status === 405) && typeof error.code === "string") return true;
+  return error.status === 404
+    && error.statusBody === "empty"
+    && await drafts.probeAuthenticatedRoute(signal);
 }
 function replayBatches(events: readonly unknown[]): ReplayEvent[][] {
   const batches: ReplayEvent[][] = [];

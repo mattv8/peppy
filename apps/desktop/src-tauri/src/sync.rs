@@ -5,15 +5,16 @@
 use crate::{
     error::{core_error, BridgeError, BridgeResult},
     gateways::{extract_device_role, gateway_views, CapabilitiesResponse, DevicesResponse},
-    net::{NetError, MAX_JSON_BYTES, MAX_PAGE_BYTES},
+    net::{NetError, MAX_JSON_BYTES, MAX_PAGE_BYTES, NON_API_ERROR_CODE},
     origin::websocket_url,
     session::{Session, VaultSummary},
 };
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::{
-    Client, Cursor, EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile,
-    RawReplayRecord, RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH,
-    MAX_SEAL_BATCH, MAX_SNAPSHOT_PAGE,
+    Client, Cursor, DraftPushOutcome, DraftTerminalReasonCore, EnvelopePurpose,
+    HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile, RawReplayRecord,
+    RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH,
+    MAX_SNAPSHOT_PAGE,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -867,6 +868,14 @@ async fn upload_object(
     session: &Arc<Session>,
     object: peppy_client_core::CipherObject,
 ) -> Result<(), Failure> {
+    upload_object_for_draft(session, object, None).await
+}
+
+async fn upload_object_for_draft(
+    session: &Arc<Session>,
+    object: peppy_client_core::CipherObject,
+    draft_id: Option<peppy_client_core::DraftId>,
+) -> Result<(), Failure> {
     if session.cancel.is_cancelled() {
         return Ok(());
     }
@@ -885,6 +894,7 @@ async fn upload_object(
         "declared_ciphertext_sha256": object.ciphertext_sha256,
         "reference_tracking": retention.reference_tracking,
         "retention_class": retention_class,
+        "draft_id": draft_id.map(|id| id.to_string()),
     });
     let recovering_finalized = match session
         .api
@@ -1010,6 +1020,291 @@ async fn download_one(
     installed.map_err(Failure::Permanent)
 }
 
+fn draft_timestamp_ms(value: &str) -> Result<i64, NetError> {
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .map_err(|_| NetError::Invalid)
+        .map(|value| value.unix_timestamp_nanos().div_euclid(1_000_000) as i64)
+}
+
+fn remote_draft_change(
+    change: peppy_hosted_api::drafts::DraftChange,
+) -> Result<peppy_client_core::RemoteDraftChange, NetError> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use peppy_client_core::{DraftId, RemoteDraftChange};
+    use peppy_hosted_api::drafts::{DraftChange, DraftTerminalReason};
+    Ok(match change {
+        DraftChange::Head {
+            draft_id,
+            branch_id,
+            revision_id,
+            parent_revision_id,
+            sealed_record,
+            attachment_ids,
+            expires_at,
+            ..
+        } => RemoteDraftChange::Head {
+            draft_id: DraftId(draft_id),
+            branch_id,
+            revision_id,
+            parent_revision_id,
+            sealed_record: URL_SAFE_NO_PAD
+                .decode(sealed_record)
+                .map_err(|_| NetError::Invalid)?,
+            attachment_ids: attachment_ids
+                .into_iter()
+                .map(peppy_client_core::AttachmentId)
+                .collect(),
+            expires_at_ms: draft_timestamp_ms(&expires_at)?,
+        },
+        DraftChange::BranchClosed {
+            draft_id,
+            branch_id,
+            ..
+        } => RemoteDraftChange::BranchClosed {
+            draft_id: DraftId(draft_id),
+            branch_id,
+        },
+        DraftChange::Terminal {
+            draft_id,
+            reason,
+            command_id,
+            ..
+        } => RemoteDraftChange::Terminal {
+            draft_id: DraftId(draft_id),
+            reason: match reason {
+                DraftTerminalReason::Sent => DraftTerminalReasonCore::Sent,
+                DraftTerminalReason::Discarded => DraftTerminalReasonCore::Discarded,
+                DraftTerminalReason::Expired => DraftTerminalReasonCore::Expired,
+            },
+            command_id: command_id.map(peppy_client_core::CommandId),
+        },
+    })
+}
+
+/// Synchronizes encrypted draft metadata and draft-only attachment objects. Draft contents are
+/// deliberately never logged; malformed server records fail the round without advancing the cursor.
+async fn sync_drafts(session: &Arc<Session>) -> BridgeResult<bool> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use peppy_hosted_api::drafts::{
+        DraftChangesResponse, PutDraftRevisionRequest, PutDraftRevisionResponse,
+    };
+    // Two MAX_DRAFT_RECORD_BYTES records can expand to roughly 700 KiB as JSON/base64, below browser's 1 MiB page cap.
+    const DRAFT_PAGE_LIMIT: usize = 2;
+
+    let c = client(session);
+    let bootstrap = blocking(move || c.draft_bootstrap_required().map_err(core_error)).await?;
+    let after = if bootstrap {
+        "0".to_owned()
+    } else {
+        let c = client(session);
+        blocking(move || c.draft_sync_cursor().map_err(core_error)).await?
+    };
+    let first: DraftChangesResponse = match session
+        .api
+        .get_json(
+            &format!("/v1/drafts?after={after}&limit={DRAFT_PAGE_LIMIT}"),
+            MAX_PAGE_BYTES,
+        )
+        .await
+    {
+        Ok(page) => page,
+        Err(NetError::Status {
+            status: 404 | 405,
+            code: Some(code),
+        }) if code != NON_API_ERROR_CODE => {
+            let c = client(session);
+            blocking(move || c.set_draft_sync_supported(false).map_err(core_error)).await?;
+            return Ok(false);
+        }
+        Err(NetError::Status {
+            status: 404,
+            code: None,
+        }) if session
+            .api
+            .get_json_200::<serde_json::Value>("/v1/gateways", MAX_JSON_BYTES)
+            .await
+            .is_ok() =>
+        {
+            let c = client(session);
+            blocking(move || c.set_draft_sync_supported(false).map_err(core_error)).await?;
+            return Ok(false);
+        }
+        Err(error) if transport_fatal(&error) => return Err(error.into()),
+        Err(_) => return Ok(false),
+    };
+    let c = client(session);
+    blocking(move || c.set_draft_sync_supported(true).map_err(core_error)).await?;
+    let mut seen_draft_ids = Vec::new();
+    let mut page = first;
+    loop {
+        if bootstrap {
+            seen_draft_ids.extend(page.changes.iter().map(|change| match change {
+                peppy_hosted_api::drafts::DraftChange::Head { draft_id, .. }
+                | peppy_hosted_api::drafts::DraftChange::BranchClosed { draft_id, .. }
+                | peppy_hosted_api::drafts::DraftChange::Terminal { draft_id, .. } => {
+                    peppy_client_core::DraftId(*draft_id)
+                }
+            }));
+        }
+        let changes = page
+            .changes
+            .into_iter()
+            .map(remote_draft_change)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(BridgeError::from)?;
+        let next_after = page.next_after.clone();
+        let c = client(session);
+        let applied_cursor = next_after.clone();
+        blocking(move || {
+            c.apply_draft_changes(changes, &applied_cursor)
+                .map_err(core_error)
+        })
+        .await?;
+        if session.cancel.is_cancelled() {
+            return Ok(false);
+        }
+        if !page.more {
+            break;
+        }
+        page = session
+            .api
+            .get_json(
+                &format!("/v1/drafts?after={next_after}&limit={DRAFT_PAGE_LIMIT}"),
+                MAX_PAGE_BYTES,
+            )
+            .await
+            .map_err(BridgeError::from)?;
+    }
+    if bootstrap {
+        let c = client(session);
+        blocking(move || {
+            c.finish_draft_bootstrap(&seen_draft_ids)
+                .map_err(core_error)
+        })
+        .await?;
+    }
+    let c = client(session);
+    let uploads = blocking(move || c.pending_draft_uploads().map_err(core_error)).await?;
+    for upload in uploads.into_iter().take(MEDIA_PER_ROUND) {
+        if session.cancel.is_cancelled() {
+            return Ok(true);
+        }
+        let id = upload.object.attachment_id;
+        if let Err(failure) =
+            upload_object_for_draft(session, upload.object, Some(upload.draft_id)).await
+        {
+            handle_media_failure(session, id, failure)?;
+        }
+    }
+    let c = client(session);
+    for push in blocking(move || c.pending_draft_pushes().map_err(core_error)).await? {
+        let request = PutDraftRevisionRequest {
+            base_revision_id: push.base_revision_id,
+            sealed_record: URL_SAFE_NO_PAD.encode(push.sealed_record),
+            attachment_ids: push.attachment_ids.iter().map(|id| id.0).collect(),
+            authored: push.authored,
+            resolves_branch_ids: push.resolves_branch_ids,
+        };
+        let outcome = match session
+            .api
+            .put_json::<_, PutDraftRevisionResponse>(
+                &format!(
+                    "/v1/drafts/{}/revisions/{}",
+                    push.draft_id, push.revision_id
+                ),
+                &request,
+            )
+            .await
+        {
+            Ok(response) => DraftPushOutcome::Accepted {
+                branch_id: response.branch_id,
+                expires_at_ms: draft_timestamp_ms(&response.expires_at)
+                    .map_err(BridgeError::from)?,
+                conflict: response.conflict,
+            },
+            Err(NetError::Status {
+                status: 410,
+                code: Some(code),
+            }) => match code.as_str() {
+                "draft_sent" => DraftPushOutcome::Terminated(DraftTerminalReasonCore::Sent),
+                "draft_discarded" => {
+                    DraftPushOutcome::Terminated(DraftTerminalReasonCore::Discarded)
+                }
+                "draft_expired" => DraftPushOutcome::Terminated(DraftTerminalReasonCore::Expired),
+                _ => continue,
+            },
+            Err(NetError::Status {
+                status: 409,
+                code: Some(code),
+            }) if code == "draft_branch_limit" => DraftPushOutcome::BranchLimit,
+            Err(NetError::Status {
+                status: 422,
+                code: Some(code),
+            }) if code == "draft_attachment_unavailable" => DraftPushOutcome::AttachmentUnavailable,
+            Err(NetError::Status {
+                status: 413,
+                code: Some(code),
+            }) if code == "draft_record_too_large" => DraftPushOutcome::Rejected,
+            Err(NetError::Status {
+                status: 422,
+                code: Some(code),
+            }) if code == "draft_invalid_request" => DraftPushOutcome::Rejected,
+            Err(error) if transport_fatal(&error) => return Err(error.into()),
+            Err(_) => continue,
+        };
+        let c = client(session);
+        blocking(move || {
+            c.record_draft_push(push.draft_id, push.revision_id, outcome)
+                .map_err(core_error)
+        })
+        .await?;
+    }
+    let c = client(session);
+    for draft_id in blocking(move || c.pending_draft_discards().map_err(core_error)).await? {
+        match session
+            .api
+            .post_discard(
+                &format!("/v1/drafts/{draft_id}/discard"),
+                &serde_json::json!({}),
+            )
+            .await
+        {
+            Ok(()) => {
+                let c = client(session);
+                blocking(move || c.record_draft_discard(draft_id).map_err(core_error)).await?;
+            }
+            Err(error) if transport_fatal(&error) => return Err(error.into()),
+            Err(_) => {}
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod draft_push_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn only_documented_client_rejections_are_permanent() {
+        let cases = [
+            (413, "draft_record_too_large", true),
+            (422, "draft_invalid_request", true),
+            (413, "draft_invalid_request", false),
+            (422, "draft_record_too_large", false),
+            (500, "draft_invalid_request", false),
+        ];
+        for (status, code, rejected) in cases {
+            let outcome = match (status, code) {
+                (413, "draft_record_too_large") | (422, "draft_invalid_request") => {
+                    Some(DraftPushOutcome::Rejected)
+                }
+                _ => None,
+            };
+            assert_eq!(outcome.is_some(), rejected);
+        }
+    }
+}
+
 /// Bounded outbound and media work: uploads (before held MMS envelopes can seal), sealing,
 /// outbox upload with acknowledgement only after HTTP acceptance, then verified downloads.
 pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
@@ -1039,6 +1334,7 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         }
     };
     let mut changed = false;
+    changed |= sync_drafts(session).await?;
     let failed: Vec<_> = session
         .transfer_errors
         .lock()

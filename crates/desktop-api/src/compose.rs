@@ -1,10 +1,10 @@
 //! Shared local draft composition policy for native and browser hosts.
 use crate::{DraftView, GatewayAvailability, GatewayView, SendResultView, draft_view};
 use peppy_client_core::{
-    AttachmentId, Client, ComposeDraft, ComposeDraftUpdate, ConversationId, DeviceId, Direction,
-    DraftId, Error as CoreError, GatewayRoute, Message, Transport,
+    AttachmentId, Client, CommandId, ComposeDraft, ComposeDraftUpdate, ConversationId, DeviceId,
+    Direction, DraftId, Error as CoreError, GatewayRoute, Message, Transport,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 const MAX_ATTACHMENTS: usize = 10;
@@ -23,7 +23,7 @@ pub fn find_route<'a>(
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftInput {
     #[serde(default)]
@@ -302,6 +302,29 @@ pub fn send_draft(
     input: &DraftInput,
     gateways: Option<&[GatewayView]>,
 ) -> Result<SendResultView, ComposeError> {
+    let prepared = prepare_draft_send(client, input, gateways)?;
+    queue_prepared_draft_send(client, &prepared, None)
+}
+
+/// Runs the same local composition policy as `send_draft`, then queues the command ID already
+/// accepted by the draft-sync service. Hosts must only call this after that acceptance.
+pub fn send_draft_accepted(
+    client: &Client,
+    input: &DraftInput,
+    gateways: Option<&[GatewayView]>,
+    command_id: CommandId,
+) -> Result<SendResultView, ComposeError> {
+    let prepared = immutable_prepared_draft_send(client, input, gateways)?;
+    queue_prepared_draft_send(client, &prepared, Some(command_id))
+}
+
+/// Validates a stored draft and persists canonical route/recipient fields before a host creates
+/// a remote send intent. The returned input must be used for both intent creation and acceptance.
+pub fn prepare_draft_send(
+    client: &Client,
+    input: &DraftInput,
+    gateways: Option<&[GatewayView]>,
+) -> Result<DraftInput, ComposeError> {
     let draft_id = DraftId::from_str(&input.id)
         .map_err(|_| ui("invalid-draft", "Save the draft before sending it."))?;
     let expected = revision(&input.expected_revision)?;
@@ -442,7 +465,7 @@ pub fn send_draft(
                     expected,
                     ComposeDraftUpdate {
                         text: stored.text.clone(),
-                        recipients,
+                        recipients: recipients.clone(),
                         attachment_ids: stored.attachment_ids.clone(),
                         route: Some(route),
                     },
@@ -459,17 +482,91 @@ pub fn send_draft(
         } else {
             (draft_id, expected)
         };
-    // A route/recipient update can move a draft. Re-resolve immediately before enqueueing.
+    // A route/recipient update can move a draft. Re-resolve immediately before intent creation.
     client
         .resolve_compose_draft_for_send(draft_id, revision)
         .map_err(ComposeError::Core)?;
-    let transport = if requires_mms {
+    Ok(DraftInput {
+        id: draft_id.to_string(),
+        conversation_id: stored.conversation_id.to_string(),
+        text: stored.text,
+        recipient_ids: recipients,
+        attachment_ids,
+        gateway_id: Some(gateway_id.to_owned()),
+        sim_id: Some(sim_id.to_owned()),
+        expected_revision: revision.to_string(),
+    })
+}
+
+fn immutable_prepared_draft_send(
+    client: &Client,
+    input: &DraftInput,
+    gateways: Option<&[GatewayView]>,
+) -> Result<DraftInput, ComposeError> {
+    let draft_id = DraftId::from_str(&input.id)
+        .map_err(|_| ui("invalid-draft", "Save the draft before sending it."))?;
+    let expected = revision(&input.expected_revision)?;
+    let route = match (input.gateway_id.as_deref(), input.sim_id.as_deref()) {
+        (Some(gateway), Some(sim)) if !gateway.is_empty() && !sim.is_empty() => {
+            parse_route(gateway, sim)?
+        }
+        _ => {
+            return Err(ui(
+                "invalid-route",
+                "Select a phone and SIM before sending.",
+            ));
+        }
+    };
+    let stored = client
+        .resolve_compose_draft_for_send(draft_id, expected)
+        .map_err(ComposeError::Core)?;
+    let attachment_ids: Vec<String> = stored
+        .attachment_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if input.conversation_id != stored.conversation_id.to_string()
+        || input.text != stored.text
+        || input.recipient_ids != stored.recipients
+        || input.attachment_ids != attachment_ids
+        || stored.route.as_ref() != Some(&route)
+    {
+        return Err(ui(
+            "draft-intent-changed",
+            "The draft changed after send approval; refresh it before sending.",
+        ));
+    }
+    // The exact match above makes the shared preflight validation read-only here.
+    prepare_draft_send(client, input, gateways)
+}
+
+fn queue_prepared_draft_send(
+    client: &Client,
+    input: &DraftInput,
+    command_id: Option<CommandId>,
+) -> Result<SendResultView, ComposeError> {
+    let draft_id = DraftId::from_str(&input.id)
+        .map_err(|_| ui("invalid-draft", "Save the draft before sending it."))?;
+    let revision = revision(&input.expected_revision)?;
+    let stored = client
+        .resolve_compose_draft_for_send(draft_id, revision)
+        .map_err(ComposeError::Core)?;
+    let (_, latest_transport) = conversation_context(client, stored.conversation_id)?;
+    let transport = if !stored.attachment_ids.is_empty()
+        || stored.recipients.len() > 1
+        || latest_transport == Some(Transport::Mms)
+    {
         Transport::Mms
     } else {
         Transport::Sms
     };
-    if let Err(source) = client.send_compose_draft_checked_transport(draft_id, revision, transport)
-    {
+    let sent = match command_id {
+        Some(command_id) => client.send_compose_draft_accepted(draft_id, revision, command_id),
+        None => client
+            .send_compose_draft_checked_transport(draft_id, revision, transport)
+            .map(|_| ()),
+    };
+    if let Err(source) = sent {
         let current_revision = match &source {
             CoreError::DraftMoved {
                 current_revision, ..
@@ -523,10 +620,103 @@ fn validate_draft_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peppy_client_core::{ClientConfig, DatabaseKey, DraftPushOutcome, IncomingSms, VaultId};
+    use peppy_crypto::{KeyProfile, create_vault_check_header, derive_root_key};
+
+    const PASSPHRASE: &str = "compose test passphrase";
+    const GATEWAY_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        client: Client,
+    }
+
+    fn fixture() -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let vault_id = VaultId::new();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("compose.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[7; 32]).unwrap(),
+        )
+        .unwrap();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key(PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client.unlock(&profile, &header, PASSPHRASE).unwrap();
+        Fixture {
+            _directory: directory,
+            client,
+        }
+    }
+
+    fn input(draft: &ComposeDraft) -> DraftInput {
+        DraftInput {
+            id: draft.draft_id.to_string(),
+            conversation_id: draft.conversation_id.to_string(),
+            text: draft.text.clone(),
+            recipient_ids: draft.recipients.clone(),
+            attachment_ids: draft
+                .attachment_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            gateway_id: Some(GATEWAY_ID.into()),
+            sim_id: Some("sim".into()),
+            expected_revision: draft.revision.to_string(),
+        }
+    }
+
+    fn saved_draft(client: &Client, recipients: Vec<&str>) -> ComposeDraft {
+        let draft = client.recipientless_compose_draft().unwrap();
+        client
+            .save_compose_draft(
+                draft.draft_id,
+                draft.revision,
+                ComposeDraftUpdate {
+                    text: "ready".into(),
+                    recipients: recipients.into_iter().map(str::to_owned).collect(),
+                    attachment_ids: vec![],
+                    route: None,
+                },
+            )
+            .unwrap()
+    }
+
+    fn mark_synced(client: &Client, draft_id: DraftId) {
+        let push = client
+            .pending_draft_pushes()
+            .unwrap()
+            .into_iter()
+            .find(|push| push.draft_id == draft_id)
+            .unwrap();
+        client
+            .record_draft_push(
+                draft_id,
+                push.revision_id,
+                DraftPushOutcome::Accepted {
+                    branch_id: uuid::Uuid::new_v4(),
+                    expires_at_ms: 1_000,
+                    conflict: false,
+                },
+            )
+            .unwrap();
+    }
+
+    fn prepared(result: Result<DraftInput, ComposeError>) -> DraftInput {
+        match result {
+            Ok(input) => input,
+            Err(ComposeError::Ui { code, .. }) => panic!("draft preflight should succeed: {code}"),
+            Err(_) => panic!("draft preflight should succeed with a core error"),
+        }
+    }
 
     fn gateway(availability: GatewayAvailability) -> GatewayView {
         GatewayView {
-            id: "gateway".into(),
+            id: GATEWAY_ID.into(),
             name: "Gateway".into(),
             sim_id: "sim".into(),
             online: false,
@@ -571,5 +761,151 @@ mod tests {
                 "{availability:?}"
             );
         }
+    }
+
+    #[test]
+    fn prepare_rejects_invalid_source_route_and_mms_limits_before_send_intent() {
+        let fixture = fixture();
+        let draft = saved_draft(&fixture.client, vec!["+14155552671", "+14155552672"]);
+        let draft_input = input(&draft);
+        let gateways = [gateway(GatewayAvailability::Connected)];
+
+        let mut foreign = input(&draft);
+        foreign.conversation_id = ConversationId::new().to_string();
+        assert!(prepare_draft_send(&fixture.client, &foreign, Some(&gateways)).is_err());
+
+        let mut unavailable = input(&draft);
+        unavailable.gateway_id = Some("other".into());
+        assert!(prepare_draft_send(&fixture.client, &unavailable, Some(&gateways)).is_err());
+
+        let mut no_mms = gateway(GatewayAvailability::Connected);
+        no_mms.supports_mms = false;
+        assert!(prepare_draft_send(&fixture.client, &draft_input, Some(&[no_mms])).is_err());
+
+        let mut too_small = gateway(GatewayAvailability::Connected);
+        too_small.mms_max_bytes = Some(1);
+        assert!(prepare_draft_send(&fixture.client, &draft_input, Some(&[too_small])).is_err());
+        assert_eq!(
+            fixture
+                .client
+                .compose_draft(draft.draft_id)
+                .unwrap()
+                .unwrap()
+                .revision,
+            draft.revision
+        );
+    }
+
+    #[test]
+    fn prepare_canonicalizes_before_the_sync_send_gate() {
+        let fixture = fixture();
+        let captured = fixture
+            .client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+14155552671".into(),
+                body: "history".into(),
+                provider_message_id: Some("compose-context".into()),
+                imported: false,
+            })
+            .unwrap();
+        let saved = match save_draft(
+            &fixture.client,
+            &DraftInput {
+                id: String::new(),
+                conversation_id: captured.conversation_id.to_string(),
+                text: "reply".into(),
+                recipient_ids: vec![],
+                attachment_ids: vec![],
+                gateway_id: None,
+                sim_id: None,
+                expected_revision: "0".into(),
+            },
+        ) {
+            Ok(saved) => saved,
+            Err(_) => panic!("draft save should succeed"),
+        };
+        let draft = fixture
+            .client
+            .compose_draft(saved.id.parse().unwrap())
+            .unwrap()
+            .unwrap();
+        mark_synced(&fixture.client, draft.draft_id);
+
+        let prepared = prepared(prepare_draft_send(
+            &fixture.client,
+            &input(&draft),
+            Some(&[gateway(GatewayAvailability::Connected)]),
+        ));
+        let stored = fixture
+            .client
+            .compose_draft(draft.draft_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.expected_revision, stored.revision.to_string());
+        assert_eq!(prepared.recipient_ids, ["+14155552671"]);
+        assert_eq!(stored.route.as_ref().unwrap().subscription_id, "sim");
+        assert_eq!(
+            fixture
+                .client
+                .begin_draft_send(draft.draft_id, stored.revision),
+            Err(CoreError::DraftNotSynced)
+        );
+    }
+
+    #[test]
+    fn accepted_send_refuses_changed_content_and_preserves_the_exact_command() {
+        let fixture = fixture();
+        let draft = saved_draft(&fixture.client, vec!["+14155552671"]);
+        let prepared = prepared(prepare_draft_send(
+            &fixture.client,
+            &input(&draft),
+            Some(&[gateway(GatewayAvailability::Connected)]),
+        ));
+        let prepared_id = DraftId::from_str(&prepared.id).unwrap();
+        mark_synced(&fixture.client, prepared_id);
+        let command = fixture
+            .client
+            .begin_draft_send(prepared_id, prepared.expected_revision.parse().unwrap())
+            .unwrap()
+            .remote
+            .unwrap()
+            .command_id;
+
+        let mut changed = prepared;
+        changed.text = "changed after approval".into();
+        assert!(
+            send_draft_accepted(
+                &fixture.client,
+                &changed,
+                Some(&[gateway(GatewayAvailability::Connected)]),
+                command
+            )
+            .is_err()
+        );
+        let unchanged = fixture.client.compose_draft(prepared_id).unwrap().unwrap();
+        assert_eq!(unchanged.text, "ready");
+        assert_eq!(unchanged.route.as_ref().unwrap().subscription_id, "sim");
+
+        let accepted = match send_draft_accepted(
+            &fixture.client,
+            &input(&unchanged),
+            Some(&[gateway(GatewayAvailability::Connected)]),
+            command,
+        ) {
+            Ok(accepted) => accepted,
+            Err(_) => panic!("accepted send should queue the sealed command"),
+        };
+        assert!(accepted.accepted);
+        assert_eq!(
+            fixture
+                .client
+                .begin_draft_send(prepared_id, unchanged.revision)
+                .unwrap()
+                .remote
+                .unwrap()
+                .command_id,
+            command
+        );
     }
 }

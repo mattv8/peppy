@@ -286,6 +286,9 @@ pub struct AttachmentView {
     pub remote_state: Option<RemoteAttachmentStateDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_available: Option<bool>,
+    /// Draft-transfer state, present only for attachments displayed in a draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_state: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -366,7 +369,7 @@ pub struct MediaPageAroundView {
     pub older_cursor: Option<MediaCursorView>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftView {
     pub id: String,
@@ -375,10 +378,52 @@ pub struct DraftView {
     pub recipient_ids: Vec<String>,
     pub attachment_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<AttachmentView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sim_id: Option<String>,
     pub revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync: Option<DraftSyncView>,
+}
+
+impl std::fmt::Debug for DraftView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DraftView")
+            .field("id", &self.id)
+            .field("conversation_id", &self.conversation_id)
+            .field("revision", &self.revision)
+            .field(
+                "attachment_count",
+                &self.attachments.as_ref().map_or(0, Vec::len),
+            )
+            .finish()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftSyncView {
+    pub state: &'static str,
+    pub expires_at: Option<String>,
+    pub conflicts: Vec<DraftConflictView>,
+    pub notice: Option<&'static str>,
+    pub send_requires_connection: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftConflictView {
+    pub branch_id: String,
+    pub text: String,
+    pub attachment_ids: Vec<String>,
+    pub recipient_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sim_id: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -452,6 +497,7 @@ pub fn attachment_view(
         media_meta: None,
         remote_state: None,
         local_available: None,
+        draft_state: None,
     }
 }
 
@@ -688,6 +734,7 @@ pub fn draft_view(draft: &ComposeDraft) -> DraftView {
             .iter()
             .map(ToString::to_string)
             .collect(),
+        attachments: None,
         gateway_id: draft
             .route
             .as_ref()
@@ -697,7 +744,60 @@ pub fn draft_view(draft: &ComposeDraft) -> DraftView {
             .as_ref()
             .map(|route| route.subscription_id.clone()),
         revision: draft.revision.to_string(),
+        sync: None,
     }
+}
+
+pub fn draft_view_with_sync(client: &Client, draft: &ComposeDraft) -> Result<DraftView, Error> {
+    let mut view = draft_view(draft);
+    let status = client.draft_sync_status(draft.draft_id)?;
+    let state = match status.state {
+        peppy_client_core::DraftSyncState::LocalOnly => "local-only",
+        peppy_client_core::DraftSyncState::SavedLocal => "saved-local",
+        peppy_client_core::DraftSyncState::Syncing => "syncing",
+        peppy_client_core::DraftSyncState::Synced => "synced",
+        peppy_client_core::DraftSyncState::Paused => "paused",
+        peppy_client_core::DraftSyncState::Failed => "failed",
+    };
+    view.sync = Some(DraftSyncView {
+        state,
+        expires_at: status
+            .expires_at_ms
+            .and_then(|ms| time::OffsetDateTime::from_unix_timestamp(ms / 1000).ok())
+            .and_then(|value| {
+                value
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            }),
+        conflicts: status
+            .conflicts
+            .into_iter()
+            .map(|conflict| DraftConflictView {
+                branch_id: conflict.branch_id.to_string(),
+                text: conflict.text,
+                attachment_ids: conflict
+                    .attachment_ids
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect(),
+                recipient_ids: conflict.recipient_ids,
+                gateway_id: conflict
+                    .route
+                    .as_ref()
+                    .map(|route| route.gateway_device_id.to_string()),
+                sim_id: conflict
+                    .route
+                    .as_ref()
+                    .map(|route| route.subscription_id.clone()),
+            })
+            .collect(),
+        notice: status.notice.map(|notice| match notice {
+            peppy_client_core::DraftNotice::RestoredAfterExpiry => "restored-after-expiry",
+            peppy_client_core::DraftNotice::KeptAfterSent => "kept-after-sent",
+        }),
+        send_requires_connection: status.send_requires_connection,
+    });
+    Ok(view)
 }
 
 #[cfg(test)]

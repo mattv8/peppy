@@ -11,6 +11,7 @@ import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
 import { AttachmentRetentionDriver, AttachmentRetentionStatusFacade } from "./attachment-retention.js";
 import { AccountAccessDriver } from "./account-access.js";
+import { DraftTransport } from "./drafts.js";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
 import type { AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
 
@@ -107,6 +108,7 @@ export interface BrowserNetwork {
   producerReady?(): boolean;
   attachmentRetentionStatus?(): Promise<AttachmentRetentionStatusResult>;
   accountAccess?(): Promise<AccountAccessResult>;
+  sendDraft?(args: Record<string, unknown>): Promise<unknown>;
 }
 
 export interface BrowserHostDependencies {
@@ -132,6 +134,8 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   save_draft: { coreCommand: "save_draft", mutation: true },
   send_draft: { coreCommand: "send_draft", mutation: true },
   discard_draft: { coreCommand: "discard_draft", mutation: true },
+  resolve_draft_conflict: { coreCommand: "resolve_draft_conflict", mutation: true },
+  acknowledge_draft_notice: { coreCommand: "acknowledge_draft_notice", mutation: true },
   mark_seen: { coreCommand: "mark_seen", mutation: true },
   unread_message_batches: { coreCommand: "unread_message_batches", mutation: false },
   mark_read_batch: { coreCommand: "mark_read_batch", mutation: true },
@@ -227,6 +231,12 @@ function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
 }
 
 function errorFor(error: unknown): RpcError {
+  if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "draft-reconnect") {
+    return { code: "unavailable", message: "Reconnect to send this synced draft." };
+  }
+  if (typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string" && ["draft_expired", "draft_already_sent", "draft_revision_not_head"].includes((error as { code: string }).code)) {
+    return { code: (error as { code: string }).code, message: "The synced draft changed on another device." };
+  }
   if (error instanceof TransportError) {
     return { code: error.kind === "offline" ? "offline" : "unavailable", message: "Browser operation failed." };
   }
@@ -686,6 +696,10 @@ function requiredId(args: Record<string, unknown>): string {
   if (typeof id !== "string" || !/^[0-9a-f-]{36}$/.test(id)) throw { code: "invalid-request" };
   return id;
 }
+function requiredString(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) throw { code: "invalid-request" };
+  return value;
+}
 async function prepareAttachment(session: HostSession, args: Record<string, unknown>): Promise<CoreResult> {
   const displayName = args.displayName;
   const mediaType = args.mediaType;
@@ -923,6 +937,21 @@ export class BrowserWorkerHost {
     if (HISTORY_COMMANDS.has(request.command)) {
       const response = await this.historySearch(port, request);
       if (this.ports.has(port)) port.postMessage(response);
+      return;
+    }
+    if (request.command === "send_draft" && this.dependencies.network?.sendDraft) {
+      if (producerCommand(request) && !(this.dependencies.network.producerReady?.() ?? this.producerAdmissionReady)) {
+        port.postMessage({ id: request.id, ok: false, error: { code: "unavailable", message: "Browser session is not ready." } });
+        return;
+      }
+      try {
+        const value = await this.dependencies.network.sendDraft(request.args);
+        port.postMessage({ id: request.id, ok: true, value });
+        this.changed();
+        this.dependencies.network.wake?.();
+      } catch (error) {
+        port.postMessage({ id: request.id, ok: false, error: errorFor(error) });
+      }
       return;
     }
     const generation = this.visibleGeneration();
@@ -1450,6 +1479,32 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       if (polling) pollTimer = setTimeout(schedulePoll, pollDelay);
     });
   };
+  const sendDraft = async (args: Record<string, unknown>): Promise<unknown> => {
+    const session = activeSession;
+    if (!session || !publicTransport) throw { code: "draft-reconnect" };
+    const input = object(args.input);
+    const prepared = object(await session.mutate("_worker_draft_prepare_send", { input }));
+    const draftId = requiredId(prepared);
+    const expectedRevision = requiredString(prepared.expectedRevision);
+    const gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
+    if (gate.remote === null) return session.mutate("send_draft", prepared);
+    const remote = object(gate.remote);
+    try {
+      const accepted = await new DraftTransport(publicTransport).acceptDraftSend({
+        draftId: requiredString(remote.draftId),
+        revisionId: requiredString(remote.revisionId),
+        commandId: requiredString(remote.commandId),
+      }, session.signal);
+      return session.mutate("_worker_draft_send_accepted", { input: prepared, commandId: accepted.commandId });
+    } catch (error) {
+      if (isTerminalDraftSendRejection(error)) {
+        await session.mutate("_worker_draft_abort_send_intent", { draftId, commandId: requiredString(remote.commandId) });
+        throw { code: error.code };
+      }
+      if (error instanceof TransportError && (error.kind === "offline" || error.kind === "cancelled" || error.kind === "status")) throw { code: "draft-reconnect" };
+      throw error;
+    }
+  };
   return {
     locks,
     terminate,
@@ -1498,9 +1553,10 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
         async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
         async listDevices() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/devices", { method: "GET" }); },
        async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
-       async accountAccess() {
+      async accountAccess() {
          return accountAccess?.status() ?? { kind: "temporarily_unavailable" };
        },
+      sendDraft,
        },
     async boot(_signal, onFatal) {
       const modulePromise = loadBrowserCore();
@@ -1542,4 +1598,11 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       },
     },
   };
+}
+
+function isTerminalDraftSendRejection(error: unknown): error is TransportError {
+  return error instanceof TransportError
+    && error.kind === "status"
+    && ((error.status === 409 && ["draft_already_sent", "draft_revision_not_head"].includes(error.code ?? ""))
+      || (error.status === 410 && ["draft_sent", "draft_discarded", "draft_expired"].includes(error.code ?? "")));
 }

@@ -634,6 +634,9 @@ mod tests {
             if (method, path) == ("PUT", "/v1/devices/self/retention-capability") {
                 return (204, String::new());
             }
+            if method == "GET" && path.starts_with("/v1/drafts?") {
+                return (404, serde_json::json!({"code": "unsupported"}).to_string());
+            }
             assert_eq!(method, "POST");
             assert!(path.starts_with("/v1/attachments/"));
             assert_ne!(path, "/v1/attachments/reserve");
@@ -692,6 +695,16 @@ mod tests {
             .unwrap()
             .iter()
             .all(|request| request.path != "/v1/attachments/reserve"));
+        let requests = seen.lock().unwrap();
+        let draft_probe = requests
+            .iter()
+            .position(|request| request.method == "GET" && request.path.starts_with("/v1/drafts?"))
+            .expect("old server draft probe");
+        let last_retention_use = requests
+            .iter()
+            .rposition(|request| request.path.ends_with("/retention-uses"))
+            .expect("attachment uses registered before the probe");
+        assert!(last_retention_use < draft_probe);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -699,6 +712,9 @@ mod tests {
         let (origin, seen) = mock_server(|method, path, body| {
             if (method, path) == ("PUT", "/v1/devices/self/retention-capability") {
                 return (204, String::new());
+            }
+            if method == "GET" && path.starts_with("/v1/drafts?") {
+                return (404, serde_json::json!({"code": "unsupported"}).to_string());
             }
             assert_eq!(method, "POST");
             assert!(path.starts_with("/v1/attachments/"));
@@ -749,6 +765,7 @@ mod tests {
         assert!(session
             .attachment_retention_ready_advertised
             .load(Ordering::Acquire));
+        crate::sync::work_round(&session).await.unwrap();
         let requests = seen.lock().unwrap();
         let readiness = requests
             .iter()
@@ -760,6 +777,20 @@ mod tests {
         assert!(readiness[1].contains("cleanup_ready\":true"));
         assert!(readiness[2].contains("cleanup_ready\":false"));
         assert!(readiness[3].contains("cleanup_ready\":true"));
+        let retention_use = requests
+            .iter()
+            .position(|request| request.path.ends_with("/retention-uses"))
+            .expect("attachment use registered");
+        let draft_probes = requests
+            .iter()
+            .enumerate()
+            .filter(|(_, request)| {
+                request.method == "GET" && request.path.starts_with("/v1/drafts?")
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(draft_probes.len(), 2, "unsupported draft probes retry");
+        assert!(retention_use < draft_probes[0]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

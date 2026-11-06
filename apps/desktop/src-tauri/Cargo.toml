@@ -49,6 +49,7 @@ url = "2"
 unicode-general-category = "0.6"
 semver = "1"
 plist = "1"
+percent-encoding = "2"
 time = { version = "0.3", features = ["formatting"] }
 zeroize = "1"
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control", "image-data"] }

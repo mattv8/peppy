@@ -6,9 +6,13 @@ class TestPort {
   public onmessage: ((event: MessageEvent) => void) | null = null;
   public onmessageerror: (() => void) | null = null;
   public readonly sent: unknown[] = [];
+  public readonly transfers: Transferable[][] = [];
   public start = vi.fn();
   public close = vi.fn();
-  public postMessage(message: unknown): void { this.sent.push(message); }
+  public postMessage(message: unknown, transfer: Transferable[] = []): void {
+    this.sent.push(message);
+    this.transfers.push(transfer);
+  }
   public reply(message: unknown): void { this.onmessage?.({ data: message } as MessageEvent); }
 }
 
@@ -64,6 +68,58 @@ describe("BrowserBridge", () => {
     expect(port.sent).toEqual([{ id: 1, command: "set_conversation_pinned", args: { conversationId: "conversation-1", pinned: true } }]);
     port.reply({ id: 1, ok: true, value: {} });
     await expect(pinned).resolves.toEqual({});
+    bridge.dispose();
+  });
+
+  it("prepares pasted images through the attachment worker command", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const bytes = new Uint8Array([1, 2, 3]).buffer;
+    const prepared = bridge.prepare_pasted_attachments([{ bytes, name: "pasted.png", mediaType: "image/png" }]);
+
+    expect(port.sent).toEqual([{ id: 1, command: "prepare_attachment", args: { bytes, displayName: "pasted.png", mediaType: "image/png" } }]);
+    port.reply({ id: 1, ok: true, value: { id: "attachment-1", name: "pasted.png", mediaType: "image/png", byteSize: 3, state: "ready" } });
+    await expect(prepared).resolves.toMatchObject({ views: [{ id: "attachment-1" }], failures: [] });
+    bridge.dispose();
+  });
+
+  it("prepares pasted images independently, transferring accepted bytes and retaining partial success", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const first = new Uint8Array([1]).buffer;
+    const second = new Uint8Array([2]).buffer;
+    const prepared = bridge.prepare_pasted_attachments([
+      { bytes: first, name: "first.png", mediaType: "image/png" },
+      { bytes: second, name: "second.png", mediaType: "image/png" },
+    ]);
+
+    expect(port.sent).toEqual([
+      { id: 1, command: "prepare_attachment", args: { bytes: first, displayName: "first.png", mediaType: "image/png" } },
+      { id: 2, command: "prepare_attachment", args: { bytes: second, displayName: "second.png", mediaType: "image/png" } },
+    ]);
+    expect(port.transfers).toEqual([[first], [second]]);
+    port.reply({ id: 1, ok: true, value: { id: "attachment-1", name: "first.png", mediaType: "image/png", byteSize: 1, state: "ready" } });
+    port.reply({ id: 2, ok: false, error: { code: "storage", message: "disk full" } });
+
+    await expect(prepared).resolves.toMatchObject({
+      views: [{ id: "attachment-1" }],
+      failures: ["disk full"],
+    });
+    bridge.dispose();
+  });
+
+  it("rejects invalid pasted image types and sizes before posting to the worker", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+
+    await expect(bridge.prepare_pasted_attachments([
+      { bytes: new ArrayBuffer(1), name: "image.bmp", mediaType: "image/bmp" },
+      { bytes: new ArrayBuffer(32 * 1024 * 1024 + 1), name: "large.png", mediaType: "image/png" },
+    ])).resolves.toMatchObject({
+      views: [],
+      failures: ["Only PNG, JPEG, GIF, and WebP images can be pasted.", "Images must be 32 MiB or smaller."],
+    });
+    expect(port.sent).toEqual([]);
     bridge.dispose();
   });
 

@@ -156,6 +156,20 @@ describe("browser checkpoint filesystem", () => {
     expect(new TextDecoder().decode(fs.readFile(`/peppy/${cipher(id)}`))).toBe("cipher bytes");
   });
 
+  it("checkpoints and hydrates a draft-only ciphertext at the committed generation", async () => {
+    const draftId = "00000000-0000-4000-8000-000000000111";
+    const fs = seededFs();
+    fs.writeFile(`/peppy/${cipher(draftId)}`, encoder.encode("draft ciphertext"));
+    const captured = await captureFilesystemCheckpoint({ fs, core: core([[draftId]]), expectedGeneration: 11, previousFiles: [] });
+    expect(captured.files.map(file => file.path)).toEqual(["client.db", cipher(draftId)]);
+
+    const restored = new MemoryFs();
+    restoreFilesystemCheckpoint({ ...loaded(), manifest: { version: 1, generation: 11, files: ["client.db", cipher(draftId)], wrappedCredentials: encoder.encode("opaque") } }, restored);
+    let generation = 0;
+    await hydrateCipher(draftId, 11, { readCipher: async (_path, committedGeneration) => { generation = committedGeneration; return encoder.encode("draft ciphertext"); } }, restored);
+    expect(generation).toBe(11);
+  });
+
   it("fails rather than overwriting conflicting hydrated ciphertext", async () => {
     const fs = new MemoryFs();
     restoreFilesystemCheckpoint(loaded(), fs);

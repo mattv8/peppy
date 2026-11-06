@@ -19,6 +19,8 @@ export class TransportError extends Error {
     public readonly kind: TransportErrorKind,
     public readonly status?: number,
     public readonly code?: string,
+    /** Whether a status body was empty, a JSON API response, or a non-JSON proxy response. */
+    public readonly statusBody?: "empty" | "json" | "other",
   ) {
     super("Transport request failed");
   }
@@ -280,10 +282,20 @@ function boundedLimit(limit: number | undefined, fallback: number, maximum: numb
 async function assertSuccess(response: Response, deadlineSignal: AbortSignal, expectedStatus?: number): Promise<void> {
   if (response.ok && (expectedStatus === undefined || response.status === expectedStatus)) return;
   if (response.status === 401) throw new TransportError("revoked");
-  const code = await readBounded(response, MAX_ERROR_BODY_BYTES, deadlineSignal)
-    .then(serverCode)
-    .catch(() => undefined);
-  throw new TransportError("status", response.status, code);
+  const status = await readBounded(response, MAX_ERROR_BODY_BYTES, deadlineSignal)
+    .then(statusDetails)
+    .catch(() => ({ code: undefined, body: "other" as const }));
+  throw new TransportError("status", response.status, status.code, status.body);
+}
+
+function statusDetails(bytes: Uint8Array): { code?: string; body: "empty" | "json" | "other" } {
+  if (bytes.byteLength === 0) return { body: "empty" };
+  try {
+    JSON.parse(new TextDecoder().decode(bytes));
+    return { code: serverCode(bytes), body: "json" };
+  } catch {
+    return { body: "other" };
+  }
 }
 
 function serverCode(bytes: Uint8Array): string | undefined {

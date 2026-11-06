@@ -4,7 +4,7 @@
 //! filesystem and must checkpoint it before acknowledging mutating calls.
 use peppy_client_core::{
     AttachmentId, Client, ClientConfig, ConversationFolder, ConversationId, DatabaseKey, DeviceId,
-    Error as CoreError, Message, MessageId, NotificationPreferences, VaultId,
+    DraftId, Error as CoreError, Message, MessageId, NotificationPreferences, VaultId,
 };
 use peppy_crypto::{KeyProfile, VaultCheckHeader};
 use peppy_desktop_api::{
@@ -313,6 +313,27 @@ impl BrowserCore {
             "save_draft" => self.save_draft(args_value(raw_args)?),
             "discard_draft" => self.discard_draft(args_value(raw_args)?),
             "send_draft" => self.send_draft(args_value(raw_args)?),
+            "resolve_draft_conflict"
+            | "acknowledge_draft_notice"
+            | "_worker_draft_sync_supported"
+            | "_worker_draft_sync_cursor"
+            | "_worker_draft_apply_changes"
+            | "_worker_draft_bootstrap_required"
+            | "_worker_draft_attachment_ids"
+            | "_worker_draft_finish_bootstrap"
+            | "_worker_draft_pending_uploads"
+            | "_worker_draft_pending_pushes"
+            | "_worker_draft_record_push"
+            | "_worker_draft_pending_discards"
+            | "_worker_draft_record_discard"
+            | "_worker_draft_attachment_transfer_failure"
+            | "_worker_draft_attachment_transfer_clear"
+            | "_worker_draft_begin_send"
+            | "_worker_draft_prepare_send"
+            | "_worker_draft_abort_send_intent"
+            | "_worker_draft_send_accepted" => {
+                self.draft_sync_command(command, args_value(raw_args)?)
+            }
             "mark_seen" => self.mark_seen(args_value(raw_args)?),
             "unread_message_batches" => self.unread_message_batches(args_value(raw_args)?),
             "mark_read_batch" => self.mark_read_batch(args_value(raw_args)?),
@@ -605,7 +626,9 @@ impl BrowserCore {
             active_conversation_id: active.map(|id| id.to_string()),
             draft: active
                 .and_then(|id| drafts_by_conversation.get(&id).copied())
-                .map(dto::draft_view),
+                .map(|draft| Self::draft_view_with_browser_attachments(client, draft))
+                .transpose()
+                .map_err(core)?,
             head: dto::Head {
                 enabled: false,
                 capability: "unsupported",
@@ -644,6 +667,57 @@ impl BrowserCore {
             }),
         })
         .map_err(|_| core(CoreError::Database))
+    }
+
+    pub(crate) fn draft_view_with_browser_attachments(
+        client: &Client,
+        draft: &peppy_client_core::ComposeDraft,
+    ) -> Result<dto::DraftView, CoreError> {
+        let mut view = dto::draft_view_with_sync(client, draft)?;
+        let states = client.draft_attachment_states(draft.draft_id)?;
+        view.attachments = Some(
+            states
+                .into_iter()
+                .map(|(id, draft_state)| match client.attachment_info(id) {
+                    Ok(info) => {
+                        let mut attachment = dto::attachment_view(&info, None, None);
+                        attachment.draft_state = Some(match draft_state {
+                            peppy_client_core::DraftAttachmentState::Saving => "saving",
+                            peppy_client_core::DraftAttachmentState::Local => "local",
+                            peppy_client_core::DraftAttachmentState::Waiting => "waiting",
+                            peppy_client_core::DraftAttachmentState::Uploading => "uploading",
+                            peppy_client_core::DraftAttachmentState::Uploaded => "uploaded",
+                            peppy_client_core::DraftAttachmentState::UploadFailed => {
+                                "upload-failed"
+                            }
+                            peppy_client_core::DraftAttachmentState::Downloading => "downloading",
+                            peppy_client_core::DraftAttachmentState::DownloadFailed => {
+                                "download-failed"
+                            }
+                            peppy_client_core::DraftAttachmentState::Unavailable => "unavailable",
+                        });
+                        attachment
+                    }
+                    Err(_) => dto::AttachmentView {
+                        id: id.to_string(),
+                        name: "Image unavailable".into(),
+                        media_type: "application/octet-stream".into(),
+                        byte_size: 0,
+                        state: "failed",
+                        error: None,
+                        preview_url: None,
+                        transfer: None,
+                        retryable: Some(false),
+                        media_hold: None,
+                        media_meta: None,
+                        remote_state: None,
+                        local_available: Some(false),
+                        draft_state: Some("unavailable"),
+                    },
+                })
+                .collect(),
+        );
+        Ok(view)
     }
     fn load_history(&self, args: Value) -> Result<Value, Failure> {
         #[derive(Deserialize)]
@@ -703,8 +777,17 @@ impl BrowserCore {
     fn save_draft(&self, args: Value) -> Result<Value, Failure> {
         let input: DraftInput = serde_json::from_value(args).map_err(|_| invalid())?;
         parse_revision(&input.expected_revision)?;
-        serde_json::to_value(compose::save_draft(self.client()?, &input).map_err(compose_failure)?)
-            .map_err(|_| core(CoreError::Database))
+        let client = self.client()?;
+        let draft = compose::save_draft(client, &input).map_err(compose_failure)?;
+        let draft_id = draft.id.parse().map_err(|_| core(CoreError::Database))?;
+        let saved = client
+            .compose_draft(draft_id)
+            .map_err(core)?
+            .ok_or_else(|| core(CoreError::Database))?;
+        serde_json::to_value(
+            Self::draft_view_with_browser_attachments(client, &saved).map_err(core)?,
+        )
+        .map_err(|_| core(CoreError::Database))
     }
     fn send_draft(&self, args: Value) -> Result<Value, Failure> {
         let input: DraftInput = serde_json::from_value(args).map_err(|_| invalid())?;

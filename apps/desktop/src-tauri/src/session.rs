@@ -316,6 +316,32 @@ fn host() -> BridgeError {
     BridgeError::host_state()
 }
 
+const CORE_MEDIA_DIRECTORY: &str = "client.sqlcipher.media";
+
+fn pasted_extension(media_type: &str) -> &'static str {
+    match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "img",
+    }
+}
+
+fn pasted_attachment_display_name(name: &str, media_type: &str) -> String {
+    let name = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let name = if name.is_empty() {
+        "pasted-image"
+    } else {
+        name
+    };
+    if Path::new(name).extension().is_some() {
+        name.into()
+    } else {
+        format!("{name}.{}", pasted_extension(media_type))
+    }
+}
+
 /// Opens (or re-attaches to) the binding's database with its existing protected key, and
 /// restores cached purpose keys without a passphrase when their integrity check passes.
 pub fn open_session(
@@ -444,7 +470,7 @@ fn sanitize_cached_gateways(mut gateways: Vec<GatewayView>) -> Vec<GatewayView> 
 
 pub use peppy_desktop_api::compose::DraftInput;
 
-fn compose_error(error: ComposeError) -> BridgeError {
+pub(crate) fn compose_error(error: ComposeError) -> BridgeError {
     match error {
         ComposeError::Ui { code, message } => BridgeError::new(code, message),
         ComposeError::Core(error) => core_error(error),
@@ -727,14 +753,83 @@ impl Session {
         let previous = DraftId::from_str(&input.id)
             .ok()
             .and_then(|id| self.client.compose_draft(id).ok().flatten());
-        let draft = compose::save_draft(&self.client, input).map_err(compose_error)?;
+        let saved = compose::save_draft(&self.client, input).map_err(compose_error)?;
         if previous.as_ref().is_none_or(|old| {
-            old.draft_id.to_string() != draft.id
-                || old.conversation_id.to_string() != draft.conversation_id
+            old.draft_id.to_string() != saved.id
+                || old.conversation_id.to_string() != saved.conversation_id
         }) {
             self.notify();
         }
-        Ok(draft)
+        let draft_id = DraftId::from_str(&saved.id).map_err(|_| BridgeError::host_state())?;
+        let draft = self
+            .client
+            .compose_draft(draft_id)
+            .map_err(core_error)?
+            .ok_or_else(BridgeError::host_state)?;
+        self.draft_view(&draft)
+    }
+
+    pub(crate) fn draft_view(
+        &self,
+        draft: &peppy_client_core::ComposeDraft,
+    ) -> BridgeResult<DraftView> {
+        let states = self
+            .client
+            .draft_attachment_states(draft.draft_id)
+            .map_err(core_error)?;
+        let states: HashMap<_, _> = states.into_iter().collect();
+        let errors = self
+            .transfer_errors
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let attachments = draft
+            .attachment_ids
+            .iter()
+            .map(|id| {
+                let Ok(info) = self.client.attachment_info(*id) else {
+                    return AttachmentView {
+                        id: id.to_string(),
+                        name: "Attachment unavailable".into(),
+                        media_type: "application/octet-stream".into(),
+                        byte_size: 0,
+                        state: "failed",
+                        error: None,
+                        preview_url: None,
+                        transfer: None,
+                        retryable: Some(false),
+                        media_hold: None,
+                        media_meta: None,
+                        remote_state: None,
+                        local_available: Some(false),
+                        draft_state: Some("unavailable"),
+                    };
+                };
+                let preview = self
+                    .previews
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.get(id))
+                    .flatten();
+                let mut view = dto::attachment_view(&info, errors.get(id).cloned(), preview);
+                view.draft_state = states.get(id).map(|state| match state {
+                    peppy_client_core::DraftAttachmentState::Saving => "saving",
+                    peppy_client_core::DraftAttachmentState::Local => "local",
+                    peppy_client_core::DraftAttachmentState::Waiting => "waiting",
+                    peppy_client_core::DraftAttachmentState::Uploading => "uploading",
+                    peppy_client_core::DraftAttachmentState::Uploaded => "uploaded",
+                    peppy_client_core::DraftAttachmentState::UploadFailed => "upload-failed",
+                    peppy_client_core::DraftAttachmentState::Downloading => "downloading",
+                    peppy_client_core::DraftAttachmentState::DownloadFailed => "download-failed",
+                    peppy_client_core::DraftAttachmentState::Unavailable => "unavailable",
+                });
+                view
+            })
+            .collect();
+        let mut view =
+            peppy_desktop_api::draft_view_with_sync(&self.client, draft).map_err(core_error)?;
+        view.attachments = Some(attachments);
+        Ok(view)
     }
 
     pub fn discard_draft(
@@ -870,9 +965,19 @@ impl Session {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "attachment".into());
+        self.prepare_attachment_with_media_type(path, media_type, &name)
+    }
+
+    /// Encrypts a trusted app-owned file using caller-supplied image metadata.
+    fn prepare_attachment_with_media_type(
+        &self,
+        path: &Path,
+        media_type: &str,
+        name: &str,
+    ) -> BridgeResult<AttachmentView> {
         let info = self
             .client
-            .prepare_attachment(path, media_type, &name)
+            .prepare_attachment(path, media_type, name)
             .map_err(core_error)?;
         let preview = media::is_previewable(media_type)
             .then(|| media::read_capped(path).and_then(|bytes| media::preview_data_url(&bytes)))
@@ -887,6 +992,47 @@ impl Session {
             &mut HashMap::new(),
         );
         Ok(attachment)
+    }
+
+    /// Encrypts pasted image bytes through the regular attachment path and removes the temporary
+    /// plaintext input before returning, including if preparation fails.
+    pub fn prepare_attachment_bytes(
+        &self,
+        bytes: &[u8],
+        media_type: &str,
+        name: &str,
+    ) -> BridgeResult<AttachmentView> {
+        let name = pasted_attachment_display_name(name, media_type);
+        let temporary = self
+            .data_dir
+            .join(CORE_MEDIA_DIRECTORY)
+            .join("tmp")
+            .join(format!(
+                "pasted-{}.{}",
+                uuid::Uuid::new_v4(),
+                pasted_extension(media_type)
+            ));
+        let result = (|| {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary).map_err(|_| {
+                BridgeError::new("attachment-local", "The pasted image could not be saved.")
+            })?;
+            std::io::Write::write_all(&mut file, bytes).map_err(|_| {
+                BridgeError::new("attachment-local", "The pasted image could not be saved.")
+            })?;
+            file.sync_all().map_err(|_| {
+                BridgeError::new("attachment-local", "The pasted image could not be saved.")
+            })?;
+            self.prepare_attachment_with_media_type(&temporary, media_type, &name)
+        })();
+        let _ = fs::remove_file(&temporary);
+        result
     }
 
     /// Retries only a locally recorded transfer failure. It never changes message state or queues
@@ -1219,6 +1365,7 @@ impl Session {
                         media_meta: None,
                         remote_state: None,
                         local_available: None,
+                        draft_state: None,
                     };
                 };
                 let media_metadata = self
@@ -1612,7 +1759,8 @@ impl Session {
         }
         let draft = active
             .and_then(|id| drafts_by_conversation.get(&id).copied())
-            .map(dto::draft_view);
+            .map(|draft| self.draft_view(draft))
+            .transpose()?;
         let pending = self.client.pending_outbox_count().map_err(core_error)? as u64;
         let quarantine = self.client.quarantine_count().map_err(core_error)? as u64;
         let notification_snapshot = self.client.notification_snapshot().map_err(core_error)?;
@@ -1827,6 +1975,44 @@ mod tests {
     };
     use peppy_client_core::IncomingSms;
     use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
+
+    #[test]
+    fn pasted_attachment_temporary_file_is_removed_after_success_and_failure() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let temporary_directory = session.data_dir.join(CORE_MEDIA_DIRECTORY).join("tmp");
+
+        let attachment = session
+            .prepare_attachment_bytes(&sample_png(2, 2), "image/png", "Pasted image")
+            .unwrap();
+        assert!(attachment
+            .preview_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("data:image/png;base64,")));
+        assert!(std::fs::read_dir(&temporary_directory)
+            .unwrap()
+            .next()
+            .is_none());
+
+        assert!(session
+            .prepare_attachment_bytes(b"pixels", "invalid", "Pasted image")
+            .is_err());
+        assert!(std::fs::read_dir(&temporary_directory)
+            .unwrap()
+            .next()
+            .is_none());
+    }
 
     #[test]
     fn notification_preferences_adopt_once_then_follow_core() {

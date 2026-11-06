@@ -656,9 +656,11 @@ async fn draft_event_targets_composer_after_move_and_not_unrelated_composer() {
         text: moved.text.clone(),
         recipient_ids: moved.recipient_ids.clone(),
         attachment_ids: moved.attachment_ids.clone(),
+        attachments: moved.attachments.clone(),
         gateway_id: moved.gateway_id.clone(),
         sim_id: moved.sim_id.clone(),
         revision: moved.revision.clone(),
+        sync: None,
     };
     assert_eq!(
         draft_event_target_labels_after_save(

@@ -4098,6 +4098,7 @@ dependencies = [
  "peppy-hosted-client",
  "peppy-protocol",
  "peppy-server",
+ "percent-encoding",
  "plist",
  "reqwest 0.13.5",
  "rustls",
@@ -4141,6 +4142,7 @@ dependencies = [
  "peppy-hosted-client",
  "serde",
  "serde_json",
+ "time",
  "ts-rs",
  "uuid",
 ]

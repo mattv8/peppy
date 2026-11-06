@@ -67,6 +67,7 @@ class AttachmentCore extends TrustedCore {
   public exportFailure?: CoreRejectedError;
   public touchFailure?: CoreRejectedError;
   public snapshot?: CoreResult;
+  public snapshotDraftMediaState = false;
   public history?: CoreResult;
   public content = encoder.encode("cat");
   public previewFailure?: CoreRejectedError;
@@ -111,6 +112,10 @@ class AttachmentCore extends TrustedCore {
     }
     if (command === "_worker_attachment_remote") return { remoteObjectId: "remote-object" };
     if (command === "_worker_local_attachment_ids") return { attachmentIds: this.state === "ready" ? this.attachmentIds : [] };
+    if (command === "_worker_draft_attachment_ids") return { attachmentIds: this.attachmentIds };
+    if (command === "snapshot" && this.snapshotDraftMediaState) {
+      return { drafts: [{ attachment: this.fs.readdir("/peppy/client.db.media/cipher").includes(`${id}.ppss`) ? "ready" : "unavailable" }] };
+    }
     if (command === "snapshot" && this.snapshot) return this.snapshot;
     if (command === "load_history" && this.history) return this.history;
     return super.invoke(request);
@@ -185,6 +190,18 @@ describe("BrowserSession", () => {
     const locked = await BrowserSession.boot(sessionOptions(new TrustedCore(), new MemoryFs(), store));
     expect(locked.phase).toBe("locked");
     expect(locked.generation).toBe(1);
+  });
+
+  it("hydrates committed draft ciphertext before a restored snapshot inspects draft media", async () => {
+    const { core, fs, session } = await unlockedAttachmentSession("ready", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("draft ciphertext") },
+    ]);
+    core.state = "pending";
+    core.snapshotDraftMediaState = true;
+
+    await expect(session.query("snapshot", {})).resolves.toEqual({ drafts: [{ attachment: "ready" }] });
+    expect(fs.readdir("/peppy/client.db.media/cipher")).toContain(`${id}.ppss`);
   });
 
   it("restores a committed checkpoint with a remembered phrase without saving it again", async () => {

@@ -6,7 +6,7 @@ import type {
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
-  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder,
+  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, PastedImage,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
@@ -546,6 +546,19 @@ export class BrowserBridge implements DesktopBridge {
     if (files.some((file) => file.size > MAX_FILE_BYTES)) throw new BrowserBridgeError("attachment-too-large", "Attachments must be 32 MiB or smaller.");
     return Promise.all(files.map(async (file) => { const bytes = await file.arrayBuffer(); return this.call<AttachmentView>("prepare_attachment", { bytes, displayName: file.name, mediaType: file.type || "application/octet-stream" }, [bytes]); }));
   }
+  public async prepare_pasted_attachments(files: PastedImage[]) {
+    const prepared = await Promise.allSettled(files.map(({ bytes, name, mediaType }) => {
+      if (!IMAGE_TYPES.has(mediaType)) return Promise.reject(new BrowserBridgeError("invalid-attachment", "Only PNG, JPEG, GIF, and WebP images can be pasted."));
+      if (bytes.byteLength > MAX_FILE_BYTES) return Promise.reject(new BrowserBridgeError("attachment-too-large", "Images must be 32 MiB or smaller."));
+      return this.call<AttachmentView>("prepare_attachment", { bytes, displayName: name, mediaType }, [bytes]);
+    }));
+    return {
+      views: prepared.flatMap(result => result.status === "fulfilled" ? [result.value] : []),
+      failures: prepared.flatMap(result => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "Could not add pasted image."] : []),
+    };
+  }
+  public resolve_draft_conflict(input: { draftId: string; keepBranchId: string | null }): Promise<Draft> { return this.call("resolve_draft_conflict", input); }
+  public acknowledge_draft_notice(draftId: string): Promise<void> { return this.call("acknowledge_draft_notice", { draftId }); }
   public retry_attachment(id: string): Promise<void> { return this.call("retry_attachment", { id }); }
   public attachment_retention_state(attachmentId: string): Promise<AttachmentRetentionStateDto> { return this.call("attachment_retention_state", { attachmentId }); }
   public attachment_retention_status(): Promise<AttachmentRetentionStatusResult> { return this.call("attachment_retention_status"); }

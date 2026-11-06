@@ -727,11 +727,15 @@ describe("browser host RPC", () => {
     await dispatchBrowserRpc(session, { id: 1, command: "load_state", args: { conversationId: "c" } });
     await dispatchBrowserRpc(session, { id: 2, command: "save_draft", args: { input: { text: "hello" } } });
     await dispatchBrowserRpc(session, { id: 3, command: "discard_draft", args: { input: { id: "draft", conversationId: "conversation", expectedRevision: "1" } } });
+    await dispatchBrowserRpc(session, { id: 4, command: "resolve_draft_conflict", args: { draftId: "draft", keepBranchId: null } });
+    await dispatchBrowserRpc(session, { id: 5, command: "acknowledge_draft_notice", args: { draftId: "draft" } });
     expect(session.calls).toEqual([
       { command: "snapshot", args: { conversationId: "c" }, mutation: false },
       { command: "contact_snapshot", args: { addresses: [] }, mutation: false },
       { command: "save_draft", args: { text: "hello" }, mutation: true },
       { command: "discard_draft", args: { id: "draft", conversationId: "conversation", expectedRevision: "1" }, mutation: true },
+      { command: "resolve_draft_conflict", args: { draftId: "draft", keepBranchId: null }, mutation: true },
+      { command: "acknowledge_draft_notice", args: { draftId: "draft" }, mutation: true },
     ]);
   });
 
@@ -1268,6 +1272,78 @@ describe("browser host RPC", () => {
     first.emit({ id: 1, command: "send_draft", args: { input: {} } });
     await eventually(() => second.messages.some(message => typeof message === "object" && message !== null && "event" in message && message.event === "changed"));
     expect(first.messages).toContainEqual(expect.objectContaining({ id: 1, ok: false, error: expect.objectContaining({ code: "draft-moved" }) }));
+  });
+
+  it("routes local draft sends through the network dispatch and blocks unavailable producers before preparation", async () => {
+    const session = new FakeSession();
+    const sendDraft = vi.fn(async (args: Record<string, unknown>) => {
+      const input = args.input as Record<string, unknown>;
+      const prepared = await session.mutate("_worker_draft_prepare_send", { input });
+      const gate = await session.mutate("_worker_draft_begin_send", { draftId: (prepared as { id: string }).id, expectedRevision: (prepared as { expectedRevision: string }).expectedRevision });
+      if ((gate as { remote: unknown }).remote !== null) throw new Error("expected local draft");
+      return session.mutate("send_draft", prepared as Record<string, unknown>);
+    });
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      if (command === "_worker_draft_prepare_send") return { id: "draft", expectedRevision: "1", text: (args.input as { text: string }).text };
+      if (command === "_worker_draft_begin_send") return { remote: null };
+      return { command };
+    };
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, producerReady: () => true, sendDraft } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "send_draft", args: { input: { text: "local" } } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    expect(sendDraft).toHaveBeenCalledWith({ input: { text: "local" } });
+    expect(session.calls).toContainEqual({ command: "_worker_draft_prepare_send", args: { input: { text: "local" } }, mutation: true });
+    expect(session.calls).toContainEqual({ command: "send_draft", args: { id: "draft", expectedRevision: "1", text: "local" }, mutation: true });
+
+    const blockedSession = new FakeSession();
+    const blockedSend = vi.fn(async () => undefined);
+    const blockedHost = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => blockedSession,
+      network: { start: async () => undefined, stop: async () => undefined, producerReady: () => false, sendDraft: blockedSend } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const blocked = port();
+    await blockedHost.attach(blocked);
+    blocked.emit({ id: 2, command: "send_draft", args: { input: { text: "blocked", attachmentIds: ["attachment"] } } });
+    await eventually(() => blocked.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+    expect(blockedSend).not.toHaveBeenCalled();
+    expect(blockedSession.calls).not.toContainEqual(expect.objectContaining({ command: "_worker_draft_prepare_send" }));
+  });
+
+  it("does not accept a draft send when its core preflight rejects it", async () => {
+    const session = new FakeSession();
+    const accept = vi.fn(async () => undefined);
+    const sendDraft = async (args: Record<string, unknown>) => {
+      const input = args.input as Record<string, unknown>;
+      const prepared = await session.mutate("_worker_draft_prepare_send", { input });
+      await accept();
+      return prepared;
+    };
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      if (command === "_worker_draft_prepare_send") throw new CoreRejectedError("invalid-draft");
+      return { command };
+    };
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, producerReady: () => true, sendDraft } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "send_draft", args: { input: { text: "invalid" } } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    expect(accept).not.toHaveBeenCalled();
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: false, error: expect.objectContaining({ code: "invalid-draft" }) }));
   });
 
   it("locks all ports and terminates the worker without restoring a live filesystem", async () => {

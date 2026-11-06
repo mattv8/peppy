@@ -53,6 +53,31 @@ export async function transferContactPhotoUploads(
   return result;
 }
 
+/** Uploads draft attachments through the ordinary reservation/finalize path. */
+export async function transferDraftUploads(
+  session: SchedulerMediaSession,
+  transport: Pick<MediaTransport, "json" | "upload">,
+  bridge: WorkerMediaBridge | undefined,
+  signal: AbortSignal,
+): Promise<MediaTransferResult> {
+  const result: MediaTransferResult = { failedIds: [], completedIds: [] };
+  if (!bridge) return result;
+  const pending = draftUploads(await session.query("_worker_draft_pending_uploads", {}));
+  for (const upload of pending.slice(0, MAX_MEDIA_PER_ROUND)) {
+    throwIfAborted(signal);
+    try {
+      await uploadAttachment(session, transport, bridge, upload, signal, upload.draftId);
+      await session.mutate("_worker_draft_attachment_transfer_clear", { attachmentId: upload.id });
+      result.completedIds.push(upload.id);
+    } catch (error) {
+      throwIfFatalTransferError(error, signal);
+      await session.mutate("_worker_draft_attachment_transfer_failure", { attachmentId: upload.id, direction: "upload" });
+      result.failedIds.push(upload.id);
+    }
+  }
+  return result;
+}
+
 async function transferUploads(session: SchedulerMediaSession, transport: Pick<MediaTransport, "json" | "upload">, bridge: WorkerMediaBridge, signal: AbortSignal, deferredIds: ReadonlySet<string>, result: MediaTransferResult, permittedIds?: ReadonlySet<string>): Promise<void> {
   const pending = array(await session.query("pending_uploads", {}));
   for (const item of pending.filter(item => isEligibleAttachment(item, deferredIds) && (permittedIds === undefined || permittedIds.has(optionalAttachmentId(item) ?? ""))).slice(0, MAX_MEDIA_PER_ROUND)) {
@@ -70,7 +95,7 @@ async function transferUploads(session: SchedulerMediaSession, transport: Pick<M
   }
 }
 
-async function uploadAttachment(session: SchedulerMediaSession, transport: Pick<MediaTransport, "json" | "upload">, bridge: WorkerMediaBridge, attachment: AttachmentItem, signal: AbortSignal): Promise<void> {
+async function uploadAttachment(session: SchedulerMediaSession, transport: Pick<MediaTransport, "json" | "upload">, bridge: WorkerMediaBridge, attachment: AttachmentItem, signal: AbortSignal, draftId?: string): Promise<void> {
   await session.hydrate(attachment.id);
   const classification = uploadClassification(await session.query("_worker_attachment_retention_upload_classification", { attachmentId: attachment.id }));
   const cipher = object(await session.query("cipher_file", { id: attachment.id }));
@@ -80,7 +105,7 @@ async function uploadAttachment(session: SchedulerMediaSession, transport: Pick<
   try {
     const reserved = object(await transport.json("/v1/attachments/reserve", {
       method: "POST",
-      body: { attachment_id: attachment.id, declared_ciphertext_bytes: attachment.ciphertextBytes, declared_ciphertext_sha256: requiredString(cipher.ciphertextSha256), retention_class: classification.retentionClass, reference_tracking: classification.referenceTracking },
+      body: { attachment_id: attachment.id, declared_ciphertext_bytes: attachment.ciphertextBytes, declared_ciphertext_sha256: requiredString(cipher.ciphertextSha256), retention_class: classification.retentionClass, reference_tracking: classification.referenceTracking, ...(draftId ? { draft_id: draftId } : {}) },
       signal,
     }));
     remoteObjectId = exactAttachmentId(reserved, attachment.id);
@@ -142,6 +167,17 @@ function attachmentItem(value: unknown): AttachmentItem {
   const ciphertextBytes = item.ciphertextBytes;
   if (typeof ciphertextBytes !== "number" || !Number.isSafeInteger(ciphertextBytes) || ciphertextBytes <= 0) throw new TransportError("invalid");
   return { id: requiredString(item.id), ciphertextBytes };
+}
+
+function draftUploads(value: unknown): Array<AttachmentItem & { draftId: string }> {
+  const uploads = object(value).uploads;
+  if (!Array.isArray(uploads)) throw new TransportError("invalid");
+  return uploads.map(upload => {
+    const item = object(upload);
+    const ciphertextBytes = item.ciphertextBytes;
+    if (typeof ciphertextBytes !== "number" || !Number.isSafeInteger(ciphertextBytes) || ciphertextBytes <= 0) throw new TransportError("invalid");
+    return { id: requiredString(item.attachmentId), ciphertextBytes, draftId: requiredString(item.draftId) };
+  });
 }
 
 function optionalAttachmentId(value: unknown): string | undefined {
