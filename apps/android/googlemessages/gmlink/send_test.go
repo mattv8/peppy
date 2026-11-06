@@ -333,7 +333,7 @@ func TestPreparedRcsRejectsChangedFetchedConversationWithoutIndexChange(t *testi
 	ticket := prepareTicket(t, link, token, tmpID)
 	fixture.mu.Lock()
 	fixture.conversations[0] = cloneConversation(fixture.conversations[0])
-	fixture.conversations[0].Status = gmproto.ConversationStatus_INACTIVE
+	fixture.conversations[0].Status = gmproto.ConversationStatus_ARCHIVED
 	fixture.mu.Unlock()
 	if got := decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))); got != "rejected" {
 		t.Fatalf("changed fetched conversation = %s", got)
