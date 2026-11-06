@@ -260,8 +260,7 @@ fn projected_gateway_matrix_rejects_without_record_side_effects() {
 }
 
 #[test]
-#[ignore = "defect: NULL R1 reservations are not materialized by projected ingest"]
-fn page_proof_boundary_and_null_reservation_materialization_are_durable() {
+fn page_proof_time_rejects_equal_and_undated_pages_without_touching_live_records() {
     let (_dir, _vault, config, client, conversation, owner) = fixture();
     let connection = sql(&config);
     let proof_time: i64 = connection
@@ -307,7 +306,12 @@ fn page_proof_boundary_and_null_reservation_materialization_are_durable() {
             .iter()
             .any(|message| message.payload.body == "body-live" && !message.seen)
     );
+}
 
+#[test]
+fn null_reservation_materializes_once_replays_and_resolves_immutable_status() {
+    let (_dir, _vault, config, client, conversation, owner) = fixture();
+    let connection = sql(&config);
     let reserved = "reserved";
     assert_eq!(
         client
@@ -325,7 +329,7 @@ fn page_proof_boundary_and_null_reservation_materialization_are_durable() {
         client
             .ingest_rcs_projected_record(conversation, owner.ownership_generation, record(reserved))
             .unwrap(),
-        RcsReceiveOutcome::Duplicate
+        RcsReceiveOutcome::Inserted
     );
     let reserved_id: String = connection
         .query_row(
@@ -335,6 +339,13 @@ fn page_proof_boundary_and_null_reservation_materialization_are_durable() {
         )
         .unwrap();
     assert!(reserved_id.parse::<MessageId>().is_ok());
+    assert_eq!(client.messages(conversation).unwrap().len(), 1);
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, record(reserved))
+            .unwrap(),
+        RcsReceiveOutcome::Duplicate
+    );
     assert_eq!(
         client
             .apply_rcs_projected_status(
@@ -354,7 +365,7 @@ fn page_proof_boundary_and_null_reservation_materialization_are_durable() {
             .count(),
         1
     );
-    // Reverting <= proof floor or reserved-identity materialization fails this test.
+    // Reverting reserved-identity materialization fails the Inserted/replay/status sequence.
 }
 
 #[test]
@@ -442,9 +453,31 @@ fn reported_facts_converge_for_outgoing_match_and_immutable_duplicate() {
                 .unwrap(),
             RcsReceiveOutcome::OutgoingMatched
         );
+        let expected_send_state = only_message(&client, conversation).send_state;
+        let mut tmp_duplicate = echo.clone();
+        tmp_duplicate.rcs_reported = !first_reported;
+        tmp_duplicate.e2ee_reported = Some(!first_reported);
+        assert_eq!(
+            client
+                .ingest_rcs_projected_record(
+                    conversation,
+                    owner.ownership_generation,
+                    tmp_duplicate,
+                )
+                .unwrap(),
+            RcsReceiveOutcome::Duplicate
+        );
+        assert_eq!(
+            client
+                .rcs_conversation_metadata(conversation)
+                .unwrap()
+                .unwrap()
+                .rcs_encryption,
+            Some(!first_reported)
+        );
         echo.tmp_id = None;
-        echo.rcs_reported = !first_reported;
-        echo.e2ee_reported = Some(!first_reported);
+        echo.rcs_reported = first_reported;
+        echo.e2ee_reported = Some(first_reported);
         assert_eq!(
             client
                 .ingest_rcs_projected_record(conversation, owner.ownership_generation, echo)
@@ -452,8 +485,18 @@ fn reported_facts_converge_for_outgoing_match_and_immutable_duplicate() {
             RcsReceiveOutcome::Duplicate
         );
         assert_eq!(client.rcs_message_status(message_id).unwrap(), None);
-        let send_state = only_message(&client, conversation).send_state;
-        assert_eq!(only_message(&client, conversation).send_state, send_state);
+        assert_eq!(
+            only_message(&client, conversation).send_state,
+            expected_send_state
+        );
+        assert_eq!(
+            client
+                .rcs_conversation_metadata(conversation)
+                .unwrap()
+                .unwrap()
+                .rcs_encryption,
+            Some(first_reported)
+        );
         let peer_config = config(&directory, "peer", &vault);
         let peer = unlocked(&peer_config, &vault);
         let mut server = Server::default();
@@ -461,6 +504,13 @@ fn reported_facts_converge_for_outgoing_match_and_immutable_duplicate() {
         server.sync(&peer);
         assert_eq!(client.rcs_message_reported(message_id).unwrap(), Some(true));
         assert_eq!(peer.rcs_message_reported(message_id).unwrap(), Some(true));
+        assert_eq!(
+            peer.rcs_conversation_metadata(conversation)
+                .unwrap()
+                .unwrap()
+                .rcs_encryption,
+            Some(first_reported)
+        );
     }
     // Reverting apply_reported_facts from either outgoing match path fails local/peer convergence.
 }
