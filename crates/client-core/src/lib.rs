@@ -10185,6 +10185,9 @@ fn valid_message(message: &MessagePayload, producer: DeviceId) -> bool {
                     || message.sender_address.as_deref().is_some_and(address_ok)
             }
             Direction::Outgoing => {
+                if message.transport == Transport::Rcs && message.recipients.is_empty() {
+                    return true;
+                }
                 let limit = match message.transport {
                     Transport::Mms => MAX_MMS_RECIPIENTS,
                     _ => 1,

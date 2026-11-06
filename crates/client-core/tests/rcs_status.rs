@@ -364,3 +364,49 @@ fn statuses_converge_and_rejections_leave_no_status_row() {
     );
     assert_eq!(status_rank(&first_config, message_id), Some(5));
 }
+
+#[test]
+fn unmatched_foreign_outgoing_is_inserted_once_without_a_command() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let owner = client
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
+    let mut foreign = record("foreign");
+    foreign.direction = Direction::Outgoing;
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, foreign.clone())
+            .unwrap(),
+        RcsReceiveOutcome::UnmatchedOutgoing
+    );
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, foreign)
+            .unwrap(),
+        RcsReceiveOutcome::Duplicate
+    );
+    let message = only_message(&client, conversation);
+    assert_eq!(message.payload.direction, Direction::Outgoing);
+    assert_eq!(message.send_state, None);
+    let message_id = message.payload.record.message_id;
+    assert_eq!(
+        client
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status(RcsProjectedStatus::Sent),
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusApplied
+    );
+    assert_eq!(status_rank(&config, message_id), Some(2));
+    for envelope in client.pending_outbox().unwrap() {
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        assert!(!serialized.contains("provider-message"));
+        assert!(!serialized.contains("provider-conversation"));
+    }
+}

@@ -78,6 +78,7 @@ pub struct RcsProjectedRecord {
 pub enum RcsReceiveOutcome {
     Inserted,
     Duplicate,
+    UnmatchedOutgoing,
     StatusApplied,
     StatusUnchanged,
     Rejected(RcsReceiveCode),
@@ -280,6 +281,7 @@ impl Client {
         )?;
         let outcome = match identity {
             RcsIdentityOutcome::Recorded => {
+                let unmatched_outgoing = record.direction == Direction::Outgoing;
                 let payload = MessagePayload {
                     record: MessageRecord {
                         message_id,
@@ -311,7 +313,20 @@ impl Client {
                     None,
                     &PrivatePayload::Message(payload),
                 )?;
-                RcsReceiveOutcome::Inserted
+                if unmatched_outgoing {
+                    let count: i64 = tx.query_row(
+                        "SELECT COALESCE(CAST(v AS INTEGER),0) FROM metadata WHERE k='rcs_unmatched_outgoing_count'",
+                        [],
+                        |row| row.get(0),
+                    ).optional()?.unwrap_or(0);
+                    tx.execute(
+                        "INSERT INTO metadata(k,v) VALUES('rcs_unmatched_outgoing_count',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                        [(count.checked_add(1).ok_or(Error::Database)?).to_string()],
+                    )?;
+                    RcsReceiveOutcome::UnmatchedOutgoing
+                } else {
+                    RcsReceiveOutcome::Inserted
+                }
             }
             RcsIdentityOutcome::Duplicate => RcsReceiveOutcome::Duplicate,
             RcsIdentityOutcome::Rejected(code) => return Ok(RcsReceiveOutcome::Rejected(code)),
