@@ -10861,15 +10861,28 @@ mod tests {
         drop(client);
         let upgraded = Client::open(config.clone(), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
         let store = upgraded.lock().unwrap();
-        let state: String = store.conn.query_row(
-            "SELECT state FROM rcs_link_status_projection WHERE gateway_device_id='gateway'", [], |row| row.get(0),
-        ).unwrap();
+        let state: String = store
+            .conn
+            .query_row(
+                "SELECT state FROM rcs_link_status_projection WHERE gateway_device_id='gateway'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(state, "linked");
-        let table: String = store.conn.query_row(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='rcs_lane_ownership'", [], |row| row.get(0),
-        ).unwrap();
+        let table: String = store
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='rcs_lane_ownership'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(table, "rcs_lane_ownership");
-        store.conn.execute("UPDATE schema_meta SET version=50", []).unwrap();
+        store
+            .conn
+            .execute("UPDATE schema_meta SET version=50", [])
+            .unwrap();
         drop(store);
         drop(upgraded);
         assert!(matches!(
