@@ -208,7 +208,7 @@ impl LiveTestServer {
         let (router, _maintenance) = build_router_with_live_backend(
             pool.clone(),
             RouterBuildOptions {
-                config: None,
+                config: Some(test_config(&database_url)),
                 initialized_storage: None,
                 transport: TransportOptions::default(),
                 explicit_relay_url: None,
@@ -271,6 +271,32 @@ impl LiveTestServer {
         connect_async(request).await.unwrap().0
     }
 
+    async fn connect_with_ticket(
+        &self,
+        session_id: &str,
+        ticket: &str,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        String,
+    ) {
+        let protocol = live_ticket_protocol(session_id, ticket);
+        let mut request = self.ws_url.clone().into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("origin", "https://web.peppy.test".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("sec-websocket-protocol", protocol.parse().unwrap());
+        let (socket, response) = connect_async(request).await.unwrap();
+        assert_eq!(
+            response.headers().get("sec-websocket-protocol").unwrap(),
+            &protocol
+        );
+        (socket, protocol)
+    }
+
     async fn snapshot(&self) -> serde_json::Value {
         reqwest::Client::new()
             .get(format!("{}/v1/snapshot", self.base_url))
@@ -301,6 +327,28 @@ impl LiveTestServer {
         if let Some(sender) = self.shutdown.lock().unwrap().take() {
             let _ = sender.send(());
         }
+    }
+}
+
+fn test_config(database_url: &str) -> crate::config::Config {
+    crate::config::Config {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        database_url: database_url.into(),
+        release_identity: "test".into(),
+        s3: None,
+        public_api_url: None,
+        public_attachment_url: None,
+        vault_attachment_quota_bytes: 512 * 1024 * 1024,
+        trusted_proxy_cidrs: Vec::new(),
+        replay_retention: Duration::from_secs(30 * 86_400),
+        relay_url: None,
+        web_client: None,
+        web_live_trusted_origin: Some(
+            "https://web.peppy.test"
+                .parse::<url::Url>()
+                .unwrap()
+                .origin(),
+        ),
     }
 }
 
@@ -998,6 +1046,20 @@ async fn issue_ticket(server: &LiveTestServer, session_id: String) -> String {
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+fn live_ticket_protocol(session_id: &str, ticket: &str) -> String {
+    format!("peppy-live-v2.{session_id}.{ticket}")
+}
+
+#[tokio::test]
+async fn ticket_live_upgrade_echoes_protocol_and_sends_hello() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session_id = URL_SAFE_NO_PAD.encode([31_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
+    expect_strict_hello(&mut socket).await;
+    server.shutdown().await;
 }
 
 fn ticket_parts(session_id: &str, ticket: &str) -> ([u8; 16], [u8; 32]) {

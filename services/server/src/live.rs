@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 use tokio::sync::{mpsc, watch};
 
@@ -38,10 +38,6 @@ struct LiveHubInner {
 
 struct LiveSink {
     generation: u64,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "ticket upgrade wiring consumes the session fence")
-    )]
     session_id: Option<[u8; 16]>,
     sender: mpsc::Sender<EphemeralSignalV2>,
     cancellation: watch::Sender<bool>,
@@ -150,13 +146,6 @@ impl LiveHub {
         self.register_with_session(vault_id, device_id, None)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "ticket upgrade wiring registers session-fenced sockets"
-        )
-    )]
     pub(crate) fn register_ticket(
         &self,
         vault_id: VaultId,
@@ -201,10 +190,6 @@ impl LiveHub {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "ticket close notifications cancel fenced sockets")
-    )]
     pub(crate) fn cancel_exact(
         &self,
         vault_id: VaultId,
@@ -331,7 +316,7 @@ impl LiveHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use peppy_domain::{DeviceId, VaultId};
     use peppy_protocol::{EphemeralSignalV2, EphemeralSignalV2Kind};
     use tokio::sync::mpsc::error::TryRecvError;

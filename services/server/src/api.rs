@@ -286,6 +286,7 @@ pub(super) struct ApiState {
     claim_policy: crate::instance::ClaimPolicy,
     setup_window_started: std::time::Instant,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
+    live_trusted_origin: Option<url::Origin>,
     live_hub: crate::live::LiveHub,
     live_backend: Arc<crate::live_postgres::PgLiveBackend>,
     #[cfg(test)]
@@ -587,6 +588,9 @@ fn build_router_with_live_backend(
         .as_ref()
         .map(|config| config.trusted_proxy_cidrs.clone())
         .unwrap_or_default();
+    let live_trusted_origin = config
+        .as_ref()
+        .and_then(|config| config.web_live_trusted_origin.clone());
     let push_config_response = push_advertisement
         .response()
         .expect("router requires a validated push configuration");
@@ -724,6 +728,7 @@ fn build_router_with_live_backend(
         claim_policy,
         setup_window_started: std::time::Instant::now(),
         trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs.clone()),
+        live_trusted_origin,
         live_hub,
         live_backend,
         #[cfg(test)]
@@ -3004,9 +3009,45 @@ async fn live_websocket(
     shutdown: Option<Extension<tokio::sync::watch::Receiver<bool>>>,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    // Authenticate before deciding whether the relay is available, so failed
-    // credentials never receive an upgrade or register a hub sink.
-    let principal = authenticated(&state, &headers, Operation::Sync).await?;
+    let mode = crate::live_ticket_upgrade::classify_live_upgrade(
+        &headers,
+        state.live_trusted_origin.as_ref(),
+    )
+    .map_err(|rejection| {
+        let status = match rejection {
+            crate::live_ticket_upgrade::UpgradeRejection::ProtocolInvalid
+            | crate::live_ticket_upgrade::UpgradeRejection::AuthModeMixed => {
+                StatusCode::BAD_REQUEST
+            }
+            crate::live_ticket_upgrade::UpgradeRejection::OriginForbidden => StatusCode::FORBIDDEN,
+            crate::live_ticket_upgrade::UpgradeRejection::Unsupported => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        };
+        ApiError(status, rejection.code())
+    })?;
+    let (principal, ticket_session, protocol) = match mode {
+        crate::live_ticket_upgrade::UpgradeMode::Bearer => (
+            authenticated(&state, &headers, Operation::Sync).await?,
+            None,
+            None,
+        ),
+        crate::live_ticket_upgrade::UpgradeMode::Ticket {
+            session_id,
+            secret,
+            protocol_token,
+        } => {
+            let principal = consume_live_ticket(&state.db, session_id, secret).await?;
+            let active = still_active(&state, &principal)
+                .await
+                .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+            if !active {
+                return Err(ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"));
+            }
+            authorize(&state, &principal, Operation::Sync).await?;
+            (principal, Some(session_id), Some(protocol_token))
+        }
+    };
     #[cfg(test)]
     let backend = state
         .live_backend_override
@@ -3039,9 +3080,12 @@ async fn live_websocket(
     let readiness = state.live_readiness.clone();
     let lease = lease.map(|Extension(lease)| lease);
     let shutdown = shutdown.map(|Extension(shutdown)| shutdown);
+    let upgrade = upgrade.max_message_size(8_192).max_frame_size(8_192);
+    let upgrade = match protocol {
+        Some(protocol) => upgrade.protocols([protocol]),
+        None => upgrade,
+    };
     Ok(upgrade
-        .max_message_size(8_192)
-        .max_frame_size(8_192)
         .on_upgrade(move |socket| {
             live_session(
                 socket,
@@ -3051,6 +3095,7 @@ async fn live_websocket(
                 backend,
                 readiness,
                 LiveSessionLifetime { lease, shutdown },
+                ticket_session,
             )
         })
         .into_response())
@@ -3064,10 +3109,18 @@ async fn live_session(
     backend: Arc<dyn crate::live::LiveBackend>,
     readiness: tokio::sync::watch::Receiver<bool>,
     lifetime: LiveSessionLifetime,
+    ticket_session: Option<[u8; 16]>,
 ) {
-    let registration = state
-        .live_hub
-        .register(VaultId(principal.vault), DeviceId(principal.device));
+    let registration = match ticket_session {
+        Some(session_id) => state.live_hub.register_ticket(
+            VaultId(principal.vault),
+            DeviceId(principal.device),
+            session_id,
+        ),
+        None => state
+            .live_hub
+            .register(VaultId(principal.vault), DeviceId(principal.device)),
+    };
     let generation = registration.generation;
     live_session_inner(
         socket,
@@ -3084,11 +3137,19 @@ async fn live_session(
         },
     )
     .await;
-    state.live_hub.unregister(
-        VaultId(principal.vault),
-        DeviceId(principal.device),
-        generation,
-    );
+    match ticket_session {
+        Some(session_id) => state.live_hub.cancel_exact(
+            VaultId(principal.vault),
+            DeviceId(principal.device),
+            session_id,
+            generation,
+        ),
+        None => state.live_hub.unregister(
+            VaultId(principal.vault),
+            DeviceId(principal.device),
+            generation,
+        ),
+    }
     drop(lifetime.lease);
 }
 
