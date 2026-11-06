@@ -39,7 +39,7 @@ impl BrowserCore {
     fn enable_typing(&self, args: Value) -> Result<Value, Failure> {
         let input: EnableInput = serde_json::from_value(args).map_err(|_| invalid())?;
         if input.trusted_roster.len() > 100 {
-            return Err(invalid());
+            return Err(live_error(LiveError::InvalidContext));
         }
         let context = LiveEnableContext {
             trusted_roster: parse_device_ids(input.trusted_roster)?,
@@ -63,7 +63,10 @@ impl BrowserCore {
 
     fn seal_typing(&self, args: Value) -> Result<Value, Failure> {
         let input: SealInput = serde_json::from_value(args).map_err(|_| invalid())?;
-        let conversation_id = input.conversation_id.parse().map_err(|_| invalid())?;
+        let conversation_id = input
+            .conversation_id
+            .parse()
+            .map_err(|_| live_error(LiveError::InvalidContext))?;
         let gateway_device_id = parse_device_id(&input.gateway_device_id)?;
         let Some(outbound) = self
             .client()?
@@ -173,7 +176,8 @@ fn parse_device_ids(ids: Vec<String>) -> Result<Vec<DeviceId>, Failure> {
 }
 
 fn parse_device_id(id: &str) -> Result<DeviceId, Failure> {
-    id.parse().map_err(|_| invalid())
+    id.parse()
+        .map_err(|_| live_error(LiveError::InvalidContext))
 }
 
 /// Outputs must be published by hosts in generation, session token/revision, sequence, then
@@ -265,9 +269,11 @@ fn live_error(error: LiveError) -> Failure {
 mod tests {
     use super::*;
     use crate::BrowserCore;
-    use peppy_client_core::{ConversationId, VaultId};
+    use peppy_client_core::{
+        ConversationId, RcsCapabilityState, RcsEligibility, RcsEligibilityProjection,
+        RcsLinkStatusEvent, VaultId,
+    };
     use peppy_crypto::{KeyProfile, create_vault_check_header, derive_root_key};
-    use peppy_protocol::{EphemeralSignalV2, EphemeralSignalV2Kind};
 
     fn response(core: &mut BrowserCore, command: &str, args: Value) -> Value {
         serde_json::from_str(&core.dispatch(&json!({"command": command, "args": args}).to_string()))
@@ -275,6 +281,21 @@ mod tests {
     }
 
     fn unlocked_core(vault: VaultId, device: DeviceId) -> (tempfile::TempDir, BrowserCore) {
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("test passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        unlocked_core_with_material(vault, device, profile, header)
+    }
+
+    fn unlocked_core_with_material(
+        vault: VaultId,
+        device: DeviceId,
+        profile: KeyProfile,
+        header: peppy_crypto::VaultCheckHeader,
+    ) -> (tempfile::TempDir, BrowserCore) {
         let directory = tempfile::tempdir().unwrap();
         let mut core = BrowserCore::new(directory.path().to_owned());
         assert_eq!(
@@ -291,12 +312,6 @@ mod tests {
             )["ok"],
             true
         );
-        let profile = KeyProfile::new(vault.0, 1).unwrap();
-        let header = create_vault_check_header(
-            &derive_root_key("test passphrase", &profile).unwrap(),
-            profile.clone(),
-        )
-        .unwrap();
         assert_eq!(
             response(
                 &mut core,
@@ -332,6 +347,59 @@ mod tests {
         );
     }
 
+    fn assert_keys(value: &Value, keys: &[&str]) {
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), keys.len());
+        assert!(keys.iter().all(|key| object.contains_key(*key)));
+    }
+
+    fn deliver_gateway_capability(
+        gateway: &mut BrowserCore,
+        recipient: &mut BrowserCore,
+        conversation: ConversationId,
+        gateway_device: DeviceId,
+    ) {
+        gateway
+            .client()
+            .unwrap()
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: gateway_device,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: 1_000,
+                    capability_revision: 1,
+                    feature_bits: 1,
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id: conversation,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 1,
+                    mapping_revision: 1,
+                    observed_at_ms: 1_000,
+                    gateway_device_id: gateway_device,
+                }],
+                1_000,
+            )
+            .unwrap();
+        let pending = response(gateway, "pending_outbox", json!({"limit": 10}));
+        let envelopes = pending["value"]["envelopes"].as_array().unwrap();
+        assert_eq!(envelopes.len(), 2);
+        for (index, envelope) in envelopes.iter().enumerate() {
+            let ingested = response(
+                recipient,
+                "ingest",
+                json!({"cursor": (index + 1).to_string(), "envelope": envelope}),
+            );
+            assert_eq!(ingested["ok"], true);
+            assert_eq!(ingested["value"]["state"], "journaled");
+        }
+        let applied = response(recipient, "apply_pending", json!({"limit": 10}));
+        assert_eq!(applied["ok"], true);
+    }
+
     #[test]
     fn disabled_enablement_is_reported_with_a_fixed_code() {
         let vault = VaultId::new();
@@ -363,43 +431,171 @@ mod tests {
     }
 
     #[test]
-    fn outcomes_serialize_a_tagged_action_and_private_reply() {
-        let peer = DeviceId::new();
-        let conversation = ConversationId::new();
-        let value = outcome_value(LiveOutcome {
-            generation: peppy_client_core::LiveEnableGeneration((1_u64 << 53) + 1),
-            session_update: Some(PeerSessionUpdate {
-                peer_device_id: peer,
-                replaced_session_token: Some(7),
-                current_session_token: 8,
-                validation_revision: 9,
+    fn malformed_typing_identifiers_are_invalid_context() {
+        let vault = VaultId::new();
+        let device = DeviceId::new();
+        let (_directory, mut core) = unlocked_core(vault, device);
+        let oversized_roster = vec![device.to_string(); 101];
+        for args in [
+            json!({
+                "trustedRoster": ["not-a-device"],
+                "localGatewayDeviceId": device,
+                "executor": "current_gateway",
+                "clock": {"wallMs": 1000, "monoMs": 1000},
             }),
-            action: Some(LiveAction::GatewayTypingIntent {
-                peer_device_id: peer,
-                session_token: 8,
-                sequence: (1_u64 << 53) + 1,
-                conversation_id: conversation,
-                state: TypingStateV2::Started,
-                deadline_mono: (1_u64 << 53) + 2,
+            json!({
+                "trustedRoster": oversized_roster,
+                "localGatewayDeviceId": device,
+                "executor": "current_gateway",
+                "clock": {"wallMs": 1000, "monoMs": 1000},
             }),
-            reply: Some(EphemeralSignalV2 {
-                protocol_version: 2,
-                kind: EphemeralSignalV2Kind::Challenge,
-                sender_device_id: peer,
-                key_epoch: 1,
-                session_id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
-                sent_at_ms: "1".into(),
-                expires_at_ms: "2".into(),
-                sequence: "1".into(),
-                ciphertext_b64: "AA==".into(),
+        ] {
+            assert_eq!(
+                response(&mut core, "_worker_typing_enable", args)["error"]["code"],
+                "invalid_context"
+            );
+        }
+        enable(&mut core, &[device], device, "current_gateway");
+        for args in [
+            json!({
+                "conversationId": "not-a-conversation",
+                "gatewayDeviceId": device,
+                "origin": "vault_device",
+                "state": "started",
+                "clock": {"wallMs": 1001, "monoMs": 1001},
             }),
-        })
-        .unwrap();
+            json!({
+                "conversationId": ConversationId::new(),
+                "gatewayDeviceId": "not-a-device",
+                "origin": "vault_device",
+                "state": "started",
+                "clock": {"wallMs": 1001, "monoMs": 1001},
+            }),
+        ] {
+            assert_eq!(
+                response(&mut core, "_worker_typing_seal", args)["error"]["code"],
+                "invalid_context"
+            );
+        }
+    }
 
-        assert_eq!(value["action"]["kind"], "gateway_typing_intent");
-        assert!(value["replyFrameJson"].is_string());
-        assert_eq!(value["generation"], ((1_u64 << 53) + 1).to_string());
-        assert!(value.get("ciphertextB64").is_none());
+    #[test]
+    fn two_clients_dispatch_a_typed_handshake_and_action() {
+        let vault = VaultId::new();
+        let sender_device = DeviceId::new();
+        let gateway_device = DeviceId::new();
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("test passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        let (_sender_directory, mut sender) =
+            unlocked_core_with_material(vault, sender_device, profile.clone(), header.clone());
+        let (_gateway_directory, mut gateway) =
+            unlocked_core_with_material(vault, gateway_device, profile, header);
+        let conversation = ConversationId::new();
+        deliver_gateway_capability(&mut gateway, &mut sender, conversation, gateway_device);
+        let roster = [sender_device, gateway_device];
+        enable(&mut sender, &roster, sender_device, "none");
+        enable(&mut gateway, &roster, gateway_device, "current_gateway");
+
+        let sealed = response(
+            &mut sender,
+            "_worker_typing_seal",
+            json!({
+                "conversationId": conversation,
+                "gatewayDeviceId": gateway_device,
+                "origin": "vault_device",
+                "state": "started",
+                "clock": {"wallMs": 1001, "monoMs": 1001},
+            }),
+        );
+        assert_keys(&sealed["value"], &["generation", "frameJson"]);
+        let challenge = response(
+            &mut gateway,
+            "_worker_typing_open",
+            json!({
+                "frameJson": sealed["value"]["frameJson"],
+                "clock": {"wallMs": 1001, "monoMs": 1001},
+            }),
+        );
+        assert_keys(
+            &challenge["value"],
+            &["generation", "sessionUpdate", "action", "replyFrameJson"],
+        );
+        assert!(challenge["value"]["replyFrameJson"].is_string());
+        let acknowledgement = response(
+            &mut sender,
+            "_worker_typing_open",
+            json!({
+                "frameJson": challenge["value"]["replyFrameJson"],
+                "clock": {"wallMs": 1002, "monoMs": 1002},
+            }),
+        );
+        assert_keys(
+            &acknowledgement["value"],
+            &["generation", "sessionUpdate", "action", "replyFrameJson"],
+        );
+        assert!(acknowledgement["value"]["replyFrameJson"].is_string());
+        let installed = response(
+            &mut gateway,
+            "_worker_typing_open",
+            json!({
+                "frameJson": acknowledgement["value"]["replyFrameJson"],
+                "clock": {"wallMs": 1003, "monoMs": 1003},
+            }),
+        );
+        assert_keys(
+            &installed["value"],
+            &["generation", "sessionUpdate", "action", "replyFrameJson"],
+        );
+        assert_keys(
+            &installed["value"]["sessionUpdate"],
+            &[
+                "peerDeviceId",
+                "replacedSessionToken",
+                "currentSessionToken",
+                "validationRevision",
+            ],
+        );
+
+        let fresh = response(
+            &mut sender,
+            "_worker_typing_seal",
+            json!({
+                "conversationId": conversation,
+                "gatewayDeviceId": gateway_device,
+                "origin": "vault_device",
+                "state": "started",
+                "clock": {"wallMs": 4001, "monoMs": 4001},
+            }),
+        );
+        let opened = response(
+            &mut gateway,
+            "_worker_typing_open",
+            json!({
+                "frameJson": fresh["value"]["frameJson"],
+                "clock": {"wallMs": 4001, "monoMs": 4001},
+            }),
+        );
+        assert_keys(
+            &opened["value"]["action"],
+            &[
+                "kind",
+                "peerDeviceId",
+                "sessionToken",
+                "sequence",
+                "conversationId",
+                "state",
+                "deadlineMono",
+            ],
+        );
+        assert_eq!(opened["value"]["action"]["kind"], "gateway_typing_intent");
+        assert_eq!(
+            opened["value"]["action"]["conversationId"],
+            conversation.to_string()
+        );
     }
 
     #[test]
