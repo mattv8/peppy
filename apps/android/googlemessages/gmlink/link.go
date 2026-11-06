@@ -685,6 +685,17 @@ func (link *Link) activeRuntime() (*libgm.Client, context.Context, uint64, uint6
 	return link.client, link.runCtx, link.runGeneration, link.streamEpoch, true
 }
 
+// OwnerGeneration returns the currently running generation used to fence effects.
+// It is zero when no active generation can admit work.
+func (link *Link) OwnerGeneration() uint64 {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if link.closed || !link.running || link.runGeneration == 0 || link.runGeneration != link.generation {
+		return 0
+	}
+	return link.runGeneration
+}
+
 // Unlink cancels any in-flight pair or relink and waits, bounded, for it to unwind. Then
 // it unpairs the pairing the link ends up with, once, and wipes the local link. A pair
 // that commits first is unpaired; one that loses commits nothing.

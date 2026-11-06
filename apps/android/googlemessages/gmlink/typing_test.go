@@ -250,6 +250,20 @@ func TestSetTypingRequiresCurrentLinkGeneration(t *testing.T) {
 	}
 }
 
+func TestOwnerGenerationMatchesSetTypingFence(t *testing.T) {
+	conversation := typingConversation("synthetic-conversation", true)
+	conversation.DefaultOutgoingID = "self-sim"
+	link := typingLink(&ownedRecordHost{}, conversation)
+	link.settings = typingSettings()
+	if got := link.OwnerGeneration(); got != 7 {
+		t.Fatalf("running owner generation = %d", got)
+	}
+	link.runGeneration = 6
+	if got := link.OwnerGeneration(); got != 0 {
+		t.Fatalf("retired owner generation = %d", got)
+	}
+}
+
 func TestSetTypingRequiresEligibleStage2Conversation(t *testing.T) {
 	for _, test := range []struct {
 		name      string

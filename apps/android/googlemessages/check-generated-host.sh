@@ -28,3 +28,7 @@ grep -Eq 'setTyping\(java\.lang\.String\)' "$signature" || {
 	printf '%s\n' 'generated Link.setTyping is missing' >&2
 	return 1 2>/dev/null || exit 1
 }
+grep -Eq 'ownerGeneration\(\)' "$signature" || {
+	printf '%s\n' 'generated Link.ownerGeneration is missing' >&2
+	return 1 2>/dev/null || exit 1
+}
