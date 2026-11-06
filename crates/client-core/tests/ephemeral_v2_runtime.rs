@@ -616,3 +616,123 @@ fn epoch_cutover_preserves_v2_session_counter_and_reenable_rotates_both() {
     assert_ne!(second_generation, first_generation);
     assert_eq!(rotated.signal.sequence, "1");
 }
+
+#[test]
+fn remote_gateway_capability_reaches_an_ordinary_desktop_before_vault_sealing() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "v2-remote-gateway", &vault);
+    let desktop_config = config(&directory, "v2-remote-desktop", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&gateway, gateway_config.device_id, conversation);
+    let mut server = Server::default();
+    assert_eq!(server.upload(&gateway), 2);
+    server.sync(&desktop);
+    assert_eq!(
+        desktop
+            .rcs_eligibility_projection(conversation, gateway_config.device_id, 1_000)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible
+    );
+    let before = persisted_rows(&desktop_config);
+    desktop
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: vec![desktop_config.device_id, gateway_config.device_id],
+                local_gateway_device_id: gateway_config.device_id,
+                local_executor: LiveExecutor::None,
+            },
+            LiveClock {
+                wall_ms: 1_000,
+                mono_ms: 1_000,
+            },
+        )
+        .unwrap();
+    let outbound = desktop
+        .seal_typing_signal_v2(
+            conversation,
+            gateway_config.device_id,
+            TypingOriginV2::VaultDevice,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 1_001,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let bytes = STANDARD.decode(&outbound.signal.ciphertext_b64).unwrap();
+    let nonce: [u8; 24] = bytes[..24].try_into().unwrap();
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let plaintext = decrypt(
+        &key,
+        &outbound.signal.aad_bytes(vault.id).unwrap(),
+        &EncryptedEnvelope {
+            nonce,
+            ciphertext: bytes[24..].to_vec(),
+        },
+    )
+    .unwrap();
+    let value: peppy_protocol::TypingPlaintextV2 = serde_json::from_slice(&plaintext).unwrap();
+    assert_eq!(value.origin, TypingOriginV2::VaultDevice);
+    assert_eq!(value.gateway_device_id, Some(gateway_config.device_id));
+    assert_eq!(
+        desktop.seal_typing_signal_v2(
+            conversation,
+            desktop_config.device_id,
+            TypingOriginV2::GoogleContact,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_002,
+            },
+        ),
+        Err(LiveError::InvalidContext)
+    );
+    assert_eq!(
+        desktop.seal_typing_signal_v2(
+            conversation,
+            DeviceId::new(),
+            TypingOriginV2::VaultDevice,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_002,
+            },
+        ),
+        Err(LiveError::InvalidContext)
+    );
+    desktop.disable_live_typing().unwrap();
+    desktop
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: vec![desktop_config.device_id],
+                local_gateway_device_id: desktop_config.device_id,
+                local_executor: LiveExecutor::None,
+            },
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_002,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        desktop.seal_typing_signal_v2(
+            conversation,
+            gateway_config.device_id,
+            TypingOriginV2::VaultDevice,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 1_003,
+                mono_ms: 1_003,
+            },
+        ),
+        Err(LiveError::InvalidContext)
+    );
+    assert_eq!(persisted_rows(&desktop_config), before);
+}
