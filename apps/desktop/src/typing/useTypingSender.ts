@@ -5,28 +5,86 @@ import { readShareTyping } from "../shell/layout-persistence";
 const REFRESH_MS = 3_200;
 const IDLE_STOP_MS = 6_000;
 
-export function useTypingSender({ bridge, conversationId, current, eligible, sendSupported }: { bridge: DesktopBridge; conversationId?: string; current: boolean; eligible: boolean; sendSupported: boolean }) {
-  const active = useRef(false);
-  const refresh = useRef<number | undefined>(undefined);
-  const idle = useRef<number | undefined>(undefined);
+type TypingSenderInput = {
+  bridge: DesktopBridge;
+  conversationId?: string;
+  current: boolean;
+  existing: boolean;
+  sendSupported: boolean;
+  readOnly: boolean;
+};
+
+export function useTypingSender(input: TypingSenderInput) {
+  const activeConversationId = useRef<string | undefined>(undefined);
+  const refreshTimer = useRef<number | undefined>(undefined);
+  const idleTimer = useRef<number | undefined>(undefined);
+  const inputRef = useRef(input);
+  inputRef.current = input;
+
+  const clearTimers = () => {
+    if (refreshTimer.current !== undefined) window.clearInterval(refreshTimer.current);
+    if (idleTimer.current !== undefined) window.clearTimeout(idleTimer.current);
+    refreshTimer.current = undefined;
+    idleTimer.current = undefined;
+  };
+
   const stop = () => {
-    if (!active.current || !conversationId) return;
-    active.current = false;
-    if (refresh.current) window.clearInterval(refresh.current);
-    if (idle.current) window.clearTimeout(idle.current);
-    void bridge.send_typing?.({ conversationId, state: "stopped" }).catch(() => undefined);
+    const conversationId = activeConversationId.current;
+    if (!conversationId) return;
+    activeConversationId.current = undefined;
+    clearTimers();
+    void inputRef.current.bridge.send_typing?.({ conversationId, state: "stopped" }).catch(() => undefined);
   };
-  const start = () => {
-    if (!bridge.send_typing || !conversationId || !current || !eligible || !sendSupported || !readShareTyping()) return;
-    if (!active.current) { active.current = true; void bridge.send_typing({ conversationId, state: "started" }).catch(() => undefined); }
-    if (!refresh.current) refresh.current = window.setInterval(() => { if (readShareTyping()) void bridge.send_typing?.({ conversationId, state: "started" }).catch(() => undefined); else stop(); }, REFRESH_MS);
-    if (idle.current) window.clearTimeout(idle.current);
-    idle.current = window.setTimeout(stop, IDLE_STOP_MS);
+
+  const canSend = () => {
+    const { bridge, conversationId, current, existing, sendSupported, readOnly } = inputRef.current;
+    return Boolean(bridge.send_typing && conversationId && current && existing && sendSupported && !readOnly && readShareTyping() && document.visibilityState === "visible");
   };
+
+  const refresh = () => {
+    const conversationId = activeConversationId.current;
+    if (!conversationId || !canSend()) return stop();
+    void inputRef.current.bridge.send_typing?.({ conversationId, state: "started" }).catch(() => undefined);
+  };
+
+  const noteInput = (text: string) => {
+    if (!text.trim()) return stop();
+    if (!canSend()) return;
+    const conversationId = inputRef.current.conversationId;
+    if (!conversationId) return;
+    if (!activeConversationId.current) {
+      activeConversationId.current = conversationId;
+      void inputRef.current.bridge.send_typing?.({ conversationId, state: "started" }).catch(() => undefined);
+      refreshTimer.current = window.setInterval(refresh, REFRESH_MS);
+    }
+    if (idleTimer.current !== undefined) window.clearTimeout(idleTimer.current);
+    idleTimer.current = window.setTimeout(stop, IDLE_STOP_MS);
+  };
+
   useEffect(() => {
-    const storage = (event: StorageEvent) => { if (event.key === "peppy.layout.v1" && !readShareTyping()) stop(); };
-    window.addEventListener("storage", storage);
-    return () => { window.removeEventListener("storage", storage); stop(); };
-  }, [conversationId, current, eligible, sendSupported]);
-  return { noteInput: start, noteSend: stop, setFocused: (focused: boolean) => { if (!focused) stop(); } };
+    const stopWhenHidden = () => {
+      if (document.visibilityState === "hidden") stop();
+    };
+    const stopWhenSharingDisabled = (event: StorageEvent) => {
+      if (event.key === "peppy.layout.v1" && !readShareTyping()) stop();
+    };
+    const stopOnComposerBlur = (event: FocusEvent) => {
+      if ((event.target as HTMLElement | null)?.id === "composer-textarea") stop();
+    };
+    window.addEventListener("blur", stop);
+    window.addEventListener("pagehide", stop);
+    window.addEventListener("storage", stopWhenSharingDisabled);
+    document.addEventListener("visibilitychange", stopWhenHidden);
+    document.addEventListener("focusout", stopOnComposerBlur);
+    return () => {
+      window.removeEventListener("blur", stop);
+      window.removeEventListener("pagehide", stop);
+      window.removeEventListener("storage", stopWhenSharingDisabled);
+      document.removeEventListener("visibilitychange", stopWhenHidden);
+      document.removeEventListener("focusout", stopOnComposerBlur);
+      stop();
+    };
+  }, [input.conversationId, input.current, input.existing, input.sendSupported, input.readOnly, input.bridge]);
+
+  return { noteInput, noteSend: stop, setFocused: (focused: boolean) => { if (!focused) stop(); } };
 }
