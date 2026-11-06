@@ -111,12 +111,26 @@ class LinkRuntimeTest {
     }
 
     @Test
-    fun `typing bridge fails closed when Go owner generation is unavailable`() {
-        val handle = FakeHandle().apply { ownerGeneration = null }
+    fun `typing bridge uses a new Go owner generation after reconnect on the same Kotlin lease`() {
+        val handle = FakeHandle().apply { ownerGeneration = 73 }
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        val lease = requireNotNull(LinkRuntime.handleLease(context))
+
+        assertEquals("ok", LinkRuntime.setTyping(lease, typingIntent()))
+        handle.ownerGeneration = 74
+        assertEquals("ok", LinkRuntime.setTyping(lease, typingIntent()))
+
+        assertEquals(listOf(73L, 74L), handle.typingRequests.map(LinkTypingRequest::linkGeneration))
+    }
+
+    @Test
+    fun `typing bridge drops a retired Go owner generation without calling Go`() {
+        val handle = FakeHandle().apply { ownerGeneration = 0 }
         LinkRuntimeTestHooks.engine = availableEngine(handle)
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
 
-        assertEquals("typing_unavailable", LinkRuntime.setTyping(context, typingIntent()))
+        assertEquals("typing_stale", LinkRuntime.setTyping(context, typingIntent()))
         assertTrue(handle.typingRequests.isEmpty())
     }
 
@@ -674,7 +688,7 @@ class LinkRuntimeTest {
         var closed = false
         var typingFailure: Throwable? = null
         var typingResult = "ok"
-        var ownerGeneration: Long? = 1
+        var ownerGeneration = 1L
         val typingRequests = mutableListOf<LinkTypingRequest>()
         override fun pair(cookiesJson: ByteArray) = Unit
         override fun relink() = Unit
@@ -684,7 +698,7 @@ class LinkRuntimeTest {
         override fun stop() = Unit
         override fun close() { closed = true }
         override fun status(): String = """{\"state\":\"unlinked\"}"""
-        override fun ownerGeneration(): Long? = ownerGeneration
+        override fun ownerGeneration(): Long = ownerGeneration
         open override fun setTyping(request: LinkTypingRequest): String {
             typingRequests += request
             typingFailure?.let { throw it }

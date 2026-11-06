@@ -102,7 +102,8 @@ object LinkRuntime {
     internal fun setTyping(lease: LinkHandleLease, intent: LiveTypingEffectIntent): String = synchronized(nativeOperationLock) {
         if (!ownsLease(lease)) return@synchronized "typing_stale"
         if (!intent.isCurrent.isCurrent()) return@synchronized "typing_stale"
-        val ownerGeneration = lease.handle.ownerGeneration() ?: return@synchronized "typing_unavailable"
+        val ownerGeneration = lease.handle.ownerGeneration()
+        if (ownerGeneration <= 0) return@synchronized "typing_stale"
         val request = typingRequest(intent, ownerGeneration) ?: return@synchronized "typing_expired"
         try {
             lease.handle.setTyping(request)

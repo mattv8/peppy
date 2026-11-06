@@ -13,6 +13,7 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
     override fun stop() = link.stop()
     override fun close() = link.close()
     override fun status(): String = link.status()
+    override fun ownerGeneration(): Long = link.ownerGeneration()
     override fun setTyping(request: LinkTypingRequest): String = link.setTyping(request.toJson())
     override fun acceptsOutput(generation: Long, revision: Long): Boolean = link.acceptsOutput(generation, revision)
     override fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
