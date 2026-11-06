@@ -80,6 +80,25 @@ fn observation(participant: &str, revision: u64) -> RcsMappingObservation {
     }
 }
 
+fn capture_us_region(gateway: &Client, gateway_config: &ClientConfig) {
+    gateway
+        .capture_contact_book(
+            &serde_json::json!({
+                "schema_version": 1,
+                "book": {
+                    "id": "carrier-region",
+                    "owner_device_id": gateway_config.device_id.to_string(),
+                    "generation": "1",
+                    "state": "active",
+                    "region": "US",
+                },
+                "contacts": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+}
+
 fn carrier_command() -> (tempfile::TempDir, Vault, ClientConfig, Client, CommandId) {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
@@ -179,6 +198,7 @@ fn recorded_linked_lifecycle_blocks_carrier_without_proof() {
 #[test]
 fn fresh_current_carrier_only_proof_permits_once_and_survives_reopen() {
     let (_directory, vault, config, gateway, command_id) = carrier_command();
+    capture_us_region(&gateway, &config);
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
@@ -200,7 +220,8 @@ fn fresh_current_carrier_only_proof_permits_once_and_survives_reopen() {
 
 #[test]
 fn stale_wrong_sim_wrong_context_and_proven_rcs_never_fall_back_to_carrier() {
-    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let (_directory, _vault, config, gateway, command_id) = carrier_command();
+    capture_us_region(&gateway, &config);
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
@@ -389,6 +410,7 @@ fn automatic_admission_upgrades_a_legacy_carrier_command_only_with_an_exact_mapp
 #[test]
 fn automatic_admission_invalidates_carrier_proof_for_same_context_contradictions() {
     let (_directory, vault, config, gateway, command_id) = carrier_command();
+    capture_us_region(&gateway, &config);
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
@@ -532,7 +554,12 @@ fn carrier_mms_command(
     )
 }
 
-fn record_media_carrier_proof(gateway: &Client, conversation_id: ConversationId) {
+fn record_media_carrier_proof(
+    gateway: &Client,
+    gateway_config: &ClientConfig,
+    conversation_id: ConversationId,
+) {
+    capture_us_region(gateway, gateway_config);
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
@@ -1212,6 +1239,7 @@ fn carrier_proof_rejects_future_extreme_overflow_and_expired_times() {
 #[test]
 fn clock_rollback_invalidates_carrier_proof_until_a_new_lookup_is_recorded() {
     let (_directory, vault, config, gateway, command_id) = carrier_command();
+    capture_us_region(&gateway, &config);
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
@@ -1354,7 +1382,7 @@ fn automatic_locally_available_unregistered_media_invalidates_contradicted_proof
             &sender.native_cipher_file(attachment.attachment_id).unwrap(),
         )
         .unwrap();
-    record_media_carrier_proof(&gateway, conversation_id);
+    record_media_carrier_proof(&gateway, &config, conversation_id);
     let retention_use = gateway
         .pending_attachment_retention_operations()
         .unwrap()
@@ -1406,7 +1434,7 @@ fn automatic_locally_available_unregistered_media_invalidates_contradicted_proof
 fn automatic_download_pending_media_invalidates_contradicted_proof_durably() {
     let (_directory, vault, config, sender, gateway, command_id, attachment, conversation_id) =
         carrier_mms_command(false);
-    record_media_carrier_proof(&gateway, conversation_id);
+    record_media_carrier_proof(&gateway, &config, conversation_id);
     let contradictory = observation("different-peer-local", 1);
 
     assert_eq!(
@@ -1436,6 +1464,7 @@ fn automatic_download_pending_media_invalidates_contradicted_proof_durably() {
 #[test]
 fn automatic_fresh_carrier_proof_permits_original_sim_once_and_rcs_link_never_carrier() {
     let (_directory, _vault, config, gateway, command_id) = carrier_command();
+    capture_us_region(&gateway, &config);
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
@@ -1598,6 +1627,7 @@ fn automatic_carrier_upgrade_remains_frozen_as_rcs_outcome_unknown_after_reopen(
 #[test]
 fn automatic_original_sim_mismatch_invalidates_existing_proof_across_reopen() {
     let (_directory, vault, config, gateway, command_id) = carrier_command();
+    capture_us_region(&gateway, &config);
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
