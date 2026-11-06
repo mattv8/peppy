@@ -34,6 +34,7 @@ mod context;
 mod conversation;
 mod media;
 mod notifications;
+mod rcs_receive;
 mod search_history;
 mod sync;
 mod typing;
@@ -522,8 +523,8 @@ impl BrowserCore {
                     .map_err(core)?;
                     let messages = history
                         .iter()
-                        .map(|message| message_view(client, message))
-                        .collect();
+                        .map(|message| rcs_receive::message_view(client, message))
+                        .collect::<Result<Vec<_>, _>>()?;
                     (messages, Some(has_more))
                 } else {
                     (Vec::new(), None)
@@ -546,6 +547,14 @@ impl BrowserCore {
                 folder_reason: conversation.folder_reason,
                 unblock: conversation.unblock,
                 can_unblock: conversation.can_unblock,
+                rcs_encryption: rcs_receive::conversation_encryption(
+                    client,
+                    conversation.conversation_id,
+                )?,
+                rcs_history_gap: rcs_receive::conversation_history_gap(
+                    client,
+                    conversation.conversation_id,
+                )?,
             });
         }
         for draft in drafts.iter().filter(|draft| {
@@ -578,6 +587,8 @@ impl BrowserCore {
                 folder_reason: None,
                 unblock: None,
                 can_unblock: false,
+                rcs_encryption: None,
+                rcs_history_gap: false,
             });
         }
         let keys = client.key_status().map_err(core)?;
@@ -686,8 +697,8 @@ impl BrowserCore {
         let messages = page
             .messages
             .iter()
-            .map(|message| message_view(client, message))
-            .collect();
+            .map(|message| rcs_receive::message_view(client, message))
+            .collect::<Result<Vec<_>, _>>()?;
         serde_json::to_value(dto::HistoryPage {
             conversation_id: conversation.to_string(),
             messages,

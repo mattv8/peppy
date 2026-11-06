@@ -7,7 +7,7 @@ use peppy_client_core::{
     Captured, CipherObject, Client, ClientConfig, ComposeDraftUpdate, ContactBookSelection,
     DatabaseKey, DeviceId, Error as CoreError, GatewayHostFacts, GatewayMmsCleanup,
     GatewayPlatform, GatewaySettings, HistoryImportConditions, IncomingSms, KeyProfile,
-    MAX_SEAL_BATCH, Message, MessageId, MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause,
+    MAX_SEAL_BATCH, MessageId, MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause,
     MmsBackfillPhase, MmsBackfillRecheck, MmsBackfillRecheckConditions, MmsBackfillRecheckOutcome,
     MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome, MmsLegacyBackfillState,
     MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource, NativeKeyCache, NotificationCapture,
@@ -28,6 +28,7 @@ mod account_access;
 mod attachment_retention;
 mod hosted;
 pub mod newenrollment;
+mod rcs_receive;
 mod rcs_status;
 mod typing;
 
@@ -505,6 +506,8 @@ pub struct NativeConversation {
     pub conversation_id: String,
     pub unread_count: u64,
     pub pinned: bool,
+    pub rcs_encryption: Option<bool>,
+    pub rcs_history_gap: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -537,6 +540,8 @@ pub struct NativeMessage {
     pub seen: bool,
     pub send_state: Option<String>,
     pub sent_at_ms: Option<i64>,
+    pub rcs_status: Option<String>,
+    pub rcs_reported: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -1085,34 +1090,6 @@ fn snapshot_progress_view(progress: peppy_client_core::SnapshotProgress) -> Nati
     }
 }
 
-fn message_view(message: Message) -> NativeMessage {
-    NativeMessage {
-        message_id: message.payload.record.message_id.to_string(),
-        conversation_id: message.payload.record.conversation_id.to_string(),
-        sender_address: message.payload.sender_address,
-        recipients: message.payload.recipients,
-        body: message.payload.body,
-        subject: message.payload.subject,
-        transport: transport_name(message.payload.transport).into(),
-        attachment_ids: message
-            .payload
-            .record
-            .attachments
-            .into_iter()
-            .map(|a| a.attachment_id.to_string())
-            .collect(),
-        incoming: matches!(
-            message.payload.direction,
-            peppy_client_core::Direction::Incoming
-        ),
-        seen: message.seen,
-        send_state: message
-            .send_state
-            .map(|state| send_state_name(state).to_owned()),
-        sent_at_ms: message.payload.sent_at_ms.filter(|time| *time > 0),
-    }
-}
-
 fn payload_view(payload: peppy_client_core::MessagePayload) -> NativeMessage {
     NativeMessage {
         message_id: payload.record.message_id.to_string(),
@@ -1132,6 +1109,8 @@ fn payload_view(payload: peppy_client_core::MessagePayload) -> NativeMessage {
         seen: false,
         send_state: None,
         sent_at_ms: payload.sent_at_ms.filter(|time| *time > 0),
+        rcs_status: None,
+        rcs_reported: false,
     }
 }
 
@@ -3292,15 +3271,13 @@ impl NativeClient {
     }
 
     pub fn list_conversations(&self) -> Result<Vec<NativeConversation>, MobileBindingsError> {
-        with_client(&self.client, Client::list_conversations).map(|items| {
-            items
-                .into_iter()
-                .map(|item| NativeConversation {
-                    conversation_id: item.conversation_id.to_string(),
-                    unread_count: item.unread_count,
-                    pinned: item.pinned,
-                })
-                .collect()
+        with_client(&self.client, |client| {
+            client.list_conversations().and_then(|items| {
+                items
+                    .into_iter()
+                    .map(|item| rcs_receive::conversation_view(client, item))
+                    .collect()
+            })
         })
     }
 
@@ -3389,8 +3366,14 @@ impl NativeClient {
         conversation_id: String,
     ) -> Result<Vec<NativeMessage>, MobileBindingsError> {
         let conversation_id = parse_id(&conversation_id)?;
-        with_client(&self.client, |client| client.messages(conversation_id))
-            .map(|items| items.into_iter().map(message_view).collect())
+        with_client(&self.client, |client| {
+            client.messages(conversation_id).and_then(|items| {
+                items
+                    .into_iter()
+                    .map(|item| rcs_receive::message_view(client, item))
+                    .collect()
+            })
+        })
     }
 
     pub fn mark_seen(&self, message_id: String) -> Result<bool, MobileBindingsError> {
@@ -4652,6 +4635,8 @@ mod tests {
                 conversation_id,
                 unread_count: 1,
                 pinned: true,
+                rcs_encryption: None,
+                rcs_history_gap: false,
             }
         );
 

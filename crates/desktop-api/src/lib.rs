@@ -8,6 +8,7 @@ use peppy_client_core::{
 };
 pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Preview};
 use serde::{Deserialize, Serialize};
+pub mod rcs_receive;
 use std::collections::BTreeMap;
 
 pub mod account_access;
@@ -228,6 +229,10 @@ pub struct ConversationView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unblock: Option<SenderUnblockStatus>,
     pub can_unblock: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcs_encryption: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rcs_history_gap: bool,
 }
 
 #[derive(Serialize)]
@@ -262,6 +267,8 @@ pub struct MessageView {
     pub subject: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub participants: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rcs_reported: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -673,6 +680,7 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             }
             (!values.is_empty()).then_some(values)
         },
+        rcs_reported: false,
     }
 }
 
@@ -757,6 +765,8 @@ mod tests {
             folder_reason: Some(ConversationFolderReason::Marked),
             unblock: Some(SenderUnblockStatus::Failed),
             can_unblock: true,
+            rcs_encryption: Some(true),
+            rcs_history_gap: true,
         };
 
         let value = serde_json::to_value(view).unwrap();
@@ -765,6 +775,12 @@ mod tests {
         assert_eq!(value["folderReason"], "marked");
         assert_eq!(value["unblock"], "failed");
         assert_eq!(value["canUnblock"], true);
+        assert_eq!(value["rcsEncryption"], true);
+        assert_eq!(value["rcsHistoryGap"], true);
+        let serialized = value.to_string();
+        for forbidden in ["google", "cursor", "detector", "provider", "tmp"] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 
     #[test]

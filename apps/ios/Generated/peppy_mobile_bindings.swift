@@ -398,7 +398,7 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
-// Initial value and increment amount for handles. 
+// Initial value and increment amount for handles.
 // These ensure that SWIFT handles always have the lowest bit set
 fileprivate let UNIFFI_HANDLEMAP_INITIAL: UInt64 = 1
 fileprivate let UNIFFI_HANDLEMAP_DELTA: UInt64 = 2
@@ -618,15 +618,15 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 public protocol NativeClientProtocol: AnyObject, Sendable {
-    
-    func ackOutbox(envelopeId: String) throws 
-    
-    func ackSmsScanExhausted(sourceGeneration: String, providerScope: String, imported: Bool, frozenUpperBound: String) throws 
-    
+
+    func ackOutbox(envelopeId: String) throws
+
+    func ackSmsScanExhausted(sourceGeneration: String, providerScope: String, imported: Bool, frozenUpperBound: String) throws
+
     func acknowledgeContactPhotoReclaimJson(inputJson: String) throws  -> String
-    
+
     func acknowledgeContactPhotoReferenceJson(inputJson: String) throws  -> String
-    
+
     /**
      * Explicit manual epoch cutover. Native hosts call this only after a
      * successful passphrase/header `unlock` of the newer profile; never after
@@ -634,66 +634,66 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * epoch is an idempotent no-op. Higher epochs remain subject to C's
      * verified-and-unlocked requirement.
      */
-    func activateVerifiedEpoch(epoch: UInt32) throws 
-    
-    func advanceMmsBackfillPage(generation: String, scope: String, phase: NativeMmsBackfillPhase, providerId: String) throws 
-    
+    func activateVerifiedEpoch(epoch: UInt32) throws
+
+    func advanceMmsBackfillPage(generation: String, scope: String, phase: NativeMmsBackfillPhase, providerId: String) throws
+
     func appendSnapshotRawPage(generation: UInt64, records: [NativeRawSnapshotRecord]) throws  -> NativeSnapshotProgress
-    
+
     /**
      * Stores a canonical transport response only when all immutable identity fields match.
      */
-    func applyAttachmentRetentionResponse(response: NativeAttachmentUseResponse) throws 
-    
+    func applyAttachmentRetentionResponse(response: NativeAttachmentUseResponse) throws
+
     func applyPending(limit: UInt64) throws  -> NativeApplyReport
-    
+
     func applyPhoneReads(candidates: [NativePhoneReadCandidate]) throws  -> UInt32
-    
+
     func attachmentInfo(attachmentId: String) throws  -> NativeAttachmentInfo
-    
+
     func attachmentRetentionPreparationPending() throws  -> Bool
-    
+
     func attachmentRetentionProtocolEnabled() throws  -> Bool
-    
+
     func attachmentRetentionReady() throws  -> Bool
-    
+
     func attachmentRetentionState(attachmentId: String) throws  -> NativeAttachmentRetentionState
-    
+
     func attachmentUploadRetention(attachmentId: String) throws  -> NativeAttachmentUploadRetention
-    
+
     /**
      * Persists a protected use before the host publishes dependent attachment work.
      */
     func beginAttachmentRetentionUse(attachmentId: String, kind: NativeAttachmentUseKind) throws  -> NativePendingAttachmentRetentionOperation
-    
+
     func beginContactScan(inputJson: String) throws  -> String
-    
+
     func beginMessageHistoryCapture(providerGeneration: String, transport: String) throws  -> String
-    
+
     func beginMmsAcquisition(input: NativeMmsAcquisitionInput) throws  -> NativeMmsAcquisition
-    
+
     func beginMmsAcquisitionOutcome(input: NativeMmsAcquisitionInput) throws  -> NativeMmsBeginOutcome
-    
+
     /**
      * A carrier API may be invoked only when this returns NativePermitState::Permit.
      */
     func beginSendAttempt(commandId: String) throws  -> NativePermit
-    
+
     func beginSenderUnblock(requestId: String) throws  -> Bool
-    
+
     func beginSmsProviderAcquisition(input: NativeSmsProviderAcquisitionInput) throws  -> NativeSmsAcquisition
-    
+
     func beginSnapshot(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose) throws  -> NativeSnapshotProgress
-    
+
     func beginSnapshotWithCompaction(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose, serverCompactionGeneration: String?) throws  -> NativeSnapshotProgress
-    
+
     /**
      * Contact DTOs are Rust-owned JSON schemas; native hosts must not maintain a parallel wire model.
      */
     func captureContactBook(inputJson: String) throws  -> String
-    
+
     func captureIncoming(sms: NativeIncomingSms) throws  -> NativeCaptured
-    
+
     /**
      * Timestamp-aware `SMS_RECEIVED` capture. `sms.provider_message_id` carries the broadcast
      * identity; `smsc_at_ms` is the carrier timestamp (provider `date_sent`) kept as
@@ -701,101 +701,101 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * provider row captured first for the same message is reused, never duplicated.
      */
     func captureIncomingTimed(sms: NativeIncomingSms, smscAtMs: Int64?, receivedAtMs: Int64?) throws  -> NativeCaptured
-    
+
     func captureNotification(input: NativeNotificationCapture) throws  -> NativeNotificationCaptureOutcome
-    
+
     func capturePlatformContactsJson(inputJson: String) throws  -> String
-    
+
     /**
      * Deletes only durable-finalized Android gateway MMS capture copies in a bounded batch.
      */
     func cleanupUploadedGatewayMmsCiphertext(limit: UInt32) throws  -> NativeGatewayMmsCleanup
-    
+
     func commitMmsProviderRescanPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool) throws  -> Bool
-    
+
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
     func compactionBackfillStepJson(limit: UInt32) throws  -> String
-    
+
     func completeMmsAcquisition(id: String) throws  -> NativeCaptured
-    
-    func completeNotificationDismissal(id: String) throws 
-    
-    func completePhoneReadEffects(messageIds: [String]) throws 
-    
-    func completeSenderUnblock(requestId: String, outcome: NativeSenderUnblockOutcome) throws 
-    
+
+    func completeNotificationDismissal(id: String) throws
+
+    func completePhoneReadEffects(messageIds: [String]) throws
+
+    func completeSenderUnblock(requestId: String, outcome: NativeSenderUnblockOutcome) throws
+
     func completeSmsAcquisition(id: String) throws  -> NativeCaptured
-    
-    func completeSmsReconciliation(sourceGeneration: String, providerScope: String, upperBound: String, cursor: String?, exhausted: Bool) throws 
-    
+
+    func completeSmsReconciliation(sourceGeneration: String, providerScope: String, upperBound: String, cursor: String?, exhausted: Bool) throws
+
     func composeDrafts() throws  -> [NativeComposeDraft]
-    
-    func configureAttachmentRetentionProtocol(enabled: Bool) throws 
-    
+
+    func configureAttachmentRetentionProtocol(enabled: Bool) throws
+
     func consumePhoneReadEffects(messageIds: [String], rows: [NativeProviderRowRef], nowMs: Int64) throws  -> UInt32
-    
+
     func contactApplyEvidenceJson(inputJson: String) throws  -> String
-    
+
     func contactApprovalJson(input: String) throws  -> String
-    
+
     func contactBookSelection() throws  -> NativeContactBookSelection
-    
+
     func contactBookView(inputJson: String) throws  -> String
-    
+
     /**
      * Contact photo work queue JSON (uploads with `reference_tracking`, reference
      * registrations to POST before publishing, reclaim candidates).
      */
     func contactPhotoTransferStateJson() throws  -> String
-    
+
     /**
      * True after a schema upgrade or `request_contact_repair` until a compaction snapshot
      * promotes. While true, hosts fetch one fenced snapshot (`begin_snapshot_with_compaction`)
      * instead of republishing owned contacts.
      */
     func contactRepairRequired() throws  -> Bool
-    
+
     func contactScanStateJson(inputJson: String) throws  -> String
-    
+
     func contactSettingsJson(input: String) throws  -> String
-    
+
     func contactSourceContextJson(inputJson: String) throws  -> String
-    
+
     /**
      * Contact sync readiness JSON (`state`: server_unsupported | needs_unlock |
      * backfill_pending | ready). Contact producers fail closed unless `ready`.
      */
     func contactSyncReadinessJson() throws  -> String
-    
+
     func contactSyncRequestStatus(inputJson: String) throws  -> String
-    
+
     func createComposeDraft(conversationId: String?) throws  -> NativeComposeDraft
-    
+
     /**
      * Retires the current memory-only live typing incarnation. Call this off the UI thread.
      */
-    func disableLiveTyping() throws 
-    
+    func disableLiveTyping() throws
+
     func discardUnreferencedAttachment(attachmentId: String) throws  -> Bool
-    
-    func dismissNotification(target: NativeNotificationTarget) throws 
-    
+
+    func dismissNotification(target: NativeNotificationTarget) throws
+
     /**
      * Closes this handle to new operations: every later call returns `Closed`.
      * Operations admitted before `dispose` keep their own core handle and run
      * to completion; the underlying store closes once the last one finishes.
      */
-    func dispose() throws 
-    
+    func dispose() throws
+
     func drainMessageHistoryCaptureResults(providerGeneration: String) throws  -> String
-    
+
     /**
      * Supplies transient Android network facts for deferred gateway MMS media selection.
      */
-    func enableDeferredGatewayMedia(wifiConnected: Bool, mediaWifiOnly: Bool) throws 
-    
+    func enableDeferredGatewayMedia(wifiConnected: Bool, mediaWifiOnly: Bool) throws
+
     /**
      * Enables memory-only live typing from host-attested roster and executor facts.
      *
@@ -804,124 +804,124 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * Google effect.
      */
     func enableLiveTyping(context: NativeLiveEnableContext, clock: NativeLiveClock) throws  -> UInt64
-    
+
     func evictAttachmentCiphertext(attachmentId: String) throws  -> Bool
-    
+
     /**
      * Sensitive bytes for Android Keystore/iOS Keychain/native secure storage only.
      * This API is deliberately not represented in a view record.
      */
     func exportNativeKeyCacheForNativeStorage(epoch: UInt32) throws  -> Data
-    
+
     func finishContactScan(inputJson: String) throws  -> String
-    
+
     func finishMessageHistoryCapture(input: String) throws  -> String
-    
+
     func finishMmsBackfillPhase(generation: String, scope: String, phase: NativeMmsBackfillPhase, bound: String, exhausted: Bool) throws  -> Bool
-    
+
     /**
      * Publishes only. Host work loops must drain with `apply_pending` until
      * `NativeApplyReport.snapshot_remaining` is zero.
      */
     func finishSnapshot(generation: UInt64) throws  -> NativeSnapshotReport
-    
+
     func forgetContactBook(inputJson: String) throws  -> String
-    
+
     /**
      * Returns the host-neutral support matrix. iOS carrier and notification-listener
      * claims remain unavailable even when a host reports a SIM or permission.
      */
     func gatewayCapabilities(platform: NativeGatewayPlatform, facts: NativeGatewayHostFacts) throws  -> NativeGatewayCapabilities
-    
+
     /**
      * Evaluates durable settings against transient native facts without storing them.
      */
     func gatewayPolicyDecision(platform: NativeGatewayPlatform, facts: NativeGatewayHostFacts) throws  -> NativeGatewayPolicyDecision
-    
+
     func gatewaySettings() throws  -> NativeGatewaySettings
-    
+
     func historyImportGateOpen() throws  -> Bool
-    
+
     /**
      * Imports the opaque bytes previously retrieved from native secure storage.
      */
-    func importNativeKeyCacheFromNativeStorage(bytes: Data) throws 
-    
+    func importNativeKeyCacheFromNativeStorage(bytes: Data) throws
+
     /**
      * Journals opaque server envelope JSON. Native code owns the transport and cursor progression.
      */
     func ingestRaw(envelopeJson: Data, cursor: String) throws  -> NativeIngestResult
-    
+
     func initialReplayCaughtUp() throws  -> Bool
-    
-    func installDownloadedAttachment(attachmentId: String, downloadedPath: String) throws 
-    
+
+    func installDownloadedAttachment(attachmentId: String, downloadedPath: String) throws
+
     func interruptedSenderUnblocks() throws  -> [NativeSenderUnblockWork]
-    
-    func invalidateAttachmentRetentionReconciliation() throws 
-    
+
+    func invalidateAttachmentRetentionReconciliation() throws
+
     func listContactBooksJson() throws  -> String
-    
+
     func listContactRequestsJson(input: String) throws  -> String
-    
+
     func listConversations() throws  -> [NativeConversation]
-    
+
     func listRestorableContactsJson(input: String) throws  -> String
-    
-    func markAttachmentRetentionReconciled() throws 
-    
-    func markAttachmentUploaded(attachmentId: String, remoteObjectId: String) throws 
-    
-    func markNotificationsSeen(targets: [NativeNotificationTarget]) throws 
-    
+
+    func markAttachmentRetentionReconciled() throws
+
+    func markAttachmentUploaded(attachmentId: String, remoteObjectId: String) throws
+
+    func markNotificationsSeen(targets: [NativeNotificationTarget]) throws
+
     func markSeen(messageId: String) throws  -> Bool
-    
+
     func messages(conversationId: String) throws  -> [NativeMessage]
-    
-    func migrateMmsBackfillState(generation: String, scope: String, legacy: NativeMmsLegacyBackfillState) throws 
-    
+
+    func migrateMmsBackfillState(generation: String, scope: String, legacy: NativeMmsLegacyBackfillState) throws
+
     func mmsAcquisitionParts(id: String) throws  -> [NativeMmsAcquisitionPart]
-    
+
     func mmsAcquisitions(limit: UInt64) throws  -> [NativeMmsAcquisition]
-    
+
     func mmsBackfillDueRechecks(generation: String, scope: String, nowMs: Int64, conditions: NativeMmsBackfillRecheckConditions) throws  -> NativeMmsBackfillRecheck
-    
+
     func mmsBackfillRecheckRequests(generation: String, scope: String) throws  -> NativeMmsBackfillRecheck
-    
+
     func mmsBackfillStatus(generation: String, scope: String) throws  -> NativeMmsBackfillStatus
-    
+
     func mmsContentVersion()  -> UInt32
-    
+
     func mmsOwnAddress(subscriptionId: String) throws  -> String?
-    
+
     func mmsPendingMediaBytes() throws  -> UInt64
-    
+
     func mmsReplyContext(conversationId: String) throws  -> NativeMmsReplyContext
-    
+
     func mmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool) throws  -> String?
-    
+
     /**
      * Native-only verified cipher path for upload; never expose it to web content.
      */
     func nativeCipherFileForUpload(attachmentId: String) throws  -> String
-    
+
     func nextContactApplyPermit(inputJson: String) throws  -> String
-    
+
     func notificationSnapshot() throws  -> NativeNotificationSnapshot
-    
+
     func notificationSourceDeviceId() throws  -> String
-    
+
     func observeContactScan(inputJson: String) throws  -> String
-    
+
     /**
      * Records the first server replay watermark observed by the host.
      */
-    func observeServerHighWater(highWaterCursor: String) throws 
-    
+    func observeServerHighWater(highWaterCursor: String) throws
+
     func openHistoryImportGate(reason: String) throws  -> Bool
-    
+
     func openNativePlaintextFile(attachmentId: String) throws  -> NativePlaintextHandle
-    
+
     /**
      * Opens a canonical private live transport frame and returns only sanitized host metadata.
      *
@@ -930,36 +930,36 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * then deadline.
      */
     func openTypingSignalV2(frameJson: String, clock: NativeLiveClock) throws  -> NativeLiveOutcome
-    
-    func pauseMmsBackfillForLocalCapacity(generation: String, scope: String) throws 
-    
+
+    func pauseMmsBackfillForLocalCapacity(generation: String, scope: String) throws
+
     func pendingAttachmentRetentionOperations() throws  -> [NativePendingAttachmentRetentionOperation]
-    
+
     /**
      * Lets an SMS-only adapter reject an immutable pending MMS command before
      * requesting a carrier permit. It exposes no attachment metadata or keys.
      */
     func pendingCommandAttachmentCount(commandId: String) throws  -> UInt64
-    
+
     func pendingCommands() throws  -> [NativeCarrierCommand]
-    
+
     func pendingContactSyncScans(inputJson: String) throws  -> String
-    
+
     func pendingDownloads() throws  -> [NativeCipherObject]
-    
+
     func pendingGatewayMediaDownloads() throws  -> [NativeCipherObject]
-    
+
     /**
      * Returns the core-filtered upload set for this Android gateway pass.
      */
     func pendingGatewayMediaUploads() throws  -> [NativeCipherObject]
-    
+
     func pendingMessageHistoryCaptureRequests(providerGeneration: String) throws  -> String
-    
+
     func pendingNotificationDismissals(limit: UInt64) throws  -> [NativeNotificationDismissal]
-    
+
     func pendingOutboxJson() throws  -> [String]
-    
+
     /**
      * Bounded opaque outbox retrieval for native upload workers, capped at 500.
      *
@@ -975,196 +975,196 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * seals nothing.
      */
     func pendingOutboxJsonBatch(limit: UInt64) throws  -> [String]
-    
+
     func pendingPhoneReadEffects(nowMs: Int64, limit: UInt32) throws  -> [NativePhoneReadEffect]
-    
+
     func pendingSenderUnblocks() throws  -> [NativeSenderUnblockWork]
-    
+
     func pendingUploads() throws  -> [NativeCipherObject]
-    
+
     func phoneReadCandidates(transport: NativePhoneReadTransport, sourceGeneration: String, afterOrder: Int64, limit: UInt32) throws  -> [NativePhoneReadCandidate]
-    
+
     func planMmsBackfillScans(generation: String, scope: String, observedMaxId: String) throws  -> [NativeMmsBackfillScanPlan]
-    
+
     func planSmsReconciliation(sourceGeneration: String, providerScope: String, observedHighWater: String, liveAnchorFingerprint: String?) throws  -> NativeSmsReconciliationPlan?
-    
+
     func planSmsScans(sourceGeneration: String, providerScope: String, observedHighWater: String) throws  -> [NativeSmsScanPlan]
-    
+
     /**
      * Additive adaptive history API. Hosts pass current OS facts; the core persists only
      * cursor/seed progress, never network or charging state.
      */
     func planSmsScansWithHistoryConditions(sourceGeneration: String, providerScope: String, observedHighWater: String, conditions: NativeHistoryImportConditions) throws  -> [NativeSmsScanPlan]
-    
+
     func prepareAttachment(sourcePath: String, mediaType: String, displayName: String) throws  -> NativeAttachmentInfo
-    
+
     /**
      * Durably prepares bounded register/release work. Hosts checkpoint before HTTP and must
      * discard responses from an older open/restore generation before applying them.
      */
     func prepareAttachmentRetentionOperations(limit: UInt64) throws  -> [NativePendingAttachmentRetentionOperation]
-    
+
     func prepareContactPhoto(path: String) throws  -> NativeAttachmentInfo
-    
+
     /**
      * Android-only local admission: provider UUIDs stay local while core maps
      * them to the protocol's decimal control generation.
      */
     func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFacts) throws  -> String
-    
+
     func publishSenderBlocklist(numbers: [String]?, canUnblock: Bool) throws  -> Bool
-    
+
     /**
      * Returns sanitized per-conversation capability state. Core maps stale,
      * future, unavailable, and unlinked evidence to `Unknown`; this method is
      * never a permit or send authority.
      */
     func rcsEligibilityProjection(conversationId: String, gatewayDeviceId: String, nowMs: Int64) throws  -> NativeRcsEligibilityProjection?
-    
+
     /**
      * Returns whether this gateway's current RCS link satisfies the core's
      * capability gate. This is a display capability, not a permit or transport
      * authority.
      */
     func rcsGatewaySupported(gatewayDeviceId: String, nowMs: Int64) throws  -> Bool
-    
+
     /**
      * Returns sanitized link state for native display. `current` means fresh
      * evidence only; it does not authorize a transport effect.
      */
     func rcsLinkStatus(gatewayDeviceId: String, nowMs: Int64) throws  -> NativeRcsLinkStatus?
-    
+
     func receiveCursor() throws  -> String
-    
+
     func reconcileContactApply(inputJson: String) throws  -> String
-    
+
     func reconcileProviderArchive(archivedThreadIds: [String]) throws  -> UInt32
-    
+
     func recordGatewayMediaFailure(attachmentId: String, reason: String) throws  -> Bool
-    
-    func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, outcome: NativeMmsBackfillRecheckOutcome, conditions: NativeMmsBackfillRecheckConditions) throws 
-    
+
+    func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, outcome: NativeMmsBackfillRecheckOutcome, conditions: NativeMmsBackfillRecheckConditions) throws
+
     /**
      * Records the local Google Messages lifecycle and publishes its content-free status.
      */
-    func recordRcsLinkLifecycle(state: NativeRcsLinkState, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, nowMs: Int64) throws 
-    
-    func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: UInt64) throws 
-    
+    func recordRcsLinkLifecycle(state: NativeRcsLinkState, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, nowMs: Int64) throws
+
+    func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: UInt64) throws
+
     func recordSendResult(commandId: String, result: NativeSendResult) throws  -> String
-    
+
     /**
      * Call after unlock and before choosing or minting a native contact book.
      */
-    func registerDeviceHint(platform: String, hint: Data) throws 
-    
+    func registerDeviceHint(platform: String, hint: Data) throws
+
     /**
      * Call when the host cannot read or create its reinstall-stable hint.
      */
-    func registerNoDeviceHint() throws 
-    
-    func removeNotification(notificationKey: String, instance: String) throws 
-    
-    func reportAttachmentRemovedByStoragePolicy(attachmentId: String) throws 
-    
+    func registerNoDeviceHint() throws
+
+    func removeNotification(notificationKey: String, instance: String) throws
+
+    func reportAttachmentRemovedByStoragePolicy(attachmentId: String) throws
+
     func reportContactSyncBlocked(inputJson: String) throws  -> String
-    
-    func reportMmsBackfillRemoteCapacity(generation: String, scope: String, hasCapacity: Bool) throws 
-    
-    func reportMmsBackfillVaultQuotaExceeded(generation: String, scope: String) throws 
-    
-    func requestAttachmentDownload(attachmentId: String) throws 
-    
+
+    func reportMmsBackfillRemoteCapacity(generation: String, scope: String, hasCapacity: Bool) throws
+
+    func reportMmsBackfillVaultQuotaExceeded(generation: String, scope: String) throws
+
+    func requestAttachmentDownload(attachmentId: String) throws
+
     func requestAttachmentRetentionRelease(useId: String) throws  -> NativePendingAttachmentRetentionOperation
-    
+
     func requestContactEdit(inputJson: String) throws  -> String
-    
+
     /**
      * Latches a local projection repair (e.g. after an integrity warning). Does not clear
      * visible state; the next promoted compaction snapshot replaces it.
      */
-    func requestContactRepair() throws 
-    
+    func requestContactRepair() throws
+
     func requestContactSync(inputJson: String) throws  -> String
-    
+
     func requestMmsProviderRescan(generation: String, scope: String, observedMaxId: String) throws  -> Bool
-    
+
     func requestMmsRecheck(generation: String, scope: String, limit: UInt64) throws  -> UInt64
-    
+
     func restoreContactJson(input: String) throws  -> String
-    
+
     func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: NativeComposeDraftUpdate) throws  -> NativeComposeDraft
-    
+
     /**
      * Seals a canonical protocol frame for the private live transport. Call this off the UI
      * thread.
      */
     func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, origin: NativeTypingOrigin, state: NativeTypingState, clock: NativeLiveClock) throws  -> NativeLiveOutbound?
-    
+
     func sendComposeDraft(draftId: String, expectedRevision: UInt64) throws  -> NativeQueuedSend
-    
+
     func sendComposeDraftCheckedTransport(draftId: String, expectedRevision: UInt64, expectedTransport: String) throws  -> NativeQueuedSend
-    
+
     func serverCompactionSupported() throws  -> Bool
-    
-    func setAppMuted(sourceDeviceId: String, packageName: String, appName: String, muted: Bool) throws 
-    
+
+    func setAppMuted(sourceDeviceId: String, packageName: String, appName: String, muted: Bool) throws
+
     func setContactScanRequestCapability(inputJson: String) throws  -> String
-    
-    func setConversationPinned(conversationId: String, pinned: Bool) throws 
-    
-    func setGatewaySettings(settings: NativeGatewaySettings) throws 
-    
-    func setMmsAcquisitionPart(id: String, providerPartId: String, attachmentId: String) throws 
-    
-    func setMmsAcquisitionPartMetadata(id: String, providerPartId: String, width: UInt32?, height: UInt32?, durationMs: UInt64?, thumbnailAttachmentId: String?) throws 
-    
-    func setMmsAcquisitionPartPreviewState(id: String, providerPartId: String, state: NativeMmsPreviewState) throws 
-    
-    func setMmsAcquisitionState(id: String, state: NativeMmsAcquisitionState, reason: String?) throws 
-    
-    func setMmsOwnAddress(subscriptionId: String, address: String) throws 
-    
-    func setMmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool, providerMessageId: String) throws 
-    
+
+    func setConversationPinned(conversationId: String, pinned: Bool) throws
+
+    func setGatewaySettings(settings: NativeGatewaySettings) throws
+
+    func setMmsAcquisitionPart(id: String, providerPartId: String, attachmentId: String) throws
+
+    func setMmsAcquisitionPartMetadata(id: String, providerPartId: String, width: UInt32?, height: UInt32?, durationMs: UInt64?, thumbnailAttachmentId: String?) throws
+
+    func setMmsAcquisitionPartPreviewState(id: String, providerPartId: String, state: NativeMmsPreviewState) throws
+
+    func setMmsAcquisitionState(id: String, state: NativeMmsAcquisitionState, reason: String?) throws
+
+    func setMmsOwnAddress(subscriptionId: String, address: String) throws
+
+    func setMmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool, providerMessageId: String) throws
+
     /**
      * Records `/v1/snapshot` `compaction_supported` and `compaction_active`, runs one bounded
      * frontier backfill step and returns the contact sync readiness JSON.
      */
     func setServerCompactionState(supported: Bool, active: Bool) throws  -> String
-    
-    func setServerCompactionSupported(supported: Bool) throws 
-    
-    func setServerOriginTagsSupported(supported: Bool) throws 
-    
-    func setSmsAcquisitionState(id: String, state: NativeSmsAcquisitionState, reason: String?) throws 
-    
-    func setSmsPendingRecheckCursor(sourceGeneration: String, providerScope: String, imported: Bool, acquisitionId: String?) throws 
-    
-    func setSmsProviderError(sourceGeneration: String, providerScope: String, providerError: Bool) throws 
-    
-    func setSmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool, providerMessageId: String) throws 
-    
+
+    func setServerCompactionSupported(supported: Bool) throws
+
+    func setServerOriginTagsSupported(supported: Bool) throws
+
+    func setSmsAcquisitionState(id: String, state: NativeSmsAcquisitionState, reason: String?) throws
+
+    func setSmsPendingRecheckCursor(sourceGeneration: String, providerScope: String, imported: Bool, acquisitionId: String?) throws
+
+    func setSmsProviderError(sourceGeneration: String, providerScope: String, providerError: Bool) throws
+
+    func setSmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool, providerMessageId: String) throws
+
     /**
      * Separately controls whether this enabled incarnation seals outbound typing frames.
      * Call this off the UI thread.
      */
-    func setTypingSharing(enabled: Bool) throws 
-    
+    func setTypingSharing(enabled: Bool) throws
+
     func smsAcquisitionsAfter(afterId: String?, limit: UInt64) throws  -> [NativeSmsAcquisition]
-    
+
     func smsHistoryStatus(sourceGeneration: String, providerScope: String) throws  -> NativeSmsHistoryStatus
-    
+
     func smsProviderRowsSeen(rows: [NativeProviderRowRef]) throws  -> Bool
-    
+
     func smsScanStatus(sourceGeneration: String, subscriptionId: String, imported: Bool) throws  -> NativeSmsScanStatus
-    
+
     func snapshotProgress() throws  -> NativeSnapshotProgress?
-    
+
     func snapshotProjectionStatus() throws  -> NativeSnapshotProjectionStatus?
-    
-    func unlock(profileJson: String, headerJson: String, passphrase: String) throws 
-    
+
+    func unlock(profileJson: String, headerJson: String, passphrase: String) throws
+
 }
 open class NativeClient: NativeClientProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -1216,9 +1216,9 @@ open class NativeClient: NativeClientProtocol, @unchecked Sendable {
         try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativeclient(handle, $0) }
     }
 
-    
 
-    
+
+
 open func ackOutbox(envelopeId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_ack_outbox(
@@ -1227,7 +1227,7 @@ open func ackOutbox(envelopeId: String)throws   {try rustCallWithError(FfiConver
     )
 }
 }
-    
+
 open func ackSmsScanExhausted(sourceGeneration: String, providerScope: String, imported: Bool, frozenUpperBound: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_ack_sms_scan_exhausted(
@@ -1239,7 +1239,7 @@ open func ackSmsScanExhausted(sourceGeneration: String, providerScope: String, i
     )
 }
 }
-    
+
 open func acknowledgeContactPhotoReclaimJson(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1249,7 +1249,7 @@ open func acknowledgeContactPhotoReclaimJson(inputJson: String)throws  -> String
     )
 })
 }
-    
+
 open func acknowledgeContactPhotoReferenceJson(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1259,7 +1259,7 @@ open func acknowledgeContactPhotoReferenceJson(inputJson: String)throws  -> Stri
     )
 })
 }
-    
+
     /**
      * Explicit manual epoch cutover. Native hosts call this only after a
      * successful passphrase/header `unlock` of the newer profile; never after
@@ -1275,7 +1275,7 @@ open func activateVerifiedEpoch(epoch: UInt32)throws   {try rustCallWithError(Ff
     )
 }
 }
-    
+
 open func advanceMmsBackfillPage(generation: String, scope: String, phase: NativeMmsBackfillPhase, providerId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_advance_mms_backfill_page(
@@ -1287,7 +1287,7 @@ open func advanceMmsBackfillPage(generation: String, scope: String, phase: Nativ
     )
 }
 }
-    
+
 open func appendSnapshotRawPage(generation: UInt64, records: [NativeRawSnapshotRecord])throws  -> NativeSnapshotProgress  {
     return try  FfiConverterTypeNativeSnapshotProgress_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1298,7 +1298,7 @@ open func appendSnapshotRawPage(generation: UInt64, records: [NativeRawSnapshotR
     )
 })
 }
-    
+
     /**
      * Stores a canonical transport response only when all immutable identity fields match.
      */
@@ -1310,7 +1310,7 @@ open func applyAttachmentRetentionResponse(response: NativeAttachmentUseResponse
     )
 }
 }
-    
+
 open func applyPending(limit: UInt64)throws  -> NativeApplyReport  {
     return try  FfiConverterTypeNativeApplyReport_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1320,7 +1320,7 @@ open func applyPending(limit: UInt64)throws  -> NativeApplyReport  {
     )
 })
 }
-    
+
 open func applyPhoneReads(candidates: [NativePhoneReadCandidate])throws  -> UInt32  {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1330,7 +1330,7 @@ open func applyPhoneReads(candidates: [NativePhoneReadCandidate])throws  -> UInt
     )
 })
 }
-    
+
 open func attachmentInfo(attachmentId: String)throws  -> NativeAttachmentInfo  {
     return try  FfiConverterTypeNativeAttachmentInfo_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1340,7 +1340,7 @@ open func attachmentInfo(attachmentId: String)throws  -> NativeAttachmentInfo  {
     )
 })
 }
-    
+
 open func attachmentRetentionPreparationPending()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1349,7 +1349,7 @@ open func attachmentRetentionPreparationPending()throws  -> Bool  {
     )
 })
 }
-    
+
 open func attachmentRetentionProtocolEnabled()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1358,7 +1358,7 @@ open func attachmentRetentionProtocolEnabled()throws  -> Bool  {
     )
 })
 }
-    
+
 open func attachmentRetentionReady()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1367,7 +1367,7 @@ open func attachmentRetentionReady()throws  -> Bool  {
     )
 })
 }
-    
+
 open func attachmentRetentionState(attachmentId: String)throws  -> NativeAttachmentRetentionState  {
     return try  FfiConverterTypeNativeAttachmentRetentionState_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1377,7 +1377,7 @@ open func attachmentRetentionState(attachmentId: String)throws  -> NativeAttachm
     )
 })
 }
-    
+
 open func attachmentUploadRetention(attachmentId: String)throws  -> NativeAttachmentUploadRetention  {
     return try  FfiConverterTypeNativeAttachmentUploadRetention_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1387,7 +1387,7 @@ open func attachmentUploadRetention(attachmentId: String)throws  -> NativeAttach
     )
 })
 }
-    
+
     /**
      * Persists a protected use before the host publishes dependent attachment work.
      */
@@ -1401,7 +1401,7 @@ open func beginAttachmentRetentionUse(attachmentId: String, kind: NativeAttachme
     )
 })
 }
-    
+
 open func beginContactScan(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1411,7 +1411,7 @@ open func beginContactScan(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func beginMessageHistoryCapture(providerGeneration: String, transport: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1422,7 +1422,7 @@ open func beginMessageHistoryCapture(providerGeneration: String, transport: Stri
     )
 })
 }
-    
+
 open func beginMmsAcquisition(input: NativeMmsAcquisitionInput)throws  -> NativeMmsAcquisition  {
     return try  FfiConverterTypeNativeMmsAcquisition_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1432,7 +1432,7 @@ open func beginMmsAcquisition(input: NativeMmsAcquisitionInput)throws  -> Native
     )
 })
 }
-    
+
 open func beginMmsAcquisitionOutcome(input: NativeMmsAcquisitionInput)throws  -> NativeMmsBeginOutcome  {
     return try  FfiConverterTypeNativeMmsBeginOutcome_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1442,7 +1442,7 @@ open func beginMmsAcquisitionOutcome(input: NativeMmsAcquisitionInput)throws  ->
     )
 })
 }
-    
+
     /**
      * A carrier API may be invoked only when this returns NativePermitState::Permit.
      */
@@ -1455,7 +1455,7 @@ open func beginSendAttempt(commandId: String)throws  -> NativePermit  {
     )
 })
 }
-    
+
 open func beginSenderUnblock(requestId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1465,7 +1465,7 @@ open func beginSenderUnblock(requestId: String)throws  -> Bool  {
     )
 })
 }
-    
+
 open func beginSmsProviderAcquisition(input: NativeSmsProviderAcquisitionInput)throws  -> NativeSmsAcquisition  {
     return try  FfiConverterTypeNativeSmsAcquisition_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1475,7 +1475,7 @@ open func beginSmsProviderAcquisition(input: NativeSmsProviderAcquisitionInput)t
     )
 })
 }
-    
+
 open func beginSnapshot(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose)throws  -> NativeSnapshotProgress  {
     return try  FfiConverterTypeNativeSnapshotProgress_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1487,7 +1487,7 @@ open func beginSnapshot(highWater: String, recordCount: UInt64, purpose: NativeS
     )
 })
 }
-    
+
 open func beginSnapshotWithCompaction(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose, serverCompactionGeneration: String?)throws  -> NativeSnapshotProgress  {
     return try  FfiConverterTypeNativeSnapshotProgress_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1500,7 +1500,7 @@ open func beginSnapshotWithCompaction(highWater: String, recordCount: UInt64, pu
     )
 })
 }
-    
+
     /**
      * Contact DTOs are Rust-owned JSON schemas; native hosts must not maintain a parallel wire model.
      */
@@ -1513,7 +1513,7 @@ open func captureContactBook(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func captureIncoming(sms: NativeIncomingSms)throws  -> NativeCaptured  {
     return try  FfiConverterTypeNativeCaptured_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1523,7 +1523,7 @@ open func captureIncoming(sms: NativeIncomingSms)throws  -> NativeCaptured  {
     )
 })
 }
-    
+
     /**
      * Timestamp-aware `SMS_RECEIVED` capture. `sms.provider_message_id` carries the broadcast
      * identity; `smsc_at_ms` is the carrier timestamp (provider `date_sent`) kept as
@@ -1541,7 +1541,7 @@ open func captureIncomingTimed(sms: NativeIncomingSms, smscAtMs: Int64?, receive
     )
 })
 }
-    
+
 open func captureNotification(input: NativeNotificationCapture)throws  -> NativeNotificationCaptureOutcome  {
     return try  FfiConverterTypeNativeNotificationCaptureOutcome_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1551,7 +1551,7 @@ open func captureNotification(input: NativeNotificationCapture)throws  -> Native
     )
 })
 }
-    
+
 open func capturePlatformContactsJson(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1561,7 +1561,7 @@ open func capturePlatformContactsJson(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Deletes only durable-finalized Android gateway MMS capture copies in a bounded batch.
      */
@@ -1574,7 +1574,7 @@ open func cleanupUploadedGatewayMmsCiphertext(limit: UInt32)throws  -> NativeGat
     )
 })
 }
-    
+
 open func commitMmsProviderRescanPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1589,7 +1589,7 @@ open func commitMmsProviderRescanPage(generation: String, scope: String, token: 
     )
 })
 }
-    
+
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
@@ -1602,7 +1602,7 @@ open func compactionBackfillStepJson(limit: UInt32)throws  -> String  {
     )
 })
 }
-    
+
 open func completeMmsAcquisition(id: String)throws  -> NativeCaptured  {
     return try  FfiConverterTypeNativeCaptured_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1612,7 +1612,7 @@ open func completeMmsAcquisition(id: String)throws  -> NativeCaptured  {
     )
 })
 }
-    
+
 open func completeNotificationDismissal(id: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_notification_dismissal(
@@ -1621,7 +1621,7 @@ open func completeNotificationDismissal(id: String)throws   {try rustCallWithErr
     )
 }
 }
-    
+
 open func completePhoneReadEffects(messageIds: [String])throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_phone_read_effects(
@@ -1630,7 +1630,7 @@ open func completePhoneReadEffects(messageIds: [String])throws   {try rustCallWi
     )
 }
 }
-    
+
 open func completeSenderUnblock(requestId: String, outcome: NativeSenderUnblockOutcome)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sender_unblock(
@@ -1640,7 +1640,7 @@ open func completeSenderUnblock(requestId: String, outcome: NativeSenderUnblockO
     )
 }
 }
-    
+
 open func completeSmsAcquisition(id: String)throws  -> NativeCaptured  {
     return try  FfiConverterTypeNativeCaptured_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1650,7 +1650,7 @@ open func completeSmsAcquisition(id: String)throws  -> NativeCaptured  {
     )
 })
 }
-    
+
 open func completeSmsReconciliation(sourceGeneration: String, providerScope: String, upperBound: String, cursor: String?, exhausted: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sms_reconciliation(
@@ -1663,7 +1663,7 @@ open func completeSmsReconciliation(sourceGeneration: String, providerScope: Str
     )
 }
 }
-    
+
 open func composeDrafts()throws  -> [NativeComposeDraft]  {
     return try  FfiConverterSequenceTypeNativeComposeDraft.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1672,7 +1672,7 @@ open func composeDrafts()throws  -> [NativeComposeDraft]  {
     )
 })
 }
-    
+
 open func configureAttachmentRetentionProtocol(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_configure_attachment_retention_protocol(
@@ -1681,7 +1681,7 @@ open func configureAttachmentRetentionProtocol(enabled: Bool)throws   {try rustC
     )
 }
 }
-    
+
 open func consumePhoneReadEffects(messageIds: [String], rows: [NativeProviderRowRef], nowMs: Int64)throws  -> UInt32  {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1693,7 +1693,7 @@ open func consumePhoneReadEffects(messageIds: [String], rows: [NativeProviderRow
     )
 })
 }
-    
+
 open func contactApplyEvidenceJson(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1703,7 +1703,7 @@ open func contactApplyEvidenceJson(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func contactApprovalJson(input: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1713,7 +1713,7 @@ open func contactApprovalJson(input: String)throws  -> String  {
     )
 })
 }
-    
+
 open func contactBookSelection()throws  -> NativeContactBookSelection  {
     return try  FfiConverterTypeNativeContactBookSelection_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1722,7 +1722,7 @@ open func contactBookSelection()throws  -> NativeContactBookSelection  {
     )
 })
 }
-    
+
 open func contactBookView(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1732,7 +1732,7 @@ open func contactBookView(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Contact photo work queue JSON (uploads with `reference_tracking`, reference
      * registrations to POST before publishing, reclaim candidates).
@@ -1745,7 +1745,7 @@ open func contactPhotoTransferStateJson()throws  -> String  {
     )
 })
 }
-    
+
     /**
      * True after a schema upgrade or `request_contact_repair` until a compaction snapshot
      * promotes. While true, hosts fetch one fenced snapshot (`begin_snapshot_with_compaction`)
@@ -1759,7 +1759,7 @@ open func contactRepairRequired()throws  -> Bool  {
     )
 })
 }
-    
+
 open func contactScanStateJson(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1769,7 +1769,7 @@ open func contactScanStateJson(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func contactSettingsJson(input: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1779,7 +1779,7 @@ open func contactSettingsJson(input: String)throws  -> String  {
     )
 })
 }
-    
+
 open func contactSourceContextJson(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1789,7 +1789,7 @@ open func contactSourceContextJson(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Contact sync readiness JSON (`state`: server_unsupported | needs_unlock |
      * backfill_pending | ready). Contact producers fail closed unless `ready`.
@@ -1802,7 +1802,7 @@ open func contactSyncReadinessJson()throws  -> String  {
     )
 })
 }
-    
+
 open func contactSyncRequestStatus(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1812,7 +1812,7 @@ open func contactSyncRequestStatus(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func createComposeDraft(conversationId: String?)throws  -> NativeComposeDraft  {
     return try  FfiConverterTypeNativeComposeDraft_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1822,7 +1822,7 @@ open func createComposeDraft(conversationId: String?)throws  -> NativeComposeDra
     )
 })
 }
-    
+
     /**
      * Retires the current memory-only live typing incarnation. Call this off the UI thread.
      */
@@ -1833,7 +1833,7 @@ open func disableLiveTyping()throws   {try rustCallWithError(FfiConverterTypeNat
     )
 }
 }
-    
+
 open func discardUnreferencedAttachment(attachmentId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1843,7 +1843,7 @@ open func discardUnreferencedAttachment(attachmentId: String)throws  -> Bool  {
     )
 })
 }
-    
+
 open func dismissNotification(target: NativeNotificationTarget)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_dismiss_notification(
@@ -1852,7 +1852,7 @@ open func dismissNotification(target: NativeNotificationTarget)throws   {try rus
     )
 }
 }
-    
+
     /**
      * Closes this handle to new operations: every later call returns `Closed`.
      * Operations admitted before `dispose` keep their own core handle and run
@@ -1865,7 +1865,7 @@ open func dispose()throws   {try rustCallWithError(FfiConverterTypeMobileBinding
     )
 }
 }
-    
+
 open func drainMessageHistoryCaptureResults(providerGeneration: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1875,7 +1875,7 @@ open func drainMessageHistoryCaptureResults(providerGeneration: String)throws  -
     )
 })
 }
-    
+
     /**
      * Supplies transient Android network facts for deferred gateway MMS media selection.
      */
@@ -1888,7 +1888,7 @@ open func enableDeferredGatewayMedia(wifiConnected: Bool, mediaWifiOnly: Bool)th
     )
 }
 }
-    
+
     /**
      * Enables memory-only live typing from host-attested roster and executor facts.
      *
@@ -1906,7 +1906,7 @@ open func enableLiveTyping(context: NativeLiveEnableContext, clock: NativeLiveCl
     )
 })
 }
-    
+
 open func evictAttachmentCiphertext(attachmentId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1916,7 +1916,7 @@ open func evictAttachmentCiphertext(attachmentId: String)throws  -> Bool  {
     )
 })
 }
-    
+
     /**
      * Sensitive bytes for Android Keystore/iOS Keychain/native secure storage only.
      * This API is deliberately not represented in a view record.
@@ -1930,7 +1930,7 @@ open func exportNativeKeyCacheForNativeStorage(epoch: UInt32)throws  -> Data  {
     )
 })
 }
-    
+
 open func finishContactScan(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1940,7 +1940,7 @@ open func finishContactScan(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func finishMessageHistoryCapture(input: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1950,7 +1950,7 @@ open func finishMessageHistoryCapture(input: String)throws  -> String  {
     )
 })
 }
-    
+
 open func finishMmsBackfillPhase(generation: String, scope: String, phase: NativeMmsBackfillPhase, bound: String, exhausted: Bool)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1964,7 +1964,7 @@ open func finishMmsBackfillPhase(generation: String, scope: String, phase: Nativ
     )
 })
 }
-    
+
     /**
      * Publishes only. Host work loops must drain with `apply_pending` until
      * `NativeApplyReport.snapshot_remaining` is zero.
@@ -1978,7 +1978,7 @@ open func finishSnapshot(generation: UInt64)throws  -> NativeSnapshotReport  {
     )
 })
 }
-    
+
 open func forgetContactBook(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1988,7 +1988,7 @@ open func forgetContactBook(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Returns the host-neutral support matrix. iOS carrier and notification-listener
      * claims remain unavailable even when a host reports a SIM or permission.
@@ -2003,7 +2003,7 @@ open func gatewayCapabilities(platform: NativeGatewayPlatform, facts: NativeGate
     )
 })
 }
-    
+
     /**
      * Evaluates durable settings against transient native facts without storing them.
      */
@@ -2017,7 +2017,7 @@ open func gatewayPolicyDecision(platform: NativeGatewayPlatform, facts: NativeGa
     )
 })
 }
-    
+
 open func gatewaySettings()throws  -> NativeGatewaySettings  {
     return try  FfiConverterTypeNativeGatewaySettings_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2026,7 +2026,7 @@ open func gatewaySettings()throws  -> NativeGatewaySettings  {
     )
 })
 }
-    
+
 open func historyImportGateOpen()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2035,7 +2035,7 @@ open func historyImportGateOpen()throws  -> Bool  {
     )
 })
 }
-    
+
     /**
      * Imports the opaque bytes previously retrieved from native secure storage.
      */
@@ -2047,7 +2047,7 @@ open func importNativeKeyCacheFromNativeStorage(bytes: Data)throws   {try rustCa
     )
 }
 }
-    
+
     /**
      * Journals opaque server envelope JSON. Native code owns the transport and cursor progression.
      */
@@ -2061,7 +2061,7 @@ open func ingestRaw(envelopeJson: Data, cursor: String)throws  -> NativeIngestRe
     )
 })
 }
-    
+
 open func initialReplayCaughtUp()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2070,7 +2070,7 @@ open func initialReplayCaughtUp()throws  -> Bool  {
     )
 })
 }
-    
+
 open func installDownloadedAttachment(attachmentId: String, downloadedPath: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_install_downloaded_attachment(
@@ -2080,7 +2080,7 @@ open func installDownloadedAttachment(attachmentId: String, downloadedPath: Stri
     )
 }
 }
-    
+
 open func interruptedSenderUnblocks()throws  -> [NativeSenderUnblockWork]  {
     return try  FfiConverterSequenceTypeNativeSenderUnblockWork.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2089,7 +2089,7 @@ open func interruptedSenderUnblocks()throws  -> [NativeSenderUnblockWork]  {
     )
 })
 }
-    
+
 open func invalidateAttachmentRetentionReconciliation()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_invalidate_attachment_retention_reconciliation(
@@ -2097,7 +2097,7 @@ open func invalidateAttachmentRetentionReconciliation()throws   {try rustCallWit
     )
 }
 }
-    
+
 open func listContactBooksJson()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2106,7 +2106,7 @@ open func listContactBooksJson()throws  -> String  {
     )
 })
 }
-    
+
 open func listContactRequestsJson(input: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2116,7 +2116,7 @@ open func listContactRequestsJson(input: String)throws  -> String  {
     )
 })
 }
-    
+
 open func listConversations()throws  -> [NativeConversation]  {
     return try  FfiConverterSequenceTypeNativeConversation.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2125,7 +2125,7 @@ open func listConversations()throws  -> [NativeConversation]  {
     )
 })
 }
-    
+
 open func listRestorableContactsJson(input: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2135,7 +2135,7 @@ open func listRestorableContactsJson(input: String)throws  -> String  {
     )
 })
 }
-    
+
 open func markAttachmentRetentionReconciled()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_attachment_retention_reconciled(
@@ -2143,7 +2143,7 @@ open func markAttachmentRetentionReconciled()throws   {try rustCallWithError(Ffi
     )
 }
 }
-    
+
 open func markAttachmentUploaded(attachmentId: String, remoteObjectId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_attachment_uploaded(
@@ -2153,7 +2153,7 @@ open func markAttachmentUploaded(attachmentId: String, remoteObjectId: String)th
     )
 }
 }
-    
+
 open func markNotificationsSeen(targets: [NativeNotificationTarget])throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_notifications_seen(
@@ -2162,7 +2162,7 @@ open func markNotificationsSeen(targets: [NativeNotificationTarget])throws   {tr
     )
 }
 }
-    
+
 open func markSeen(messageId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2172,7 +2172,7 @@ open func markSeen(messageId: String)throws  -> Bool  {
     )
 })
 }
-    
+
 open func messages(conversationId: String)throws  -> [NativeMessage]  {
     return try  FfiConverterSequenceTypeNativeMessage.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2182,7 +2182,7 @@ open func messages(conversationId: String)throws  -> [NativeMessage]  {
     )
 })
 }
-    
+
 open func migrateMmsBackfillState(generation: String, scope: String, legacy: NativeMmsLegacyBackfillState)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_migrate_mms_backfill_state(
@@ -2193,7 +2193,7 @@ open func migrateMmsBackfillState(generation: String, scope: String, legacy: Nat
     )
 }
 }
-    
+
 open func mmsAcquisitionParts(id: String)throws  -> [NativeMmsAcquisitionPart]  {
     return try  FfiConverterSequenceTypeNativeMmsAcquisitionPart.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2203,7 +2203,7 @@ open func mmsAcquisitionParts(id: String)throws  -> [NativeMmsAcquisitionPart]  
     )
 })
 }
-    
+
 open func mmsAcquisitions(limit: UInt64)throws  -> [NativeMmsAcquisition]  {
     return try  FfiConverterSequenceTypeNativeMmsAcquisition.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2213,7 +2213,7 @@ open func mmsAcquisitions(limit: UInt64)throws  -> [NativeMmsAcquisition]  {
     )
 })
 }
-    
+
 open func mmsBackfillDueRechecks(generation: String, scope: String, nowMs: Int64, conditions: NativeMmsBackfillRecheckConditions)throws  -> NativeMmsBackfillRecheck  {
     return try  FfiConverterTypeNativeMmsBackfillRecheck_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2226,7 +2226,7 @@ open func mmsBackfillDueRechecks(generation: String, scope: String, nowMs: Int64
     )
 })
 }
-    
+
 open func mmsBackfillRecheckRequests(generation: String, scope: String)throws  -> NativeMmsBackfillRecheck  {
     return try  FfiConverterTypeNativeMmsBackfillRecheck_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2237,7 +2237,7 @@ open func mmsBackfillRecheckRequests(generation: String, scope: String)throws  -
     )
 })
 }
-    
+
 open func mmsBackfillStatus(generation: String, scope: String)throws  -> NativeMmsBackfillStatus  {
     return try  FfiConverterTypeNativeMmsBackfillStatus_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2248,7 +2248,7 @@ open func mmsBackfillStatus(generation: String, scope: String)throws  -> NativeM
     )
 })
 }
-    
+
 open func mmsContentVersion() -> UInt32  {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
         uniffiCallStatus in
@@ -2257,7 +2257,7 @@ open func mmsContentVersion() -> UInt32  {
     )
 })
 }
-    
+
 open func mmsOwnAddress(subscriptionId: String)throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2267,7 +2267,7 @@ open func mmsOwnAddress(subscriptionId: String)throws  -> String?  {
     )
 })
 }
-    
+
 open func mmsPendingMediaBytes()throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2276,7 +2276,7 @@ open func mmsPendingMediaBytes()throws  -> UInt64  {
     )
 })
 }
-    
+
 open func mmsReplyContext(conversationId: String)throws  -> NativeMmsReplyContext  {
     return try  FfiConverterTypeNativeMmsReplyContext_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2286,7 +2286,7 @@ open func mmsReplyContext(conversationId: String)throws  -> NativeMmsReplyContex
     )
 })
 }
-    
+
 open func mmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool)throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2298,7 +2298,7 @@ open func mmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, im
     )
 })
 }
-    
+
     /**
      * Native-only verified cipher path for upload; never expose it to web content.
      */
@@ -2311,7 +2311,7 @@ open func nativeCipherFileForUpload(attachmentId: String)throws  -> String  {
     )
 })
 }
-    
+
 open func nextContactApplyPermit(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2321,7 +2321,7 @@ open func nextContactApplyPermit(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func notificationSnapshot()throws  -> NativeNotificationSnapshot  {
     return try  FfiConverterTypeNativeNotificationSnapshot_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2330,7 +2330,7 @@ open func notificationSnapshot()throws  -> NativeNotificationSnapshot  {
     )
 })
 }
-    
+
 open func notificationSourceDeviceId()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2339,7 +2339,7 @@ open func notificationSourceDeviceId()throws  -> String  {
     )
 })
 }
-    
+
 open func observeContactScan(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2349,7 +2349,7 @@ open func observeContactScan(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Records the first server replay watermark observed by the host.
      */
@@ -2361,7 +2361,7 @@ open func observeServerHighWater(highWaterCursor: String)throws   {try rustCallW
     )
 }
 }
-    
+
 open func openHistoryImportGate(reason: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2371,7 +2371,7 @@ open func openHistoryImportGate(reason: String)throws  -> Bool  {
     )
 })
 }
-    
+
 open func openNativePlaintextFile(attachmentId: String)throws  -> NativePlaintextHandle  {
     return try  FfiConverterTypeNativePlaintextHandle_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2381,7 +2381,7 @@ open func openNativePlaintextFile(attachmentId: String)throws  -> NativePlaintex
     )
 })
 }
-    
+
     /**
      * Opens a canonical private live transport frame and returns only sanitized host metadata.
      *
@@ -2399,7 +2399,7 @@ open func openTypingSignalV2(frameJson: String, clock: NativeLiveClock)throws  -
     )
 })
 }
-    
+
 open func pauseMmsBackfillForLocalCapacity(generation: String, scope: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_pause_mms_backfill_for_local_capacity(
@@ -2409,7 +2409,7 @@ open func pauseMmsBackfillForLocalCapacity(generation: String, scope: String)thr
     )
 }
 }
-    
+
 open func pendingAttachmentRetentionOperations()throws  -> [NativePendingAttachmentRetentionOperation]  {
     return try  FfiConverterSequenceTypeNativePendingAttachmentRetentionOperation.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2418,7 +2418,7 @@ open func pendingAttachmentRetentionOperations()throws  -> [NativePendingAttachm
     )
 })
 }
-    
+
     /**
      * Lets an SMS-only adapter reject an immutable pending MMS command before
      * requesting a carrier permit. It exposes no attachment metadata or keys.
@@ -2432,7 +2432,7 @@ open func pendingCommandAttachmentCount(commandId: String)throws  -> UInt64  {
     )
 })
 }
-    
+
 open func pendingCommands()throws  -> [NativeCarrierCommand]  {
     return try  FfiConverterSequenceTypeNativeCarrierCommand.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2441,7 +2441,7 @@ open func pendingCommands()throws  -> [NativeCarrierCommand]  {
     )
 })
 }
-    
+
 open func pendingContactSyncScans(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2451,7 +2451,7 @@ open func pendingContactSyncScans(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func pendingDownloads()throws  -> [NativeCipherObject]  {
     return try  FfiConverterSequenceTypeNativeCipherObject.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2460,7 +2460,7 @@ open func pendingDownloads()throws  -> [NativeCipherObject]  {
     )
 })
 }
-    
+
 open func pendingGatewayMediaDownloads()throws  -> [NativeCipherObject]  {
     return try  FfiConverterSequenceTypeNativeCipherObject.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2469,7 +2469,7 @@ open func pendingGatewayMediaDownloads()throws  -> [NativeCipherObject]  {
     )
 })
 }
-    
+
     /**
      * Returns the core-filtered upload set for this Android gateway pass.
      */
@@ -2481,7 +2481,7 @@ open func pendingGatewayMediaUploads()throws  -> [NativeCipherObject]  {
     )
 })
 }
-    
+
 open func pendingMessageHistoryCaptureRequests(providerGeneration: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2491,7 +2491,7 @@ open func pendingMessageHistoryCaptureRequests(providerGeneration: String)throws
     )
 })
 }
-    
+
 open func pendingNotificationDismissals(limit: UInt64)throws  -> [NativeNotificationDismissal]  {
     return try  FfiConverterSequenceTypeNativeNotificationDismissal.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2501,7 +2501,7 @@ open func pendingNotificationDismissals(limit: UInt64)throws  -> [NativeNotifica
     )
 })
 }
-    
+
 open func pendingOutboxJson()throws  -> [String]  {
     return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2510,7 +2510,7 @@ open func pendingOutboxJson()throws  -> [String]  {
     )
 })
 }
-    
+
     /**
      * Bounded opaque outbox retrieval for native upload workers, capped at 500.
      *
@@ -2534,7 +2534,7 @@ open func pendingOutboxJsonBatch(limit: UInt64)throws  -> [String]  {
     )
 })
 }
-    
+
 open func pendingPhoneReadEffects(nowMs: Int64, limit: UInt32)throws  -> [NativePhoneReadEffect]  {
     return try  FfiConverterSequenceTypeNativePhoneReadEffect.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2545,7 +2545,7 @@ open func pendingPhoneReadEffects(nowMs: Int64, limit: UInt32)throws  -> [Native
     )
 })
 }
-    
+
 open func pendingSenderUnblocks()throws  -> [NativeSenderUnblockWork]  {
     return try  FfiConverterSequenceTypeNativeSenderUnblockWork.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2554,7 +2554,7 @@ open func pendingSenderUnblocks()throws  -> [NativeSenderUnblockWork]  {
     )
 })
 }
-    
+
 open func pendingUploads()throws  -> [NativeCipherObject]  {
     return try  FfiConverterSequenceTypeNativeCipherObject.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2563,7 +2563,7 @@ open func pendingUploads()throws  -> [NativeCipherObject]  {
     )
 })
 }
-    
+
 open func phoneReadCandidates(transport: NativePhoneReadTransport, sourceGeneration: String, afterOrder: Int64, limit: UInt32)throws  -> [NativePhoneReadCandidate]  {
     return try  FfiConverterSequenceTypeNativePhoneReadCandidate.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2576,7 +2576,7 @@ open func phoneReadCandidates(transport: NativePhoneReadTransport, sourceGenerat
     )
 })
 }
-    
+
 open func planMmsBackfillScans(generation: String, scope: String, observedMaxId: String)throws  -> [NativeMmsBackfillScanPlan]  {
     return try  FfiConverterSequenceTypeNativeMmsBackfillScanPlan.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2588,7 +2588,7 @@ open func planMmsBackfillScans(generation: String, scope: String, observedMaxId:
     )
 })
 }
-    
+
 open func planSmsReconciliation(sourceGeneration: String, providerScope: String, observedHighWater: String, liveAnchorFingerprint: String?)throws  -> NativeSmsReconciliationPlan?  {
     return try  FfiConverterOptionTypeNativeSmsReconciliationPlan.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2601,7 +2601,7 @@ open func planSmsReconciliation(sourceGeneration: String, providerScope: String,
     )
 })
 }
-    
+
 open func planSmsScans(sourceGeneration: String, providerScope: String, observedHighWater: String)throws  -> [NativeSmsScanPlan]  {
     return try  FfiConverterSequenceTypeNativeSmsScanPlan.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2613,7 +2613,7 @@ open func planSmsScans(sourceGeneration: String, providerScope: String, observed
     )
 })
 }
-    
+
     /**
      * Additive adaptive history API. Hosts pass current OS facts; the core persists only
      * cursor/seed progress, never network or charging state.
@@ -2630,7 +2630,7 @@ open func planSmsScansWithHistoryConditions(sourceGeneration: String, providerSc
     )
 })
 }
-    
+
 open func prepareAttachment(sourcePath: String, mediaType: String, displayName: String)throws  -> NativeAttachmentInfo  {
     return try  FfiConverterTypeNativeAttachmentInfo_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2642,7 +2642,7 @@ open func prepareAttachment(sourcePath: String, mediaType: String, displayName: 
     )
 })
 }
-    
+
     /**
      * Durably prepares bounded register/release work. Hosts checkpoint before HTTP and must
      * discard responses from an older open/restore generation before applying them.
@@ -2656,7 +2656,7 @@ open func prepareAttachmentRetentionOperations(limit: UInt64)throws  -> [NativeP
     )
 })
 }
-    
+
 open func prepareContactPhoto(path: String)throws  -> NativeAttachmentInfo  {
     return try  FfiConverterTypeNativeAttachmentInfo_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2666,7 +2666,7 @@ open func prepareContactPhoto(path: String)throws  -> NativeAttachmentInfo  {
     )
 })
 }
-    
+
     /**
      * Android-only local admission: provider UUIDs stay local while core maps
      * them to the protocol's decimal control generation.
@@ -2680,7 +2680,7 @@ open func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFa
     )
 })
 }
-    
+
 open func publishSenderBlocklist(numbers: [String]?, canUnblock: Bool)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2691,7 +2691,7 @@ open func publishSenderBlocklist(numbers: [String]?, canUnblock: Bool)throws  ->
     )
 })
 }
-    
+
     /**
      * Returns sanitized per-conversation capability state. Core maps stale,
      * future, unavailable, and unlinked evidence to `Unknown`; this method is
@@ -2708,7 +2708,7 @@ open func rcsEligibilityProjection(conversationId: String, gatewayDeviceId: Stri
     )
 })
 }
-    
+
     /**
      * Returns whether this gateway's current RCS link satisfies the core's
      * capability gate. This is a display capability, not a permit or transport
@@ -2724,7 +2724,7 @@ open func rcsGatewaySupported(gatewayDeviceId: String, nowMs: Int64)throws  -> B
     )
 })
 }
-    
+
     /**
      * Returns sanitized link state for native display. `current` means fresh
      * evidence only; it does not authorize a transport effect.
@@ -2739,7 +2739,7 @@ open func rcsLinkStatus(gatewayDeviceId: String, nowMs: Int64)throws  -> NativeR
     )
 })
 }
-    
+
 open func receiveCursor()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2748,7 +2748,7 @@ open func receiveCursor()throws  -> String  {
     )
 })
 }
-    
+
 open func reconcileContactApply(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2758,7 +2758,7 @@ open func reconcileContactApply(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func reconcileProviderArchive(archivedThreadIds: [String])throws  -> UInt32  {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2768,7 +2768,7 @@ open func reconcileProviderArchive(archivedThreadIds: [String])throws  -> UInt32
     )
 })
 }
-    
+
 open func recordGatewayMediaFailure(attachmentId: String, reason: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2779,7 +2779,7 @@ open func recordGatewayMediaFailure(attachmentId: String, reason: String)throws 
     )
 })
 }
-    
+
 open func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, outcome: NativeMmsBackfillRecheckOutcome, conditions: NativeMmsBackfillRecheckConditions)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_mms_backfill_recheck_outcome(
@@ -2791,7 +2791,7 @@ open func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, o
     )
 }
 }
-    
+
     /**
      * Records the local Google Messages lifecycle and publishes its content-free status.
      */
@@ -2808,7 +2808,7 @@ open func recordRcsLinkLifecycle(state: NativeRcsLinkState, availability: Bool, 
     )
 }
 }
-    
+
 open func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: UInt64)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_recovery_snapshot_capacity(
@@ -2818,7 +2818,7 @@ open func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: U
     )
 }
 }
-    
+
 open func recordSendResult(commandId: String, result: NativeSendResult)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2829,7 +2829,7 @@ open func recordSendResult(commandId: String, result: NativeSendResult)throws  -
     )
 })
 }
-    
+
     /**
      * Call after unlock and before choosing or minting a native contact book.
      */
@@ -2842,7 +2842,7 @@ open func registerDeviceHint(platform: String, hint: Data)throws   {try rustCall
     )
 }
 }
-    
+
     /**
      * Call when the host cannot read or create its reinstall-stable hint.
      */
@@ -2853,7 +2853,7 @@ open func registerNoDeviceHint()throws   {try rustCallWithError(FfiConverterType
     )
 }
 }
-    
+
 open func removeNotification(notificationKey: String, instance: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification(
@@ -2863,7 +2863,7 @@ open func removeNotification(notificationKey: String, instance: String)throws   
     )
 }
 }
-    
+
 open func reportAttachmentRemovedByStoragePolicy(attachmentId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_attachment_removed_by_storage_policy(
@@ -2872,7 +2872,7 @@ open func reportAttachmentRemovedByStoragePolicy(attachmentId: String)throws   {
     )
 }
 }
-    
+
 open func reportContactSyncBlocked(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2882,7 +2882,7 @@ open func reportContactSyncBlocked(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func reportMmsBackfillRemoteCapacity(generation: String, scope: String, hasCapacity: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_mms_backfill_remote_capacity(
@@ -2893,7 +2893,7 @@ open func reportMmsBackfillRemoteCapacity(generation: String, scope: String, has
     )
 }
 }
-    
+
 open func reportMmsBackfillVaultQuotaExceeded(generation: String, scope: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_mms_backfill_vault_quota_exceeded(
@@ -2903,7 +2903,7 @@ open func reportMmsBackfillVaultQuotaExceeded(generation: String, scope: String)
     )
 }
 }
-    
+
 open func requestAttachmentDownload(attachmentId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_attachment_download(
@@ -2912,7 +2912,7 @@ open func requestAttachmentDownload(attachmentId: String)throws   {try rustCallW
     )
 }
 }
-    
+
 open func requestAttachmentRetentionRelease(useId: String)throws  -> NativePendingAttachmentRetentionOperation  {
     return try  FfiConverterTypeNativePendingAttachmentRetentionOperation_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2922,7 +2922,7 @@ open func requestAttachmentRetentionRelease(useId: String)throws  -> NativePendi
     )
 })
 }
-    
+
 open func requestContactEdit(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2932,7 +2932,7 @@ open func requestContactEdit(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Latches a local projection repair (e.g. after an integrity warning). Does not clear
      * visible state; the next promoted compaction snapshot replaces it.
@@ -2944,7 +2944,7 @@ open func requestContactRepair()throws   {try rustCallWithError(FfiConverterType
     )
 }
 }
-    
+
 open func requestContactSync(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2954,7 +2954,7 @@ open func requestContactSync(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func requestMmsProviderRescan(generation: String, scope: String, observedMaxId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2966,7 +2966,7 @@ open func requestMmsProviderRescan(generation: String, scope: String, observedMa
     )
 })
 }
-    
+
 open func requestMmsRecheck(generation: String, scope: String, limit: UInt64)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2978,7 +2978,7 @@ open func requestMmsRecheck(generation: String, scope: String, limit: UInt64)thr
     )
 })
 }
-    
+
 open func restoreContactJson(input: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2988,7 +2988,7 @@ open func restoreContactJson(input: String)throws  -> String  {
     )
 })
 }
-    
+
 open func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: NativeComposeDraftUpdate)throws  -> NativeComposeDraft  {
     return try  FfiConverterTypeNativeComposeDraft_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3000,7 +3000,7 @@ open func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: Na
     )
 })
 }
-    
+
     /**
      * Seals a canonical protocol frame for the private live transport. Call this off the UI
      * thread.
@@ -3018,7 +3018,7 @@ open func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, or
     )
 })
 }
-    
+
 open func sendComposeDraft(draftId: String, expectedRevision: UInt64)throws  -> NativeQueuedSend  {
     return try  FfiConverterTypeNativeQueuedSend_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3029,7 +3029,7 @@ open func sendComposeDraft(draftId: String, expectedRevision: UInt64)throws  -> 
     )
 })
 }
-    
+
 open func sendComposeDraftCheckedTransport(draftId: String, expectedRevision: UInt64, expectedTransport: String)throws  -> NativeQueuedSend  {
     return try  FfiConverterTypeNativeQueuedSend_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3041,7 +3041,7 @@ open func sendComposeDraftCheckedTransport(draftId: String, expectedRevision: UI
     )
 })
 }
-    
+
 open func serverCompactionSupported()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3050,7 +3050,7 @@ open func serverCompactionSupported()throws  -> Bool  {
     )
 })
 }
-    
+
 open func setAppMuted(sourceDeviceId: String, packageName: String, appName: String, muted: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_app_muted(
@@ -3062,7 +3062,7 @@ open func setAppMuted(sourceDeviceId: String, packageName: String, appName: Stri
     )
 }
 }
-    
+
 open func setContactScanRequestCapability(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3072,7 +3072,7 @@ open func setContactScanRequestCapability(inputJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func setConversationPinned(conversationId: String, pinned: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_conversation_pinned(
@@ -3082,7 +3082,7 @@ open func setConversationPinned(conversationId: String, pinned: Bool)throws   {t
     )
 }
 }
-    
+
 open func setGatewaySettings(settings: NativeGatewaySettings)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_gateway_settings(
@@ -3091,7 +3091,7 @@ open func setGatewaySettings(settings: NativeGatewaySettings)throws   {try rustC
     )
 }
 }
-    
+
 open func setMmsAcquisitionPart(id: String, providerPartId: String, attachmentId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_part(
@@ -3102,7 +3102,7 @@ open func setMmsAcquisitionPart(id: String, providerPartId: String, attachmentId
     )
 }
 }
-    
+
 open func setMmsAcquisitionPartMetadata(id: String, providerPartId: String, width: UInt32?, height: UInt32?, durationMs: UInt64?, thumbnailAttachmentId: String?)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_part_metadata(
@@ -3116,7 +3116,7 @@ open func setMmsAcquisitionPartMetadata(id: String, providerPartId: String, widt
     )
 }
 }
-    
+
 open func setMmsAcquisitionPartPreviewState(id: String, providerPartId: String, state: NativeMmsPreviewState)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_part_preview_state(
@@ -3127,7 +3127,7 @@ open func setMmsAcquisitionPartPreviewState(id: String, providerPartId: String, 
     )
 }
 }
-    
+
 open func setMmsAcquisitionState(id: String, state: NativeMmsAcquisitionState, reason: String?)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_state(
@@ -3138,7 +3138,7 @@ open func setMmsAcquisitionState(id: String, state: NativeMmsAcquisitionState, r
     )
 }
 }
-    
+
 open func setMmsOwnAddress(subscriptionId: String, address: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_own_address(
@@ -3148,7 +3148,7 @@ open func setMmsOwnAddress(subscriptionId: String, address: String)throws   {try
     )
 }
 }
-    
+
 open func setMmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool, providerMessageId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_scan_checkpoint(
@@ -3160,7 +3160,7 @@ open func setMmsScanCheckpoint(sourceGeneration: String, subscriptionId: String,
     )
 }
 }
-    
+
     /**
      * Records `/v1/snapshot` `compaction_supported` and `compaction_active`, runs one bounded
      * frontier backfill step and returns the contact sync readiness JSON.
@@ -3175,7 +3175,7 @@ open func setServerCompactionState(supported: Bool, active: Bool)throws  -> Stri
     )
 })
 }
-    
+
 open func setServerCompactionSupported(supported: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_compaction_supported(
@@ -3184,7 +3184,7 @@ open func setServerCompactionSupported(supported: Bool)throws   {try rustCallWit
     )
 }
 }
-    
+
 open func setServerOriginTagsSupported(supported: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_origin_tags_supported(
@@ -3193,7 +3193,7 @@ open func setServerOriginTagsSupported(supported: Bool)throws   {try rustCallWit
     )
 }
 }
-    
+
 open func setSmsAcquisitionState(id: String, state: NativeSmsAcquisitionState, reason: String?)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_acquisition_state(
@@ -3204,7 +3204,7 @@ open func setSmsAcquisitionState(id: String, state: NativeSmsAcquisitionState, r
     )
 }
 }
-    
+
 open func setSmsPendingRecheckCursor(sourceGeneration: String, providerScope: String, imported: Bool, acquisitionId: String?)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_pending_recheck_cursor(
@@ -3216,7 +3216,7 @@ open func setSmsPendingRecheckCursor(sourceGeneration: String, providerScope: St
     )
 }
 }
-    
+
 open func setSmsProviderError(sourceGeneration: String, providerScope: String, providerError: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_provider_error(
@@ -3227,7 +3227,7 @@ open func setSmsProviderError(sourceGeneration: String, providerScope: String, p
     )
 }
 }
-    
+
 open func setSmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool, providerMessageId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_scan_checkpoint(
@@ -3239,7 +3239,7 @@ open func setSmsScanCheckpoint(sourceGeneration: String, subscriptionId: String,
     )
 }
 }
-    
+
     /**
      * Separately controls whether this enabled incarnation seals outbound typing frames.
      * Call this off the UI thread.
@@ -3252,7 +3252,7 @@ open func setTypingSharing(enabled: Bool)throws   {try rustCallWithError(FfiConv
     )
 }
 }
-    
+
 open func smsAcquisitionsAfter(afterId: String?, limit: UInt64)throws  -> [NativeSmsAcquisition]  {
     return try  FfiConverterSequenceTypeNativeSmsAcquisition.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3263,7 +3263,7 @@ open func smsAcquisitionsAfter(afterId: String?, limit: UInt64)throws  -> [Nativ
     )
 })
 }
-    
+
 open func smsHistoryStatus(sourceGeneration: String, providerScope: String)throws  -> NativeSmsHistoryStatus  {
     return try  FfiConverterTypeNativeSmsHistoryStatus_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3274,7 +3274,7 @@ open func smsHistoryStatus(sourceGeneration: String, providerScope: String)throw
     )
 })
 }
-    
+
 open func smsProviderRowsSeen(rows: [NativeProviderRowRef])throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3284,7 +3284,7 @@ open func smsProviderRowsSeen(rows: [NativeProviderRowRef])throws  -> Bool  {
     )
 })
 }
-    
+
 open func smsScanStatus(sourceGeneration: String, subscriptionId: String, imported: Bool)throws  -> NativeSmsScanStatus  {
     return try  FfiConverterTypeNativeSmsScanStatus_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3296,7 +3296,7 @@ open func smsScanStatus(sourceGeneration: String, subscriptionId: String, import
     )
 })
 }
-    
+
 open func snapshotProgress()throws  -> NativeSnapshotProgress?  {
     return try  FfiConverterOptionTypeNativeSnapshotProgress.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3305,7 +3305,7 @@ open func snapshotProgress()throws  -> NativeSnapshotProgress?  {
     )
 })
 }
-    
+
 open func snapshotProjectionStatus()throws  -> NativeSnapshotProjectionStatus?  {
     return try  FfiConverterOptionTypeNativeSnapshotProjectionStatus.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3314,7 +3314,7 @@ open func snapshotProjectionStatus()throws  -> NativeSnapshotProjectionStatus?  
     )
 })
 }
-    
+
 open func unlock(profileJson: String, headerJson: String, passphrase: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_unlock(
@@ -3325,9 +3325,9 @@ open func unlock(profileJson: String, headerJson: String, passphrase: String)thr
     )
 }
 }
-    
 
-    
+
+
 }
 
 
@@ -3377,105 +3377,105 @@ public func FfiConverterTypeNativeClient_lower(_ value: NativeClient) -> UInt64 
 
 
 public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
-    
-    func acceptVaultRequestCreated(json: String) throws 
-    
+
+    func acceptVaultRequestCreated(json: String) throws
+
     func approvePhoneInvitationRequest(statusJson: String, passphrase: String) throws  -> String
-    
+
     func beginVaultRequest(origin: String, inviteToken: String, displayName: String) throws  -> String
-    
+
     /**
      * Abandons a local claimant flow; it does not perform a server-side cancellation.
      */
-    func cancelPhoneFlow() throws 
-    
+    func cancelPhoneFlow() throws
+
     func checkpoint() throws  -> Data
-    
+
     func claimPhoneInvitationRequest(qrJson: String) throws  -> String
-    
-    func clearVaultRequest() throws 
-    
+
+    func clearVaultRequest() throws
+
     func completeManualChallengeRequest(challengeJson: String, passphrase: String) throws  -> String
-    
+
     func confirmPhoneInvitationRequest(statusJson: String, sharedSecret: String?) throws  -> String
-    
-    func consumeCreatedPhoneInvitation(createdJson: String) throws 
-    
-    func consumePhoneClaim(claimJson: String) throws 
-    
+
+    func consumeCreatedPhoneInvitation(createdJson: String) throws
+
+    func consumePhoneClaim(claimJson: String) throws
+
     func createOwnerRequest(setupToken: String, username: String, adminPassword: String, passphrase: String) throws  -> String
-    
+
     func createPhoneInvitationRequest(method: NativeEnrollmentMethod) throws  -> String
-    
+
     func createVaultRequest(username: String, adminPassword: String, passphrase: String) throws  -> String
-    
+
     func finishManualAdmission(responseJson: String, passphrase: String) throws  -> NativeEnrollmentIdentity
-    
+
     func finishOwnerAdmission(responseJson: String, passphrase: String) throws  -> NativeEnrollmentIdentity
-    
+
     func finishPhoneAdmission(completeJson: String) throws  -> NativeEnrollmentIdentity
-    
+
     func hasPreparedOwnerMaterial() throws  -> Bool
-    
+
     func manualChallengeRequest(vaultId: String?, vaultOwner: String?) throws  -> String
-    
+
     func parseVaultRequestStatus(json: String) throws  -> String
-    
+
     func pendingVaultRequest() throws  -> NativePendingVaultRequest?
-    
+
     func phoneSas(statusJson: String) throws  -> String
-    
+
     /**
      * Opaque claimant-authenticated polling descriptor for native transport only.
      */
     func phoneStatusRequest() throws  -> String
-    
+
     func vaultRequestAccepted() throws  -> Bool
-    
+
     func vaultRequestHeader() throws  -> String
-    
+
     /**
      * Verifies the separately prompted vault key phrase, requires an unlocked native core, and
      * emits the authenticated approval only after an explicit comparison-code confirmation.
      */
     func approveOwnerComputerRequest(invitationId: String, promptDigest: String, codesMatch: Bool, vaultKeyPhrase: String, nativeClient: NativeClient) throws  -> String
-    
+
     /**
      * Clears only local computer-enrollment state; it does not cancel the server enrollment.
      */
-    func cancelOwnerComputerFlow() throws 
-    
+    func cancelOwnerComputerFlow() throws
+
     /**
      * Supplies the enrolled owner UUID from protected native identity storage. The shared client
      * rejects scans until this has been configured; it never uses its local enrollment UUID.
      */
-    func configureOwnerComputerDevice(deviceId: String) throws 
-    
+    func configureOwnerComputerDevice(deviceId: String) throws
+
     /**
      * Pins one create response only when it belongs to the currently displayed QR prompt.
      */
-    func consumeOwnerComputerCreated(invitationId: String, promptDigest: String, createdJson: String) throws 
-    
+    func consumeOwnerComputerCreated(invitationId: String, promptDigest: String, createdJson: String) throws
+
     /**
      * Validates a computer QR locally and creates the body for the authenticated owner request.
      */
     func ownerComputerCreateRequest(qrJson: String) throws  -> NativeOwnerComputerCreateRequest
-    
+
     /**
      * Returns local prompt identity and the locally derived comparison code, never server SAS.
      */
     func ownerComputerView() throws  -> NativeOwnerComputerView
-    
+
     func ownerPassphraseMatches(passphrase: String) throws  -> Bool
-    
+
     func ownerPhoneInvitationId() throws  -> String?
-    
+
     func ownerPhoneMethod() throws  -> NativeEnrollmentMethod?
-    
+
     func ownerPhoneQrPayload() throws  -> String
-    
+
     func ownerPhoneStatus(statusJson: String) throws  -> NativeOwnerPhoneStatus
-    
+
 }
 open class NativeEnrollmentClient: NativeEnrollmentClientProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -3527,9 +3527,9 @@ open class NativeEnrollmentClient: NativeEnrollmentClientProtocol, @unchecked Se
         try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativeenrollmentclient(handle, $0) }
     }
 
-    
 
-    
+
+
 open func acceptVaultRequestCreated(json: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_accept_vault_request_created(
@@ -3538,7 +3538,7 @@ open func acceptVaultRequestCreated(json: String)throws   {try rustCallWithError
     )
 }
 }
-    
+
 open func approvePhoneInvitationRequest(statusJson: String, passphrase: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3549,7 +3549,7 @@ open func approvePhoneInvitationRequest(statusJson: String, passphrase: String)t
     )
 })
 }
-    
+
 open func beginVaultRequest(origin: String, inviteToken: String, displayName: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3561,7 +3561,7 @@ open func beginVaultRequest(origin: String, inviteToken: String, displayName: St
     )
 })
 }
-    
+
     /**
      * Abandons a local claimant flow; it does not perform a server-side cancellation.
      */
@@ -3572,7 +3572,7 @@ open func cancelPhoneFlow()throws   {try rustCallWithError(FfiConverterTypeMobil
     )
 }
 }
-    
+
 open func checkpoint()throws  -> Data  {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3581,7 +3581,7 @@ open func checkpoint()throws  -> Data  {
     )
 })
 }
-    
+
 open func claimPhoneInvitationRequest(qrJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3591,7 +3591,7 @@ open func claimPhoneInvitationRequest(qrJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func clearVaultRequest()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_clear_vault_request(
@@ -3599,7 +3599,7 @@ open func clearVaultRequest()throws   {try rustCallWithError(FfiConverterTypeMob
     )
 }
 }
-    
+
 open func completeManualChallengeRequest(challengeJson: String, passphrase: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3610,7 +3610,7 @@ open func completeManualChallengeRequest(challengeJson: String, passphrase: Stri
     )
 })
 }
-    
+
 open func confirmPhoneInvitationRequest(statusJson: String, sharedSecret: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3621,7 +3621,7 @@ open func confirmPhoneInvitationRequest(statusJson: String, sharedSecret: String
     )
 })
 }
-    
+
 open func consumeCreatedPhoneInvitation(createdJson: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_consume_created_phone_invitation(
@@ -3630,7 +3630,7 @@ open func consumeCreatedPhoneInvitation(createdJson: String)throws   {try rustCa
     )
 }
 }
-    
+
 open func consumePhoneClaim(claimJson: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_consume_phone_claim(
@@ -3639,7 +3639,7 @@ open func consumePhoneClaim(claimJson: String)throws   {try rustCallWithError(Ff
     )
 }
 }
-    
+
 open func createOwnerRequest(setupToken: String, username: String, adminPassword: String, passphrase: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3652,7 +3652,7 @@ open func createOwnerRequest(setupToken: String, username: String, adminPassword
     )
 })
 }
-    
+
 open func createPhoneInvitationRequest(method: NativeEnrollmentMethod)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3662,7 +3662,7 @@ open func createPhoneInvitationRequest(method: NativeEnrollmentMethod)throws  ->
     )
 })
 }
-    
+
 open func createVaultRequest(username: String, adminPassword: String, passphrase: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3674,7 +3674,7 @@ open func createVaultRequest(username: String, adminPassword: String, passphrase
     )
 })
 }
-    
+
 open func finishManualAdmission(responseJson: String, passphrase: String)throws  -> NativeEnrollmentIdentity  {
     return try  FfiConverterTypeNativeEnrollmentIdentity_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3685,7 +3685,7 @@ open func finishManualAdmission(responseJson: String, passphrase: String)throws 
     )
 })
 }
-    
+
 open func finishOwnerAdmission(responseJson: String, passphrase: String)throws  -> NativeEnrollmentIdentity  {
     return try  FfiConverterTypeNativeEnrollmentIdentity_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3696,7 +3696,7 @@ open func finishOwnerAdmission(responseJson: String, passphrase: String)throws  
     )
 })
 }
-    
+
 open func finishPhoneAdmission(completeJson: String)throws  -> NativeEnrollmentIdentity  {
     return try  FfiConverterTypeNativeEnrollmentIdentity_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3706,7 +3706,7 @@ open func finishPhoneAdmission(completeJson: String)throws  -> NativeEnrollmentI
     )
 })
 }
-    
+
 open func hasPreparedOwnerMaterial()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3715,7 +3715,7 @@ open func hasPreparedOwnerMaterial()throws  -> Bool  {
     )
 })
 }
-    
+
 open func manualChallengeRequest(vaultId: String?, vaultOwner: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3726,7 +3726,7 @@ open func manualChallengeRequest(vaultId: String?, vaultOwner: String?)throws  -
     )
 })
 }
-    
+
 open func parseVaultRequestStatus(json: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3736,7 +3736,7 @@ open func parseVaultRequestStatus(json: String)throws  -> String  {
     )
 })
 }
-    
+
 open func pendingVaultRequest()throws  -> NativePendingVaultRequest?  {
     return try  FfiConverterOptionTypeNativePendingVaultRequest.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3745,7 +3745,7 @@ open func pendingVaultRequest()throws  -> NativePendingVaultRequest?  {
     )
 })
 }
-    
+
 open func phoneSas(statusJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3755,7 +3755,7 @@ open func phoneSas(statusJson: String)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Opaque claimant-authenticated polling descriptor for native transport only.
      */
@@ -3767,7 +3767,7 @@ open func phoneStatusRequest()throws  -> String  {
     )
 })
 }
-    
+
 open func vaultRequestAccepted()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3776,7 +3776,7 @@ open func vaultRequestAccepted()throws  -> Bool  {
     )
 })
 }
-    
+
 open func vaultRequestHeader()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3785,7 +3785,7 @@ open func vaultRequestHeader()throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Verifies the separately prompted vault key phrase, requires an unlocked native core, and
      * emits the authenticated approval only after an explicit comparison-code confirmation.
@@ -3803,7 +3803,7 @@ open func approveOwnerComputerRequest(invitationId: String, promptDigest: String
     )
 })
 }
-    
+
     /**
      * Clears only local computer-enrollment state; it does not cancel the server enrollment.
      */
@@ -3814,7 +3814,7 @@ open func cancelOwnerComputerFlow()throws   {try rustCallWithError(FfiConverterT
     )
 }
 }
-    
+
     /**
      * Supplies the enrolled owner UUID from protected native identity storage. The shared client
      * rejects scans until this has been configured; it never uses its local enrollment UUID.
@@ -3827,7 +3827,7 @@ open func configureOwnerComputerDevice(deviceId: String)throws   {try rustCallWi
     )
 }
 }
-    
+
     /**
      * Pins one create response only when it belongs to the currently displayed QR prompt.
      */
@@ -3841,7 +3841,7 @@ open func consumeOwnerComputerCreated(invitationId: String, promptDigest: String
     )
 }
 }
-    
+
     /**
      * Validates a computer QR locally and creates the body for the authenticated owner request.
      */
@@ -3854,7 +3854,7 @@ open func ownerComputerCreateRequest(qrJson: String)throws  -> NativeOwnerComput
     )
 })
 }
-    
+
     /**
      * Returns local prompt identity and the locally derived comparison code, never server SAS.
      */
@@ -3866,7 +3866,7 @@ open func ownerComputerView()throws  -> NativeOwnerComputerView  {
     )
 })
 }
-    
+
 open func ownerPassphraseMatches(passphrase: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3876,7 +3876,7 @@ open func ownerPassphraseMatches(passphrase: String)throws  -> Bool  {
     )
 })
 }
-    
+
 open func ownerPhoneInvitationId()throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3885,7 +3885,7 @@ open func ownerPhoneInvitationId()throws  -> String?  {
     )
 })
 }
-    
+
 open func ownerPhoneMethod()throws  -> NativeEnrollmentMethod?  {
     return try  FfiConverterOptionTypeNativeEnrollmentMethod.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3894,7 +3894,7 @@ open func ownerPhoneMethod()throws  -> NativeEnrollmentMethod?  {
     )
 })
 }
-    
+
 open func ownerPhoneQrPayload()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3903,7 +3903,7 @@ open func ownerPhoneQrPayload()throws  -> String  {
     )
 })
 }
-    
+
 open func ownerPhoneStatus(statusJson: String)throws  -> NativeOwnerPhoneStatus  {
     return try  FfiConverterTypeNativeOwnerPhoneStatus_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3913,9 +3913,9 @@ open func ownerPhoneStatus(statusJson: String)throws  -> NativeOwnerPhoneStatus 
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -3965,19 +3965,19 @@ public func FfiConverterTypeNativeEnrollmentClient_lower(_ value: NativeEnrollme
 
 
 public protocol NativeEnrollmentIdentityProtocol: AnyObject, Sendable {
-    
+
     /**
      * Consumes the verified root package directly into the supplied native core.
      */
-    func activateInto(nativeClient: NativeClient) throws 
-    
+    func activateInto(nativeClient: NativeClient) throws
+
     /**
      * Returns the bearer only to a generated native binding for immediate secure-store install.
      */
     func credentialForNativeSecureStore() throws  -> String
-    
+
     func metadata()  -> NativeEnrollmentIdentityMetadata
-    
+
 }
 open class NativeEnrollmentIdentity: NativeEnrollmentIdentityProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -4029,9 +4029,9 @@ open class NativeEnrollmentIdentity: NativeEnrollmentIdentityProtocol, @unchecke
         try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativeenrollmentidentity(handle, $0) }
     }
 
-    
 
-    
+
+
     /**
      * Consumes the verified root package directly into the supplied native core.
      */
@@ -4043,7 +4043,7 @@ open func activateInto(nativeClient: NativeClient)throws   {try rustCallWithErro
     )
 }
 }
-    
+
     /**
      * Returns the bearer only to a generated native binding for immediate secure-store install.
      */
@@ -4055,7 +4055,7 @@ open func credentialForNativeSecureStore()throws  -> String  {
     )
 })
 }
-    
+
 open func metadata() -> NativeEnrollmentIdentityMetadata  {
     return try!  FfiConverterTypeNativeEnrollmentIdentityMetadata_lift(try! rustCall() {
         uniffiCallStatus in
@@ -4064,9 +4064,9 @@ open func metadata() -> NativeEnrollmentIdentityMetadata  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -4116,13 +4116,13 @@ public func FfiConverterTypeNativeEnrollmentIdentity_lower(_ value: NativeEnroll
 
 
 public protocol NativeHostedLoginAttemptProtocol: AnyObject, Sendable {
-    
+
     func attemptId()  -> String
-    
+
     func expiresInSeconds()  -> UInt32
-    
+
     func nonce()  -> String
-    
+
 }
 open class NativeHostedLoginAttempt: NativeHostedLoginAttemptProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -4174,9 +4174,9 @@ open class NativeHostedLoginAttempt: NativeHostedLoginAttemptProtocol, @unchecke
         try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativehostedloginattempt(handle, $0) }
     }
 
-    
 
-    
+
+
 open func attemptId() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -4185,7 +4185,7 @@ open func attemptId() -> String  {
     )
 })
 }
-    
+
 open func expiresInSeconds() -> UInt32  {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
         uniffiCallStatus in
@@ -4194,7 +4194,7 @@ open func expiresInSeconds() -> UInt32  {
     )
 })
 }
-    
+
 open func nonce() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -4203,9 +4203,9 @@ open func nonce() -> String  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -4255,23 +4255,23 @@ public func FfiConverterTypeNativeHostedLoginAttempt_lower(_ value: NativeHosted
 
 
 public protocol NativeHostedProvisioningProtocol: AnyObject, Sendable {
-    
-    func acceptGrant(responseJson: String) throws 
-    
+
+    func acceptGrant(responseJson: String) throws
+
     func checkpoint() throws  -> Data
-    
+
     func completeRequest() throws  -> String
-    
+
     func credentialJson(completeResponseJson: String) throws  -> String
-    
+
     func grantRequest() throws  -> String
-    
+
     func hasGrant()  -> Bool
-    
+
     func passphraseMatches(passphrase: String) throws  -> Bool
-    
+
     func view() throws  -> NativeHostedProvisioningView
-    
+
 }
 open class NativeHostedProvisioning: NativeHostedProvisioningProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -4323,9 +4323,9 @@ open class NativeHostedProvisioning: NativeHostedProvisioningProtocol, @unchecke
         try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativehostedprovisioning(handle, $0) }
     }
 
-    
 
-    
+
+
 open func acceptGrant(responseJson: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_accept_grant(
@@ -4334,7 +4334,7 @@ open func acceptGrant(responseJson: String)throws   {try rustCallWithError(FfiCo
     )
 }
 }
-    
+
 open func checkpoint()throws  -> Data  {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -4343,7 +4343,7 @@ open func checkpoint()throws  -> Data  {
     )
 })
 }
-    
+
 open func completeRequest()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -4352,7 +4352,7 @@ open func completeRequest()throws  -> String  {
     )
 })
 }
-    
+
 open func credentialJson(completeResponseJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -4362,7 +4362,7 @@ open func credentialJson(completeResponseJson: String)throws  -> String  {
     )
 })
 }
-    
+
 open func grantRequest()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -4371,7 +4371,7 @@ open func grantRequest()throws  -> String  {
     )
 })
 }
-    
+
 open func hasGrant() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
@@ -4380,7 +4380,7 @@ open func hasGrant() -> Bool  {
     )
 })
 }
-    
+
 open func passphraseMatches(passphrase: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -4390,7 +4390,7 @@ open func passphraseMatches(passphrase: String)throws  -> Bool  {
     )
 })
 }
-    
+
 open func view()throws  -> NativeHostedProvisioningView  {
     return try  FfiConverterTypeNativeHostedProvisioningView_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -4399,9 +4399,9 @@ open func view()throws  -> NativeHostedProvisioningView  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -4451,13 +4451,13 @@ public func FfiConverterTypeNativeHostedProvisioning_lower(_ value: NativeHosted
 
 
 public protocol NativeHostedSessionProtocol: AnyObject, Sendable {
-    
+
     func accountId()  -> String
-    
+
     func bearerToken()  -> String
-    
+
     func expiresInSeconds()  -> UInt32
-    
+
 }
 open class NativeHostedSession: NativeHostedSessionProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -4509,9 +4509,9 @@ open class NativeHostedSession: NativeHostedSessionProtocol, @unchecked Sendable
         try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativehostedsession(handle, $0) }
     }
 
-    
 
-    
+
+
 open func accountId() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -4520,7 +4520,7 @@ open func accountId() -> String  {
     )
 })
 }
-    
+
 open func bearerToken() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -4529,7 +4529,7 @@ open func bearerToken() -> String  {
     )
 })
 }
-    
+
 open func expiresInSeconds() -> UInt32  {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
         uniffiCallStatus in
@@ -4538,9 +4538,9 @@ open func expiresInSeconds() -> UInt32  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -4594,14 +4594,14 @@ public func FfiConverterTypeNativeHostedSession_lower(_ value: NativeHostedSessi
  * is disposed or dropped; callers must never forward its path to a web view.
  */
 public protocol NativePlaintextHandleProtocol: AnyObject, Sendable {
-    
-    func dispose() throws 
-    
+
+    func dispose() throws
+
     /**
      * Native-only temporary plaintext path. Deleted on dispose/drop, not secure-erased.
      */
     func nativePlaintextPath() throws  -> String
-    
+
 }
 /**
  * Owns a core-created temporary plaintext file. It is deleted when this handle
@@ -4657,9 +4657,9 @@ open class NativePlaintextHandle: NativePlaintextHandleProtocol, @unchecked Send
         try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativeplaintexthandle(handle, $0) }
     }
 
-    
 
-    
+
+
 open func dispose()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeplaintexthandle_dispose(
@@ -4667,7 +4667,7 @@ open func dispose()throws   {try rustCallWithError(FfiConverterTypeMobileBinding
     )
 }
 }
-    
+
     /**
      * Native-only temporary plaintext path. Deleted on dispose/drop, not secure-erased.
      */
@@ -4679,9 +4679,9 @@ open func nativePlaintextPath()throws  -> String  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -4741,9 +4741,9 @@ public struct CapabilityDiagnostic: Equatable, Hashable {
         self.detail = detail
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4757,8 +4757,8 @@ public struct FfiConverterTypeCapabilityDiagnostic: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CapabilityDiagnostic {
         return
             try CapabilityDiagnostic(
-                name: FfiConverterString.read(from: &buf), 
-                state: FfiConverterTypeCapabilityState.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf),
+                state: FfiConverterTypeCapabilityState.read(from: &buf),
                 detail: FfiConverterString.read(from: &buf)
         )
     }
@@ -4797,9 +4797,9 @@ public struct GatewayHealth: Equatable, Hashable {
         self.diagnostics = diagnostics
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4813,7 +4813,7 @@ public struct FfiConverterTypeGatewayHealth: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GatewayHealth {
         return
             try GatewayHealth(
-                enrollmentState: FfiConverterString.read(from: &buf), 
+                enrollmentState: FfiConverterString.read(from: &buf),
                 diagnostics: FfiConverterSequenceTypeCapabilityDiagnostic.read(from: &buf)
         )
     }
@@ -4856,10 +4856,10 @@ public struct NativeAccountNotice: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(kind: NativeAccountNoticeKind, severity: NativeNoticeSeverity, 
+    public init(kind: NativeAccountNoticeKind, severity: NativeNoticeSeverity,
         /**
          * Unix seconds supplied by the server.
-         */deadline: Int64?, 
+         */deadline: Int64?,
         /**
          * Present only when the URL passed the shared trust check; `None` means no action.
          */manageUrl: String?, dismissible: Bool, snoozeKey: String) {
@@ -4871,9 +4871,9 @@ public struct NativeAccountNotice: Equatable, Hashable {
         self.snoozeKey = snoozeKey
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4887,11 +4887,11 @@ public struct FfiConverterTypeNativeAccountNotice: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAccountNotice {
         return
             try NativeAccountNotice(
-                kind: FfiConverterTypeNativeAccountNoticeKind.read(from: &buf), 
-                severity: FfiConverterTypeNativeNoticeSeverity.read(from: &buf), 
-                deadline: FfiConverterOptionInt64.read(from: &buf), 
-                manageUrl: FfiConverterOptionString.read(from: &buf), 
-                dismissible: FfiConverterBool.read(from: &buf), 
+                kind: FfiConverterTypeNativeAccountNoticeKind.read(from: &buf),
+                severity: FfiConverterTypeNativeNoticeSeverity.read(from: &buf),
+                deadline: FfiConverterOptionInt64.read(from: &buf),
+                manageUrl: FfiConverterOptionString.read(from: &buf),
+                dismissible: FfiConverterBool.read(from: &buf),
                 snoozeKey: FfiConverterString.read(from: &buf)
         )
     }
@@ -4937,9 +4937,9 @@ public struct NativeAppFilter: Equatable, Hashable {
         self.muted = muted
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4953,9 +4953,9 @@ public struct FfiConverterTypeNativeAppFilter: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAppFilter {
         return
             try NativeAppFilter(
-                sourceDeviceId: FfiConverterString.read(from: &buf), 
-                packageName: FfiConverterString.read(from: &buf), 
-                appName: FfiConverterString.read(from: &buf), 
+                sourceDeviceId: FfiConverterString.read(from: &buf),
+                packageName: FfiConverterString.read(from: &buf),
+                appName: FfiConverterString.read(from: &buf),
                 muted: FfiConverterBool.read(from: &buf)
         )
     }
@@ -5008,9 +5008,9 @@ public struct NativeApplyReport: Equatable, Hashable {
         self.superseded = superseded
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5024,11 +5024,11 @@ public struct FfiConverterTypeNativeApplyReport: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeApplyReport {
         return
             try NativeApplyReport(
-                applied: FfiConverterUInt64.read(from: &buf), 
-                quarantined: FfiConverterUInt64.read(from: &buf), 
-                waitingForKeys: FfiConverterUInt64.read(from: &buf), 
-                drained: FfiConverterUInt64.read(from: &buf), 
-                snapshotRemaining: FfiConverterUInt64.read(from: &buf), 
+                applied: FfiConverterUInt64.read(from: &buf),
+                quarantined: FfiConverterUInt64.read(from: &buf),
+                waitingForKeys: FfiConverterUInt64.read(from: &buf),
+                drained: FfiConverterUInt64.read(from: &buf),
+                snapshotRemaining: FfiConverterUInt64.read(from: &buf),
                 superseded: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -5080,9 +5080,9 @@ public struct NativeAttachmentInfo: Equatable, Hashable {
         self.state = state
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5096,12 +5096,12 @@ public struct FfiConverterTypeNativeAttachmentInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentInfo {
         return
             try NativeAttachmentInfo(
-                attachmentId: FfiConverterString.read(from: &buf), 
-                mediaType: FfiConverterString.read(from: &buf), 
-                displayName: FfiConverterString.read(from: &buf), 
-                plaintextBytes: FfiConverterUInt64.read(from: &buf), 
-                ciphertextBytes: FfiConverterUInt64.read(from: &buf), 
-                ciphertextSha256: FfiConverterString.read(from: &buf), 
+                attachmentId: FfiConverterString.read(from: &buf),
+                mediaType: FfiConverterString.read(from: &buf),
+                displayName: FfiConverterString.read(from: &buf),
+                plaintextBytes: FfiConverterUInt64.read(from: &buf),
+                ciphertextBytes: FfiConverterUInt64.read(from: &buf),
+                ciphertextSha256: FfiConverterString.read(from: &buf),
                 state: FfiConverterTypeNativeAttachmentState.read(from: &buf)
         )
     }
@@ -5144,9 +5144,9 @@ public struct NativeAttachmentRetentionProtocolHeader: Equatable, Hashable {
         self.value = value
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5160,7 +5160,7 @@ public struct FfiConverterTypeNativeAttachmentRetentionProtocolHeader: FfiConver
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionProtocolHeader {
         return
             try NativeAttachmentRetentionProtocolHeader(
-                name: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf),
                 value: FfiConverterString.read(from: &buf)
         )
     }
@@ -5204,9 +5204,9 @@ public struct NativeAttachmentRetentionRequest: Equatable, Hashable {
         self.expectedSuccessStatus = expectedSuccessStatus
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5220,10 +5220,10 @@ public struct FfiConverterTypeNativeAttachmentRetentionRequest: FfiConverterRust
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionRequest {
         return
             try NativeAttachmentRetentionRequest(
-                method: FfiConverterString.read(from: &buf), 
-                relativePath: FfiConverterString.read(from: &buf), 
-                jsonBody: FfiConverterOptionString.read(from: &buf), 
-                protocolHeader: FfiConverterOptionTypeNativeAttachmentRetentionProtocolHeader.read(from: &buf), 
+                method: FfiConverterString.read(from: &buf),
+                relativePath: FfiConverterString.read(from: &buf),
+                jsonBody: FfiConverterOptionString.read(from: &buf),
+                protocolHeader: FfiConverterOptionTypeNativeAttachmentRetentionProtocolHeader.read(from: &buf),
                 expectedSuccessStatus: FfiConverterUInt16.read(from: &buf)
         )
     }
@@ -5264,9 +5264,9 @@ public struct NativeAttachmentRetentionState: Equatable, Hashable {
         self.localAvailable = localAvailable
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5280,7 +5280,7 @@ public struct FfiConverterTypeNativeAttachmentRetentionState: FfiConverterRustBu
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionState {
         return
             try NativeAttachmentRetentionState(
-                remote: FfiConverterTypeNativeRemoteAttachmentState.read(from: &buf), 
+                remote: FfiConverterTypeNativeRemoteAttachmentState.read(from: &buf),
                 localAvailable: FfiConverterBool.read(from: &buf)
         )
     }
@@ -5336,9 +5336,9 @@ public struct NativeAttachmentStorageStatus: Equatable, Hashable {
         self.cleanupUnavailableReason = cleanupUnavailableReason
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5352,13 +5352,13 @@ public struct FfiConverterTypeNativeAttachmentStorageStatus: FfiConverterRustBuf
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentStorageStatus {
         return
             try NativeAttachmentStorageStatus(
-                usedBytes: FfiConverterInt64.read(from: &buf), 
-                limitBytes: FfiConverterInt64.read(from: &buf), 
-                baseBytes: FfiConverterInt64.read(from: &buf), 
-                packBytes: FfiConverterInt64.read(from: &buf), 
-                protectedBytes: FfiConverterInt64.read(from: &buf), 
-                removedBytes: FfiConverterInt64.read(from: &buf), 
-                cleanupState: FfiConverterTypeNativeStorageCleanupState.read(from: &buf), 
+                usedBytes: FfiConverterInt64.read(from: &buf),
+                limitBytes: FfiConverterInt64.read(from: &buf),
+                baseBytes: FfiConverterInt64.read(from: &buf),
+                packBytes: FfiConverterInt64.read(from: &buf),
+                protectedBytes: FfiConverterInt64.read(from: &buf),
+                removedBytes: FfiConverterInt64.read(from: &buf),
+                cleanupState: FfiConverterTypeNativeStorageCleanupState.read(from: &buf),
                 cleanupUnavailableReason: FfiConverterOptionTypeNativeStorageCleanupUnavailableReason.read(from: &buf)
         )
     }
@@ -5402,9 +5402,9 @@ public struct NativeAttachmentUploadRetention: Equatable, Hashable {
         self.referenceTracking = referenceTracking
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5418,7 +5418,7 @@ public struct FfiConverterTypeNativeAttachmentUploadRetention: FfiConverterRustB
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUploadRetention {
         return
             try NativeAttachmentUploadRetention(
-                retentionClass: FfiConverterTypeNativeAttachmentRetentionClass.read(from: &buf), 
+                retentionClass: FfiConverterTypeNativeAttachmentRetentionClass.read(from: &buf),
                 referenceTracking: FfiConverterBool.read(from: &buf)
         )
     }
@@ -5462,9 +5462,9 @@ public struct NativeAttachmentUseResponse: Equatable, Hashable {
         self.state = state
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5478,10 +5478,10 @@ public struct FfiConverterTypeNativeAttachmentUseResponse: FfiConverterRustBuffe
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUseResponse {
         return
             try NativeAttachmentUseResponse(
-                useId: FfiConverterString.read(from: &buf), 
-                attachmentId: FfiConverterString.read(from: &buf), 
-                deviceId: FfiConverterString.read(from: &buf), 
-                kind: FfiConverterTypeNativeAttachmentUseKind.read(from: &buf), 
+                useId: FfiConverterString.read(from: &buf),
+                attachmentId: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
+                kind: FfiConverterTypeNativeAttachmentUseKind.read(from: &buf),
                 state: FfiConverterTypeNativeAttachmentUseState.read(from: &buf)
         )
     }
@@ -5524,9 +5524,9 @@ public struct NativeCaptured: Equatable, Hashable {
         self.duplicate = duplicate
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5540,8 +5540,8 @@ public struct FfiConverterTypeNativeCaptured: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeCaptured {
         return
             try NativeCaptured(
-                messageId: FfiConverterString.read(from: &buf), 
-                conversationId: FfiConverterString.read(from: &buf), 
+                messageId: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
                 duplicate: FfiConverterBool.read(from: &buf)
         )
     }
@@ -5582,9 +5582,9 @@ public struct NativeCarrierCommand: Equatable, Hashable {
         self.message = message
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5598,8 +5598,8 @@ public struct FfiConverterTypeNativeCarrierCommand: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeCarrierCommand {
         return
             try NativeCarrierCommand(
-                commandId: FfiConverterString.read(from: &buf), 
-                subscriptionId: FfiConverterString.read(from: &buf), 
+                commandId: FfiConverterString.read(from: &buf),
+                subscriptionId: FfiConverterString.read(from: &buf),
                 message: FfiConverterTypeNativeMessage.read(from: &buf)
         )
     }
@@ -5642,9 +5642,9 @@ public struct NativeCipherObject: Equatable, Hashable {
         self.remoteObjectId = remoteObjectId
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5658,9 +5658,9 @@ public struct FfiConverterTypeNativeCipherObject: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeCipherObject {
         return
             try NativeCipherObject(
-                attachmentId: FfiConverterString.read(from: &buf), 
-                ciphertextBytes: FfiConverterUInt64.read(from: &buf), 
-                ciphertextSha256: FfiConverterString.read(from: &buf), 
+                attachmentId: FfiConverterString.read(from: &buf),
+                ciphertextBytes: FfiConverterUInt64.read(from: &buf),
+                ciphertextSha256: FfiConverterString.read(from: &buf),
                 remoteObjectId: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -5703,7 +5703,7 @@ public struct NativeComposeDraft: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(draftId: String, conversationId: String, text: String, recipients: [String], attachmentIds: [String], 
+    public init(draftId: String, conversationId: String, text: String, recipients: [String], attachmentIds: [String],
         /**
          * Opaque `GatewayRoute` JSON owned by Rust's protocol crate.
          */routeJson: String?, revision: UInt64) {
@@ -5716,9 +5716,9 @@ public struct NativeComposeDraft: Equatable, Hashable {
         self.revision = revision
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5732,12 +5732,12 @@ public struct FfiConverterTypeNativeComposeDraft: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeComposeDraft {
         return
             try NativeComposeDraft(
-                draftId: FfiConverterString.read(from: &buf), 
-                conversationId: FfiConverterString.read(from: &buf), 
-                text: FfiConverterString.read(from: &buf), 
-                recipients: FfiConverterSequenceString.read(from: &buf), 
-                attachmentIds: FfiConverterSequenceString.read(from: &buf), 
-                routeJson: FfiConverterOptionString.read(from: &buf), 
+                draftId: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                text: FfiConverterString.read(from: &buf),
+                recipients: FfiConverterSequenceString.read(from: &buf),
+                attachmentIds: FfiConverterSequenceString.read(from: &buf),
+                routeJson: FfiConverterOptionString.read(from: &buf),
                 revision: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -5784,9 +5784,9 @@ public struct NativeComposeDraftUpdate: Equatable, Hashable {
         self.routeJson = routeJson
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5800,9 +5800,9 @@ public struct FfiConverterTypeNativeComposeDraftUpdate: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeComposeDraftUpdate {
         return
             try NativeComposeDraftUpdate(
-                text: FfiConverterString.read(from: &buf), 
-                recipients: FfiConverterSequenceString.read(from: &buf), 
-                attachmentIds: FfiConverterSequenceString.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf),
+                recipients: FfiConverterSequenceString.read(from: &buf),
+                attachmentIds: FfiConverterSequenceString.read(from: &buf),
                 routeJson: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -5835,18 +5835,22 @@ public struct NativeConversation: Equatable, Hashable {
     public var conversationId: String
     public var unreadCount: UInt64
     public var pinned: Bool
+    public var rcsEncryption: Bool?
+    public var rcsHistoryGap: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(conversationId: String, unreadCount: UInt64, pinned: Bool) {
+    public init(conversationId: String, unreadCount: UInt64, pinned: Bool, rcsEncryption: Bool?, rcsHistoryGap: Bool) {
         self.conversationId = conversationId
         self.unreadCount = unreadCount
         self.pinned = pinned
+        self.rcsEncryption = rcsEncryption
+        self.rcsHistoryGap = rcsHistoryGap
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5860,9 +5864,11 @@ public struct FfiConverterTypeNativeConversation: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeConversation {
         return
             try NativeConversation(
-                conversationId: FfiConverterString.read(from: &buf), 
-                unreadCount: FfiConverterUInt64.read(from: &buf), 
-                pinned: FfiConverterBool.read(from: &buf)
+                conversationId: FfiConverterString.read(from: &buf),
+                unreadCount: FfiConverterUInt64.read(from: &buf),
+                pinned: FfiConverterBool.read(from: &buf),
+                rcsEncryption: FfiConverterOptionBool.read(from: &buf),
+                rcsHistoryGap: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5870,6 +5876,8 @@ public struct FfiConverterTypeNativeConversation: FfiConverterRustBuffer {
         FfiConverterString.write(value.conversationId, into: &buf)
         FfiConverterUInt64.write(value.unreadCount, into: &buf)
         FfiConverterBool.write(value.pinned, into: &buf)
+        FfiConverterOptionBool.write(value.rcsEncryption, into: &buf)
+        FfiConverterBool.write(value.rcsHistoryGap, into: &buf)
     }
 }
 
@@ -5908,9 +5916,9 @@ public struct NativeEnrollmentIdentityMetadata: Equatable, Hashable {
         self.headerJson = headerJson
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5924,11 +5932,11 @@ public struct FfiConverterTypeNativeEnrollmentIdentityMetadata: FfiConverterRust
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEnrollmentIdentityMetadata {
         return
             try NativeEnrollmentIdentityMetadata(
-                origin: FfiConverterString.read(from: &buf), 
-                vaultId: FfiConverterString.read(from: &buf), 
-                deviceId: FfiConverterString.read(from: &buf), 
-                role: FfiConverterString.read(from: &buf), 
-                profileJson: FfiConverterString.read(from: &buf), 
+                origin: FfiConverterString.read(from: &buf),
+                vaultId: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
+                role: FfiConverterString.read(from: &buf),
+                profileJson: FfiConverterString.read(from: &buf),
                 headerJson: FfiConverterString.read(from: &buf)
         )
     }
@@ -5976,9 +5984,9 @@ public struct NativeGatewayCapabilities: Equatable, Hashable {
         self.phoneReadSupported = phoneReadSupported
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -5992,10 +6000,10 @@ public struct FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGatewayCapabilities {
         return
             try NativeGatewayCapabilities(
-                notificationMirroringSupported: FfiConverterBool.read(from: &buf), 
-                smsSyncSupported: FfiConverterBool.read(from: &buf), 
-                mmsSyncSupported: FfiConverterBool.read(from: &buf), 
-                rcsSupported: FfiConverterBool.read(from: &buf), 
+                notificationMirroringSupported: FfiConverterBool.read(from: &buf),
+                smsSyncSupported: FfiConverterBool.read(from: &buf),
+                mmsSyncSupported: FfiConverterBool.read(from: &buf),
+                rcsSupported: FfiConverterBool.read(from: &buf),
                 phoneReadSupported: FfiConverterBool.read(from: &buf)
         )
     }
@@ -6042,9 +6050,9 @@ public struct NativeGatewayHostFacts: Equatable, Hashable {
         self.phoneReadAvailable = phoneReadAvailable
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6058,10 +6066,10 @@ public struct FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGatewayHostFacts {
         return
             try NativeGatewayHostFacts(
-                wifiConnected: FfiConverterBool.read(from: &buf), 
-                notificationListenerAvailable: FfiConverterBool.read(from: &buf), 
-                smsAvailable: FfiConverterBool.read(from: &buf), 
-                notificationIsSilent: FfiConverterBool.read(from: &buf), 
+                wifiConnected: FfiConverterBool.read(from: &buf),
+                notificationListenerAvailable: FfiConverterBool.read(from: &buf),
+                smsAvailable: FfiConverterBool.read(from: &buf),
+                notificationIsSilent: FfiConverterBool.read(from: &buf),
                 phoneReadAvailable: FfiConverterBool.read(from: &buf)
         )
     }
@@ -6107,9 +6115,9 @@ public struct NativeGatewayMmsCleanup: Equatable, Hashable {
         self.pendingUnlink = pendingUnlink
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6123,8 +6131,8 @@ public struct FfiConverterTypeNativeGatewayMmsCleanup: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGatewayMmsCleanup {
         return
             try NativeGatewayMmsCleanup(
-                marked: FfiConverterUInt32.read(from: &buf), 
-                unlinked: FfiConverterUInt32.read(from: &buf), 
+                marked: FfiConverterUInt32.read(from: &buf),
+                unlinked: FfiConverterUInt32.read(from: &buf),
                 pendingUnlink: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -6173,9 +6181,9 @@ public struct NativeGatewayPolicyDecision: Equatable, Hashable {
         self.ingestPhoneRead = ingestPhoneRead
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6189,12 +6197,12 @@ public struct FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGatewayPolicyDecision {
         return
             try NativeGatewayPolicyDecision(
-                captureNotification: FfiConverterBool.read(from: &buf), 
-                captureSms: FfiConverterBool.read(from: &buf), 
-                captureMms: FfiConverterBool.read(from: &buf), 
-                transferMedia: FfiConverterBool.read(from: &buf), 
-                rcsSupported: FfiConverterBool.read(from: &buf), 
-                applyPhoneRead: FfiConverterBool.read(from: &buf), 
+                captureNotification: FfiConverterBool.read(from: &buf),
+                captureSms: FfiConverterBool.read(from: &buf),
+                captureMms: FfiConverterBool.read(from: &buf),
+                transferMedia: FfiConverterBool.read(from: &buf),
+                rcsSupported: FfiConverterBool.read(from: &buf),
+                applyPhoneRead: FfiConverterBool.read(from: &buf),
                 ingestPhoneRead: FfiConverterBool.read(from: &buf)
         )
     }
@@ -6251,9 +6259,9 @@ public struct NativeGatewaySettings: Equatable, Hashable {
         self.phoneReadEnabled = phoneReadEnabled
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6267,12 +6275,12 @@ public struct FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGatewaySettings {
         return
             try NativeGatewaySettings(
-                mirroringEnabled: FfiConverterBool.read(from: &buf), 
-                mirroringWifiOnly: FfiConverterBool.read(from: &buf), 
-                skipSilent: FfiConverterBool.read(from: &buf), 
-                smsSyncEnabled: FfiConverterBool.read(from: &buf), 
-                mmsSyncEnabled: FfiConverterBool.read(from: &buf), 
-                mediaWifiOnly: FfiConverterBool.read(from: &buf), 
+                mirroringEnabled: FfiConverterBool.read(from: &buf),
+                mirroringWifiOnly: FfiConverterBool.read(from: &buf),
+                skipSilent: FfiConverterBool.read(from: &buf),
+                smsSyncEnabled: FfiConverterBool.read(from: &buf),
+                mmsSyncEnabled: FfiConverterBool.read(from: &buf),
+                mediaWifiOnly: FfiConverterBool.read(from: &buf),
                 phoneReadEnabled: FfiConverterBool.read(from: &buf)
         )
     }
@@ -6318,9 +6326,9 @@ public struct NativeHistoryImportConditions: Equatable, Hashable {
         self.charging = charging
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6334,7 +6342,7 @@ public struct FfiConverterTypeNativeHistoryImportConditions: FfiConverterRustBuf
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHistoryImportConditions {
         return
             try NativeHistoryImportConditions(
-                unmeteredNetwork: FfiConverterBool.read(from: &buf), 
+                unmeteredNetwork: FfiConverterBool.read(from: &buf),
                 charging: FfiConverterBool.read(from: &buf)
         )
     }
@@ -6380,9 +6388,9 @@ public struct NativeHostedAccount: Equatable, Hashable {
         self.operationId = operationId
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6396,11 +6404,11 @@ public struct FfiConverterTypeNativeHostedAccount: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHostedAccount {
         return
             try NativeHostedAccount(
-                accountId: FfiConverterString.read(from: &buf), 
-                classification: FfiConverterString.read(from: &buf), 
-                entitlement: FfiConverterString.read(from: &buf), 
-                access: FfiConverterString.read(from: &buf), 
-                vaultId: FfiConverterOptionString.read(from: &buf), 
+                accountId: FfiConverterString.read(from: &buf),
+                classification: FfiConverterString.read(from: &buf),
+                entitlement: FfiConverterString.read(from: &buf),
+                access: FfiConverterString.read(from: &buf),
+                vaultId: FfiConverterOptionString.read(from: &buf),
                 operationId: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -6448,9 +6456,9 @@ public struct NativeHostedProvisioningView: Equatable, Hashable {
         self.deviceId = deviceId
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6464,10 +6472,10 @@ public struct FfiConverterTypeNativeHostedProvisioningView: FfiConverterRustBuff
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHostedProvisioningView {
         return
             try NativeHostedProvisioningView(
-                origin: FfiConverterString.read(from: &buf), 
-                accountId: FfiConverterString.read(from: &buf), 
-                operationId: FfiConverterString.read(from: &buf), 
-                vaultId: FfiConverterString.read(from: &buf), 
+                origin: FfiConverterString.read(from: &buf),
+                accountId: FfiConverterString.read(from: &buf),
+                operationId: FfiConverterString.read(from: &buf),
+                vaultId: FfiConverterString.read(from: &buf),
                 deviceId: FfiConverterString.read(from: &buf)
         )
     }
@@ -6514,9 +6522,9 @@ public struct NativeIncomingSms: Equatable, Hashable {
         self.imported = imported
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6530,10 +6538,10 @@ public struct FfiConverterTypeNativeIncomingSms: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeIncomingSms {
         return
             try NativeIncomingSms(
-                conversationId: FfiConverterOptionString.read(from: &buf), 
-                senderAddress: FfiConverterString.read(from: &buf), 
-                body: FfiConverterString.read(from: &buf), 
-                providerMessageId: FfiConverterOptionString.read(from: &buf), 
+                conversationId: FfiConverterOptionString.read(from: &buf),
+                senderAddress: FfiConverterString.read(from: &buf),
+                body: FfiConverterString.read(from: &buf),
+                providerMessageId: FfiConverterOptionString.read(from: &buf),
                 imported: FfiConverterBool.read(from: &buf)
         )
     }
@@ -6574,9 +6582,9 @@ public struct NativeIngestResult: Equatable, Hashable {
         self.quarantineReason = quarantineReason
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6590,7 +6598,7 @@ public struct FfiConverterTypeNativeIngestResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeIngestResult {
         return
             try NativeIngestResult(
-                state: FfiConverterTypeNativeIngestState.read(from: &buf), 
+                state: FfiConverterTypeNativeIngestState.read(from: &buf),
                 quarantineReason: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -6628,9 +6636,9 @@ public struct NativeLiveClock: Equatable, Hashable {
         self.monoMs = monoMs
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6644,7 +6652,7 @@ public struct FfiConverterTypeNativeLiveClock: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveClock {
         return
             try NativeLiveClock(
-                wallMs: FfiConverterInt64.read(from: &buf), 
+                wallMs: FfiConverterInt64.read(from: &buf),
                 monoMs: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -6684,9 +6692,9 @@ public struct NativeLiveEnableContext: Equatable, Hashable {
         self.localExecutor = localExecutor
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6700,8 +6708,8 @@ public struct FfiConverterTypeNativeLiveEnableContext: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveEnableContext {
         return
             try NativeLiveEnableContext(
-                trustedRoster: FfiConverterSequenceString.read(from: &buf), 
-                localGatewayDeviceId: FfiConverterString.read(from: &buf), 
+                trustedRoster: FfiConverterSequenceString.read(from: &buf),
+                localGatewayDeviceId: FfiConverterString.read(from: &buf),
                 localExecutor: FfiConverterTypeNativeLiveExecutor.read(from: &buf)
         )
     }
@@ -6740,9 +6748,9 @@ public struct NativeLiveOutbound: Equatable, Hashable {
         self.frameJson = frameJson
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6756,7 +6764,7 @@ public struct FfiConverterTypeNativeLiveOutbound: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveOutbound {
         return
             try NativeLiveOutbound(
-                generation: FfiConverterUInt64.read(from: &buf), 
+                generation: FfiConverterUInt64.read(from: &buf),
                 frameJson: FfiConverterString.read(from: &buf)
         )
     }
@@ -6798,9 +6806,9 @@ public struct NativeLiveOutcome: Equatable, Hashable {
         self.replyFrameJson = replyFrameJson
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6814,9 +6822,9 @@ public struct FfiConverterTypeNativeLiveOutcome: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveOutcome {
         return
             try NativeLiveOutcome(
-                generation: FfiConverterUInt64.read(from: &buf), 
-                sessionUpdate: FfiConverterOptionTypeNativeLiveSessionUpdate.read(from: &buf), 
-                action: FfiConverterOptionTypeNativeLiveAction.read(from: &buf), 
+                generation: FfiConverterUInt64.read(from: &buf),
+                sessionUpdate: FfiConverterOptionTypeNativeLiveSessionUpdate.read(from: &buf),
+                action: FfiConverterOptionTypeNativeLiveAction.read(from: &buf),
                 replyFrameJson: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -6860,9 +6868,9 @@ public struct NativeLiveSessionUpdate: Equatable, Hashable {
         self.validationRevision = validationRevision
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6876,9 +6884,9 @@ public struct FfiConverterTypeNativeLiveSessionUpdate: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveSessionUpdate {
         return
             try NativeLiveSessionUpdate(
-                peerDeviceId: FfiConverterString.read(from: &buf), 
-                replacedSessionToken: FfiConverterOptionUInt64.read(from: &buf), 
-                currentSessionToken: FfiConverterUInt64.read(from: &buf), 
+                peerDeviceId: FfiConverterString.read(from: &buf),
+                replacedSessionToken: FfiConverterOptionUInt64.read(from: &buf),
+                currentSessionToken: FfiConverterUInt64.read(from: &buf),
                 validationRevision: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -6924,10 +6932,12 @@ public struct NativeMessage: Equatable, Hashable {
     public var seen: Bool
     public var sendState: String?
     public var sentAtMs: Int64?
+    public var rcsStatus: String?
+    public var rcsReported: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(messageId: String, conversationId: String, senderAddress: String?, recipients: [String], body: String, subject: String?, transport: String, attachmentIds: [String], incoming: Bool, seen: Bool, sendState: String?, sentAtMs: Int64?) {
+    public init(messageId: String, conversationId: String, senderAddress: String?, recipients: [String], body: String, subject: String?, transport: String, attachmentIds: [String], incoming: Bool, seen: Bool, sendState: String?, sentAtMs: Int64?, rcsStatus: String?, rcsReported: Bool) {
         self.messageId = messageId
         self.conversationId = conversationId
         self.senderAddress = senderAddress
@@ -6940,11 +6950,13 @@ public struct NativeMessage: Equatable, Hashable {
         self.seen = seen
         self.sendState = sendState
         self.sentAtMs = sentAtMs
+        self.rcsStatus = rcsStatus
+        self.rcsReported = rcsReported
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -6958,18 +6970,20 @@ public struct FfiConverterTypeNativeMessage: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMessage {
         return
             try NativeMessage(
-                messageId: FfiConverterString.read(from: &buf), 
-                conversationId: FfiConverterString.read(from: &buf), 
-                senderAddress: FfiConverterOptionString.read(from: &buf), 
-                recipients: FfiConverterSequenceString.read(from: &buf), 
-                body: FfiConverterString.read(from: &buf), 
-                subject: FfiConverterOptionString.read(from: &buf), 
-                transport: FfiConverterString.read(from: &buf), 
-                attachmentIds: FfiConverterSequenceString.read(from: &buf), 
-                incoming: FfiConverterBool.read(from: &buf), 
-                seen: FfiConverterBool.read(from: &buf), 
-                sendState: FfiConverterOptionString.read(from: &buf), 
-                sentAtMs: FfiConverterOptionInt64.read(from: &buf)
+                messageId: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                senderAddress: FfiConverterOptionString.read(from: &buf),
+                recipients: FfiConverterSequenceString.read(from: &buf),
+                body: FfiConverterString.read(from: &buf),
+                subject: FfiConverterOptionString.read(from: &buf),
+                transport: FfiConverterString.read(from: &buf),
+                attachmentIds: FfiConverterSequenceString.read(from: &buf),
+                incoming: FfiConverterBool.read(from: &buf),
+                seen: FfiConverterBool.read(from: &buf),
+                sendState: FfiConverterOptionString.read(from: &buf),
+                sentAtMs: FfiConverterOptionInt64.read(from: &buf),
+                rcsStatus: FfiConverterOptionString.read(from: &buf),
+                rcsReported: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -6986,6 +7000,8 @@ public struct FfiConverterTypeNativeMessage: FfiConverterRustBuffer {
         FfiConverterBool.write(value.seen, into: &buf)
         FfiConverterOptionString.write(value.sendState, into: &buf)
         FfiConverterOptionInt64.write(value.sentAtMs, into: &buf)
+        FfiConverterOptionString.write(value.rcsStatus, into: &buf)
+        FfiConverterBool.write(value.rcsReported, into: &buf)
     }
 }
 
@@ -7028,9 +7044,9 @@ public struct NativeMessageHistorySourceFacts: Equatable, Hashable {
         self.forceRepublish = forceRepublish
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7044,11 +7060,11 @@ public struct FfiConverterTypeNativeMessageHistorySourceFacts: FfiConverterRustB
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMessageHistorySourceFacts {
         return
             try NativeMessageHistorySourceFacts(
-                providerGeneration: FfiConverterString.read(from: &buf), 
-                sms: FfiConverterBool.read(from: &buf), 
-                mms: FfiConverterBool.read(from: &buf), 
-                permission: FfiConverterBool.read(from: &buf), 
-                policy: FfiConverterBool.read(from: &buf), 
+                providerGeneration: FfiConverterString.read(from: &buf),
+                sms: FfiConverterBool.read(from: &buf),
+                mms: FfiConverterBool.read(from: &buf),
+                permission: FfiConverterBool.read(from: &buf),
+                policy: FfiConverterBool.read(from: &buf),
                 forceRepublish: FfiConverterBool.read(from: &buf)
         )
     }
@@ -7106,9 +7122,9 @@ public struct NativeMirroredNotification: Equatable, Hashable {
         self.dismissalPending = dismissalPending
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7122,15 +7138,15 @@ public struct FfiConverterTypeNativeMirroredNotification: FfiConverterRustBuffer
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMirroredNotification {
         return
             try NativeMirroredNotification(
-                target: FfiConverterTypeNativeNotificationTarget.read(from: &buf), 
-                packageName: FfiConverterString.read(from: &buf), 
-                appName: FfiConverterString.read(from: &buf), 
-                title: FfiConverterString.read(from: &buf), 
-                text: FfiConverterString.read(from: &buf), 
-                category: FfiConverterOptionString.read(from: &buf), 
-                postedAt: FfiConverterInt64.read(from: &buf), 
-                dismissible: FfiConverterBool.read(from: &buf), 
-                seen: FfiConverterBool.read(from: &buf), 
+                target: FfiConverterTypeNativeNotificationTarget.read(from: &buf),
+                packageName: FfiConverterString.read(from: &buf),
+                appName: FfiConverterString.read(from: &buf),
+                title: FfiConverterString.read(from: &buf),
+                text: FfiConverterString.read(from: &buf),
+                category: FfiConverterOptionString.read(from: &buf),
+                postedAt: FfiConverterInt64.read(from: &buf),
+                dismissible: FfiConverterBool.read(from: &buf),
+                seen: FfiConverterBool.read(from: &buf),
                 dismissalPending: FfiConverterBool.read(from: &buf)
         )
     }
@@ -7184,9 +7200,9 @@ public struct NativeMmsAcquisition: Equatable, Hashable {
         self.attachmentIds = attachmentIds
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7200,11 +7216,11 @@ public struct FfiConverterTypeNativeMmsAcquisition: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsAcquisition {
         return
             try NativeMmsAcquisition(
-                acquisitionId: FfiConverterString.read(from: &buf), 
-                conversationId: FfiConverterString.read(from: &buf), 
-                input: FfiConverterTypeNativeMmsAcquisitionInput.read(from: &buf), 
-                state: FfiConverterTypeNativeMmsAcquisitionState.read(from: &buf), 
-                reason: FfiConverterOptionString.read(from: &buf), 
+                acquisitionId: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                input: FfiConverterTypeNativeMmsAcquisitionInput.read(from: &buf),
+                state: FfiConverterTypeNativeMmsAcquisitionState.read(from: &buf),
+                reason: FfiConverterOptionString.read(from: &buf),
                 attachmentIds: FfiConverterSequenceString.read(from: &buf)
         )
     }
@@ -7260,9 +7276,9 @@ public struct NativeMmsAcquisitionInput: Equatable, Hashable {
         self.transactionId = transactionId
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7276,14 +7292,14 @@ public struct FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsAcquisitionInput {
         return
             try NativeMmsAcquisitionInput(
-                source: FfiConverterTypeNativeMmsSource.read(from: &buf), 
-                incoming: FfiConverterBool.read(from: &buf), 
-                senderAddress: FfiConverterOptionString.read(from: &buf), 
-                recipients: FfiConverterSequenceString.read(from: &buf), 
-                subject: FfiConverterOptionString.read(from: &buf), 
-                body: FfiConverterString.read(from: &buf), 
-                imported: FfiConverterBool.read(from: &buf), 
-                observedAtMs: FfiConverterInt64.read(from: &buf), 
+                source: FfiConverterTypeNativeMmsSource.read(from: &buf),
+                incoming: FfiConverterBool.read(from: &buf),
+                senderAddress: FfiConverterOptionString.read(from: &buf),
+                recipients: FfiConverterSequenceString.read(from: &buf),
+                subject: FfiConverterOptionString.read(from: &buf),
+                body: FfiConverterString.read(from: &buf),
+                imported: FfiConverterBool.read(from: &buf),
+                observedAtMs: FfiConverterInt64.read(from: &buf),
                 transactionId: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -7340,9 +7356,9 @@ public struct NativeMmsAcquisitionPart: Equatable, Hashable {
         self.metadataRecorded = metadataRecorded
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7356,13 +7372,13 @@ public struct FfiConverterTypeNativeMmsAcquisitionPart: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsAcquisitionPart {
         return
             try NativeMmsAcquisitionPart(
-                providerPartId: FfiConverterString.read(from: &buf), 
-                attachmentId: FfiConverterString.read(from: &buf), 
-                width: FfiConverterOptionUInt32.read(from: &buf), 
-                height: FfiConverterOptionUInt32.read(from: &buf), 
-                durationMs: FfiConverterOptionUInt64.read(from: &buf), 
-                thumbnailAttachmentId: FfiConverterOptionString.read(from: &buf), 
-                previewState: FfiConverterTypeNativeMmsPreviewState.read(from: &buf), 
+                providerPartId: FfiConverterString.read(from: &buf),
+                attachmentId: FfiConverterString.read(from: &buf),
+                width: FfiConverterOptionUInt32.read(from: &buf),
+                height: FfiConverterOptionUInt32.read(from: &buf),
+                durationMs: FfiConverterOptionUInt64.read(from: &buf),
+                thumbnailAttachmentId: FfiConverterOptionString.read(from: &buf),
+                previewState: FfiConverterTypeNativeMmsPreviewState.read(from: &buf),
                 metadataRecorded: FfiConverterBool.read(from: &buf)
         )
     }
@@ -7410,9 +7426,9 @@ public struct NativeMmsBackfillRecheck: Equatable, Hashable {
         self.continuationDue = continuationDue
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7426,9 +7442,9 @@ public struct FfiConverterTypeNativeMmsBackfillRecheck: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillRecheck {
         return
             try NativeMmsBackfillRecheck(
-                requests: FfiConverterSequenceTypeNativeMmsBackfillRecheckRequest.read(from: &buf), 
-                cursor: FfiConverterOptionString.read(from: &buf), 
-                budget: FfiConverterUInt64.read(from: &buf), 
+                requests: FfiConverterSequenceTypeNativeMmsBackfillRecheckRequest.read(from: &buf),
+                cursor: FfiConverterOptionString.read(from: &buf),
+                budget: FfiConverterUInt64.read(from: &buf),
                 continuationDue: FfiConverterBool.read(from: &buf)
         )
     }
@@ -7472,9 +7488,9 @@ public struct NativeMmsBackfillRecheckConditions: Equatable, Hashable {
         self.providerChanged = providerChanged
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7488,9 +7504,9 @@ public struct FfiConverterTypeNativeMmsBackfillRecheckConditions: FfiConverterRu
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillRecheckConditions {
         return
             try NativeMmsBackfillRecheckConditions(
-                charging: FfiConverterBool.read(from: &buf), 
-                capacityChanged: FfiConverterBool.read(from: &buf), 
-                explicitRefresh: FfiConverterBool.read(from: &buf), 
+                charging: FfiConverterBool.read(from: &buf),
+                capacityChanged: FfiConverterBool.read(from: &buf),
+                explicitRefresh: FfiConverterBool.read(from: &buf),
                 providerChanged: FfiConverterBool.read(from: &buf)
         )
     }
@@ -7534,9 +7550,9 @@ public struct NativeMmsBackfillRecheckRequest: Equatable, Hashable {
         self.state = state
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7550,9 +7566,9 @@ public struct FfiConverterTypeNativeMmsBackfillRecheckRequest: FfiConverterRustB
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillRecheckRequest {
         return
             try NativeMmsBackfillRecheckRequest(
-                acquisitionId: FfiConverterString.read(from: &buf), 
-                providerMessageId: FfiConverterString.read(from: &buf), 
-                direction: FfiConverterTypeNativeMmsBackfillDirection.read(from: &buf), 
+                acquisitionId: FfiConverterString.read(from: &buf),
+                providerMessageId: FfiConverterString.read(from: &buf),
+                direction: FfiConverterTypeNativeMmsBackfillDirection.read(from: &buf),
                 state: FfiConverterTypeNativeMmsAcquisitionState.read(from: &buf)
         )
     }
@@ -7612,9 +7628,9 @@ public struct NativeMmsBackfillScanPlan: Equatable, Hashable {
         self.budget = budget
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7628,17 +7644,17 @@ public struct FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillScanPlan {
         return
             try NativeMmsBackfillScanPlan(
-                phase: FfiConverterTypeNativeMmsBackfillPhase.read(from: &buf), 
-                sourceGeneration: FfiConverterString.read(from: &buf), 
-                subscriptionId: FfiConverterString.read(from: &buf), 
-                cursor: FfiConverterOptionString.read(from: &buf), 
-                providerRescanToken: FfiConverterOptionString.read(from: &buf), 
-                descending: FfiConverterBool.read(from: &buf), 
-                historyFloor: FfiConverterOptionString.read(from: &buf), 
-                historyUpperBound: FfiConverterOptionString.read(from: &buf), 
-                historyComplete: FfiConverterBool.read(from: &buf), 
-                paused: FfiConverterBool.read(from: &buf), 
-                pause: FfiConverterOptionTypeNativeMmsBackfillPause.read(from: &buf), 
+                phase: FfiConverterTypeNativeMmsBackfillPhase.read(from: &buf),
+                sourceGeneration: FfiConverterString.read(from: &buf),
+                subscriptionId: FfiConverterString.read(from: &buf),
+                cursor: FfiConverterOptionString.read(from: &buf),
+                providerRescanToken: FfiConverterOptionString.read(from: &buf),
+                descending: FfiConverterBool.read(from: &buf),
+                historyFloor: FfiConverterOptionString.read(from: &buf),
+                historyUpperBound: FfiConverterOptionString.read(from: &buf),
+                historyComplete: FfiConverterBool.read(from: &buf),
+                paused: FfiConverterBool.read(from: &buf),
+                pause: FfiConverterOptionTypeNativeMmsBackfillPause.read(from: &buf),
                 budget: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -7696,9 +7712,9 @@ public struct NativeMmsBackfillStatus: Equatable, Hashable {
         self.recheckCursor = recheckCursor
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7712,12 +7728,12 @@ public struct FfiConverterTypeNativeMmsBackfillStatus: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillStatus {
         return
             try NativeMmsBackfillStatus(
-                baselineInitialized: FfiConverterBool.read(from: &buf), 
-                historyUpperBound: FfiConverterOptionString.read(from: &buf), 
-                historyComplete: FfiConverterBool.read(from: &buf), 
-                pause: FfiConverterOptionTypeNativeMmsBackfillPause.read(from: &buf), 
-                pendingCount: FfiConverterUInt64.read(from: &buf), 
-                quarantinedCount: FfiConverterUInt64.read(from: &buf), 
+                baselineInitialized: FfiConverterBool.read(from: &buf),
+                historyUpperBound: FfiConverterOptionString.read(from: &buf),
+                historyComplete: FfiConverterBool.read(from: &buf),
+                pause: FfiConverterOptionTypeNativeMmsBackfillPause.read(from: &buf),
+                pendingCount: FfiConverterUInt64.read(from: &buf),
+                quarantinedCount: FfiConverterUInt64.read(from: &buf),
                 recheckCursor: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -7762,9 +7778,9 @@ public struct NativeMmsLegacyBackfillState: Equatable, Hashable {
         self.recheckCursor = recheckCursor
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7778,8 +7794,8 @@ public struct FfiConverterTypeNativeMmsLegacyBackfillState: FfiConverterRustBuff
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsLegacyBackfillState {
         return
             try NativeMmsLegacyBackfillState(
-                historyBaseline: FfiConverterOptionString.read(from: &buf), 
-                importHistory: FfiConverterOptionBool.read(from: &buf), 
+                historyBaseline: FfiConverterOptionString.read(from: &buf),
+                importHistory: FfiConverterOptionBool.read(from: &buf),
                 recheckCursor: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -7820,9 +7836,9 @@ public struct NativeMmsProviderIdentityQuarantine: Equatable, Hashable {
         self.reason = reason
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7836,8 +7852,8 @@ public struct FfiConverterTypeNativeMmsProviderIdentityQuarantine: FfiConverterR
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsProviderIdentityQuarantine {
         return
             try NativeMmsProviderIdentityQuarantine(
-                source: FfiConverterTypeNativeMmsSource.read(from: &buf), 
-                incoming: FfiConverterBool.read(from: &buf), 
+                source: FfiConverterTypeNativeMmsSource.read(from: &buf),
+                incoming: FfiConverterBool.read(from: &buf),
                 reason: FfiConverterString.read(from: &buf)
         )
     }
@@ -7875,7 +7891,7 @@ public struct NativeMmsReplyContext: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recipients: [String], 
+    public init(recipients: [String],
         /**
          * Deprecated; always None.
          */blockedReason: String?, subject: String?) {
@@ -7884,9 +7900,9 @@ public struct NativeMmsReplyContext: Equatable, Hashable {
         self.subject = subject
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7900,8 +7916,8 @@ public struct FfiConverterTypeNativeMmsReplyContext: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsReplyContext {
         return
             try NativeMmsReplyContext(
-                recipients: FfiConverterSequenceString.read(from: &buf), 
-                blockedReason: FfiConverterOptionString.read(from: &buf), 
+                recipients: FfiConverterSequenceString.read(from: &buf),
+                blockedReason: FfiConverterOptionString.read(from: &buf),
                 subject: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -7944,9 +7960,9 @@ public struct NativeMmsSource: Equatable, Hashable {
         self.providerThreadId = providerThreadId
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -7960,9 +7976,9 @@ public struct FfiConverterTypeNativeMmsSource: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsSource {
         return
             try NativeMmsSource(
-                sourceGeneration: FfiConverterString.read(from: &buf), 
-                subscriptionId: FfiConverterString.read(from: &buf), 
-                providerMessageId: FfiConverterString.read(from: &buf), 
+                sourceGeneration: FfiConverterString.read(from: &buf),
+                subscriptionId: FfiConverterString.read(from: &buf),
+                providerMessageId: FfiConverterString.read(from: &buf),
                 providerThreadId: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -8018,9 +8034,9 @@ public struct NativeNotificationCapture: Equatable, Hashable {
         self.appIconPngBase64 = appIconPngBase64
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8034,15 +8050,15 @@ public struct FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeNotificationCapture {
         return
             try NativeNotificationCapture(
-                notificationKey: FfiConverterString.read(from: &buf), 
-                instance: FfiConverterString.read(from: &buf), 
-                packageName: FfiConverterString.read(from: &buf), 
-                appName: FfiConverterString.read(from: &buf), 
-                title: FfiConverterString.read(from: &buf), 
-                text: FfiConverterString.read(from: &buf), 
-                category: FfiConverterOptionString.read(from: &buf), 
-                postedAt: FfiConverterInt64.read(from: &buf), 
-                dismissible: FfiConverterBool.read(from: &buf), 
+                notificationKey: FfiConverterString.read(from: &buf),
+                instance: FfiConverterString.read(from: &buf),
+                packageName: FfiConverterString.read(from: &buf),
+                appName: FfiConverterString.read(from: &buf),
+                title: FfiConverterString.read(from: &buf),
+                text: FfiConverterString.read(from: &buf),
+                category: FfiConverterOptionString.read(from: &buf),
+                postedAt: FfiConverterInt64.read(from: &buf),
+                dismissible: FfiConverterBool.read(from: &buf),
                 appIconPngBase64: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -8090,9 +8106,9 @@ public struct NativeNotificationDismissal: Equatable, Hashable {
         self.instance = instance
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8106,8 +8122,8 @@ public struct FfiConverterTypeNativeNotificationDismissal: FfiConverterRustBuffe
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeNotificationDismissal {
         return
             try NativeNotificationDismissal(
-                id: FfiConverterString.read(from: &buf), 
-                target: FfiConverterTypeNativeNotificationTarget.read(from: &buf), 
+                id: FfiConverterString.read(from: &buf),
+                target: FfiConverterTypeNativeNotificationTarget.read(from: &buf),
                 instance: FfiConverterString.read(from: &buf)
         )
     }
@@ -8146,9 +8162,9 @@ public struct NativeNotificationSnapshot: Equatable, Hashable {
         self.appFilters = appFilters
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8162,7 +8178,7 @@ public struct FfiConverterTypeNativeNotificationSnapshot: FfiConverterRustBuffer
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeNotificationSnapshot {
         return
             try NativeNotificationSnapshot(
-                notifications: FfiConverterSequenceTypeNativeMirroredNotification.read(from: &buf), 
+                notifications: FfiConverterSequenceTypeNativeMirroredNotification.read(from: &buf),
                 appFilters: FfiConverterSequenceTypeNativeAppFilter.read(from: &buf)
         )
     }
@@ -8202,9 +8218,9 @@ public struct NativeNotificationTarget: Equatable, Hashable {
         self.lifetime = lifetime
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8218,8 +8234,8 @@ public struct FfiConverterTypeNativeNotificationTarget: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeNotificationTarget {
         return
             try NativeNotificationTarget(
-                sourceDeviceId: FfiConverterString.read(from: &buf), 
-                notificationKey: FfiConverterString.read(from: &buf), 
+                sourceDeviceId: FfiConverterString.read(from: &buf),
+                notificationKey: FfiConverterString.read(from: &buf),
                 lifetime: FfiConverterString.read(from: &buf)
         )
     }
@@ -8258,7 +8274,7 @@ public struct NativeOpenConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(databasePath: String, vaultId: String, deviceId: String, 
+    public init(databasePath: String, vaultId: String, deviceId: String,
         /**
          * Exactly 32 random bytes supplied by native secure storage.
          */databaseKey: Data) {
@@ -8268,9 +8284,9 @@ public struct NativeOpenConfig: Equatable, Hashable {
         self.databaseKey = databaseKey
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8284,9 +8300,9 @@ public struct FfiConverterTypeNativeOpenConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeOpenConfig {
         return
             try NativeOpenConfig(
-                databasePath: FfiConverterString.read(from: &buf), 
-                vaultId: FfiConverterString.read(from: &buf), 
-                deviceId: FfiConverterString.read(from: &buf), 
+                databasePath: FfiConverterString.read(from: &buf),
+                vaultId: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
                 databaseKey: FfiConverterData.read(from: &buf)
         )
     }
@@ -8335,10 +8351,10 @@ public struct NativeOwnerComputerCreateRequest: Equatable, Hashable {
     public init(
         /**
          * Canonical hosted API origin validated against the scanned QR.
-         */origin: String, invitationId: String, 
+         */origin: String, invitationId: String,
         /**
          * Digest of the exact scanned QR payload. Return it with asynchronous responses.
-         */promptDigest: String, 
+         */promptDigest: String,
         /**
          * The canonical hosted API create request body; native hosts add their owner session.
          */requestJson: String) {
@@ -8348,9 +8364,9 @@ public struct NativeOwnerComputerCreateRequest: Equatable, Hashable {
         self.requestJson = requestJson
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8364,9 +8380,9 @@ public struct FfiConverterTypeNativeOwnerComputerCreateRequest: FfiConverterRust
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeOwnerComputerCreateRequest {
         return
             try NativeOwnerComputerCreateRequest(
-                origin: FfiConverterString.read(from: &buf), 
-                invitationId: FfiConverterString.read(from: &buf), 
-                promptDigest: FfiConverterString.read(from: &buf), 
+                origin: FfiConverterString.read(from: &buf),
+                invitationId: FfiConverterString.read(from: &buf),
+                promptDigest: FfiConverterString.read(from: &buf),
                 requestJson: FfiConverterString.read(from: &buf)
         )
     }
@@ -8407,7 +8423,7 @@ public struct NativeOwnerComputerView: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(origin: String, invitationId: String, promptDigest: String, created: Bool, 
+    public init(origin: String, invitationId: String, promptDigest: String, created: Bool,
         /**
          * Locally derived after the server nonce has been pinned.
          */sas: String?) {
@@ -8418,9 +8434,9 @@ public struct NativeOwnerComputerView: Equatable, Hashable {
         self.sas = sas
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8434,10 +8450,10 @@ public struct FfiConverterTypeNativeOwnerComputerView: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeOwnerComputerView {
         return
             try NativeOwnerComputerView(
-                origin: FfiConverterString.read(from: &buf), 
-                invitationId: FfiConverterString.read(from: &buf), 
-                promptDigest: FfiConverterString.read(from: &buf), 
-                created: FfiConverterBool.read(from: &buf), 
+                origin: FfiConverterString.read(from: &buf),
+                invitationId: FfiConverterString.read(from: &buf),
+                promptDigest: FfiConverterString.read(from: &buf),
+                created: FfiConverterBool.read(from: &buf),
                 sas: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -8482,10 +8498,10 @@ public struct NativeOwnerPhoneStatus: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(invitationId: String, stage: NativeOwnerPhoneStage, expiresInSeconds: UInt32, 
+    public init(invitationId: String, stage: NativeOwnerPhoneStage, expiresInSeconds: UInt32,
         /**
          * Locally derived six-digit SAS; present only while verification is required.
-         */sas: String?, 
+         */sas: String?,
         /**
          * SHA-256 base64url-no-pad digest of the validated transcript and typed claim.
          */claimDigest: String?) {
@@ -8496,9 +8512,9 @@ public struct NativeOwnerPhoneStatus: Equatable, Hashable {
         self.claimDigest = claimDigest
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8512,10 +8528,10 @@ public struct FfiConverterTypeNativeOwnerPhoneStatus: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeOwnerPhoneStatus {
         return
             try NativeOwnerPhoneStatus(
-                invitationId: FfiConverterString.read(from: &buf), 
-                stage: FfiConverterTypeNativeOwnerPhoneStage.read(from: &buf), 
-                expiresInSeconds: FfiConverterUInt32.read(from: &buf), 
-                sas: FfiConverterOptionString.read(from: &buf), 
+                invitationId: FfiConverterString.read(from: &buf),
+                stage: FfiConverterTypeNativeOwnerPhoneStage.read(from: &buf),
+                expiresInSeconds: FfiConverterUInt32.read(from: &buf),
+                sas: FfiConverterOptionString.read(from: &buf),
                 claimDigest: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -8562,9 +8578,9 @@ public struct NativePendingAttachmentRetentionOperation: Equatable, Hashable {
         self.kind = kind
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8578,10 +8594,10 @@ public struct FfiConverterTypeNativePendingAttachmentRetentionOperation: FfiConv
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePendingAttachmentRetentionOperation {
         return
             try NativePendingAttachmentRetentionOperation(
-                operation: FfiConverterTypeNativeAttachmentUseOperationKind.read(from: &buf), 
-                useId: FfiConverterString.read(from: &buf), 
-                attachmentId: FfiConverterString.read(from: &buf), 
-                deviceId: FfiConverterString.read(from: &buf), 
+                operation: FfiConverterTypeNativeAttachmentUseOperationKind.read(from: &buf),
+                useId: FfiConverterString.read(from: &buf),
+                attachmentId: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
                 kind: FfiConverterTypeNativeAttachmentUseKind.read(from: &buf)
         )
     }
@@ -8624,9 +8640,9 @@ public struct NativePendingVaultRequest: Equatable, Hashable {
         self.displayName = displayName
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8640,8 +8656,8 @@ public struct FfiConverterTypeNativePendingVaultRequest: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePendingVaultRequest {
         return
             try NativePendingVaultRequest(
-                origin: FfiConverterString.read(from: &buf), 
-                requestId: FfiConverterString.read(from: &buf), 
+                origin: FfiConverterString.read(from: &buf),
+                requestId: FfiConverterString.read(from: &buf),
                 displayName: FfiConverterString.read(from: &buf)
         )
     }
@@ -8679,7 +8695,7 @@ public struct NativePermit: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(state: NativePermitState, 
+    public init(state: NativePermitState,
         /**
          * Present only when state is Permit. Only that state authorizes a carrier effect.
          */command: NativeCarrierCommand?, existingSendState: String?) {
@@ -8688,9 +8704,9 @@ public struct NativePermit: Equatable, Hashable {
         self.existingSendState = existingSendState
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8704,8 +8720,8 @@ public struct FfiConverterTypeNativePermit: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePermit {
         return
             try NativePermit(
-                state: FfiConverterTypeNativePermitState.read(from: &buf), 
-                command: FfiConverterOptionTypeNativeCarrierCommand.read(from: &buf), 
+                state: FfiConverterTypeNativePermitState.read(from: &buf),
+                command: FfiConverterOptionTypeNativeCarrierCommand.read(from: &buf),
                 existingSendState: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -8750,9 +8766,9 @@ public struct NativePhoneReadCandidate: Equatable, Hashable {
         self.transactionId = transactionId
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8766,10 +8782,10 @@ public struct FfiConverterTypeNativePhoneReadCandidate: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePhoneReadCandidate {
         return
             try NativePhoneReadCandidate(
-                messageId: FfiConverterString.read(from: &buf), 
-                transport: FfiConverterTypeNativePhoneReadTransport.read(from: &buf), 
-                localOrder: FfiConverterInt64.read(from: &buf), 
-                row: FfiConverterTypeNativeProviderRowRef.read(from: &buf), 
+                messageId: FfiConverterString.read(from: &buf),
+                transport: FfiConverterTypeNativePhoneReadTransport.read(from: &buf),
+                localOrder: FfiConverterInt64.read(from: &buf),
+                row: FfiConverterTypeNativeProviderRowRef.read(from: &buf),
                 transactionId: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -8810,9 +8826,9 @@ public struct NativePhoneReadEffect: Equatable, Hashable {
         self.row = row
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8826,7 +8842,7 @@ public struct FfiConverterTypeNativePhoneReadEffect: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePhoneReadEffect {
         return
             try NativePhoneReadEffect(
-                messageId: FfiConverterString.read(from: &buf), 
+                messageId: FfiConverterString.read(from: &buf),
                 row: FfiConverterTypeNativeProviderRowRef.read(from: &buf)
         )
     }
@@ -8876,9 +8892,9 @@ public struct NativePlayBillingContext: Equatable, Hashable {
         self.currentProvider = currentProvider
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8892,11 +8908,11 @@ public struct FfiConverterTypeNativePlayBillingContext: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePlayBillingContext {
         return
             try NativePlayBillingContext(
-                accountId: FfiConverterString.read(from: &buf), 
-                available: FfiConverterBool.read(from: &buf), 
-                productId: FfiConverterOptionString.read(from: &buf), 
-                basePlanIds: FfiConverterSequenceString.read(from: &buf), 
-                accountBinding: FfiConverterOptionString.read(from: &buf), 
+                accountId: FfiConverterString.read(from: &buf),
+                available: FfiConverterBool.read(from: &buf),
+                productId: FfiConverterOptionString.read(from: &buf),
+                basePlanIds: FfiConverterSequenceString.read(from: &buf),
+                accountBinding: FfiConverterOptionString.read(from: &buf),
                 currentProvider: FfiConverterTypeNativeBillingProvider.read(from: &buf)
         )
     }
@@ -8946,9 +8962,9 @@ public struct NativeProviderRowRef: Equatable, Hashable {
         self.sourceRowFingerprint = sourceRowFingerprint
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -8962,11 +8978,11 @@ public struct FfiConverterTypeNativeProviderRowRef: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeProviderRowRef {
         return
             try NativeProviderRowRef(
-                sourceGeneration: FfiConverterString.read(from: &buf), 
-                subscriptionId: FfiConverterString.read(from: &buf), 
-                providerMessageId: FfiConverterString.read(from: &buf), 
-                providerThreadId: FfiConverterString.read(from: &buf), 
-                providerDateMs: FfiConverterInt64.read(from: &buf), 
+                sourceGeneration: FfiConverterString.read(from: &buf),
+                subscriptionId: FfiConverterString.read(from: &buf),
+                providerMessageId: FfiConverterString.read(from: &buf),
+                providerThreadId: FfiConverterString.read(from: &buf),
+                providerDateMs: FfiConverterInt64.read(from: &buf),
                 sourceRowFingerprint: FfiConverterString.read(from: &buf)
         )
     }
@@ -9010,9 +9026,9 @@ public struct NativePushConfig: Equatable, Hashable {
         self.apnsEnvironment = apnsEnvironment
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9026,8 +9042,8 @@ public struct FfiConverterTypeNativePushConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePushConfig {
         return
             try NativePushConfig(
-                available: FfiConverterBool.read(from: &buf), 
-                providers: FfiConverterSequenceString.read(from: &buf), 
+                available: FfiConverterBool.read(from: &buf),
+                providers: FfiConverterSequenceString.read(from: &buf),
                 apnsEnvironment: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -9068,9 +9084,9 @@ public struct NativeQueuedSend: Equatable, Hashable {
         self.envelopeId = envelopeId
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9084,8 +9100,8 @@ public struct FfiConverterTypeNativeQueuedSend: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeQueuedSend {
         return
             try NativeQueuedSend(
-                messageId: FfiConverterString.read(from: &buf), 
-                commandId: FfiConverterString.read(from: &buf), 
+                messageId: FfiConverterString.read(from: &buf),
+                commandId: FfiConverterString.read(from: &buf),
                 envelopeId: FfiConverterString.read(from: &buf)
         )
     }
@@ -9128,9 +9144,9 @@ public struct NativeRawSnapshotRecord: Equatable, Hashable {
         self.envelopeJson = envelopeJson
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9144,7 +9160,7 @@ public struct FfiConverterTypeNativeRawSnapshotRecord: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRawSnapshotRecord {
         return
             try NativeRawSnapshotRecord(
-                cursor: FfiConverterString.read(from: &buf), 
+                cursor: FfiConverterString.read(from: &buf),
                 envelopeJson: FfiConverterData.read(from: &buf)
         )
     }
@@ -9185,7 +9201,7 @@ public struct NativeRcsEligibilityProjection: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(conversationId: String, gatewayDeviceId: String, 
+    public init(conversationId: String, gatewayDeviceId: String,
         /**
          * Stale, future, unavailable, or unlinked evidence is represented as
          * `Unknown`; it is not send authority.
@@ -9198,9 +9214,9 @@ public struct NativeRcsEligibilityProjection: Equatable, Hashable {
         self.observedAtMs = observedAtMs
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9214,11 +9230,11 @@ public struct FfiConverterTypeNativeRcsEligibilityProjection: FfiConverterRustBu
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsEligibilityProjection {
         return
             try NativeRcsEligibilityProjection(
-                conversationId: FfiConverterString.read(from: &buf), 
-                gatewayDeviceId: FfiConverterString.read(from: &buf), 
-                eligibility: FfiConverterTypeNativeRcsEligibility.read(from: &buf), 
-                featureBits: FfiConverterUInt32.read(from: &buf), 
-                mappingRevision: FfiConverterUInt64.read(from: &buf), 
+                conversationId: FfiConverterString.read(from: &buf),
+                gatewayDeviceId: FfiConverterString.read(from: &buf),
+                eligibility: FfiConverterTypeNativeRcsEligibility.read(from: &buf),
+                featureBits: FfiConverterUInt32.read(from: &buf),
+                mappingRevision: FfiConverterUInt64.read(from: &buf),
                 observedAtMs: FfiConverterInt64.read(from: &buf)
         )
     }
@@ -9273,11 +9289,11 @@ public struct NativeRcsLinkStatus: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(state: NativeRcsLinkState, 
+    public init(state: NativeRcsLinkState,
         /**
          * Whether the content-free capability evidence is fresh. This is display
          * state only and never authorizes a transport effect.
-         */current: Bool, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, capabilityRevision: UInt64, featureBits: UInt32, 
+         */current: Bool, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, capabilityRevision: UInt64, featureBits: UInt32,
         /**
          * First instant (ms) at which core reports this evidence as not current;
          * `current` is true strictly before it. Native code must treat `now >=
@@ -9296,9 +9312,9 @@ public struct NativeRcsLinkStatus: Equatable, Hashable {
         self.expiresAtMs = expiresAtMs
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9312,14 +9328,14 @@ public struct FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsLinkStatus {
         return
             try NativeRcsLinkStatus(
-                state: FfiConverterTypeNativeRcsLinkState.read(from: &buf), 
-                current: FfiConverterBool.read(from: &buf), 
-                availability: FfiConverterBool.read(from: &buf), 
-                health: FfiConverterBool.read(from: &buf), 
-                phoneResponsive: FfiConverterBool.read(from: &buf), 
-                observedAtMs: FfiConverterInt64.read(from: &buf), 
-                capabilityRevision: FfiConverterUInt64.read(from: &buf), 
-                featureBits: FfiConverterUInt32.read(from: &buf), 
+                state: FfiConverterTypeNativeRcsLinkState.read(from: &buf),
+                current: FfiConverterBool.read(from: &buf),
+                availability: FfiConverterBool.read(from: &buf),
+                health: FfiConverterBool.read(from: &buf),
+                phoneResponsive: FfiConverterBool.read(from: &buf),
+                observedAtMs: FfiConverterInt64.read(from: &buf),
+                capabilityRevision: FfiConverterUInt64.read(from: &buf),
+                featureBits: FfiConverterUInt32.read(from: &buf),
                 expiresAtMs: FfiConverterOptionInt64.read(from: &buf)
         )
     }
@@ -9364,9 +9380,9 @@ public struct NativeSenderUnblockWork: Equatable, Hashable {
         self.numbers = numbers
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9380,7 +9396,7 @@ public struct FfiConverterTypeNativeSenderUnblockWork: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSenderUnblockWork {
         return
             try NativeSenderUnblockWork(
-                requestId: FfiConverterString.read(from: &buf), 
+                requestId: FfiConverterString.read(from: &buf),
                 numbers: FfiConverterSequenceString.read(from: &buf)
         )
     }
@@ -9424,9 +9440,9 @@ public struct NativeSmsAcquisition: Equatable, Hashable {
         self.reason = reason
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9440,10 +9456,10 @@ public struct FfiConverterTypeNativeSmsAcquisition: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsAcquisition {
         return
             try NativeSmsAcquisition(
-                acquisitionId: FfiConverterString.read(from: &buf), 
-                conversationId: FfiConverterString.read(from: &buf), 
-                input: FfiConverterTypeNativeSmsProviderAcquisitionInput.read(from: &buf), 
-                state: FfiConverterTypeNativeSmsAcquisitionState.read(from: &buf), 
+                acquisitionId: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                input: FfiConverterTypeNativeSmsProviderAcquisitionInput.read(from: &buf),
+                state: FfiConverterTypeNativeSmsAcquisitionState.read(from: &buf),
                 reason: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -9494,9 +9510,9 @@ public struct NativeSmsHistoryStatus: Equatable, Hashable {
         self.ambiguousCount = ambiguousCount
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9510,12 +9526,12 @@ public struct FfiConverterTypeNativeSmsHistoryStatus: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsHistoryStatus {
         return
             try NativeSmsHistoryStatus(
-                baselineInitialized: FfiConverterBool.read(from: &buf), 
-                scanning: FfiConverterBool.read(from: &buf), 
-                historyComplete: FfiConverterBool.read(from: &buf), 
-                paused: FfiConverterBool.read(from: &buf), 
-                providerError: FfiConverterBool.read(from: &buf), 
-                pendingCount: FfiConverterUInt64.read(from: &buf), 
+                baselineInitialized: FfiConverterBool.read(from: &buf),
+                scanning: FfiConverterBool.read(from: &buf),
+                historyComplete: FfiConverterBool.read(from: &buf),
+                paused: FfiConverterBool.read(from: &buf),
+                providerError: FfiConverterBool.read(from: &buf),
+                pendingCount: FfiConverterUInt64.read(from: &buf),
                 ambiguousCount: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -9574,9 +9590,9 @@ public struct NativeSmsProviderAcquisitionInput: Equatable, Hashable {
         self.sourceRowFingerprint = sourceRowFingerprint
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9590,15 +9606,15 @@ public struct FfiConverterTypeNativeSmsProviderAcquisitionInput: FfiConverterRus
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsProviderAcquisitionInput {
         return
             try NativeSmsProviderAcquisitionInput(
-                source: FfiConverterTypeNativeSmsSource.read(from: &buf), 
-                incoming: FfiConverterBool.read(from: &buf), 
-                senderAddress: FfiConverterOptionString.read(from: &buf), 
-                recipients: FfiConverterSequenceString.read(from: &buf), 
-                body: FfiConverterString.read(from: &buf), 
-                imported: FfiConverterBool.read(from: &buf), 
-                sentAtMs: FfiConverterOptionInt64.read(from: &buf), 
-                dateSentMs: FfiConverterOptionInt64.read(from: &buf), 
-                creator: FfiConverterOptionString.read(from: &buf), 
+                source: FfiConverterTypeNativeSmsSource.read(from: &buf),
+                incoming: FfiConverterBool.read(from: &buf),
+                senderAddress: FfiConverterOptionString.read(from: &buf),
+                recipients: FfiConverterSequenceString.read(from: &buf),
+                body: FfiConverterString.read(from: &buf),
+                imported: FfiConverterBool.read(from: &buf),
+                sentAtMs: FfiConverterOptionInt64.read(from: &buf),
+                dateSentMs: FfiConverterOptionInt64.read(from: &buf),
+                creator: FfiConverterOptionString.read(from: &buf),
                 sourceRowFingerprint: FfiConverterString.read(from: &buf)
         )
     }
@@ -9650,9 +9666,9 @@ public struct NativeSmsReconciliationPlan: Equatable, Hashable {
         self.historyUpperBound = historyUpperBound
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9666,10 +9682,10 @@ public struct FfiConverterTypeNativeSmsReconciliationPlan: FfiConverterRustBuffe
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsReconciliationPlan {
         return
             try NativeSmsReconciliationPlan(
-                sourceGeneration: FfiConverterString.read(from: &buf), 
-                subscriptionId: FfiConverterString.read(from: &buf), 
-                cursor: FfiConverterOptionString.read(from: &buf), 
-                upperBound: FfiConverterString.read(from: &buf), 
+                sourceGeneration: FfiConverterString.read(from: &buf),
+                subscriptionId: FfiConverterString.read(from: &buf),
+                cursor: FfiConverterOptionString.read(from: &buf),
+                upperBound: FfiConverterString.read(from: &buf),
                 historyUpperBound: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -9728,9 +9744,9 @@ public struct NativeSmsScanPlan: Equatable, Hashable {
         self.budget = budget
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9744,16 +9760,16 @@ public struct FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsScanPlan {
         return
             try NativeSmsScanPlan(
-                sourceGeneration: FfiConverterString.read(from: &buf), 
-                subscriptionId: FfiConverterString.read(from: &buf), 
-                imported: FfiConverterBool.read(from: &buf), 
-                checkpoint: FfiConverterOptionString.read(from: &buf), 
-                descending: FfiConverterBool.read(from: &buf), 
-                historyFloor: FfiConverterOptionString.read(from: &buf), 
-                historyUpperBound: FfiConverterOptionString.read(from: &buf), 
-                historyComplete: FfiConverterBool.read(from: &buf), 
-                paused: FfiConverterBool.read(from: &buf), 
-                pendingRecheckCursor: FfiConverterOptionString.read(from: &buf), 
+                sourceGeneration: FfiConverterString.read(from: &buf),
+                subscriptionId: FfiConverterString.read(from: &buf),
+                imported: FfiConverterBool.read(from: &buf),
+                checkpoint: FfiConverterOptionString.read(from: &buf),
+                descending: FfiConverterBool.read(from: &buf),
+                historyFloor: FfiConverterOptionString.read(from: &buf),
+                historyUpperBound: FfiConverterOptionString.read(from: &buf),
+                historyComplete: FfiConverterBool.read(from: &buf),
+                paused: FfiConverterBool.read(from: &buf),
+                pendingRecheckCursor: FfiConverterOptionString.read(from: &buf),
                 budget: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -9804,9 +9820,9 @@ public struct NativeSmsScanStatus: Equatable, Hashable {
         self.reason = reason
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9820,9 +9836,9 @@ public struct FfiConverterTypeNativeSmsScanStatus: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsScanStatus {
         return
             try NativeSmsScanStatus(
-                checkpoint: FfiConverterOptionString.read(from: &buf), 
-                historyComplete: FfiConverterBool.read(from: &buf), 
-                paused: FfiConverterBool.read(from: &buf), 
+                checkpoint: FfiConverterOptionString.read(from: &buf),
+                historyComplete: FfiConverterBool.read(from: &buf),
+                paused: FfiConverterBool.read(from: &buf),
                 reason: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -9868,9 +9884,9 @@ public struct NativeSmsSource: Equatable, Hashable {
         self.broadcastId = broadcastId
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9884,10 +9900,10 @@ public struct FfiConverterTypeNativeSmsSource: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsSource {
         return
             try NativeSmsSource(
-                sourceGeneration: FfiConverterString.read(from: &buf), 
-                subscriptionId: FfiConverterString.read(from: &buf), 
-                providerMessageId: FfiConverterString.read(from: &buf), 
-                providerThreadId: FfiConverterOptionString.read(from: &buf), 
+                sourceGeneration: FfiConverterString.read(from: &buf),
+                subscriptionId: FfiConverterString.read(from: &buf),
+                providerMessageId: FfiConverterString.read(from: &buf),
+                providerThreadId: FfiConverterOptionString.read(from: &buf),
                 broadcastId: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -9936,9 +9952,9 @@ public struct NativeSnapshotProgress: Equatable, Hashable {
         self.serverCompactionGeneration = serverCompactionGeneration
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -9952,11 +9968,11 @@ public struct FfiConverterTypeNativeSnapshotProgress: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSnapshotProgress {
         return
             try NativeSnapshotProgress(
-                generation: FfiConverterUInt64.read(from: &buf), 
-                highWater: FfiConverterString.read(from: &buf), 
-                expectedRecords: FfiConverterUInt64.read(from: &buf), 
-                receivedRecords: FfiConverterUInt64.read(from: &buf), 
-                lastCursor: FfiConverterString.read(from: &buf), 
+                generation: FfiConverterUInt64.read(from: &buf),
+                highWater: FfiConverterString.read(from: &buf),
+                expectedRecords: FfiConverterUInt64.read(from: &buf),
+                receivedRecords: FfiConverterUInt64.read(from: &buf),
+                lastCursor: FfiConverterString.read(from: &buf),
                 serverCompactionGeneration: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -10002,9 +10018,9 @@ public struct NativeSnapshotProjectionStatus: Equatable, Hashable {
         self.reason = reason
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -10018,9 +10034,9 @@ public struct FfiConverterTypeNativeSnapshotProjectionStatus: FfiConverterRustBu
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSnapshotProjectionStatus {
         return
             try NativeSnapshotProjectionStatus(
-                generation: FfiConverterUInt64.read(from: &buf), 
-                highWater: FfiConverterString.read(from: &buf), 
-                state: FfiConverterTypeNativeSnapshotProjectionState.read(from: &buf), 
+                generation: FfiConverterUInt64.read(from: &buf),
+                highWater: FfiConverterString.read(from: &buf),
+                state: FfiConverterTypeNativeSnapshotProjectionState.read(from: &buf),
                 reason: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -10064,9 +10080,9 @@ public struct NativeSnapshotReport: Equatable, Hashable {
         self.receiveCursor = receiveCursor
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -10080,9 +10096,9 @@ public struct FfiConverterTypeNativeSnapshotReport: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSnapshotReport {
         return
             try NativeSnapshotReport(
-                journaled: FfiConverterUInt64.read(from: &buf), 
-                duplicate: FfiConverterUInt64.read(from: &buf), 
-                quarantined: FfiConverterUInt64.read(from: &buf), 
+                journaled: FfiConverterUInt64.read(from: &buf),
+                duplicate: FfiConverterUInt64.read(from: &buf),
+                quarantined: FfiConverterUInt64.read(from: &buf),
                 receiveCursor: FfiConverterString.read(from: &buf)
         )
     }
@@ -10122,9 +10138,9 @@ public struct NativeVaultInvite: Equatable, Hashable {
         self.inviteToken = inviteToken
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -10138,7 +10154,7 @@ public struct FfiConverterTypeNativeVaultInvite: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeVaultInvite {
         return
             try NativeVaultInvite(
-                origin: FfiConverterString.read(from: &buf), 
+                origin: FfiConverterString.read(from: &buf),
                 inviteToken: FfiConverterString.read(from: &buf)
         )
     }
@@ -10176,9 +10192,9 @@ public struct NativeVaultMaterial: Equatable, Hashable {
         self.headerJson = headerJson
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -10192,7 +10208,7 @@ public struct FfiConverterTypeNativeVaultMaterial: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeVaultMaterial {
         return
             try NativeVaultMaterial(
-                profileJson: FfiConverterString.read(from: &buf), 
+                profileJson: FfiConverterString.read(from: &buf),
                 headerJson: FfiConverterString.read(from: &buf)
         )
     }
@@ -10230,9 +10246,9 @@ public struct SyncStepResult: Equatable, Hashable {
         self.effectsStarted = effectsStarted
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -10246,7 +10262,7 @@ public struct FfiConverterTypeSyncStepResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncStepResult {
         return
             try SyncStepResult(
-                state: FfiConverterTypeSyncStepState.read(from: &buf), 
+                state: FfiConverterTypeSyncStepState.read(from: &buf),
                 effectsStarted: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -10275,7 +10291,7 @@ public func FfiConverterTypeSyncStepResult_lower(_ value: SyncStepResult) -> Rus
 
 
 public enum CapabilityState: Equatable, Hashable {
-    
+
     case available
     case permissionRequired
     case approvalRequired
@@ -10301,44 +10317,44 @@ public struct FfiConverterTypeCapabilityState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CapabilityState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .available
-        
+
         case 2: return .permissionRequired
-        
+
         case 3: return .approvalRequired
-        
+
         case 4: return .regionRestricted
-        
+
         case 5: return .unsupported
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: CapabilityState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .available:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .permissionRequired:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .approvalRequired:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .regionRestricted:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .unsupported:
             writeInt(&buf, Int32(5))
-        
+
         }
     }
 }
@@ -10363,11 +10379,11 @@ public func FfiConverterTypeCapabilityState_lower(_ value: CapabilityState) -> R
 /**
  * Stable, non-secret error codes for generated hosts.
  */
-public 
+public
 enum MobileBindingsError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
-    
-    
+
+
     case Closed
     case InvalidRequest
     case InvalidDatabaseKey
@@ -10391,15 +10407,15 @@ enum MobileBindingsError: Swift.Error, Equatable, Hashable, Foundation.Localized
     case SmsCapacity
     case LockPoisoned
 
-    
 
-    
 
-    
+
+
+
     public var errorDescription: String? {
         String(reflecting: self)
     }
-    
+
 }
 
 #if compiler(>=6)
@@ -10416,9 +10432,9 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Closed
         case 2: return .InvalidRequest
         case 3: return .InvalidDatabaseKey
@@ -10449,97 +10465,97 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
     public static func write(_ value: MobileBindingsError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
-        
+
+
+
         case .Closed:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .InvalidRequest:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .InvalidDatabaseKey:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .WrongDatabaseKey:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .Database:
             writeInt(&buf, Int32(5))
-        
-        
+
+
         case .UnsupportedSchema:
             writeInt(&buf, Int32(6))
-        
-        
+
+
         case .IdentityMismatch:
             writeInt(&buf, Int32(7))
-        
-        
+
+
         case .WrongPassphrase:
             writeInt(&buf, Int32(8))
-        
-        
+
+
         case .InvalidProfile:
             writeInt(&buf, Int32(9))
-        
-        
+
+
         case .Crypto:
             writeInt(&buf, Int32(10))
-        
-        
+
+
         case .Conflict:
             writeInt(&buf, Int32(11))
-        
-        
+
+
         case .NotFound:
             writeInt(&buf, Int32(12))
-        
-        
+
+
         case .StaleDraft:
             writeInt(&buf, Int32(13))
-        
-        
+
+
         case .InvalidKeyCache:
             writeInt(&buf, Int32(14))
-        
-        
+
+
         case .KeysUnavailable:
             writeInt(&buf, Int32(15))
-        
-        
+
+
         case .InvalidMedia:
             writeInt(&buf, Int32(16))
-        
-        
+
+
         case .AttachmentRemovedByStoragePolicy:
             writeInt(&buf, Int32(17))
-        
-        
+
+
         case .Storage:
             writeInt(&buf, Int32(18))
-        
-        
+
+
         case .MmsAcquisitionLimit:
             writeInt(&buf, Int32(19))
-        
-        
+
+
         case .MmsMediaQuota:
             writeInt(&buf, Int32(20))
-        
-        
+
+
         case .SmsCapacity:
             writeInt(&buf, Int32(21))
-        
-        
+
+
         case .LockPoisoned:
             writeInt(&buf, Int32(22))
-        
+
         }
     }
 }
@@ -10562,7 +10578,7 @@ public func FfiConverterTypeMobileBindingsError_lower(_ value: MobileBindingsErr
 
 
 public enum NativeAccountAccessResult: Equatable, Hashable {
-    
+
     case notice(notice: NativeAccountNotice
     )
     case none
@@ -10588,40 +10604,40 @@ public struct FfiConverterTypeNativeAccountAccessResult: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAccountAccessResult {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .notice(notice: try FfiConverterTypeNativeAccountNotice.read(from: &buf)
         )
-        
+
         case 2: return .none
-        
+
         case 3: return .unsupported
-        
+
         case 4: return .temporarilyUnavailable
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeAccountAccessResult, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case let .notice(notice):
             writeInt(&buf, Int32(1))
             FfiConverterTypeNativeAccountNotice.write(notice, into: &buf)
-            
-        
+
+
         case .none:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .unsupported:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .temporarilyUnavailable:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -10645,7 +10661,7 @@ public func FfiConverterTypeNativeAccountAccessResult_lower(_ value: NativeAccou
 
 
 public enum NativeAccountNoticeKind: Equatable, Hashable {
-    
+
     case paymentFailedGrace
     case endingScheduled
     case readOnlyPastDue
@@ -10675,68 +10691,68 @@ public struct FfiConverterTypeNativeAccountNoticeKind: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAccountNoticeKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .paymentFailedGrace
-        
+
         case 2: return .endingScheduled
-        
+
         case 3: return .readOnlyPastDue
-        
+
         case 4: return .readOnlyCanceled
-        
+
         case 5: return .readOnlyIncomplete
-        
+
         case 6: return .readOnlyNoSubscription
-        
+
         case 7: return .readOnlyTesterIneligible
-        
+
         case 8: return .readOnlyAccountDeleting
-        
+
         case 9: return .readOnlyOther
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeAccountNoticeKind, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .paymentFailedGrace:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .endingScheduled:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .readOnlyPastDue:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .readOnlyCanceled:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .readOnlyIncomplete:
             writeInt(&buf, Int32(5))
-        
-        
+
+
         case .readOnlyNoSubscription:
             writeInt(&buf, Int32(6))
-        
-        
+
+
         case .readOnlyTesterIneligible:
             writeInt(&buf, Int32(7))
-        
-        
+
+
         case .readOnlyAccountDeleting:
             writeInt(&buf, Int32(8))
-        
-        
+
+
         case .readOnlyOther:
             writeInt(&buf, Int32(9))
-        
+
         }
     }
 }
@@ -10760,7 +10776,7 @@ public func FfiConverterTypeNativeAccountNoticeKind_lower(_ value: NativeAccount
 
 
 public enum NativeAttachmentRetentionClass: Equatable, Hashable {
-    
+
     case protected
     case messageMedia
 
@@ -10783,26 +10799,26 @@ public struct FfiConverterTypeNativeAttachmentRetentionClass: FfiConverterRustBu
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionClass {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .protected
-        
+
         case 2: return .messageMedia
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeAttachmentRetentionClass, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .protected:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .messageMedia:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -10826,7 +10842,7 @@ public func FfiConverterTypeNativeAttachmentRetentionClass_lower(_ value: Native
 
 
 public enum NativeAttachmentRetentionErrorClassification: Equatable, Hashable {
-    
+
     case removedByStoragePolicy
     case other
 
@@ -10849,26 +10865,26 @@ public struct FfiConverterTypeNativeAttachmentRetentionErrorClassification: FfiC
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentRetentionErrorClassification {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .removedByStoragePolicy
-        
+
         case 2: return .other
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeAttachmentRetentionErrorClassification, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .removedByStoragePolicy:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .other:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -10892,7 +10908,7 @@ public func FfiConverterTypeNativeAttachmentRetentionErrorClassification_lower(_
 
 
 public enum NativeAttachmentState: Equatable, Hashable {
-    
+
     case pendingUpload
     case uploaded
     case pendingDownload
@@ -10917,38 +10933,38 @@ public struct FfiConverterTypeNativeAttachmentState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .pendingUpload
-        
+
         case 2: return .uploaded
-        
+
         case 3: return .pendingDownload
-        
+
         case 4: return .available
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeAttachmentState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .pendingUpload:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .uploaded:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .pendingDownload:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .available:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -10972,7 +10988,7 @@ public func FfiConverterTypeNativeAttachmentState_lower(_ value: NativeAttachmen
 
 
 public enum NativeAttachmentUseKind: Equatable, Hashable {
-    
+
     case messageHistory
     case pendingSend
     case contactPhoto
@@ -10997,38 +11013,38 @@ public struct FfiConverterTypeNativeAttachmentUseKind: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUseKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .messageHistory
-        
+
         case 2: return .pendingSend
-        
+
         case 3: return .contactPhoto
-        
+
         case 4: return .restoreCritical
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeAttachmentUseKind, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .messageHistory:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .pendingSend:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .contactPhoto:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .restoreCritical:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -11052,7 +11068,7 @@ public func FfiConverterTypeNativeAttachmentUseKind_lower(_ value: NativeAttachm
 
 
 public enum NativeAttachmentUseOperationKind: Equatable, Hashable {
-    
+
     case register
     case release
 
@@ -11075,26 +11091,26 @@ public struct FfiConverterTypeNativeAttachmentUseOperationKind: FfiConverterRust
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUseOperationKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .register
-        
+
         case 2: return .release
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeAttachmentUseOperationKind, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .register:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .release:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -11118,7 +11134,7 @@ public func FfiConverterTypeNativeAttachmentUseOperationKind_lower(_ value: Nati
 
 
 public enum NativeAttachmentUseState: Equatable, Hashable {
-    
+
     case registered
     case released
 
@@ -11141,26 +11157,26 @@ public struct FfiConverterTypeNativeAttachmentUseState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeAttachmentUseState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .registered
-        
+
         case 2: return .released
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeAttachmentUseState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .registered:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .released:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -11188,7 +11204,7 @@ public func FfiConverterTypeNativeAttachmentUseState_lower(_ value: NativeAttach
  */
 
 public enum NativeBillingProvider: Equatable, Hashable {
-    
+
     case none
     case stripe
     case play
@@ -11213,38 +11229,38 @@ public struct FfiConverterTypeNativeBillingProvider: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeBillingProvider {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .none
-        
+
         case 2: return .stripe
-        
+
         case 3: return .play
-        
+
         case 4: return .unknown
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeBillingProvider, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .none:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .stripe:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .play:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .unknown:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -11268,7 +11284,7 @@ public func FfiConverterTypeNativeBillingProvider_lower(_ value: NativeBillingPr
 
 
 public enum NativeContactBookSelection: Equatable, Hashable {
-    
+
     case inherited(bookId: String, retireBookIds: [String]
     )
     case owned(bookId: String
@@ -11295,43 +11311,43 @@ public struct FfiConverterTypeNativeContactBookSelection: FfiConverterRustBuffer
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeContactBookSelection {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .inherited(bookId: try FfiConverterString.read(from: &buf), retireBookIds: try FfiConverterSequenceString.read(from: &buf)
         )
-        
+
         case 2: return .owned(bookId: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 3: return .wait
-        
+
         case 4: return .mint
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeContactBookSelection, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case let .inherited(bookId,retireBookIds):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(bookId, into: &buf)
             FfiConverterSequenceString.write(retireBookIds, into: &buf)
-            
-        
+
+
         case let .owned(bookId):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(bookId, into: &buf)
-            
-        
+
+
         case .wait:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .mint:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -11355,7 +11371,7 @@ public func FfiConverterTypeNativeContactBookSelection_lower(_ value: NativeCont
 
 
 public enum NativeDeviceRetentionAvailability: Equatable, Hashable {
-    
+
     case unsupported
     case temporarilyUnavailable
     case other
@@ -11379,32 +11395,32 @@ public struct FfiConverterTypeNativeDeviceRetentionAvailability: FfiConverterRus
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeDeviceRetentionAvailability {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .unsupported
-        
+
         case 2: return .temporarilyUnavailable
-        
+
         case 3: return .other
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeDeviceRetentionAvailability, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .unsupported:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .temporarilyUnavailable:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .other:
             writeInt(&buf, Int32(3))
-        
+
         }
     }
 }
@@ -11428,7 +11444,7 @@ public func FfiConverterTypeNativeDeviceRetentionAvailability_lower(_ value: Nat
 
 
 public enum NativeEnrollmentClientKind: Equatable, Hashable {
-    
+
     case browser
     case desktop
     case android
@@ -11453,38 +11469,38 @@ public struct FfiConverterTypeNativeEnrollmentClientKind: FfiConverterRustBuffer
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEnrollmentClientKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .browser
-        
+
         case 2: return .desktop
-        
+
         case 3: return .android
-        
+
         case 4: return .ios
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeEnrollmentClientKind, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .browser:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .desktop:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .android:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .ios:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -11508,7 +11524,7 @@ public func FfiConverterTypeNativeEnrollmentClientKind_lower(_ value: NativeEnro
 
 
 public enum NativeEnrollmentMethod: Equatable, Hashable {
-    
+
     case transfer
     case sharedSecret
 
@@ -11531,26 +11547,26 @@ public struct FfiConverterTypeNativeEnrollmentMethod: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEnrollmentMethod {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .transfer
-        
+
         case 2: return .sharedSecret
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeEnrollmentMethod, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .transfer:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .sharedSecret:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -11574,7 +11590,7 @@ public func FfiConverterTypeNativeEnrollmentMethod_lower(_ value: NativeEnrollme
 
 
 public enum NativeGatewayPlatform: Equatable, Hashable {
-    
+
     case android
     case ios
 
@@ -11597,26 +11613,26 @@ public struct FfiConverterTypeNativeGatewayPlatform: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGatewayPlatform {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .android
-        
+
         case 2: return .ios
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeGatewayPlatform, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .android:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .ios:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -11640,7 +11656,7 @@ public func FfiConverterTypeNativeGatewayPlatform_lower(_ value: NativeGatewayPl
 
 
 public enum NativeHostedClientKind: Equatable, Hashable {
-    
+
     case browser
     case desktop
     case android
@@ -11665,38 +11681,38 @@ public struct FfiConverterTypeNativeHostedClientKind: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHostedClientKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .browser
-        
+
         case 2: return .desktop
-        
+
         case 3: return .android
-        
+
         case 4: return .ios
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeHostedClientKind, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .browser:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .desktop:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .android:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .ios:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -11720,7 +11736,7 @@ public func FfiConverterTypeNativeHostedClientKind_lower(_ value: NativeHostedCl
 
 
 public enum NativeIngestState: Equatable, Hashable {
-    
+
     case journaled
     case duplicate
     case quarantined
@@ -11744,32 +11760,32 @@ public struct FfiConverterTypeNativeIngestState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeIngestState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .journaled
-        
+
         case 2: return .duplicate
-        
+
         case 3: return .quarantined
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeIngestState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .journaled:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .duplicate:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .quarantined:
             writeInt(&buf, Int32(3))
-        
+
         }
     }
 }
@@ -11793,7 +11809,7 @@ public func FfiConverterTypeNativeIngestState_lower(_ value: NativeIngestState) 
 
 
 public enum NativeLiveAction: Equatable, Hashable {
-    
+
     case display(peerDeviceId: String, sessionToken: UInt64, sequence: UInt64, conversationId: String, state: NativeTypingState, deadlineMono: UInt64
     )
     case gatewayTypingIntent(peerDeviceId: String, sessionToken: UInt64, sequence: UInt64, conversationId: String, state: NativeTypingState, deadlineMono: UInt64
@@ -11818,21 +11834,21 @@ public struct FfiConverterTypeNativeLiveAction: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveAction {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .display(peerDeviceId: try FfiConverterString.read(from: &buf), sessionToken: try FfiConverterUInt64.read(from: &buf), sequence: try FfiConverterUInt64.read(from: &buf), conversationId: try FfiConverterString.read(from: &buf), state: try FfiConverterTypeNativeTypingState.read(from: &buf), deadlineMono: try FfiConverterUInt64.read(from: &buf)
         )
-        
+
         case 2: return .gatewayTypingIntent(peerDeviceId: try FfiConverterString.read(from: &buf), sessionToken: try FfiConverterUInt64.read(from: &buf), sequence: try FfiConverterUInt64.read(from: &buf), conversationId: try FfiConverterString.read(from: &buf), state: try FfiConverterTypeNativeTypingState.read(from: &buf), deadlineMono: try FfiConverterUInt64.read(from: &buf)
         )
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeLiveAction, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case let .display(peerDeviceId,sessionToken,sequence,conversationId,state,deadlineMono):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(peerDeviceId, into: &buf)
@@ -11841,8 +11857,8 @@ public struct FfiConverterTypeNativeLiveAction: FfiConverterRustBuffer {
             FfiConverterString.write(conversationId, into: &buf)
             FfiConverterTypeNativeTypingState.write(state, into: &buf)
             FfiConverterUInt64.write(deadlineMono, into: &buf)
-            
-        
+
+
         case let .gatewayTypingIntent(peerDeviceId,sessionToken,sequence,conversationId,state,deadlineMono):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(peerDeviceId, into: &buf)
@@ -11851,7 +11867,7 @@ public struct FfiConverterTypeNativeLiveAction: FfiConverterRustBuffer {
             FfiConverterString.write(conversationId, into: &buf)
             FfiConverterTypeNativeTypingState.write(state, into: &buf)
             FfiConverterUInt64.write(deadlineMono, into: &buf)
-            
+
         }
     }
 }
@@ -11875,7 +11891,7 @@ public func FfiConverterTypeNativeLiveAction_lower(_ value: NativeLiveAction) ->
 
 
 public enum NativeLiveExecutor: Equatable, Hashable {
-    
+
     case none
     case currentGateway
 
@@ -11898,26 +11914,26 @@ public struct FfiConverterTypeNativeLiveExecutor: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveExecutor {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .none
-        
+
         case 2: return .currentGateway
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeLiveExecutor, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .none:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .currentGateway:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -11939,26 +11955,26 @@ public func FfiConverterTypeNativeLiveExecutor_lower(_ value: NativeLiveExecutor
 
 
 
-public 
+public
 enum NativeLiveTypingError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
-    
-    
+
+
     case Clock
     case Disabled
     case CounterExhausted
     case Crypto
     case InvalidContext
 
-    
 
-    
 
-    
+
+
+
     public var errorDescription: String? {
         String(reflecting: self)
     }
-    
+
 }
 
 #if compiler(>=6)
@@ -11975,9 +11991,9 @@ public struct FfiConverterTypeNativeLiveTypingError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Clock
         case 2: return .Disabled
         case 3: return .CounterExhausted
@@ -11991,29 +12007,29 @@ public struct FfiConverterTypeNativeLiveTypingError: FfiConverterRustBuffer {
     public static func write(_ value: NativeLiveTypingError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
-        
+
+
+
         case .Clock:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .Disabled:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .CounterExhausted:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .Crypto:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .InvalidContext:
             writeInt(&buf, Int32(5))
-        
+
         }
     }
 }
@@ -12036,7 +12052,7 @@ public func FfiConverterTypeNativeLiveTypingError_lower(_ value: NativeLiveTypin
 
 
 public enum NativeMmsAcquisitionState: Equatable, Hashable {
-    
+
     case pending
     case blocked
     case unavailable
@@ -12061,38 +12077,38 @@ public struct FfiConverterTypeNativeMmsAcquisitionState: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsAcquisitionState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .pending
-        
+
         case 2: return .blocked
-        
+
         case 3: return .unavailable
-        
+
         case 4: return .complete
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeMmsAcquisitionState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .pending:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .blocked:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .unavailable:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .complete:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -12116,7 +12132,7 @@ public func FfiConverterTypeNativeMmsAcquisitionState_lower(_ value: NativeMmsAc
 
 
 public enum NativeMmsBackfillDirection: Equatable, Hashable {
-    
+
     case incoming
     case outgoing
 
@@ -12139,26 +12155,26 @@ public struct FfiConverterTypeNativeMmsBackfillDirection: FfiConverterRustBuffer
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillDirection {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .incoming
-        
+
         case 2: return .outgoing
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeMmsBackfillDirection, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .incoming:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .outgoing:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -12182,7 +12198,7 @@ public func FfiConverterTypeNativeMmsBackfillDirection_lower(_ value: NativeMmsB
 
 
 public enum NativeMmsBackfillPause: Equatable, Hashable {
-    
+
     case absoluteRecoveryCapacity
     case recoveryCapacity
     case localCapacity
@@ -12207,38 +12223,38 @@ public struct FfiConverterTypeNativeMmsBackfillPause: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillPause {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .absoluteRecoveryCapacity
-        
+
         case 2: return .recoveryCapacity
-        
+
         case 3: return .localCapacity
-        
+
         case 4: return .remoteStorage
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeMmsBackfillPause, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .absoluteRecoveryCapacity:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .recoveryCapacity:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .localCapacity:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .remoteStorage:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -12262,7 +12278,7 @@ public func FfiConverterTypeNativeMmsBackfillPause_lower(_ value: NativeMmsBackf
 
 
 public enum NativeMmsBackfillPhase: Equatable, Hashable {
-    
+
     case live
     case providerRescan
     case history
@@ -12287,38 +12303,38 @@ public struct FfiConverterTypeNativeMmsBackfillPhase: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillPhase {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .live
-        
+
         case 2: return .providerRescan
-        
+
         case 3: return .history
-        
+
         case 4: return .recheck
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeMmsBackfillPhase, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .live:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .providerRescan:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .history:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .recheck:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -12342,7 +12358,7 @@ public func FfiConverterTypeNativeMmsBackfillPhase_lower(_ value: NativeMmsBackf
 
 
 public enum NativeMmsBackfillRecheckOutcome: Equatable, Hashable {
-    
+
     case verified
     case progress
     case unchangedUnavailable
@@ -12370,56 +12386,56 @@ public struct FfiConverterTypeNativeMmsBackfillRecheckOutcome: FfiConverterRustB
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillRecheckOutcome {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .verified
-        
+
         case 2: return .progress
-        
+
         case 3: return .unchangedUnavailable
-        
+
         case 4: return .unchangedPartUnavailable
-        
+
         case 5: return .transientFailure
-        
+
         case 6: return .providerChanged
-        
+
         case 7: return .awaitingProvider
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeMmsBackfillRecheckOutcome, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .verified:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .progress:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .unchangedUnavailable:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .unchangedPartUnavailable:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .transientFailure:
             writeInt(&buf, Int32(5))
-        
-        
+
+
         case .providerChanged:
             writeInt(&buf, Int32(6))
-        
-        
+
+
         case .awaitingProvider:
             writeInt(&buf, Int32(7))
-        
+
         }
     }
 }
@@ -12443,7 +12459,7 @@ public func FfiConverterTypeNativeMmsBackfillRecheckOutcome_lower(_ value: Nativ
 
 
 public enum NativeMmsBeginOutcome: Equatable, Hashable {
-    
+
     case acquired(acquisition: NativeMmsAcquisition
     )
     case quarantined(quarantine: NativeMmsProviderIdentityQuarantine
@@ -12468,30 +12484,30 @@ public struct FfiConverterTypeNativeMmsBeginOutcome: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBeginOutcome {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .acquired(acquisition: try FfiConverterTypeNativeMmsAcquisition.read(from: &buf)
         )
-        
+
         case 2: return .quarantined(quarantine: try FfiConverterTypeNativeMmsProviderIdentityQuarantine.read(from: &buf)
         )
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeMmsBeginOutcome, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case let .acquired(acquisition):
             writeInt(&buf, Int32(1))
             FfiConverterTypeNativeMmsAcquisition.write(acquisition, into: &buf)
-            
-        
+
+
         case let .quarantined(quarantine):
             writeInt(&buf, Int32(2))
             FfiConverterTypeNativeMmsProviderIdentityQuarantine.write(quarantine, into: &buf)
-            
+
         }
     }
 }
@@ -12515,7 +12531,7 @@ public func FfiConverterTypeNativeMmsBeginOutcome_lower(_ value: NativeMmsBeginO
 
 
 public enum NativeMmsPreviewState: Equatable, Hashable {
-    
+
     case pending
     case deferred
     case permanentlyUnavailable
@@ -12540,38 +12556,38 @@ public struct FfiConverterTypeNativeMmsPreviewState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsPreviewState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .pending
-        
+
         case 2: return .deferred
-        
+
         case 3: return .permanentlyUnavailable
-        
+
         case 4: return .ready
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeMmsPreviewState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .pending:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .deferred:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .permanentlyUnavailable:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .ready:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -12595,7 +12611,7 @@ public func FfiConverterTypeNativeMmsPreviewState_lower(_ value: NativeMmsPrevie
 
 
 public enum NativeNoticeSeverity: Equatable, Hashable {
-    
+
     case warning
     case error
 
@@ -12618,26 +12634,26 @@ public struct FfiConverterTypeNativeNoticeSeverity: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeNoticeSeverity {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .warning
-        
+
         case 2: return .error
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeNoticeSeverity, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .warning:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .error:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -12661,7 +12677,7 @@ public func FfiConverterTypeNativeNoticeSeverity_lower(_ value: NativeNoticeSeve
 
 
 public enum NativeNotificationCaptureOutcome: Equatable, Hashable {
-    
+
     case captured
     case duplicate
     case filteredOut
@@ -12686,38 +12702,38 @@ public struct FfiConverterTypeNativeNotificationCaptureOutcome: FfiConverterRust
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeNotificationCaptureOutcome {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .captured
-        
+
         case 2: return .duplicate
-        
+
         case 3: return .filteredOut
-        
+
         case 4: return .droppedLocked
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeNotificationCaptureOutcome, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .captured:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .duplicate:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .filteredOut:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .droppedLocked:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -12741,7 +12757,7 @@ public func FfiConverterTypeNativeNotificationCaptureOutcome_lower(_ value: Nati
 
 
 public enum NativeOwnerPhoneStage: Equatable, Hashable {
-    
+
     case waiting
     case verify
     case approved
@@ -12768,50 +12784,50 @@ public struct FfiConverterTypeNativeOwnerPhoneStage: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeOwnerPhoneStage {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .waiting
-        
+
         case 2: return .verify
-        
+
         case 3: return .approved
-        
+
         case 4: return .connected
-        
+
         case 5: return .expired
-        
+
         case 6: return .denied
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeOwnerPhoneStage, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .waiting:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .verify:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .approved:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .connected:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .expired:
             writeInt(&buf, Int32(5))
-        
-        
+
+
         case .denied:
             writeInt(&buf, Int32(6))
-        
+
         }
     }
 }
@@ -12835,7 +12851,7 @@ public func FfiConverterTypeNativeOwnerPhoneStage_lower(_ value: NativeOwnerPhon
 
 
 public enum NativePermitState: Equatable, Hashable {
-    
+
     case permit
     case alreadyAttempted
     case notReceived
@@ -12868,86 +12884,86 @@ public struct FfiConverterTypeNativePermitState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePermitState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .permit
-        
+
         case 2: return .alreadyAttempted
-        
+
         case 3: return .notReceived
-        
+
         case 4: return .staleEpoch
-        
+
         case 5: return .epochNotActive
-        
+
         case 6: return .mediaUnavailable
-        
+
         case 7: return .historical
-        
+
         case 8: return .restoreGuarded
-        
+
         case 9: return .routeUnavailable
-        
+
         case 10: return .unknownRoute
-        
+
         case 11: return .mappingUnproven
-        
+
         case 12: return .carrierOnlyProofUnavailable
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativePermitState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .permit:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .alreadyAttempted:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .notReceived:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .staleEpoch:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .epochNotActive:
             writeInt(&buf, Int32(5))
-        
-        
+
+
         case .mediaUnavailable:
             writeInt(&buf, Int32(6))
-        
-        
+
+
         case .historical:
             writeInt(&buf, Int32(7))
-        
-        
+
+
         case .restoreGuarded:
             writeInt(&buf, Int32(8))
-        
-        
+
+
         case .routeUnavailable:
             writeInt(&buf, Int32(9))
-        
-        
+
+
         case .unknownRoute:
             writeInt(&buf, Int32(10))
-        
-        
+
+
         case .mappingUnproven:
             writeInt(&buf, Int32(11))
-        
-        
+
+
         case .carrierOnlyProofUnavailable:
             writeInt(&buf, Int32(12))
-        
+
         }
     }
 }
@@ -12971,7 +12987,7 @@ public func FfiConverterTypeNativePermitState_lower(_ value: NativePermitState) 
 
 
 public enum NativePhoneReadTransport: Equatable, Hashable {
-    
+
     case sms
     case mms
 
@@ -12994,26 +13010,26 @@ public struct FfiConverterTypeNativePhoneReadTransport: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePhoneReadTransport {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .sms
-        
+
         case 2: return .mms
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativePhoneReadTransport, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .sms:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .mms:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -13040,7 +13056,7 @@ public func FfiConverterTypeNativePhoneReadTransport_lower(_ value: NativePhoneR
  */
 
 public enum NativePlayLinkOutcome: Equatable, Hashable {
-    
+
     case linked
     case pending
     case boundToOtherAccount
@@ -13066,44 +13082,44 @@ public struct FfiConverterTypeNativePlayLinkOutcome: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePlayLinkOutcome {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .linked
-        
+
         case 2: return .pending
-        
+
         case 3: return .boundToOtherAccount
-        
+
         case 4: return .notEntitling
-        
+
         case 5: return .unknown
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativePlayLinkOutcome, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .linked:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .pending:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .boundToOtherAccount:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .notEntitling:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .unknown:
             writeInt(&buf, Int32(5))
-        
+
         }
     }
 }
@@ -13127,7 +13143,7 @@ public func FfiConverterTypeNativePlayLinkOutcome_lower(_ value: NativePlayLinkO
 
 
 public enum NativeRcsEligibility: Equatable, Hashable {
-    
+
     case eligible
     case notEligible
     case unknown
@@ -13151,32 +13167,32 @@ public struct FfiConverterTypeNativeRcsEligibility: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsEligibility {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .eligible
-        
+
         case 2: return .notEligible
-        
+
         case 3: return .unknown
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeRcsEligibility, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .eligible:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .notEligible:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .unknown:
             writeInt(&buf, Int32(3))
-        
+
         }
     }
 }
@@ -13200,7 +13216,7 @@ public func FfiConverterTypeNativeRcsEligibility_lower(_ value: NativeRcsEligibi
 
 
 public enum NativeRcsLinkState: Equatable, Hashable {
-    
+
     case linked
     case unlinked
     case needsRelink
@@ -13226,44 +13242,44 @@ public struct FfiConverterTypeNativeRcsLinkState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsLinkState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .linked
-        
+
         case 2: return .unlinked
-        
+
         case 3: return .needsRelink
-        
+
         case 4: return .signedOut
-        
+
         case 5: return .unavailable
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeRcsLinkState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .linked:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .unlinked:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .needsRelink:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .signedOut:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .unavailable:
             writeInt(&buf, Int32(5))
-        
+
         }
     }
 }
@@ -13287,7 +13303,7 @@ public func FfiConverterTypeNativeRcsLinkState_lower(_ value: NativeRcsLinkState
 
 
 public enum NativeRemoteAttachmentState: Equatable, Hashable {
-    
+
     case available
     case removedByStoragePolicy
 
@@ -13310,26 +13326,26 @@ public struct FfiConverterTypeNativeRemoteAttachmentState: FfiConverterRustBuffe
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRemoteAttachmentState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .available
-        
+
         case 2: return .removedByStoragePolicy
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeRemoteAttachmentState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .available:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .removedByStoragePolicy:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -13353,7 +13369,7 @@ public func FfiConverterTypeNativeRemoteAttachmentState_lower(_ value: NativeRem
 
 
 public enum NativeSendResult: Equatable, Hashable {
-    
+
     case submitted
     case sent
     case delivered
@@ -13379,44 +13395,44 @@ public struct FfiConverterTypeNativeSendResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSendResult {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .submitted
-        
+
         case 2: return .sent
-        
+
         case 3: return .delivered
-        
+
         case 4: return .failedBeforeSubmission
-        
+
         case 5: return .failedConfirmed
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeSendResult, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .submitted:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .sent:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .delivered:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .failedBeforeSubmission:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .failedConfirmed:
             writeInt(&buf, Int32(5))
-        
+
         }
     }
 }
@@ -13440,7 +13456,7 @@ public func FfiConverterTypeNativeSendResult_lower(_ value: NativeSendResult) ->
 
 
 public enum NativeSenderUnblockOutcome: Equatable, Hashable {
-    
+
     case unblocked
     case notBlocked
     case notAllowed
@@ -13465,38 +13481,38 @@ public struct FfiConverterTypeNativeSenderUnblockOutcome: FfiConverterRustBuffer
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSenderUnblockOutcome {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .unblocked
-        
+
         case 2: return .notBlocked
-        
+
         case 3: return .notAllowed
-        
+
         case 4: return .failed
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeSenderUnblockOutcome, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .unblocked:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .notBlocked:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .notAllowed:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .failed:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -13520,7 +13536,7 @@ public func FfiConverterTypeNativeSenderUnblockOutcome_lower(_ value: NativeSend
 
 
 public enum NativeSmsAcquisitionState: Equatable, Hashable {
-    
+
     case pending
     case unavailable
     case complete
@@ -13545,38 +13561,38 @@ public struct FfiConverterTypeNativeSmsAcquisitionState: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsAcquisitionState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .pending
-        
+
         case 2: return .unavailable
-        
+
         case 3: return .complete
-        
+
         case 4: return .paused
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeSmsAcquisitionState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .pending:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .unavailable:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .complete:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .paused:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -13603,7 +13619,7 @@ public func FfiConverterTypeNativeSmsAcquisitionState_lower(_ value: NativeSmsAc
  */
 
 public enum NativeSnapshotProjectionState: Equatable, Hashable {
-    
+
     case draining
     case staging
     case promoted
@@ -13631,38 +13647,38 @@ public struct FfiConverterTypeNativeSnapshotProjectionState: FfiConverterRustBuf
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSnapshotProjectionState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .draining
-        
+
         case 2: return .staging
-        
+
         case 3: return .promoted
-        
+
         case 4: return .failed
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeSnapshotProjectionState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .draining:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .staging:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .promoted:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .failed:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -13686,7 +13702,7 @@ public func FfiConverterTypeNativeSnapshotProjectionState_lower(_ value: NativeS
 
 
 public enum NativeSnapshotPurpose: Equatable, Hashable {
-    
+
     case resync
     case restore
 
@@ -13709,26 +13725,26 @@ public struct FfiConverterTypeNativeSnapshotPurpose: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSnapshotPurpose {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .resync
-        
+
         case 2: return .restore
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeSnapshotPurpose, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .resync:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .restore:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -13752,7 +13768,7 @@ public func FfiConverterTypeNativeSnapshotPurpose_lower(_ value: NativeSnapshotP
 
 
 public enum NativeStorageCleanupState: Equatable, Hashable {
-    
+
     case disabled
     case blocked
     case pending
@@ -13777,38 +13793,38 @@ public struct FfiConverterTypeNativeStorageCleanupState: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeStorageCleanupState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .disabled
-        
+
         case 2: return .blocked
-        
+
         case 3: return .pending
-        
+
         case 4: return .available
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeStorageCleanupState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .disabled:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .blocked:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .pending:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .available:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -13832,7 +13848,7 @@ public func FfiConverterTypeNativeStorageCleanupState_lower(_ value: NativeStora
 
 
 public enum NativeStorageCleanupUnavailableReason: Equatable, Hashable {
-    
+
     case deviceNotReady
     case readOnly
     case entitlementUnavailable
@@ -13860,56 +13876,56 @@ public struct FfiConverterTypeNativeStorageCleanupUnavailableReason: FfiConverte
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeStorageCleanupUnavailableReason {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .deviceNotReady
-        
+
         case 2: return .readOnly
-        
+
         case 3: return .entitlementUnavailable
-        
+
         case 4: return .providerReconciliationPending
-        
+
         case 5: return .billingMutationPending
-        
+
         case 6: return .cleanupDisabled
-        
+
         case 7: return .unknown
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeStorageCleanupUnavailableReason, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .deviceNotReady:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .readOnly:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .entitlementUnavailable:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .providerReconciliationPending:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .billingMutationPending:
             writeInt(&buf, Int32(5))
-        
-        
+
+
         case .cleanupDisabled:
             writeInt(&buf, Int32(6))
-        
-        
+
+
         case .unknown:
             writeInt(&buf, Int32(7))
-        
+
         }
     }
 }
@@ -13933,7 +13949,7 @@ public func FfiConverterTypeNativeStorageCleanupUnavailableReason_lower(_ value:
 
 
 public enum NativeTypingOrigin: Equatable, Hashable {
-    
+
     case vaultDevice
     case googleContact
 
@@ -13956,26 +13972,26 @@ public struct FfiConverterTypeNativeTypingOrigin: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeTypingOrigin {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .vaultDevice
-        
+
         case 2: return .googleContact
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeTypingOrigin, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .vaultDevice:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .googleContact:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -13999,7 +14015,7 @@ public func FfiConverterTypeNativeTypingOrigin_lower(_ value: NativeTypingOrigin
 
 
 public enum NativeTypingState: Equatable, Hashable {
-    
+
     case started
     case stopped
 
@@ -14022,26 +14038,26 @@ public struct FfiConverterTypeNativeTypingState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeTypingState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .started
-        
+
         case 2: return .stopped
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NativeTypingState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .started:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .stopped:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
@@ -14065,7 +14081,7 @@ public func FfiConverterTypeNativeTypingState_lower(_ value: NativeTypingState) 
 
 
 public enum SyncStepState: Equatable, Hashable {
-    
+
     case completed
     case canceled
 
@@ -14088,26 +14104,26 @@ public struct FfiConverterTypeSyncStepState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncStepState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .completed
-        
+
         case 2: return .canceled
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: SyncStepState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .completed:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .canceled:
             writeInt(&buf, Int32(2))
-        
+
         }
     }
 }
