@@ -361,6 +361,106 @@ describe("setup landing routing", () => {
   };
   afterEach(() => localStorage.removeItem("peppy.setup.mode"));
 
+  const revoke = async () => {
+    host.connection = { state: "error", origin: "https://example.test", errorCode: "revoked" };
+    host.encryption = { state: "locked" };
+    host.conversations = [];
+    host.gateways = [];
+    host.drafts.clear();
+    await act(async () => hint?.());
+  };
+
+  it.each(["conversations", "Settings", "Contacts", "Notifications"])("keeps revoked recovery stable after leaving populated %s", async (view) => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server"));
+    host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "Private draft", recipientIds: [], attachmentIds: [], revision: "1" });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await waitFor(() => expect(message()).toHaveValue("Private draft"));
+    const lateDraft = draftHint;
+    message().focus();
+    if (view !== "conversations") fireEvent.click(screen.getByRole("button", { name: view }));
+
+    await revoke();
+
+    const mode = await screen.findByRole("combobox", { name: /server mode/i });
+    const landing = document.getElementById("setup-landing");
+    expect(landing).toBeVisible();
+    expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
+    expect(screen.queryByText("Hello from Aurora")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Private draft")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+    expect(document.getElementById("recipient-rail-layer")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open in new window" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Unlock sync natively" })).not.toBeInTheDocument();
+    await waitFor(() => expect(landing).toContainElement(document.activeElement as HTMLElement));
+    mode.focus();
+    await act(async () => lateDraft?.({ id: "draft-aurora", conversationId: "aurora", text: "Late private draft", recipientIds: [], attachmentIds: [], revision: "2" }));
+    await act(async () => hint?.());
+    expect(document.getElementById("setup-landing")).toBe(landing);
+    expect(mode).toHaveFocus();
+    expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Late private draft")).not.toBeInTheDocument();
+    expect(bridge.pick_attachments).not.toHaveBeenCalled();
+    expect(bridge.send_draft).not.toHaveBeenCalled();
+    expect(host.sent).toEqual([]);
+  });
+
+  it.each([false, true])("keeps a revoked detached composer noneditable without privileged setup (head=%s)", async (head) => {
+    openComposerWindow("aurora", head);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await revoke();
+
+    expect(document.getElementById("composer-recovery-notice")).toBeVisible();
+    expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(screen.queryByText("Hello from Aurora")).not.toBeInTheDocument();
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: head ? "Close bubble" : "Close composer" })).toBeEnabled();
+    await act(async () => hint?.());
+    expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
+    expect(host.sent).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: head ? "Close bubble" : "Close composer" }));
+    await waitFor(() => expect(head ? bridge.close_head_panel : bridge.close_composer).toHaveBeenCalledWith());
+    expect(bridge.save_draft).not.toHaveBeenCalled();
+  });
+
+  it("keeps an ordinary offline selected conversation out of revoked recovery", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    host.connection = { state: "offline", origin: "https://example.test" };
+    await act(async () => hint?.());
+    expect(screen.getByText("Hello from Aurora")).toBeVisible();
+    expect(message()).toBeInTheDocument();
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+  });
+
+  it("does not restore the old selected conversation after revoked recovery admits a replacement session", async () => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    let scope = "old-session";
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({ ...host.load(id), sessionScopeId: scope }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const replacement = host.conversations[1];
+    await revoke();
+    await screen.findByRole("combobox", { name: /server mode/i });
+
+    scope = "replacement-session";
+    host.connection = { state: "connected", origin: "https://example.test" };
+    host.encryption = { state: "unlocked" };
+    host.conversations = [replacement];
+    await act(async () => hint?.());
+
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(screen.queryByText("Hello from Aurora")).not.toBeInTheDocument();
+    expect(screen.queryByText("Hello from River")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-header-title]")).not.toHaveTextContent("Aurora");
+    expect(screen.queryByRole("button", { name: "Open in new window" })).not.toBeInTheDocument();
+    expect(host.sent).toEqual([]);
+  });
+
   it("uses enrollment discovery for a fresh server-required desktop", async () => {
     await landingSnapshot({ connection: { state: "offline", errorCode: "server-required" } });
     render(<App />);
@@ -5011,9 +5111,9 @@ describe("host state display", () => {
     await waitFor(() => expect(unlock).toHaveBeenCalledOnce());
   });
 
-  it.each(["credentials-required", "revoked"])("hides native sync unlock when the connection reports %s", async (errorCode) => {
+  it("hides native sync unlock when the connection reports credentials-required", async () => {
     host.encryption = { state: "unlocked" };
-    host.connection = { state: "connected", origin: "https://example.test", errorCode };
+    host.connection = { state: "connected", origin: "https://example.test", errorCode: "credentials-required" };
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
