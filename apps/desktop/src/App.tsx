@@ -3343,7 +3343,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     conversationId: active?.id,
     current: rcsRoute.current,
     existing: Boolean(active && slotKey && !isLocalDraftKey(slotKey) && !active.draftOnly),
-    sendSupported: Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason,
+    sendSupported: Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending,
     readOnly: composerReadOnly,
   });
 

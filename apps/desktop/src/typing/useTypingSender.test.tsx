@@ -71,6 +71,18 @@ describe("useTypingSender", () => {
     expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
   });
 
+  it("resets the idle deadline when input continues", () => {
+    vi.useFakeTimers();
+    const { result, sendTyping } = renderSender();
+    act(() => result.current.noteInput("message"));
+    act(() => vi.advanceTimersByTime(5_000));
+    act(() => result.current.noteInput("message"));
+    act(() => vi.advanceTimersByTime(1_001));
+    expect(sendTyping).not.toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
+    act(() => vi.advanceTimersByTime(4_999));
+    expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
+  });
+
   it("stops once when sending", () => {
     const { result, sendTyping } = renderSender();
     act(() => result.current.noteInput("message"));
@@ -83,11 +95,27 @@ describe("useTypingSender", () => {
   it.each([
     ["conversation switch", { conversationId: "conversation-2" }],
     ["route eligibility loss", { current: false }],
+    ["send becomes unavailable", { sendSupported: false }],
     ["composer becomes read-only", { readOnly: true }],
   ])("stops on %s", (_reason, next) => {
     const { result, rerender, sendTyping } = renderSender();
     act(() => result.current.noteInput("message"));
     rerender({ bridge: { send_typing: sendTyping } as unknown as DesktopBridge, conversationId: "conversation-1", current: true, existing: true, sendSupported: true, readOnly: false, ...next });
+    expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
+  });
+
+  it.each(["visibilitychange", "pagehide", "focusout"])("stops on %s", eventType => {
+    const { result, sendTyping } = renderSender();
+    act(() => result.current.noteInput("message"));
+    if (eventType === "visibilitychange") {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      act(() => document.dispatchEvent(new Event(eventType)));
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    } else if (eventType === "focusout") {
+      const textarea = document.createElement("textarea"); textarea.id = "composer-textarea"; document.body.append(textarea);
+      act(() => textarea.dispatchEvent(new FocusEvent(eventType, { bubbles: true })));
+      textarea.remove();
+    } else act(() => window.dispatchEvent(new Event(eventType)));
     expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
   });
 
@@ -99,6 +127,17 @@ describe("useTypingSender", () => {
     act(() => result.current.noteInput("message"));
     expect(sendTyping).toHaveBeenCalledTimes(2);
     expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
+  });
+
+  it("reads a disabled sharing preference before another window sends an event", () => {
+    const { result, sendTyping } = renderSender();
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ shareTyping: false }));
+    act(() => result.current.noteInput("message"));
+    expect(sendTyping).not.toHaveBeenCalled();
+    expect(result.current.state).toBe("suppressed");
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ shareTyping: true }));
+    act(() => result.current.noteInput("message"));
+    expect(result.current.state).toBe("active");
   });
 
   it("stops on window blur and unmount without retrying rejected sends", () => {
@@ -115,11 +154,14 @@ describe("useTypingSender", () => {
     vi.useFakeTimers();
     const { result, sendTyping } = renderSender();
     act(() => result.current.noteInput("message"));
-    act(() => vi.advanceTimersByTime(3_201));
+    act(() => vi.advanceTimersByTime(3_000));
     act(() => result.current.noteInput("message"));
-    act(() => vi.advanceTimersByTime(3_200));
+    act(() => vi.advanceTimersByTime(200));
+    expect(sendTyping).toHaveBeenCalledTimes(2);
     expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "started" });
     act(() => result.current.noteSend());
+    expect(result.current.state).toBe("idle");
+    act(() => result.current.noteInput(" "));
     expect(result.current.state).toBe("idle");
   });
 });
