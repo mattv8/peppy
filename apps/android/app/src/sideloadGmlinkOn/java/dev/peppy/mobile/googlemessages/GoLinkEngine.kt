@@ -3,7 +3,6 @@ package dev.peppy.mobile.googlemessages
 import dev.peppy.gmlink.gmlink.Gmlink
 import dev.peppy.gmlink.gmlink.Host
 import dev.peppy.gmlink.gmlink.Link
-import dev.peppy.gmlink.gmlink.OwnedHost
 
 private class GoLinkHandle(private val link: Link) : LinkHandle {
     override fun pair(cookiesJson: ByteArray) = link.pair(cookiesJson)
@@ -21,7 +20,7 @@ private object GoLinkEngine : LinkEngine {
     override val available = true
 
     override fun open(restoredState: ByteArray, linkHost: LinkHost): LinkHandle = GoLinkHandle(
-        Gmlink.open(restoredState, object : Host, OwnedHost {
+        Gmlink.open(restoredState, object : Host {
             // Gomobile invokes these from Go goroutine threads. Never call Link synchronously from a callback.
             override fun persistState(persistedState: ByteArray) {
                 try {
@@ -32,23 +31,7 @@ private object GoLinkEngine : LinkEngine {
                 }
             }
 
-            override fun event(kind: String, code: String, value: Long) {
-                try {
-                    linkHost.event(kind, code, value)
-                } catch (_: Throwable) {
-                    // Host event delivery must not unwind through JNI.
-                }
-            }
-
-            override fun showEmoji(emoji: String) {
-                try {
-                    linkHost.showEmoji(emoji)
-                } catch (_: Throwable) {
-                    // Host display updates must not unwind through JNI.
-                }
-            }
-
-            override fun eventOwned(kind: String, code: String, value: Long, generation: Long, revision: Long) {
+            override fun event(kind: String, code: String, value: Long, generation: Long, revision: Long) {
                 try {
                     linkHost.eventOwned(kind, code, value, generation, revision)
                 } catch (_: Throwable) {
@@ -56,7 +39,7 @@ private object GoLinkEngine : LinkEngine {
                 }
             }
 
-            override fun showEmojiOwned(emoji: String, generation: Long, revision: Long) {
+            override fun showEmoji(emoji: String, generation: Long, revision: Long) {
                 try {
                     linkHost.showEmojiOwned(emoji, generation, revision)
                 } catch (_: Throwable) {

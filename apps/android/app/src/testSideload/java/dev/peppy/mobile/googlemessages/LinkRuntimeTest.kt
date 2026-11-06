@@ -122,8 +122,8 @@ class LinkRuntimeTest {
         LinkRuntimeTestHooks.eventRecorder = { _, _, _ -> first.countDown() }
 
         val firstAttempt = LinkRuntime.tryBeginPairing()!!
-        host.showEmoji("first")
-        host.event("link", "pair_ok", 0)
+        host.showEmojiOwned("first", 0, 0)
+        host.eventOwned("link", "pair_ok", 0, 0, 0)
         assertTrue(first.await(1, TimeUnit.SECONDS))
         assertTrue(LinkRuntime.pairingInProgress.get())
         assertTrue(LinkRuntime.endPairing(firstAttempt))
@@ -161,7 +161,7 @@ class LinkRuntimeTest {
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val oldAttempt = LinkRuntime.tryBeginPairing()!!
-        host.showEmoji("old")
+        host.showEmojiOwned("old", 0, 0)
         assertTrue(LinkRuntime.endPairing(oldAttempt))
         val newAttempt = LinkRuntime.tryBeginPairing()!!
 
@@ -186,7 +186,7 @@ class LinkRuntimeTest {
         LinkRuntime.handle(context)
         val attempt = LinkRuntime.tryBeginPairing()!!
 
-        host.event("link", "pair_ok", 0)
+        host.eventOwned("link", "pair_ok", 0, 0, 0)
         assertTrue(callbackRan.await(1, TimeUnit.SECONDS))
 
         assertTrue(LinkRuntime.pairingInProgress.get())
@@ -203,6 +203,30 @@ class LinkRuntimeTest {
 
         assertTrue(LinkRuntime.pairingInProgress.get())
         assertTrue(LinkRuntime.endPairing(second))
+    }
+
+    @Test
+    fun `receiver rejects callbacks without owned identity`() {
+        lateinit var host: LinkHost
+        val queued = QueueExecutor()
+        val events = mutableListOf<String>()
+        LinkRuntimeTestHooks.callbackExecutor = queued
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, callback: LinkHost): LinkHandle = FakeHandle().also { host = callback }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> events += "$kind/$code" }
+        LinkRuntime.handle(context)
+        val attempt = LinkRuntime.tryBeginPairing()!!
+
+        host.event("link", "pair_ok", 0)
+        host.showEmoji("unowned")
+        queued.runAll()
+
+        assertTrue(events.isEmpty())
+        assertEquals(null, LinkRuntime.emoji.value)
+        assertTrue(LinkRuntime.endPairing(attempt))
     }
 
     @Test

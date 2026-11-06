@@ -16,9 +16,9 @@ type orderedOutputHost struct {
 	secondEntered chan struct{}
 }
 
-func (*orderedOutputHost) PersistState([]byte) error { return nil }
-func (*orderedOutputHost) ShowEmoji(string)          {}
-func (host *orderedOutputHost) Event(_, code string, _ int64) {
+func (*orderedOutputHost) PersistState([]byte) error      { return nil }
+func (*orderedOutputHost) ShowEmoji(string, int64, int64) {}
+func (host *orderedOutputHost) Event(_, code string, _, _, _ int64) {
 	switch code {
 	case "recovered":
 		close(host.firstEntered)
@@ -64,9 +64,9 @@ type replacementFenceHost struct {
 	releaseOld chan struct{}
 }
 
-func (*replacementFenceHost) PersistState([]byte) error { return nil }
-func (*replacementFenceHost) ShowEmoji(string)          {}
-func (host *replacementFenceHost) Event(_, code string, _ int64) {
+func (*replacementFenceHost) PersistState([]byte) error      { return nil }
+func (*replacementFenceHost) ShowEmoji(string, int64, int64) {}
+func (host *replacementFenceHost) Event(_, code string, _, _, _ int64) {
 	host.mu.Lock()
 	host.sequence = append(host.sequence, code)
 	host.mu.Unlock()

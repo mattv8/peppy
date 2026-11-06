@@ -22,15 +22,8 @@ import (
 // Host is implemented by the Kotlin runtime.
 type Host interface {
 	PersistState(sealed []byte) error
-	Event(kind, code string, value int64)
-	ShowEmoji(emoji string)
-}
-
-// OwnedHost receives the immutable Go operation identity at the platform boundary.
-// Hosts that dispatch callbacks asynchronously use it to reject stale delivery.
-type OwnedHost interface {
-	EventOwned(kind, code string, value, generation, revision int64)
-	ShowEmojiOwned(emoji string, generation, revision int64)
+	Event(kind, code string, value, generation, revision int64)
+	ShowEmoji(emoji string, generation, revision int64)
 }
 
 var (
@@ -1121,7 +1114,8 @@ func (link *Link) commitTerminalLocked(owner uint64, event any) *terminalComplet
 		return nil
 	}
 	completion := &terminalCompletion{
-		revision: link.stateRevision,
+		generation: link.generation,
+		revision:   link.stateRevision,
 		state: persistedState{
 			Version:     stateVersion,
 			State:       state,
@@ -1600,18 +1594,10 @@ func (link *Link) deliverOutput(output hostOutput) {
 }
 
 func (link *Link) callHost(output hostOutput) {
-	if owned, ok := link.host.(OwnedHost); ok {
-		if output.emoji != "" {
-			owned.ShowEmojiOwned(output.emoji, int64(output.generation), int64(output.revision))
-		} else {
-			owned.EventOwned(output.kind, output.code, output.value, int64(output.generation), int64(output.revision))
-		}
-		return
-	}
 	if output.emoji != "" {
-		link.host.ShowEmoji(output.emoji)
+		link.host.ShowEmoji(output.emoji, int64(output.generation), int64(output.revision))
 	} else {
-		link.host.Event(output.kind, output.code, output.value)
+		link.host.Event(output.kind, output.code, output.value, int64(output.generation), int64(output.revision))
 	}
 }
 

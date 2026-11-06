@@ -615,7 +615,7 @@ func (host *safetyHost) countEvent(kind, code string) int {
 	return count
 }
 
-func (host *safetyHost) Event(kind, code string, _ int64) {
+func (host *safetyHost) Event(kind, code string, _, _, _ int64) {
 	host.mu.Lock()
 	hold := host.holdEvent == code
 	reached, release := host.holdEventReached, host.holdEventRelease
@@ -643,7 +643,7 @@ func (host *safetyHost) holdNextEvent(code string) (reached, release chan struct
 	return host.holdEventReached, host.holdEventRelease
 }
 
-func (host *safetyHost) ShowEmoji(emoji string) {
+func (host *safetyHost) ShowEmoji(emoji string, _, _ int64) {
 	select {
 	case host.emoji <- emoji:
 	default:
@@ -694,7 +694,10 @@ func openSafetyLink(t *testing.T, state []byte) (*Link, *safetyHost) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(link.Close)
+	t.Cleanup(func() {
+		link.Close()
+		awaitSafety(t, "link output drain", func() bool { return openLink.Load() != link })
+	})
 	return link, host
 }
 

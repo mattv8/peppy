@@ -27,13 +27,13 @@ func (host *testHost) PersistState(state []byte) error {
 	return nil
 }
 
-func (host *testHost) Event(kind, code string, _ int64) {
+func (host *testHost) Event(kind, code string, _, _, _ int64) {
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	host.events = append(host.events, eventCode{kind, code})
 }
 
-func (host *testHost) ShowEmoji(string) {}
+func (host *testHost) ShowEmoji(string, int64, int64) {}
 
 func TestOpenEmptyIsUnlinked(t *testing.T) {
 	link, err := Open(nil, &testHost{})

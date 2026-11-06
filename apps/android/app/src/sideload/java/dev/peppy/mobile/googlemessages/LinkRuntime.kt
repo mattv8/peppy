@@ -150,7 +150,7 @@ object LinkRuntime {
     private fun acceptsCallback(handle: Long, ownerGeneration: Long, ownerRevision: Long): Boolean = synchronized(this) {
         if (handle != handleGeneration) return@synchronized false
         val current = cachedHandle ?: return@synchronized false
-        ownerGeneration < 0 || ownerRevision < 0 || current.acceptsOutput(ownerGeneration, ownerRevision)
+        ownerGeneration >= 0 && ownerRevision >= 0 && current.acceptsOutput(ownerGeneration, ownerRevision)
     }
 
     private fun assignEmojiIfCurrent(handle: Long, attempt: Long, value: String) = synchronized(this) {

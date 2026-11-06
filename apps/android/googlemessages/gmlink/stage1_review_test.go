@@ -382,12 +382,12 @@ type reentrantCloseHost struct {
 
 func (*reentrantCloseHost) PersistState([]byte) error { return nil }
 
-func (host *reentrantCloseHost) Event(_, _ string, _ int64) {
+func (host *reentrantCloseHost) Event(_, _ string, _, _, _ int64) {
 	host.link.Close()
 	close(host.closed)
 }
 
-func (*reentrantCloseHost) ShowEmoji(string) {}
+func (*reentrantCloseHost) ShowEmoji(string, int64, int64) {}
 
 func TestHostEventCanReenterClose(t *testing.T) {
 	host := &reentrantCloseHost{closed: make(chan struct{})}

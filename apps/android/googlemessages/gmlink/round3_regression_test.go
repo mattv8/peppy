@@ -76,9 +76,9 @@ type reentrantQueuedCompletionHost struct {
 	closed     chan struct{}
 }
 
-func (*reentrantQueuedCompletionHost) PersistState([]byte) error { return nil }
-func (*reentrantQueuedCompletionHost) ShowEmoji(string)          {}
-func (host *reentrantQueuedCompletionHost) Event(_, code string, _ int64) {
+func (*reentrantQueuedCompletionHost) PersistState([]byte) error      { return nil }
+func (*reentrantQueuedCompletionHost) ShowEmoji(string, int64, int64) {}
+func (host *reentrantQueuedCompletionHost) Event(_, code string, _, _, _ int64) {
 	if code != "recovered" {
 		return
 	}
@@ -156,9 +156,9 @@ type blockingEmojiHost struct {
 	delivered chan struct{}
 }
 
-func (*blockingEmojiHost) PersistState([]byte) error   { return nil }
-func (*blockingEmojiHost) Event(string, string, int64) {}
-func (host *blockingEmojiHost) ShowEmoji(string) {
+func (*blockingEmojiHost) PersistState([]byte) error                 { return nil }
+func (*blockingEmojiHost) Event(string, string, int64, int64, int64) {}
+func (host *blockingEmojiHost) ShowEmoji(string, int64, int64) {
 	close(host.entered)
 	<-host.release
 	close(host.delivered)
