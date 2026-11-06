@@ -501,7 +501,7 @@ fn deterministic_message_id(
 ) -> Result<MessageId, Error> {
     let epoch = ctx.active_epoch.ok_or(Error::Crypto)?;
     let key = ctx.keys.get(&epoch).ok_or(Error::Crypto)?;
-    let mut bytes = compaction_hmac(
+    let bytes = compaction_hmac(
         &key.event,
         b"rcs-message-id-v1",
         &[

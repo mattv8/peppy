@@ -119,3 +119,93 @@ fn replicated_rcs_messages_are_idempotent() {
     assert_eq!(first.messages(conversation).unwrap().len(), 1);
     assert_eq!(second.messages(conversation).unwrap().len(), 1);
 }
+
+#[test]
+fn incoming_rcs_replay_stale_writer_and_page_floor_are_rejected_without_rows() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let owner = client
+        .begin_rcs_link_ownership(conversation, "first-token", 10)
+        .unwrap();
+
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("one"))
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("one"))
+            .unwrap(),
+        RcsReceiveOutcome::Duplicate
+    );
+    assert_eq!(client.messages(conversation).unwrap().len(), 1);
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(
+                conversation,
+                owner.ownership_generation + 1,
+                record("two")
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+    let mut page = record("page");
+    page.google_message_id = "page-message".into();
+    page.history_token = Some("page-token".into());
+    page.sent_at_ms = Some(10);
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, page)
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor)
+    );
+    assert_eq!(client.messages(conversation).unwrap().len(), 1);
+}
+
+#[test]
+fn page_records_are_imported_while_live_records_remain_unseen() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let owner = client
+        .begin_rcs_link_ownership(conversation, "token", 0)
+        .unwrap();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("live"))
+        .unwrap();
+    let mut page = record("page");
+    page.google_message_id = "page-message".into();
+    page.history_token = Some("page-token".into());
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, page)
+        .unwrap();
+
+    let messages = client.messages(conversation).unwrap();
+    assert_eq!(messages.len(), 2);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.payload.body == "live" && !message.seen)
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.payload.body == "page" && message.seen)
+    );
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .history_token
+            .as_deref(),
+        Some("page-token")
+    );
+}
