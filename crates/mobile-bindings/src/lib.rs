@@ -2078,6 +2078,43 @@ impl NativeClient {
         .map(|status| status.map(rcs_status::link_status_view))
     }
 
+    /// Records the local Google Messages lifecycle and publishes its content-free status.
+    pub fn record_rcs_link_lifecycle(
+        &self,
+        state: rcs_status::NativeRcsLinkState,
+        availability: bool,
+        health: bool,
+        phone_responsive: bool,
+        observed_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<(), MobileBindingsError> {
+        let state = match state {
+            rcs_status::NativeRcsLinkState::Linked => peppy_client_core::RcsCapabilityState::Linked,
+            rcs_status::NativeRcsLinkState::Unlinked => {
+                peppy_client_core::RcsCapabilityState::Unlinked
+            }
+            rcs_status::NativeRcsLinkState::NeedsRelink => {
+                peppy_client_core::RcsCapabilityState::NeedsRelink
+            }
+            rcs_status::NativeRcsLinkState::SignedOut => {
+                peppy_client_core::RcsCapabilityState::SignedOut
+            }
+            rcs_status::NativeRcsLinkState::Unavailable => {
+                peppy_client_core::RcsCapabilityState::Unavailable
+            }
+        };
+        with_client(&self.client, |client| {
+            client.record_rcs_link_lifecycle(
+                state,
+                availability,
+                health,
+                phone_responsive,
+                observed_at_ms,
+                now_ms,
+            )
+        })
+    }
+
     /// Returns sanitized per-conversation capability state. Core maps stale,
     /// future, unavailable, and unlinked evidence to `Unknown`; this method is
     /// never a permit or send authority.
@@ -4175,6 +4212,8 @@ mod tests {
             observed_at_ms,
             capability_revision: revision,
             feature_bits: 7,
+            linked_since_ms: (state == peppy_client_core::RcsCapabilityState::Linked)
+                .then_some(observed_at_ms),
         }
     }
 

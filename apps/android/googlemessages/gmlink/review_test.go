@@ -178,8 +178,8 @@ func TestQueueEnqueuesOnlyHandledEvents(t *testing.T) {
 		link.queueEvent(&events.NoDataReceived{})
 	}
 	expectStatus(t, link, `"stop_code":"event_overflow"`)
-	if !host.hasEvent("link", "event_overflow") {
-		t.Fatal("event_overflow was not reported to the host")
+	if host.hasEvent("link", "event_overflow") {
+		t.Fatal("overflow ingress called the host")
 	}
 }
 

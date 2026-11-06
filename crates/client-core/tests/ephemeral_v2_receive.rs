@@ -17,6 +17,7 @@ fn publish_eligible(client: &Client, gateway: DeviceId, conversation_id: Convers
                 observed_at_ms: 1_000,
                 capability_revision: 1,
                 feature_bits: 1,
+                linked_since_ms: Some(1_000),
             },
             &[RcsEligibilityProjection {
                 conversation_id,

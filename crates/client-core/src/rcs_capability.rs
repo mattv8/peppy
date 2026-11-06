@@ -1,5 +1,5 @@
 use crate::{ConversationId, DeviceId, Error};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 pub const RCS_CAPABILITY_STALE_MS: i64 = 30 * 60_000;
@@ -35,6 +35,8 @@ pub struct RcsLinkStatusEvent {
     pub observed_at_ms: i64,
     pub capability_revision: u64,
     pub feature_bits: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_since_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -90,10 +92,31 @@ pub(crate) fn apply_status(
     let Ok(sequence) = i64::try_from(sequence) else {
         return Ok(false);
     };
-    conn.execute(
+    let applied = conn.execute(
         "INSERT INTO rcs_link_status_projection(gateway_device_id,state,availability,health,phone_responsive,observed_at_ms,capability_revision,feature_bits,producer_sequence) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(gateway_device_id) DO UPDATE SET state=excluded.state,availability=excluded.availability,health=excluded.health,phone_responsive=excluded.phone_responsive,observed_at_ms=excluded.observed_at_ms,capability_revision=excluded.capability_revision,feature_bits=excluded.feature_bits,producer_sequence=excluded.producer_sequence WHERE excluded.capability_revision > rcs_link_status_projection.capability_revision OR (excluded.capability_revision=rcs_link_status_projection.capability_revision AND excluded.producer_sequence > rcs_link_status_projection.producer_sequence)",
         params![value.gateway_device_id.to_string(), capability_state(value.state), value.availability, value.health, value.phone_responsive, value.observed_at_ms, value.capability_revision, value.feature_bits, sequence],
     )?;
+    if applied == 0 {
+        return Ok(true);
+    }
+    if value.state == RcsCapabilityState::Linked {
+        let Some(linked_since_ms) = value.linked_since_ms else {
+            conn.execute(
+                "DELETE FROM metadata WHERE k=?",
+                [linked_since_key(value.gateway_device_id)],
+            )?;
+            return Ok(true);
+        };
+        conn.execute(
+            "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            params![linked_since_key(value.gateway_device_id), linked_since_ms],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM metadata WHERE k=?",
+            [linked_since_key(value.gateway_device_id)],
+        )?;
+    }
     Ok(true)
 }
 
@@ -139,24 +162,116 @@ pub(crate) fn projection(
     gateway: DeviceId,
     now_ms: i64,
 ) -> Result<Option<RcsEligibilityProjection>, Error> {
-    let row: Option<(String, u32, u64, i64)> = conn.query_row("SELECT eligibility,feature_bits,mapping_revision,observed_at_ms FROM rcs_link_eligibility_projection WHERE gateway_device_id=? AND conversation_id=?", params![gateway.to_string(), conversation.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional()?;
-    row.map(|(kind, feature_bits, mapping_revision, observed_at_ms)| {
-        Ok(RcsEligibilityProjection {
-            conversation_id: conversation,
-            eligibility: if !current_gateway(conn, gateway, now_ms)?
-                || !fresh_at(now_ms, observed_at_ms)
-            {
-                RcsEligibility::Unknown
-            } else {
-                parse_eligibility(&kind)?
-            },
-            feature_bits,
-            mapping_revision,
-            observed_at_ms,
-            gateway_device_id: gateway,
-        })
-    })
+    let row: Option<(String, u32, u64, i64, i64)> = conn.query_row("SELECT eligibility,feature_bits,mapping_revision,observed_at_ms,producer_sequence FROM rcs_link_eligibility_projection WHERE gateway_device_id=? AND conversation_id=?", params![gateway.to_string(), conversation.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).optional()?;
+    row.map(
+        |(kind, feature_bits, mapping_revision, observed_at_ms, _)| {
+            Ok(RcsEligibilityProjection {
+                conversation_id: conversation,
+                eligibility: if !current_gateway(conn, gateway, now_ms)?
+                    || !fresh_at(now_ms, observed_at_ms)
+                    || !eligibility_follows_linked_since(conn, gateway, observed_at_ms)?
+                {
+                    RcsEligibility::Unknown
+                } else {
+                    parse_eligibility(&kind)?
+                },
+                feature_bits,
+                mapping_revision,
+                observed_at_ms,
+                gateway_device_id: gateway,
+            })
+        },
+    )
     .transpose()
+}
+
+fn eligibility_follows_linked_since(
+    conn: &Connection,
+    gateway: DeviceId,
+    eligibility_observed_at_ms: i64,
+) -> Result<bool, Error> {
+    let linked_since_ms = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [linked_since_key(gateway)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+        .transpose()?;
+    Ok(
+        linked_since_ms
+            .is_some_and(|linked_since_ms| eligibility_observed_at_ms >= linked_since_ms),
+    )
+}
+
+pub(crate) fn linked_since(conn: &Connection, gateway: DeviceId) -> Result<Option<i64>, Error> {
+    conn.query_row(
+        "SELECT v FROM metadata WHERE k=?",
+        [linked_since_key(gateway)],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+    .transpose()
+}
+
+pub(crate) fn record_linked_since(
+    conn: &Connection,
+    gateway: DeviceId,
+    linked_since_ms: i64,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![linked_since_key(gateway), linked_since_ms],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn next_linked_since(
+    conn: &Connection,
+    gateway: DeviceId,
+    observed_at_ms: i64,
+) -> Result<i64, Error> {
+    Ok(observed_at_ms.max(
+        observed_high_watermark(conn, gateway)?
+            .map(|timestamp| timestamp.checked_add(1).ok_or(Error::Database))
+            .transpose()?
+            .unwrap_or(0),
+    ))
+}
+
+pub(crate) fn record_observed_at(
+    conn: &Connection,
+    gateway: DeviceId,
+    observed_at_ms: i64,
+) -> Result<(), Error> {
+    let timestamp = observed_high_watermark(conn, gateway)?
+        .map_or(observed_at_ms, |current| current.max(observed_at_ms));
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![observed_high_watermark_key(gateway), timestamp],
+    )?;
+    Ok(())
+}
+
+fn observed_high_watermark(conn: &Connection, gateway: DeviceId) -> Result<Option<i64>, Error> {
+    conn.query_row(
+        "SELECT v FROM metadata WHERE k=?",
+        [observed_high_watermark_key(gateway)],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+    .transpose()
+}
+
+fn linked_since_key(gateway: DeviceId) -> String {
+    format!("rcs_linked_since_v1/{gateway}")
+}
+
+fn observed_high_watermark_key(gateway: DeviceId) -> String {
+    format!("rcs_capability_observed_high_watermark_v1/{gateway}")
 }
 
 pub(crate) fn status_projection(
@@ -167,21 +282,33 @@ pub(crate) fn status_projection(
     let row: Option<(String, bool, bool, bool, i64, u64, u32)> = conn
         .query_row("SELECT state,availability,health,phone_responsive,observed_at_ms,capability_revision,feature_bits FROM rcs_link_status_projection WHERE gateway_device_id=?", [gateway.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)))
         .optional()?;
-    row.map(|(state, availability, health, phone_responsive, observed_at_ms, capability_revision, feature_bits)| {
-        Ok(RcsLinkStatusProjection {
-            current: fresh_at(now_ms, observed_at_ms),
-            status: RcsLinkStatusEvent {
-                gateway_device_id: gateway,
-                state: parse_state(&state)?,
-                availability,
-                health,
-                phone_responsive,
-                observed_at_ms,
-                capability_revision,
-                feature_bits,
-            },
-        })
-    }).transpose()
+    row.map(
+        |(
+            state,
+            availability,
+            health,
+            phone_responsive,
+            observed_at_ms,
+            capability_revision,
+            feature_bits,
+        )| {
+            Ok(RcsLinkStatusProjection {
+                current: fresh_at(now_ms, observed_at_ms),
+                status: RcsLinkStatusEvent {
+                    gateway_device_id: gateway,
+                    state: parse_state(&state)?,
+                    availability,
+                    health,
+                    phone_responsive,
+                    observed_at_ms,
+                    capability_revision,
+                    feature_bits,
+                    linked_since_ms: linked_since(conn, gateway)?,
+                },
+            })
+        },
+    )
+    .transpose()
 }
 
 fn fresh_at(now_ms: i64, observed_at_ms: i64) -> bool {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 #if canImport(PeppyNative)
 import PeppyNative
 #endif
@@ -33,6 +34,7 @@ struct DeviceView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var passphrase = ""
     @State private var confirmingDisconnect = false
+    @State private var wallClockRevision = 0
     @State private var devicePendingRemoval: DeviceRosterItem?
     @State private var showingSelfHosted = false
     @State private var showingSelfHostedEnrollment = false
@@ -507,10 +509,11 @@ struct DeviceView: View {
         }
         .accessibilityIdentifier("devices-section")
         .task { await model.refreshDevices() }
-        .task(id: GoogleMessagesLinkDeadlineWake.taskKey(
-            deadlineMs: model.googleMessagesLinkStatusDeadline,
-            isForeground: scenePhase == .active
-        )) {
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
+            // A wall-clock jump does not shorten an in-flight sleep; restart the deadline task instead.
+            wallClockRevision &+= 1
+        }
+        .task(id: "\(GoogleMessagesLinkDeadlineWake.taskKey(deadlineMs: model.googleMessagesLinkStatusDeadline, isForeground: scenePhase == .active))-clock\(wallClockRevision)") {
             guard scenePhase == .active else { return }
             guard let deadline = model.googleMessagesLinkStatusDeadline else { return }
             while !Task.isCancelled {

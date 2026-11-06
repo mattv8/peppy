@@ -162,6 +162,18 @@ fn linked_unknown_carrier_is_blocked_without_an_attempt() {
 }
 
 #[test]
+fn recorded_linked_lifecycle_blocks_carrier_without_proof() {
+    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    gateway
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    assert_eq!(
+        gateway.begin_send_attempt_at(command_id, 1_000).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+}
+
+#[test]
 fn fresh_current_carrier_only_proof_permits_once_and_survives_reopen() {
     let (_directory, vault, config, gateway, command_id) = carrier_command();
     let mut unknown = observation("peer-local", 1);
@@ -1111,7 +1123,7 @@ fn rcs_retry_refuses_changed_sim_or_link_session() {
 }
 
 #[test]
-fn explicit_unknown_resend_creates_new_command_with_local_lineage_and_no_permit() {
+fn explicit_unknown_resend_becomes_received_after_server_echo() {
     let (_directory, vault, config, gateway, command_id, current) = rcs_command("peer-local");
     let original = gateway
         .begin_rcs_send_attempt(command_id, &current, 1_000)
@@ -1126,13 +1138,6 @@ fn explicit_unknown_resend_creates_new_command_with_local_lineage_and_no_permit(
             .unwrap(),
         Some(SendState::OutcomeUnknown)
     );
-    assert_eq!(
-        gateway
-            .begin_rcs_send_attempt(queued.command_id, &current, 1_000)
-            .unwrap_err(),
-        Error::NotFound
-    );
-
     let connection = encrypted_connection(&config);
     let (tmp_id, retry_of): (String, String) = connection
         .query_row(
@@ -1143,6 +1148,40 @@ fn explicit_unknown_resend_creates_new_command_with_local_lineage_and_no_permit(
         .unwrap();
     assert_ne!(tmp_id, original.tmp_id());
     assert_eq!(retry_of, command_id.to_string());
+
+    let mut server = Server::default();
+    server.upload(&gateway);
+    let echo = server
+        .log
+        .iter()
+        .find(|envelope| envelope.command_id == Some(queued.command_id))
+        .unwrap();
+    let cursor = Cursor(gateway.receive_cursor().unwrap().0 + 1);
+    assert_eq!(
+        gateway.ingest(echo, cursor).unwrap(),
+        IngestResult::Journaled
+    );
+    assert_eq!(gateway.apply_pending(100).unwrap().applied, 1);
+    assert_eq!(
+        gateway
+            .reconcile_rcs_tmp_id(original.tmp_id(), original.google_conversation_id(), None)
+            .unwrap(),
+        Some(SendState::OutcomeUnknown)
+    );
+    gateway
+        .begin_rcs_send_attempt(queued.command_id, &current, 1_000)
+        .unwrap();
+    assert_eq!(
+        gateway.ingest(echo, cursor).unwrap(),
+        IngestResult::Duplicate
+    );
+    assert_eq!(gateway.apply_pending(100).unwrap().applied, 0);
+    assert_eq!(
+        gateway
+            .begin_rcs_send_attempt(queued.command_id, &current, 1_000)
+            .unwrap_err(),
+        Error::AlreadyAttempted(SendState::AttemptRecorded)
+    );
 }
 
 #[test]
@@ -1767,4 +1806,220 @@ fn admission_does_not_recover_or_replace_legacy_context() {
         reopened.verify_rcs_mapping(&fresh, 1_001).unwrap(),
         RcsMappingOutcome::Mapped(_)
     ));
+}
+
+fn explicit_resend_echo() -> (
+    tempfile::TempDir,
+    Vault,
+    ClientConfig,
+    Client,
+    CommandId,
+    RcsMappingObservation,
+    Envelope,
+) {
+    let (directory, vault, config, gateway, command_id, observation) = rcs_command("peer-local");
+    gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    drop(gateway);
+    let gateway = unlocked(&config, &vault);
+    let queued = gateway.resend_rcs_outcome_unknown(command_id).unwrap();
+    let mut server = Server::default();
+    server.upload(&gateway);
+    let echo = server
+        .log
+        .into_iter()
+        .find(|envelope| envelope.command_id == Some(queued.command_id))
+        .unwrap();
+    (
+        directory,
+        vault,
+        config,
+        gateway,
+        queued.command_id,
+        observation,
+        echo,
+    )
+}
+
+#[test]
+fn explicit_resend_echo_at_a_different_cursor_remains_duplicate() {
+    let (_directory, _vault, _config, gateway, command_id, observation, echo) =
+        explicit_resend_echo();
+    let cursor = Cursor(gateway.receive_cursor().unwrap().0 + 1);
+    assert_eq!(
+        gateway.ingest(&echo, cursor).unwrap(),
+        IngestResult::Journaled
+    );
+    gateway.apply_pending(100).unwrap();
+    gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+
+    assert_eq!(
+        gateway.ingest(&echo, Cursor(cursor.0 + 1)).unwrap(),
+        IngestResult::Duplicate
+    );
+    assert_eq!(gateway.apply_pending(100).unwrap().applied, 0);
+    assert_eq!(
+        gateway
+            .begin_rcs_send_attempt(command_id, &observation, 1_000)
+            .unwrap_err(),
+        Error::AlreadyAttempted(SendState::AttemptRecorded)
+    );
+}
+
+#[test]
+fn explicit_resend_echo_from_snapshot_never_receives_a_permit() {
+    let (_directory, _vault, _config, gateway, command_id, observation, echo) =
+        explicit_resend_echo();
+    let cursor = Cursor(gateway.receive_cursor().unwrap().0 + 1);
+    let snapshot = gateway
+        .begin_snapshot(cursor, 1, SnapshotPurpose::Resync)
+        .unwrap();
+    gateway
+        .append_snapshot_page(
+            snapshot.generation,
+            &[SnapshotRecord {
+                cursor,
+                envelope: echo,
+            }],
+        )
+        .unwrap();
+    gateway.finish_snapshot(snapshot.generation).unwrap();
+    gateway.apply_pending(100).unwrap();
+
+    assert!(
+        gateway
+            .begin_rcs_send_attempt(command_id, &observation, 1_000)
+            .is_err()
+    );
+}
+
+#[test]
+fn explicit_resend_echo_retired_by_epoch_cutover_never_receives_a_permit() {
+    let (_directory, vault, _config, gateway, command_id, observation, echo) =
+        explicit_resend_echo();
+    let cursor = Cursor(gateway.receive_cursor().unwrap().0 + 1);
+    assert_eq!(
+        gateway.ingest(&echo, cursor).unwrap(),
+        IngestResult::Journaled
+    );
+    gateway.apply_pending(100).unwrap();
+    let epoch_two = Vault::epoch(vault.id, 2);
+    gateway
+        .unlock(&epoch_two.profile, &epoch_two.header, PASSPHRASE)
+        .unwrap();
+    gateway.activate_epoch(2).unwrap();
+
+    assert!(
+        gateway
+            .begin_rcs_send_attempt(command_id, &observation, 1_000)
+            .is_err()
+    );
+}
+
+#[test]
+fn explicit_resend_echo_under_restore_guard_never_receives_a_permit() {
+    let (_directory, _vault, _config, gateway, command_id, observation, echo) =
+        explicit_resend_echo();
+    let cursor = Cursor(gateway.receive_cursor().unwrap().0 + 1);
+    assert_eq!(
+        gateway.ingest(&echo, cursor).unwrap(),
+        IngestResult::Journaled
+    );
+    gateway.apply_pending(100).unwrap();
+    gateway.mark_restored_gateway().unwrap();
+
+    assert!(
+        gateway
+            .begin_rcs_send_attempt(command_id, &observation, 1_000)
+            .is_err()
+    );
+}
+
+#[test]
+fn non_resend_self_addressed_rcs_echo_stays_duplicate() {
+    let (_directory, _vault, config, gateway, _command_id, _observation) =
+        rcs_command("peer-local");
+    let queued = gateway
+        .queue_send(
+            OutgoingSms {
+                conversation_id: command_conversation(&gateway),
+                recipients: vec!["peer-local".into()],
+                body: String::from('\0'),
+            },
+            GatewayRoute::RcsLink {
+                gateway_device_id: config.device_id,
+            },
+        )
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&gateway);
+    let echo = server
+        .log
+        .into_iter()
+        .find(|envelope| envelope.command_id == Some(queued.command_id))
+        .unwrap();
+    let cursor = Cursor(gateway.receive_cursor().unwrap().0 + 1);
+
+    assert_eq!(
+        gateway.ingest(&echo, cursor).unwrap(),
+        IngestResult::Duplicate
+    );
+    assert_eq!(gateway.apply_pending(100).unwrap().applied, 0);
+}
+
+#[test]
+fn resend_addressed_to_another_gateway_stays_duplicate_and_has_no_authority() {
+    let (_directory, _vault, config, gateway, _command_id, _observation) =
+        rcs_command("peer-local");
+    let queued = gateway
+        .queue_send(
+            OutgoingSms {
+                conversation_id: command_conversation(&gateway),
+                recipients: vec!["peer-local".into()],
+                body: String::from('\0'),
+            },
+            GatewayRoute::RcsLink {
+                gateway_device_id: DeviceId::new(),
+            },
+        )
+        .unwrap();
+    let connection = encrypted_connection(&config);
+    connection
+        .execute(
+            "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms,retry_of_command_id) VALUES(?,?,?,?,?,?,?)",
+            rusqlite::params![
+                queued.command_id.to_string(),
+                uuid::Uuid::new_v4().to_string(),
+                1_u64,
+                vec![0_u8; 32],
+                "conversation-local",
+                0_i64,
+                CommandId::new().to_string(),
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let mut server = Server::default();
+    server.upload(&gateway);
+    let echo = server
+        .log
+        .into_iter()
+        .find(|envelope| envelope.command_id == Some(queued.command_id))
+        .unwrap();
+    let cursor = Cursor(gateway.receive_cursor().unwrap().0 + 1);
+
+    assert_eq!(
+        gateway.ingest(&echo, cursor).unwrap(),
+        IngestResult::Duplicate
+    );
+    assert_eq!(gateway.apply_pending(100).unwrap().applied, 0);
+    assert_eq!(
+        gateway
+            .begin_rcs_send_attempt(queued.command_id, &observation("peer-local", 1), 1_000)
+            .unwrap_err(),
+        Error::NotFound
+    );
 }

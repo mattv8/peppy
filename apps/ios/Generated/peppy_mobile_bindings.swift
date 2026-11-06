@@ -1044,6 +1044,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, outcome: NativeMmsBackfillRecheckOutcome, conditions: NativeMmsBackfillRecheckConditions) throws 
     
+    /**
+     * Records the local Google Messages lifecycle and publishes its content-free status.
+     */
+    func recordRcsLinkLifecycle(state: NativeRcsLinkState, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, nowMs: Int64) throws 
+    
     func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: UInt64) throws 
     
     func recordSendResult(commandId: String, result: NativeSendResult) throws  -> String
@@ -2783,6 +2788,23 @@ open func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, o
         FfiConverterInt64.lower(nowMs),
         FfiConverterTypeNativeMmsBackfillRecheckOutcome_lower(outcome),
         FfiConverterTypeNativeMmsBackfillRecheckConditions_lower(conditions),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Records the local Google Messages lifecycle and publishes its content-free status.
+     */
+open func recordRcsLinkLifecycle(state: NativeRcsLinkState, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, nowMs: Int64)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_rcs_link_lifecycle(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativeRcsLinkState_lower(state),
+        FfiConverterBool.lower(availability),
+        FfiConverterBool.lower(health),
+        FfiConverterBool.lower(phoneResponsive),
+        FfiConverterInt64.lower(observedAtMs),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 }
 }
@@ -16088,6 +16110,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_mms_backfill_recheck_outcome() != 33966) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_rcs_link_lifecycle() != 61306) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity() != 22677) {

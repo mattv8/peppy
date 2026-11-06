@@ -6,7 +6,9 @@ import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import java.util.concurrent.Executor
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -17,12 +19,17 @@ import org.robolectric.annotation.Config
 class LinkRestartReceiverTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
 
+    @Before fun setUp() {
+        LinkCoreBridge.recorder = { _, _ -> true }
+    }
+
     @After
     fun cleanUp() {
         LinkRestartReceiver.testHooks = RestartReceiverTestHooks()
         LinkRuntime.resetForTest()
         LinkRuntimeTestHooks.engine = null
         LinkRuntimeTestHooks.storeFactory = null
+        LinkCoreBridge.resetForTest()
     }
 
     @Test
@@ -59,6 +66,20 @@ class LinkRestartReceiverTest {
 
         assertEquals(0, starts)
         assertEquals(1, finishes)
+    }
+
+    @Test
+    fun `restart advances the observation generation before reading status`() {
+        val recorded = mutableListOf<String>()
+        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
+        installHandle(StatusHandle(UNLINKED_STATUS))
+        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(executor = Executor(Runnable::run))
+        val token = LinkCoreBridge.observationToken()
+
+        receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_MY_PACKAGE_REPLACED))
+        assertTrue(LinkCoreBridge.recordObservation(token, context, LinkStatus(0, "unlinked", false, false, false, 0, "")))
+
+        assertEquals(listOf("unknown"), recorded)
     }
 
     @Test

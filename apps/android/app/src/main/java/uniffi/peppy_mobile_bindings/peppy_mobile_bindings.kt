@@ -1039,6 +1039,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_mms_backfill_recheck_outcome(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_rcs_link_lifecycle(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_send_result(
@@ -1548,6 +1550,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_gateway_media_failure(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_mms_backfill_recheck_outcome(`ptr`: Long,`acquisitionId`: RustBuffer.ByValue,`nowMs`: Long,`outcome`: RustBuffer.ByValue,`conditions`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_rcs_link_lifecycle(`ptr`: Long,`state`: RustBuffer.ByValue,`availability`: Byte,`health`: Byte,`phoneResponsive`: Byte,`observedAtMs`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_recovery_snapshot_capacity(`ptr`: Long,`highWaterCursor`: RustBuffer.ByValue,`recordCount`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2522,6 +2526,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_mms_backfill_recheck_outcome() and 0xFFFF) != 33966) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_rcs_link_lifecycle() and 0xFFFF) != 61306) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity() and 0xFFFF) != 22677) {
@@ -3704,6 +3711,11 @@ public interface NativeClientInterface {
     fun `recordGatewayMediaFailure`(`attachmentId`: kotlin.String, `reason`: kotlin.String): kotlin.Boolean
     
     fun `recordMmsBackfillRecheckOutcome`(`acquisitionId`: kotlin.String, `nowMs`: kotlin.Long, `outcome`: NativeMmsBackfillRecheckOutcome, `conditions`: NativeMmsBackfillRecheckConditions)
+    
+    /**
+     * Records the local Google Messages lifecycle and publishes its content-free status.
+     */
+    fun `recordRcsLinkLifecycle`(`state`: NativeRcsLinkState, `availability`: kotlin.Boolean, `health`: kotlin.Boolean, `phoneResponsive`: kotlin.Boolean, `observedAtMs`: kotlin.Long, `nowMs`: kotlin.Long)
     
     fun `recordRecoverySnapshotCapacity`(`highWaterCursor`: kotlin.String, `recordCount`: kotlin.ULong)
     
@@ -6197,6 +6209,28 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterLong.lower(`nowMs`),
         FfiConverterTypeNativeMmsBackfillRecheckOutcome.lower(`outcome`),
         FfiConverterTypeNativeMmsBackfillRecheckConditions.lower(`conditions`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Records the local Google Messages lifecycle and publishes its content-free status.
+     */
+    @Throws(MobileBindingsException::class)override fun `recordRcsLinkLifecycle`(`state`: NativeRcsLinkState, `availability`: kotlin.Boolean, `health`: kotlin.Boolean, `phoneResponsive`: kotlin.Boolean, `observedAtMs`: kotlin.Long, `nowMs`: kotlin.Long)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_rcs_link_lifecycle(
+        it,
+        
+        FfiConverterTypeNativeRcsLinkState.lower(`state`),
+        FfiConverterBoolean.lower(`availability`),
+        FfiConverterBoolean.lower(`health`),
+        FfiConverterBoolean.lower(`phoneResponsive`),
+        FfiConverterLong.lower(`observedAtMs`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     }
     

@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{
     net::TcpListener,
-    sync::{Notify, watch},
+    sync::{Notify, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_tungstenite::{
@@ -110,6 +110,7 @@ struct LiveTestServer {
     base_url: String,
     ws_url: String,
     task: JoinHandle<()>,
+    shutdown: Mutex<Option<oneshot::Sender<()>>>,
     _readiness_sender: watch::Sender<bool>,
     owner_token: String,
     owner_device: Uuid,
@@ -218,7 +219,14 @@ impl LiveTestServer {
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            crate::serving::serve(listener, router, async move {
+                let _ = shutdown_receiver.await;
+            })
+            .await
+            .unwrap()
+        });
         Self {
             pool,
             admin,
@@ -226,6 +234,7 @@ impl LiveTestServer {
             base_url: format!("http://{address}"),
             ws_url: format!("ws://{address}/v1/live"),
             task,
+            shutdown: Mutex::new(Some(shutdown_sender)),
             _readiness_sender: readiness_sender,
             owner_token: owner.device_token,
             owner_device: owner.device_id,
@@ -276,6 +285,7 @@ impl LiveTestServer {
     }
 
     async fn shutdown(self) {
+        self.begin_shutdown();
         self.task.abort();
         let _ = self.task.await;
         self.pool.close().await;
@@ -284,6 +294,12 @@ impl LiveTestServer {
             .await
             .unwrap();
         self.admin.close().await;
+    }
+
+    fn begin_shutdown(&self) {
+        if let Some(sender) = self.shutdown.lock().unwrap().take() {
+            let _ = sender.send(());
+        }
     }
 }
 
@@ -684,6 +700,43 @@ async fn native_message_limit_rejects_oversized_valid_json_before_publication() 
     assert_eq!(close.reason, "invalid_live_frame");
     assert_eq!(backend.started.load(Ordering::SeqCst), 1);
     assert_eq!(backend.completed.load(Ordering::SeqCst), 1);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_upgrade_retains_connection_lease_until_disconnect() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let mut socket = server.connect().await;
+    expect_strict_hello(&mut socket).await;
+
+    server.begin_shutdown();
+    let closed = tokio::time::timeout(Duration::from_secs(1), socket.next()).await;
+    assert!(closed.is_ok());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_live_upgrades_without_frames_are_rate_limited() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let mut sockets = Vec::new();
+    for _ in 0..crate::live::LIVE_UPGRADE_RATE_LIMIT {
+        let mut socket = server.connect().await;
+        expect_strict_hello(&mut socket).await;
+        sockets.push(socket);
+    }
+
+    let mut request = server.ws_url.clone().into_client_request().unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", server.owner_token).parse().unwrap(),
+    );
+    let error = connect_async(request).await.unwrap_err();
+    let tungstenite::Error::Http(response) = error else {
+        panic!("expected upgrade admission rejection");
+    };
+    assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+    drop(sockets);
     server.shutdown().await;
 }
 

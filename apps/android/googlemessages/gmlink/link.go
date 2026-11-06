@@ -56,6 +56,7 @@ type Link struct {
 	runCtx              context.Context
 	generation          uint64
 	runGeneration       uint64
+	runExitCode         string
 	pairCancel          context.CancelFunc
 	pairDone            chan struct{}
 	pairOwner           uint64
@@ -78,15 +79,17 @@ type Link struct {
 	completionOutputReady func()
 	pairCleanupReady      func(uint64)
 
-	changes            chan any
-	conversationEvents []conversationEvent
-	conversationIndex  map[string]conversationSummary
-	settings           *gmproto.Settings
-	settingsAt         time.Time
-	settingsVersion    uint64
-	streamEpoch        uint64
-	streamSource       libgm.StreamSource
-	streamOpen         bool
+	changes                chan any
+	conversationEvents     []conversationEvent
+	conversationCandidates map[string][]conversationSummary
+	conversationTargets    map[string][]string
+	indexRevision          uint64
+	settings               *gmproto.Settings
+	settingsAt             time.Time
+	settingsVersion        uint64
+	streamEpoch            uint64
+	streamSource           libgm.StreamSource
+	streamOpen             bool
 
 	ownerVerification *ownerVerification
 }
@@ -146,7 +149,7 @@ func Open(state []byte, host Host) (*Link, error) {
 		return nil, err
 	}
 	zerolog.SetGlobalLevel(zerolog.Disabled)
-	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, seq: decoded.Seq, changes: make(chan any, 64), conversationIndex: make(map[string]conversationSummary)}
+	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, seq: decoded.Seq, changes: make(chan any, 64), conversationCandidates: make(map[string][]conversationSummary), conversationTargets: make(map[string][]string)}
 	if len(decoded.Auth) > 0 && string(decoded.Auth) != "null" {
 		link.auth = libgm.NewAuthData()
 		if err := json.Unmarshal(decoded.Auth, link.auth); err != nil {
@@ -421,7 +424,7 @@ func (link *Link) Run() error {
 	link.retirePhysicalSourceLocked()
 	generation := link.generation
 	client := link.newRuntimeClient(auth, generation)
-	link.client, link.running, link.stopRun, link.runCtx, link.runGeneration = client, true, cancelRun, runCtx, generation
+	link.client, link.running, link.stopRun, link.runCtx, link.runGeneration, link.runExitCode = client, true, cancelRun, runCtx, generation, ""
 	link.mu.Unlock()
 	defer link.cleanupOwnedRun(client, generation)
 	client.SetPingInterval(20 * time.Minute)
@@ -429,12 +432,16 @@ func (link *Link) Run() error {
 	err = client.FetchConfig(configCtx)
 	cancelConfig()
 	if err != nil {
+		if isFatalAuthError(err) {
+			link.signOutIfFor(generation, "signed_out", activeState)
+			return errors.New("fatal_refresh")
+		}
 		if isCookieRefusal(err) {
 			// The transport has already signed the link out for the /web/config redirect.
 			return errors.New("cookie_refused")
 		}
 		if runCtx.Err() != nil {
-			return nil
+			return link.runErrorFor(generation)
 		}
 		link.emitFor(generation, "conn", "temporary_error", 0)
 		return errors.New("run_retryable")
@@ -453,6 +460,9 @@ func (link *Link) Run() error {
 	// bounded only by libgm's 5-minute client timeout. This is a documented exception (ruling R34).
 	// The long poll takes the run context, so Stop ends it.
 	if err := client.Connect(runCtx); err != nil {
+		if runCtx.Err() != nil {
+			return link.runErrorFor(generation)
+		}
 		if isFatalAuthError(err) {
 			link.signOutIfFor(generation, "signed_out", activeState)
 			return errors.New("fatal_refresh")
@@ -463,12 +473,21 @@ func (link *Link) Run() error {
 	link.mu.Lock()
 	if link.generation != generation || link.client != client || link.runGeneration != generation {
 		link.mu.Unlock()
-		return nil
+		return link.runErrorFor(generation)
 	}
 	link.healthy = true
 	link.mu.Unlock()
 	link.emitFor(generation, "conn", "ready", 0)
 	<-runCtx.Done()
+	return link.runErrorFor(generation)
+}
+
+func (link *Link) runErrorFor(generation uint64) error {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if link.runGeneration == generation && link.runExitCode == "event_overflow" {
+		return errors.New("event_overflow")
+	}
 	return nil
 }
 
@@ -481,6 +500,7 @@ func (link *Link) cleanupOwnedRun(client *libgm.Client, owner uint64) {
 		link.client = nil
 		link.runCtx = nil
 		link.runGeneration = 0
+		link.runExitCode = ""
 		link.stopRun = nil
 		link.healthy = false
 		link.running = false
@@ -526,18 +546,20 @@ func (link *Link) RefreshConversationIndex() error {
 	if !link.hasM2Verification() {
 		return errors.New("m2_verification_required")
 	}
+	link.mu.Lock()
+	indexRevision := link.indexRevision
+	link.mu.Unlock()
+	ctx, cancel := context.WithTimeout(runCtx, conversationTimeout)
+	defer cancel()
+	var conversations []*gmproto.Conversation
 	for _, folder := range []gmproto.ListConversationsRequest_Folder{gmproto.ListConversationsRequest_INBOX, gmproto.ListConversationsRequest_ARCHIVE, gmproto.ListConversationsRequest_SPAM_BLOCKED} {
 		var cursor *gmproto.Cursor
 		for page := 0; page < conversationPageLimit; page++ {
-			ctx, cancel := context.WithTimeout(runCtx, conversationTimeout)
 			response, err := client.ListConversations(ctx, &gmproto.ListConversationsRequest{Count: conversationPageSize, Folder: folder, Cursor: cursor})
-			cancel()
 			if err != nil || response == nil {
 				return errors.New("conversation_lookup_failed")
 			}
-			if !link.indexConversationsFor(generation, streamEpoch, response.GetConversations()) {
-				return errors.New("link_unavailable")
-			}
+			conversations = append(conversations, response.GetConversations()...)
 			cursor = response.GetCursor()
 			if cursor == nil {
 				break
@@ -546,6 +568,9 @@ func (link *Link) RefreshConversationIndex() error {
 				return errors.New("conversation_lookup_incomplete")
 			}
 		}
+	}
+	if !link.replaceConversationIndexFor(generation, streamEpoch, indexRevision, conversations) {
+		return errors.New("conversation_lookup_stale")
 	}
 	return nil
 }
@@ -588,10 +613,23 @@ func (link *Link) ResolveExistingConversation(target string) string {
 		return conversationJSON("m2_verification_required")
 	}
 	link.mu.Lock()
-	summary, found := link.conversationIndex[target]
-	link.mu.Unlock()
-	if found {
-		return resolvedConversationJSON(summary.id)
+	defer link.mu.Unlock()
+	summaries := link.conversationCandidates[target]
+	var found string
+	for _, summary := range summaries {
+		if !summary.eligible {
+			continue
+		}
+		if found != "" {
+			return conversationJSON("conversation_ambiguous")
+		}
+		found = summary.id
+	}
+	if found != "" {
+		return resolvedConversationJSON(found)
+	}
+	if len(summaries) > 0 {
+		return conversationJSON("conversation_ambiguous")
 	}
 	return conversationJSON("implicit_creation_refused")
 }
@@ -767,7 +805,8 @@ func (link *Link) streamSourceMatchesLocked(source libgm.StreamSource) bool {
 func (link *Link) revokeLocked() {
 	link.generation++
 	link.ownerVerification = nil
-	link.conversationIndex = make(map[string]conversationSummary)
+	link.conversationCandidates = make(map[string][]conversationSummary)
+	link.conversationTargets = make(map[string][]string)
 	link.conversationEvents = nil
 	link.retirePhysicalSourceLocked()
 	if link.stopRun != nil {
@@ -921,7 +960,8 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		link.streamSource = value.Source
 		link.streamOpen = true
 		link.ownerVerification = nil
-		link.conversationIndex = make(map[string]conversationSummary)
+		link.conversationCandidates = make(map[string][]conversationSummary)
+		link.conversationTargets = make(map[string][]string)
 		link.mu.Unlock()
 		return
 	case *libgm.StreamRetired:
@@ -953,30 +993,35 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 	switch event.(type) {
 	case *libgm.StreamRetired, *libgm.ContinuityLost:
 		link.retirePhysicalSourceLocked()
-		link.conversationIndex = make(map[string]conversationSummary)
+		link.conversationCandidates = make(map[string][]conversationSummary)
+		link.conversationTargets = make(map[string][]string)
 		link.ownerVerification = nil
 	default:
 		if invalidatesAtIngress(event) {
 			link.invalidateEvidenceLocked()
-			link.conversationIndex = make(map[string]conversationSummary)
+			link.conversationCandidates = make(map[string][]conversationSummary)
+			link.conversationTargets = make(map[string][]string)
 		}
 		if settings, ok := event.(*libgm.WrappedSettings); ok && settings != nil && !settings.IsOld && settings.Settings != nil && settings.Settings.GetSIMCards() != nil {
 			link.invalidateEvidenceLocked()
 			link.settingsVersion++
-			link.conversationIndex = make(map[string]conversationSummary)
+			link.conversationCandidates = make(map[string][]conversationSummary)
+			link.conversationTargets = make(map[string][]string)
 		}
 	}
 	var completion *terminalCompletion
 	if terminalAtIngress(event) {
 		link.invalidateEvidenceLocked()
 		link.healthy, link.responding, link.lastOKMS = false, false, 0
-		link.conversationIndex = make(map[string]conversationSummary)
+		link.conversationCandidates = make(map[string][]conversationSummary)
+		link.conversationTargets = make(map[string][]string)
 		completion = link.commitTerminalLocked(generation, event)
 	}
 	if _, ok := event.(*events.PhoneNotResponding); ok {
 		link.invalidateEvidenceLocked()
 		link.healthy, link.responding, link.lastOKMS = false, false, 0
-		link.conversationIndex = make(map[string]conversationSummary)
+		link.conversationCandidates = make(map[string][]conversationSummary)
+		link.conversationTargets = make(map[string][]string)
 	}
 	if invalidatesOwnerEvidence(event) {
 		link.ownerVerification = nil
@@ -997,8 +1042,8 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 	case link.changes <- queued:
 		link.mu.Unlock()
 	default:
+		link.retireFatalLocked(generation, "event_overflow", false)
 		link.mu.Unlock()
-		link.stopFatalFor(generation, "event_overflow", false)
 	}
 }
 
@@ -1349,19 +1394,33 @@ func (link *Link) signOutIfFor(generation uint64, code string, allowed func(stri
 }
 
 func (link *Link) stopFatalFor(generation uint64, code string, wipe bool) {
+	link.retireFatalFor(generation, code, wipe)
+}
+
+func (link *Link) retireFatalFor(generation uint64, code string, wipe bool) (uint64, bool) {
 	link.mu.Lock()
+	retirementGeneration, retired := link.retireFatalLocked(generation, code, wipe)
+	link.mu.Unlock()
+	if retired {
+		link.emitFor(retirementGeneration, "link", code, 0)
+	}
+	return retirementGeneration, retired
+}
+
+func (link *Link) retireFatalLocked(generation uint64, code string, wipe bool) (uint64, bool) {
 	if generation != link.generation {
-		link.mu.Unlock()
-		return
+		return 0, false
 	}
 	link.stopCode = code
+	if code == "event_overflow" && link.runGeneration == generation {
+		link.runExitCode = code
+	}
 	if wipe {
 		link.state, link.pairingFrom, link.auth = stateSignedOut, "", libgm.NewAuthData()
 	}
 	link.revokeLocked()
 	retirementGeneration := link.generation
-	link.mu.Unlock()
-	link.emitFor(retirementGeneration, "link", code, 0)
+	return retirementGeneration, true
 }
 
 func (link *Link) transition(state, code string) {
@@ -1433,7 +1492,8 @@ func (link *Link) recordHealthFor(generation uint64, ok bool, latency int64) {
 	link.healthy = ok
 	if !ok {
 		link.invalidateEvidenceLocked()
-		link.conversationIndex = make(map[string]conversationSummary)
+		link.conversationCandidates = make(map[string][]conversationSummary)
+		link.conversationTargets = make(map[string][]string)
 		link.ownerVerification = nil
 	} else {
 		link.lastOKMS = time.Now().UnixMilli()
@@ -1638,6 +1698,8 @@ func (code pairFailure) Error() string { return string(code) }
 func (link *Link) pairResultError(owner uint64, err error, relink bool) error {
 	if relink && isCookieRefusal(err) {
 		link.signOutIfFor(owner, "cookie_refused", pairingState)
+	} else if relink && isFatalAuthError(err) {
+		link.signOutIfFor(owner, "signed_out", pairingState)
 	}
 	return pairFailure(pairCode(err))
 }

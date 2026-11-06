@@ -294,6 +294,7 @@ pub(super) struct ApiState {
     live_publish_timeout: Duration,
     live_readiness: tokio::sync::watch::Receiver<bool>,
     live_rate_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
+    live_upgrade_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
 }
 struct PeerAddress(Option<IpAddr>);
 
@@ -728,6 +729,9 @@ fn build_router_with_live_backend(
         live_readiness,
         live_rate_limiter: Arc::new(std::sync::Mutex::new(
             crate::live::LiveRateLimiter::default(),
+        )),
+        live_upgrade_limiter: Arc::new(std::sync::Mutex::new(
+            crate::live::LiveRateLimiter::with_limit(crate::live::LIVE_UPGRADE_RATE_LIMIT),
         )),
     });
     let manual_state = invitation_origin
@@ -2737,6 +2741,8 @@ async fn live_websocket(
     State(state): State<ApiState>,
     PeerAddress(peer): PeerAddress,
     headers: HeaderMap,
+    lease: Option<Extension<crate::serving::ConnectionLease>>,
+    shutdown: Option<Extension<tokio::sync::watch::Receiver<bool>>>,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
     // Authenticate before deciding whether the relay is available, so failed
@@ -2760,11 +2766,34 @@ async fn live_websocket(
             "live_unavailable",
         ));
     }
+    if !state
+        .live_upgrade_limiter
+        .lock()
+        .expect("live upgrade limiter lock poisoned")
+        .allow(DeviceId(principal.device), peer)
+    {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "live_upgrade_rate_limited",
+        ));
+    }
     let readiness = state.live_readiness.clone();
+    let lease = lease.map(|Extension(lease)| lease);
+    let shutdown = shutdown.map(|Extension(shutdown)| shutdown);
     Ok(upgrade
         .max_message_size(8_192)
         .max_frame_size(8_192)
-        .on_upgrade(move |socket| live_session(socket, state, principal, peer, backend, readiness))
+        .on_upgrade(move |socket| {
+            live_session(
+                socket,
+                state,
+                principal,
+                peer,
+                backend,
+                readiness,
+                LiveSessionLifetime { lease, shutdown },
+            )
+        })
         .into_response())
 }
 
@@ -2775,6 +2804,7 @@ async fn live_session(
     peer: Option<IpAddr>,
     backend: Arc<dyn crate::live::LiveBackend>,
     readiness: tokio::sync::watch::Receiver<bool>,
+    lifetime: LiveSessionLifetime,
 ) {
     let registration = state
         .live_hub
@@ -2791,6 +2821,7 @@ async fn live_session(
             outgoing: registration.receiver,
             cancellation: registration.cancellation,
             readiness,
+            shutdown: lifetime.shutdown,
         },
     )
     .await;
@@ -2799,6 +2830,7 @@ async fn live_session(
         DeviceId(principal.device),
         generation,
     );
+    drop(lifetime.lease);
 }
 
 async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
@@ -2811,6 +2843,7 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
         mut outgoing,
         mut cancellation,
         mut readiness,
+        mut shutdown,
     } = session;
     let hello = match serde_json::to_string(&LiveHelloV2::new()) {
         Ok(hello) => hello,
@@ -2832,6 +2865,7 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
     let mut challenge: Option<Vec<u8>> = None;
     loop {
         tokio::select! {
+            _ = wait_for_shutdown(&mut shutdown) => return,
             changed = cancellation.changed() => {
                 let _ = changed;
                 return;
@@ -2939,6 +2973,12 @@ struct LiveSession {
     outgoing: tokio::sync::mpsc::Receiver<LiveFrameV2>,
     cancellation: tokio::sync::watch::Receiver<bool>,
     readiness: tokio::sync::watch::Receiver<bool>,
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+}
+
+struct LiveSessionLifetime {
+    lease: Option<crate::serving::ConnectionLease>,
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 fn live_now_ms() -> u64 {

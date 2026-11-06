@@ -12,7 +12,7 @@ internal object LinkSignInRuntime {
 
     fun acquireLease(): Lease? = synchronized(lock) {
         if (signInBlocked || lease != null) return null
-        Lease(++nextGeneration).also { lease = it }
+        Lease().also { lease = it }
     }
 
     fun ownsLease(candidate: Lease?): Boolean = synchronized(lock) { candidate != null && lease === candidate }
@@ -77,11 +77,9 @@ internal object LinkSignInRuntime {
         LinkRuntime.endPairing()
     }
 
-    class Lease internal constructor(val generation: Long) {
+    class Lease internal constructor() {
         internal var webAccessed = false
         internal var cleanupStarted = false
     }
     class PairingAttempt internal constructor(val token: Long)
-
-    private var nextGeneration = 0L
 }

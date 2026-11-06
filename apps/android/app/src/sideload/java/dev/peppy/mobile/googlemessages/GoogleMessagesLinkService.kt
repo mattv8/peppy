@@ -26,18 +26,22 @@ internal data class ServiceTestHooks(
     val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
     val sleeper: (Long) -> Unit = Thread::sleep,
     val notificationExecutor: Executor = DEFAULT_NOTIFICATION_EXECUTOR,
+    val closeExecutor: Executor = DEFAULT_CLOSE_EXECUTOR,
     val notificationPublished: (GoogleMessagesLinkService) -> Unit = {},
+    val afterStatusRead: () -> Unit = {},
     val beforeRun: () -> Unit = {},
     val workerFinished: () -> Unit = {},
 )
 
 private val DEFAULT_NOTIFICATION_EXECUTOR = Executors.newSingleThreadExecutor()
+private val DEFAULT_CLOSE_EXECUTOR = Executors.newSingleThreadExecutor()
 
 class GoogleMessagesLinkService : Service() {
     private val lock = Any()
     private val backoff = RunBackoff()
     private var worker: Thread? = null
     private var workerLease: LinkHandleLease? = null
+    private var leaseReservation = 0L
     private var requestedGeneration = 0L
     private var lifecycleGeneration = 0L
     private var lastStartId = 0
@@ -92,11 +96,13 @@ class GoogleMessagesLinkService : Service() {
 
     private fun waitForLinkedRun() {
         val waitStartedAt = testHooks.elapsedRealtime()
-        val lease = LinkRuntime.handleLease(this) ?: return
-        if (!registerLease(lease)) return
+        val lease = acquireWorkerLease() ?: return
         val handle = lease.handle
         while (isCurrent(lifecycleGeneration)) {
+            val token = LinkCoreBridge.observationToken()
             val status = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
+            testHooks.afterStatusRead()
+            if (!LinkCoreBridge.recordObservation(token, applicationContext, status)) return
             publishStatus(status)
             when (nextServiceAction(status, LinkRuntime.pairingInProgress.get(), status.running)) {
                 ServiceAction.STOP -> {
@@ -112,26 +118,32 @@ class GoogleMessagesLinkService : Service() {
         }
     }
 
-    private fun registerLease(lease: LinkHandleLease): Boolean {
-        val accepted = synchronized(lock) {
-            if (cancelled || active !== this) false else {
-                workerLease = lease
-                true
-            }
+    private fun acquireWorkerLease(): LinkHandleLease? {
+        val reservation = synchronized(lock) {
+            if (cancelled || active !== this) return null
+            ++leaseReservation
         }
-        if (!accepted) LinkRuntime.closeHandleForServiceStop(lease)
-        return accepted
+        if (!LinkCoreBridge.recordPreStart(applicationContext)) return null
+        val lease = LinkRuntime.handleLease(this) ?: return null
+        return synchronized(lock) {
+            if (cancelled || active !== this || leaseReservation != reservation) null
+            else lease.also { workerLease = it }
+        }
     }
 
     private fun runWithRetry(handle: LinkHandle) {
         while (isCurrent(lifecycleGeneration)) {
+            val beforeRunToken = LinkCoreBridge.observationToken()
             val beforeRun = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
+            if (!LinkCoreBridge.recordObservation(beforeRunToken, applicationContext, beforeRun)) return
             if (beforeRun.state != "linked") return
             publishStatus(beforeRun)
             testHooks.beforeRun()
             val failure = runCatching { handle.run() }.exceptionOrNull()
             if (!isCurrent(lifecycleGeneration) || filterReasonCode(failure?.message) in STOP_CODES) return
+            val afterRunToken = LinkCoreBridge.observationToken()
             val afterRun = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
+            if (!LinkCoreBridge.recordObservation(afterRunToken, applicationContext, afterRun)) return
             publishStatus(afterRun)
             if (afterRun.state != "linked") {
                 publishAttentionIfNeeded(afterRun)
@@ -151,10 +163,15 @@ class GoogleMessagesLinkService : Service() {
     private fun cancelWorker() {
         cancelled = true
         val captured = synchronized(lock) {
+            leaseReservation += 1
             worker?.interrupt()
-            workerLease
+            workerLease?.also { workerLease = null }
         }
-        captured?.let(LinkRuntime::closeHandleForServiceStop)
+        captured?.let { lease ->
+            LinkRuntime.detachHandleForServiceStop(lease)?.let { handle ->
+                testHooks.closeExecutor.execute { LinkRuntime.closeDetachedHandle(handle) }
+            }
+        }
     }
 
     private fun joinWorker() {
@@ -193,10 +210,10 @@ class GoogleMessagesLinkService : Service() {
     private fun publishAttentionIfNeeded(status: LinkStatus) {
         if (status.state !in ATTENTION_STATES) return
         val generation = lifecycleGeneration
-        testHooks.notificationExecutor.execute {
-            if (!isCurrent(generation)) return@execute
+        synchronized(activeLock) {
+            if (!isCurrent(generation)) return
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
-            if (!isCurrent(generation)) return@execute
+            if (!isCurrent(generation)) return
             testHooks.notificationPublished(this)
             postAttentionNotification(status)
         }
@@ -238,8 +255,10 @@ class GoogleMessagesLinkService : Service() {
         private const val MAX_PAIRING_WAIT_MS = 30_000L + 30_000L + 300_000L + 30_000L
         private val STOP_CODES = setOf("link_closed", "unlink_in_progress", "pair_cancelled", "run_refused")
         private val ATTENTION_STATES = setOf("needs_relink", "signed_out")
+        private val PRE_START_STATUS = LinkStatus(0, "unknown", false, false, false, 0, "")
         @Volatile private var active: GoogleMessagesLinkService? = null
         @Volatile private var serviceGeneration = 0L
+        private val activeLock = Any()
         internal var testHooks = ServiceTestHooks()
 
         fun createNotificationChannel(context: Context) {
@@ -260,13 +279,15 @@ class GoogleMessagesLinkService : Service() {
                 service.refreshNotificationAfterEvent()
             }
         }
-        @Synchronized private fun replaceActive(service: GoogleMessagesLinkService): Long {
+        private fun replaceActive(service: GoogleMessagesLinkService): Long = synchronized(activeLock) {
             active?.cancelWorker()
             serviceGeneration += 1
             active = service
-            return serviceGeneration
+            serviceGeneration
         }
-        @Synchronized private fun clearActive(service: GoogleMessagesLinkService) { if (active === service) active = null }
+        private fun clearActive(service: GoogleMessagesLinkService) = synchronized(activeLock) {
+            if (active === service) active = null
+        }
         private fun canPostNotifications(context: Context): Boolean =
             (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) &&
                 NotificationManagerCompat.from(context).areNotificationsEnabled()

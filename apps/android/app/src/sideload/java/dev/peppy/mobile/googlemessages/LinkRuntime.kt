@@ -13,8 +13,10 @@ internal data class LinkHandleLease(val handle: LinkHandle, val generation: Long
 
 object LinkRuntime {
     private val callbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val nativeOperationLock = Any()
     private val changeCounter = MutableStateFlow(0L)
     private var cachedHandle: LinkHandle? = null
+    private var closingHandle: LinkHandle? = null
     private var handleGeneration = 0L
     private var pairingGeneration = 0L
 
@@ -22,41 +24,66 @@ object LinkRuntime {
     val changes: StateFlow<Long> = changeCounter
     val pairingInProgress = AtomicBoolean(false)
 
-    fun handle(context: Context): LinkOpenResult = synchronized(this) {
-        cachedHandle?.let { return LinkOpenResult.Open(it) }
-        val engine = LinkRuntimeTestHooks.engine ?: LinkEngines.current
-        if (!engine.available) return LinkOpenResult.Unavailable
-        val store = store(context)
-        val state = try {
-            store.read()
-        } catch (error: Exception) {
-            return LinkOpenResult.Unreadable(filterReasonCode(error.message))
-        }
-        return try {
-            engine.open(state, host(store, handleGeneration + 1)).also {
-                handleGeneration += 1
-                cachedHandle = it
-            }.let(LinkOpenResult::Open)
-        } catch (error: Exception) {
-            if (error.message == "link_unavailable") LinkOpenResult.Unavailable
-            else LinkOpenResult.Unreadable(filterReasonCode(error.message))
+    fun handle(context: Context): LinkOpenResult {
+        while (true) {
+            awaitNoClosingHandle()
+            LinkRuntimeTestHooks.afterClosingCheck?.invoke()
+            val opened = synchronized(nativeOperationLock) {
+                val closing = synchronized(this) {
+                    cachedHandle?.let { return LinkOpenResult.Open(it) }
+                    closingHandle != null
+                }
+                if (closing) null else {
+                    val engine = LinkRuntimeTestHooks.engine ?: LinkEngines.current
+                    if (!engine.available) LinkOpenResult.Unavailable else {
+                        val store = store(context)
+                        val state = try { store.read() } catch (error: Exception) {
+                            return@synchronized LinkOpenResult.Unreadable(filterReasonCode(error.message))
+                        }
+                        try {
+                            val handle = engine.open(state, host(store, nextHandleGeneration()))
+                            synchronized(this) {
+                                handleGeneration += 1
+                                cachedHandle = handle
+                            }
+                            LinkOpenResult.Open(handle)
+                        } catch (error: Exception) {
+                            if (error.message == "link_unavailable") LinkOpenResult.Unavailable
+                            else LinkOpenResult.Unreadable(filterReasonCode(error.message))
+                        }
+                    }
+                }
+            }
+            if (opened != null) return opened
         }
     }
 
     fun resetLocalState(context: Context) {
         GoogleMessagesLinkService.stopAndAwait(context)
-        synchronized(this) {
-            cachedHandle?.close()
-            cachedHandle = null
-            handleGeneration += 1
+        awaitNoClosingHandle()
+        synchronized(nativeOperationLock) {
+            val handle = synchronized(this) {
+                val current = cachedHandle
+                cachedHandle = null
+                handleGeneration += 1
+                emoji.value = null
+                pairingInProgress.set(false)
+                pairingGeneration += 1
+                current
+            }
+            handle?.close()
             store(context).wipe()
-            emoji.value = null
-            pairingInProgress.set(false)
-            pairingGeneration += 1
+            if (!recordUnlinked(context)) throw IllegalStateException("persist_failed")
         }
         recordEvent("link", "reset_local", 0)
         signalChange()
     }
+
+    fun recordPreStart(context: Context): Boolean =
+        LinkCoreBridge.recordPreStart(context.applicationContext)
+
+    fun recordUnlinked(context: Context): Boolean =
+        LinkCoreBridge.recordIfNeeded(context.applicationContext, LinkStatus(0, "unlinked", false, false, false, 0, ""))
 
     internal fun handleLease(context: Context): LinkHandleLease? {
         val opened = (handle(context) as? LinkOpenResult.Open)?.handle ?: return null
@@ -65,12 +92,29 @@ object LinkRuntime {
         }
     }
 
-    /** Closes the captured handle, but invalidates the global cache only while the lease still owns it. */
-    internal fun closeHandleForServiceStop(lease: LinkHandleLease) = synchronized(this) {
-        lease.handle.close()
-        if (lease.generation == handleGeneration && lease.handle === cachedHandle) {
-            cachedHandle = null
-            handleGeneration += 1
+    /** Detaches the captured handle only while [lease] owns it. Native close is always outside the runtime monitor. */
+    internal fun detachHandleForServiceStop(lease: LinkHandleLease): LinkHandle? = synchronized(this) {
+        if (lease.generation != handleGeneration || lease.handle !== cachedHandle) return null
+        cachedHandle = null
+        closingHandle = lease.handle
+        handleGeneration += 1
+        lease.handle
+    }
+
+    internal fun closeHandleForServiceStop(lease: LinkHandleLease) {
+        detachHandleForServiceStop(lease)?.let(::closeDetachedHandle)
+    }
+
+    internal fun closeDetachedHandle(handle: LinkHandle) = synchronized(nativeOperationLock) {
+        try {
+            handle.close()
+        } finally {
+            synchronized(this) {
+                if (closingHandle === handle) {
+                    closingHandle = null
+                    (this@LinkRuntime as java.lang.Object).notifyAll()
+                }
+            }
         }
     }
 
@@ -99,14 +143,21 @@ object LinkRuntime {
         endPairing(pairingGeneration)
     }
 
-    internal fun resetForTest() = synchronized(this) {
+    internal fun resetForTest() {
         GoogleMessagesLinkService.stopActiveWorker()
-        cachedHandle?.close()
-        cachedHandle = null
-        handleGeneration += 1
-        emoji.value = null
-        changeCounter.value = 0
-        pairingInProgress.set(false)
+        awaitNoClosingHandle()
+        synchronized(nativeOperationLock) {
+            val captured = synchronized(this) {
+                val current = cachedHandle
+                cachedHandle = null
+                handleGeneration += 1
+                emoji.value = null
+                changeCounter.value = 0
+                pairingInProgress.set(false)
+                current
+            }
+            captured?.close()
+        }
     }
 
     private fun store(context: Context): LinkStateStorage =
@@ -161,6 +212,12 @@ object LinkRuntime {
     }
 
     private fun callbackExecutor(): Executor = LinkRuntimeTestHooks.callbackExecutor ?: callbackExecutor
+
+    private fun nextHandleGeneration(): Long = synchronized(this) { handleGeneration + 1 }
+
+    private fun awaitNoClosingHandle() = synchronized(this) {
+        while (closingHandle != null) (this@LinkRuntime as java.lang.Object).wait()
+    }
 }
 
 internal interface LinkStateStorage {
@@ -185,6 +242,7 @@ internal object LinkRuntimeTestHooks {
     @Volatile var storeFactory: ((Context) -> LinkStateStorage)? = null
     @Volatile var eventRecorder: ((String, String, Long) -> Unit)? = null
     @Volatile var callbackExecutor: Executor? = null
+    @Volatile var afterClosingCheck: (() -> Unit)? = null
 }
 
 internal object LinkRuntimeEventSink {

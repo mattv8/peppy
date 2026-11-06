@@ -130,6 +130,7 @@ mod tests {
                 observed_at_ms,
                 capability_revision: 1,
                 feature_bits: 7,
+                linked_since_ms: Some(observed_at_ms),
             },
             current,
         }

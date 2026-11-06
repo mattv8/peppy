@@ -488,6 +488,9 @@ end
 
 workflow_text = Dir[File.join(root, 'workflows', '*.{yml,yaml}')].sort.map { |path| File.read(path) }.join("\n")
 assert.call(!workflow_text.include?('peppyGoogleMessagesLink=false'), 'workflows must not disable the Google Messages link with a default-off flag')
+assert.call(!workflow_text.include?('-PpeppyGoogleMessagesLink=true'), 'release workflows must not explicitly enable the Google Messages link')
+android_build_script = File.read(File.join(root, '..', 'apps', 'android', 'app', 'build.gradle.kts'))
+assert.call(android_build_script.include?('require(explicit != true) { "peppyGoogleMessagesLink cannot be enabled for Play distribution" }'), 'Play distribution must reject the Google Messages link during configuration')
 workflow_text.each_line.select { |line| line.include?(':app:bundleRelease') }.each do |line|
   assert.call(line.include?('-PpeppyDistribution=play'), 'every Play bundle invocation must explicitly select the Play distribution')
 end

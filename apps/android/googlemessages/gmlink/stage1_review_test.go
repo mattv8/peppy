@@ -327,7 +327,7 @@ func TestRetiredLookupResponseCannotPublishIntoReplacementIndex(t *testing.T) {
 	link.mu.Lock()
 	link.generation = 20
 	link.runGeneration = 20
-	link.conversationIndex["replacement"] = conversationSummary{id: "replacement-conversation"}
+	link.conversationCandidates["replacement"] = []conversationSummary{{id: "replacement-conversation"}}
 	link.mu.Unlock()
 	oldConversation := &gmproto.Conversation{
 		ConversationID: "retired-conversation",
@@ -341,10 +341,10 @@ func TestRetiredLookupResponseCannotPublishIntoReplacementIndex(t *testing.T) {
 		t.Fatal("retired lookup response reported successful publication")
 	}
 	link.mu.Lock()
-	_, oldPublished := link.conversationIndex["retired-target"]
-	replacement := link.conversationIndex["replacement"]
+	_, oldPublished := link.conversationCandidates["retired-target"]
+	replacement := link.conversationCandidates["replacement"]
 	link.mu.Unlock()
-	if oldPublished || replacement.id != "replacement-conversation" {
+	if oldPublished || len(replacement) != 1 || replacement[0].id != "replacement-conversation" {
 		t.Fatal("retired lookup response mutated replacement index")
 	}
 }
@@ -352,14 +352,15 @@ func TestRetiredLookupResponseCannotPublishIntoReplacementIndex(t *testing.T) {
 func TestHealthFailureIngressFencesQueuedSettings(t *testing.T) {
 	host := newSafetyHost()
 	link := &Link{
-		host:              host,
-		state:             stateLinked,
-		auth:              libgm.NewAuthData(),
-		generation:        5,
-		runGeneration:     5,
-		healthy:           true,
-		changes:           make(chan any, 1),
-		conversationIndex: make(map[string]conversationSummary),
+		host:                   host,
+		state:                  stateLinked,
+		auth:                   libgm.NewAuthData(),
+		generation:             5,
+		runGeneration:          5,
+		healthy:                true,
+		changes:                make(chan any, 1),
+		conversationCandidates: make(map[string][]conversationSummary),
+		conversationTargets:    make(map[string][]string),
 	}
 	link.queueEventFor(5, &libgm.WrappedSettings{Settings: completeSyntheticSettings()})
 	queued := <-link.changes

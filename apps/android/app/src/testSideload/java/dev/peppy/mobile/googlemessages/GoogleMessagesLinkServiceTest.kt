@@ -5,6 +5,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -17,12 +18,18 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class GoogleMessagesLinkServiceTest {
+    @Before
+    fun setUp() {
+        LinkCoreBridge.recorder = { _, _ -> true }
+    }
+
     @After
     fun cleanUp() {
         GoogleMessagesLinkService.stopActiveWorker()
         LinkRuntime.resetForTest()
         LinkRuntimeTestHooks.engine = null
         LinkRuntimeTestHooks.storeFactory = null
+        LinkCoreBridge.resetForTest()
         GoogleMessagesLinkService.testHooks = ServiceTestHooks()
     }
 
@@ -50,6 +57,7 @@ class GoogleMessagesLinkServiceTest {
         controller.destroy()
 
         assertTrue(interruptObserved.await(1, TimeUnit.SECONDS))
+        assertTrue(handle.closeCalled.await(1, TimeUnit.SECONDS))
         assertTrue(handle.closed)
         assertTrue(handle.runRejected.await(1, TimeUnit.SECONDS))
         assertEquals(1, handle.runCalls.get())
@@ -158,6 +166,149 @@ class GoogleMessagesLinkServiceTest {
         controller.destroy()
     }
 
+    @Test
+    fun `terminal notification is detached and published before destroy`() {
+        val executor = QueueExecutor()
+        val published = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            notificationExecutor = executor,
+            notificationPublished = { published.countDown() },
+            workerFinished = { finished.countDown() },
+        )
+        installEngine(StatusHandle(NEEDS_RELINK_STATUS))
+
+        val controller = startService()
+
+        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        controller.destroy()
+        assertTrue(published.await(1, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun `failed lifecycle fence prevents native link open`() {
+        var opens = 0
+        val finished = CountDownLatch(1)
+        LinkCoreBridge.recorder = { _, _ -> false }
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(workerFinished = { finished.countDown() })
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = StatusHandle(UNLINKED_STATUS).also { opens++ }
+        }
+        LinkRuntimeTestHooks.storeFactory = { EmptyStore }
+
+        startService()
+
+        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        assertEquals(0, opens)
+    }
+
+    @Test
+    fun `pairing service observation does not record unlinked`() {
+        val recordedStates = mutableListOf<String>()
+        val finished = CountDownLatch(1)
+        var elapsed = 0L
+        LinkCoreBridge.recorder = { _, status -> synchronized(recordedStates) { recordedStates += status.state }; true }
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            elapsedRealtime = { elapsed },
+            sleeper = { elapsed += it },
+            workerFinished = { finished.countDown() },
+        )
+        installEngine(StatusHandle(UNLINKED_STATUS))
+        val pairing = LinkRuntime.tryBeginPairing()!!
+
+        startService()
+
+        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        assertFalse(synchronized(recordedStates) { "unlinked" in recordedStates })
+        assertTrue(LinkRuntime.endPairing(pairing))
+    }
+
+    @Test
+    fun `unlinked status read before a completed pairing fence is not recorded`() {
+        val statusRead = CountDownLatch(1)
+        val allowSubmission = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val recordedStates = mutableListOf<String>()
+        LinkCoreBridge.recorder = { _, status -> synchronized(recordedStates) { recordedStates += status.state }; true }
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            afterStatusRead = {
+                statusRead.countDown()
+                allowSubmission.await()
+            },
+            workerFinished = { finished.countDown() },
+        )
+        installEngine(StatusHandle(UNLINKED_STATUS))
+
+        startService()
+
+        assertTrue(statusRead.await(1, TimeUnit.SECONDS))
+        val pairing = LinkRuntime.tryBeginPairing()!!
+        assertTrue(LinkCoreBridge.recordPreStart(androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()))
+        assertTrue(LinkRuntime.endPairing(pairing))
+        allowSubmission.countDown()
+        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        assertFalse(synchronized(recordedStates) { "unlinked" in recordedStates })
+    }
+
+    @Test
+    fun `terminal after run is recorded before destroy can suppress notification`() {
+        listOf(NEEDS_RELINK_STATUS, SIGNED_OUT_STATUS).forEach { terminalStatus ->
+            val recordEntered = CountDownLatch(1)
+            val releaseRecord = CountDownLatch(1)
+            val terminalRecorded = CountDownLatch(1)
+            val notificationExecutor = QueueExecutor()
+            var publications = 0
+            LinkCoreBridge.recorder = { _, status ->
+                if (status.state == LinkStatus.parse(terminalStatus).state) {
+                    terminalRecorded.countDown()
+                    recordEntered.countDown()
+                    releaseRecord.await()
+                }
+                true
+            }
+            GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+                notificationExecutor = notificationExecutor,
+                notificationPublished = { publications++ },
+            )
+            installEngine(TerminalAfterRunHandle(terminalStatus))
+            val controller = startService()
+            assertTrue(recordEntered.await(1, TimeUnit.SECONDS))
+
+            controller.destroy()
+            releaseRecord.countDown()
+
+            assertTrue(terminalRecorded.await(1, TimeUnit.SECONDS))
+            assertEquals(0, publications)
+            LinkRuntime.resetForTest()
+            LinkCoreBridge.resetForTest()
+        }
+    }
+
+    @Test
+    fun `destroy returns while worker is blocked opening native handle`() {
+        val openEntered = CountDownLatch(1)
+        val releaseOpen = CountDownLatch(1)
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle {
+                openEntered.countDown()
+                releaseOpen.await()
+                return StatusHandle(UNLINKED_STATUS)
+            }
+        }
+        LinkRuntimeTestHooks.storeFactory = { EmptyStore }
+        val controller = startService()
+        assertTrue(openEntered.await(1, TimeUnit.SECONDS))
+
+        val startedAt = System.nanoTime()
+        controller.destroy()
+        val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+
+        assertTrue("destroy blocked for $elapsedMs ms", elapsedMs < 250)
+        releaseOpen.countDown()
+    }
+
     private fun startService() = Robolectric.buildService(GoogleMessagesLinkService::class.java)
         .create()
         .startCommand(0, 1)
@@ -230,6 +381,12 @@ class GoogleMessagesLinkServiceTest {
         }
     }
 
+    private class TerminalAfterRunHandle(private val terminalStatus: String) : StatusHandle(LINKED_STATUS) {
+        private val statusCalls = AtomicInteger()
+        override fun status(): String = if (statusCalls.incrementAndGet() <= 2) LINKED_STATUS else terminalStatus
+        override fun run() = Unit
+    }
+
     private class HeldRefreshHandle : StatusHandle(LINKED_STATUS) {
         val runEntered = CountDownLatch(1)
         val allowRunReturn = CountDownLatch(1)
@@ -261,5 +418,7 @@ class GoogleMessagesLinkServiceTest {
         const val LINKED_STATUS = """{"seq":1,"state":"linked","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
         const val PAIRING_STATUS = """{"seq":1,"state":"pairing","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
         const val UNLINKED_STATUS = """{"seq":1,"state":"unlinked","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
+        const val NEEDS_RELINK_STATUS = """{"seq":1,"state":"needs_relink","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
+        const val SIGNED_OUT_STATUS = """{"seq":1,"state":"signed_out","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
     }
 }

@@ -103,6 +103,15 @@ import Testing
         #expect(GoogleMessagesLinkDeadlineWake.taskKey(deadlineMs: 1_000, isForeground: true) != GoogleMessagesLinkDeadlineWake.taskKey(deadlineMs: nil, isForeground: true))
     }
 
+    @Test func forwardWallClockJumpPastDeadlineExpiresPresentationWithoutSleepFinishing() {
+        // The sleep armed at nowMs 1_000 would wait 1 ms. A jump to 5_000 must decide to expire
+        // immediately, and the cached presentation must then read as unconfirmed.
+        let current = GoogleMessagesLinkPresentation.presentation(for: status(.linked, expiresAtMs: 1_001))!
+        #expect(GoogleMessagesLinkDeadlineWake.next(deadlineMs: 1_001, nowMs: 1_000) == .wait(milliseconds: 1))
+        #expect(GoogleMessagesLinkDeadlineWake.next(deadlineMs: 1_001, nowMs: 5_000) == .expire)
+        #expect(current.expired(at: 5_000) == GoogleMessagesLinkPresentation(status: .unconfirmed, expiresAtMs: nil))
+    }
+
     @Test func readOnlyLinkStatusDoesNotCreateCarrierWork() async throws {
         let server = try FakeServer(passphrase: "io synthetic vault passphrase")
         let store = InMemorySecureStore()

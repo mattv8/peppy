@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mobile_pin='v0.0.0-20261011034528-197770444867'
+libgm_version='v0.2610.1-0.20261103213626-d9140a5e807e'
 cd "$root"
 
 ./prepare-libgm.sh
@@ -64,3 +65,20 @@ check_aar_alignment() {
 }
 
 check_aar_alignment
+
+aar_sha256=$(shasum -a 256 build/gmlink.aar | awk '{print $1}')
+safety_patch_sha256=$(awk 'NR == 1 { print $1 }' upstream-safety.patch.sha256)
+inputs_sha256=$(
+	{
+		find gmlink -maxdepth 1 -type f -name '*.go' -print | LC_ALL=C sort
+		printf '%s\n' go.mod go.sum
+	} | while IFS= read -r file; do
+		shasum -a 256 "$file"
+	done | shasum -a 256 | awk '{print $1}'
+)
+cat > build/gmlink.aar.provenance <<EOF
+aar_sha256=$aar_sha256
+libgm_version=$libgm_version
+safety_patch_sha256=$safety_patch_sha256
+inputs_sha256=$inputs_sha256
+EOF

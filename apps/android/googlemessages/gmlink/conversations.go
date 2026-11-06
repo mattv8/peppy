@@ -10,12 +10,16 @@ import (
 )
 
 const (
-	conversationPageSize  = 25
-	conversationPageLimit = 20
-	conversationTimeout   = 30 * time.Second
+	conversationPageSize   = 25
+	conversationPageLimit  = 20
+	conversationTimeout    = 30 * time.Second
+	conversationEventLimit = 128
 )
 
-type conversationSummary struct{ id string }
+type conversationSummary struct {
+	id       string
+	eligible bool
+}
 
 type conversationEvent struct {
 	Code                 string `json:"code"`
@@ -59,14 +63,19 @@ func (link *Link) indexConversationsFor(generation, streamEpoch uint64, conversa
 	if link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch {
 		return false
 	}
-	link.indexConversationsLocked(conversations)
+	link.applyConversationsLocked(conversations)
 	return true
 }
 
 func (link *Link) indexConversations(conversations []*gmproto.Conversation) {
 	link.mu.Lock()
 	defer link.mu.Unlock()
+	link.applyConversationsLocked(conversations)
+}
+
+func (link *Link) applyConversationsLocked(conversations []*gmproto.Conversation) {
 	link.indexConversationsLocked(conversations)
+	link.indexRevision++
 }
 
 func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation) {
@@ -74,23 +83,74 @@ func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation
 		if conversation == nil || conversation.GetConversationID() == "" {
 			continue
 		}
-		for _, participant := range visibleOtherParticipants(conversation) {
+		link.removeConversationLocked(conversation.GetConversationID())
+		others := visibleOtherParticipants(conversation)
+		for _, participant := range others {
 			target := participant.GetID().GetNumber()
-			if target != "" {
-				link.conversationIndex[target] = conversationSummary{id: conversation.GetConversationID()}
+			if target == "" {
+				continue
 			}
+			summary := conversationSummary{
+				id:       conversation.GetConversationID(),
+				eligible: len(others) == 1 && conversation.GetType() == gmproto.ConversationType_RCS && conversation.GetStatus() == gmproto.ConversationStatus_ACTIVE,
+			}
+			link.conversationCandidates[target] = append(link.conversationCandidates[target], summary)
+			link.conversationTargets[summary.id] = append(link.conversationTargets[summary.id], target)
 		}
 	}
+}
+
+func (link *Link) removeConversationLocked(id string) {
+	for _, target := range link.conversationTargets[id] {
+		summaries := link.conversationCandidates[target]
+		for index := len(summaries) - 1; index >= 0; index-- {
+			if summaries[index].id == id {
+				summaries = append(summaries[:index], summaries[index+1:]...)
+			}
+		}
+		if len(summaries) == 0 {
+			delete(link.conversationCandidates, target)
+		} else {
+			link.conversationCandidates[target] = summaries
+		}
+	}
+	delete(link.conversationTargets, id)
+}
+
+func (link *Link) replaceConversationIndexFor(generation, streamEpoch, revision uint64, conversations []*gmproto.Conversation) bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || revision != link.indexRevision {
+		return false
+	}
+	link.conversationCandidates = make(map[string][]conversationSummary)
+	link.conversationTargets = make(map[string][]string)
+	link.applyConversationsLocked(conversations)
+	return true
 }
 
 func visibleOtherParticipants(conversation *gmproto.Conversation) []*gmproto.Participant {
 	var participants []*gmproto.Participant
 	for _, participant := range conversation.GetParticipants() {
-		if participant.GetIsVisible() && !participant.GetIsMe() && participant.GetID().GetNumber() != "" {
+		if participant.GetIsVisible() && !participant.GetIsMe() {
 			participants = append(participants, participant)
 		}
 	}
 	return participants
+}
+
+func (link *Link) recordConversationEventLocked(id string) {
+	for index := range link.conversationEvents {
+		if link.conversationEvents[index].GoogleConversationID == id {
+			link.conversationEvents[index] = conversationEvent{Code: "conversation_updated", GoogleConversationID: id}
+			return
+		}
+	}
+	if len(link.conversationEvents) >= conversationEventLimit {
+		link.conversationEvents = []conversationEvent{{Code: "conversation_resync"}}
+		return
+	}
+	link.conversationEvents = append(link.conversationEvents, conversationEvent{Code: "conversation_updated", GoogleConversationID: id})
 }
 
 func (link *Link) recordConversationEventFor(generation uint64, source libgm.StreamSource, streamEpoch uint64, conversation *gmproto.Conversation) {
@@ -102,11 +162,11 @@ func (link *Link) recordConversationEventFor(generation uint64, source libgm.Str
 	if link.closed || generation != link.generation || streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(source) {
 		return
 	}
-	link.indexConversationsLocked([]*gmproto.Conversation{conversation})
+	link.applyConversationsLocked([]*gmproto.Conversation{conversation})
 	if !link.hasOwnerVerificationLocked() {
 		return
 	}
-	link.conversationEvents = append(link.conversationEvents, conversationEvent{Code: "conversation_updated", GoogleConversationID: conversation.GetConversationID()})
+	link.recordConversationEventLocked(conversation.GetConversationID())
 }
 
 func (link *Link) recordConversationEvent(conversation *gmproto.Conversation) {
@@ -119,7 +179,7 @@ func (link *Link) recordConversationEvent(conversation *gmproto.Conversation) {
 	if link.closed || !link.hasOwnerVerificationLocked() {
 		return
 	}
-	link.conversationEvents = append(link.conversationEvents, conversationEvent{Code: "conversation_updated", GoogleConversationID: conversation.GetConversationID()})
+	link.recordConversationEventLocked(conversation.GetConversationID())
 }
 
 func (link *Link) recordSettingsFor(generation uint64, source libgm.StreamSource, streamEpoch uint64, receivedAt time.Time, event *libgm.WrappedSettings) {

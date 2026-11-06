@@ -6,6 +6,7 @@ import java.util.Base64
 import java.util.zip.ZipFile
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import java.util.zip.CRC32
 import javax.xml.parsers.DocumentBuilderFactory
 import groovy.json.JsonSlurper
 
@@ -56,6 +57,7 @@ fun resolveGoogleMessagesLink(distribution: String, explicitValue: String?): Boo
 val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
 val peppySideloadDebugSigning = strictBooleanProperty("peppySideloadDebugSigning")
 val googleMessagesAar = rootProject.layout.projectDirectory.file("googlemessages/build/gmlink.aar")
+val googleMessagesProvenance = rootProject.layout.projectDirectory.file("googlemessages/build/gmlink.aar.provenance")
 val releaseTaskRequested = gradle.startParameter.taskNames.any { taskName ->
     taskName.contains("release", ignoreCase = true) || taskName.contains("sideload", ignoreCase = true)
 }
@@ -139,6 +141,65 @@ fun sourceDiffSha256(): String {
         }
         digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }.getOrElse { "unknown" }
+}
+
+fun sha256(file: File): String = file.inputStream().use { input ->
+    val digest = MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        digest.update(buffer, 0, count)
+    }
+    digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+}
+
+fun googleMessagesBuildInputsSha256(): String {
+    val googleMessagesDirectory = rootProject.projectDir.resolve("googlemessages")
+    val inputs = googleMessagesDirectory.resolve("gmlink").listFiles()
+        .orEmpty()
+        .filter { it.isFile && it.extension == "go" }
+        .sortedBy(File::getName) + listOf(
+        googleMessagesDirectory.resolve("go.mod"),
+        googleMessagesDirectory.resolve("go.sum"),
+    )
+    require(inputs.all(File::isFile)) { "Google Messages link build inputs are missing" }
+    val content = inputs.joinToString("") { "${sha256(it)}  ${it.relativeTo(googleMessagesDirectory).path}\n" }
+    return MessageDigest.getInstance("SHA-256").digest(content.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+}
+
+fun googleMessagesProvenanceInputs(): Map<String, String> {
+    val googleMessagesDirectory = rootProject.projectDir.resolve("googlemessages")
+    val moduleVersion = googleMessagesDirectory.resolve("go.mod").readLines()
+        .firstOrNull { it.trimStart().startsWith("go.mau.fi/mautrix-gmessages ") }
+        ?.trim()
+        ?.substringAfter("go.mau.fi/mautrix-gmessages ")
+        ?: throw GradleException("Google Messages link libgm version is missing")
+    val patchSha256 = googleMessagesDirectory.resolve("upstream-safety.patch.sha256").readText()
+        .trim()
+        .split(Regex("\\s+"), limit = 2)
+        .first()
+    return mapOf(
+        "aar_sha256" to sha256(googleMessagesAar.asFile),
+        "libgm_version" to moduleVersion,
+        "safety_patch_sha256" to patchSha256,
+        "inputs_sha256" to googleMessagesBuildInputsSha256(),
+    )
+}
+
+fun verifyGoogleMessagesAarProvenance() {
+    check(googleMessagesProvenance.asFile.isFile) {
+        "peppyGoogleMessagesLink=true needs AAR provenance from apps/android/googlemessages/build-aar.sh"
+    }
+    val provenance = googleMessagesProvenance.asFile.readLines().associate { line ->
+        val (name, value) = line.split('=', limit = 2).let { fields ->
+            require(fields.size == 2 && fields[0].matches(Regex("[a-z0-9_]+"))) { "Google Messages AAR provenance is malformed" }
+            fields[0] to fields[1]
+        }
+        name to value
+    }
+    val expected = googleMessagesProvenanceInputs()
+    check(provenance == expected) { "Google Messages AAR provenance does not match current inputs" }
 }
 
 val nativeProfile = (providers.environmentVariable("PEPPY_ANDROID_NATIVE_PROFILE").orNull ?: "unknown").also { profile ->
@@ -380,6 +441,7 @@ val checkGoogleMessagesAar = tasks.register("checkGoogleMessagesAar") {
         check(googleMessagesAar.asFile.isFile) {
             "peppyGoogleMessagesLink=true needs apps/android/googlemessages/build-aar.sh first"
         }
+        verifyGoogleMessagesAarProvenance()
     }
 }
 
@@ -735,6 +797,109 @@ fun writeArchiveFixture(archiveFile: File, entries: Map<String, ByteArray>) {
     }
 }
 
+fun writeLittleEndian(bytes: ByteArray, offset: Int, value: Long, byteCount: Int) {
+    repeat(byteCount) { index -> bytes[offset + index] = (value shr (index * 8)).toByte() }
+}
+
+fun elfFixture(loadAlignment: Long): ByteArray = ByteArray(120).also { bytes ->
+    bytes[0] = 0x7f
+    bytes[1] = 'E'.code.toByte()
+    bytes[2] = 'L'.code.toByte()
+    bytes[3] = 'F'.code.toByte()
+    bytes[4] = 2
+    bytes[5] = 1
+    writeLittleEndian(bytes, 32, 64, 8)
+    writeLittleEndian(bytes, 54, 56, 2)
+    writeLittleEndian(bytes, 56, 1, 2)
+    writeLittleEndian(bytes, 64, 1, 4)
+    writeLittleEndian(bytes, 112, loadAlignment, 8)
+}
+
+fun writeStoredZipEntry(archive: ZipOutputStream, name: String, bytes: ByteArray) {
+    val entry = ZipEntry(name).apply {
+        method = ZipEntry.STORED
+        size = bytes.size.toLong()
+        compressedSize = bytes.size.toLong()
+        crc = CRC32().apply { update(bytes) }.value
+    }
+    archive.putNextEntry(entry)
+    archive.write(bytes)
+    archive.closeEntry()
+}
+
+fun writeAlignedGoogleMessagesFixture(archiveFile: File, loadAlignment: Long, library: ByteArray = elfFixture(loadAlignment)) {
+    val libraryPath = "lib/arm64-v8a/$googleMessagesNativeLibrary"
+    val paddingSize = (0x4000 - (30 + "padding".length + 30 + libraryPath.length) % 0x4000) % 0x4000
+    ZipOutputStream(archiveFile.outputStream()).use { archive ->
+        writeStoredZipEntry(archive, "padding", ByteArray(paddingSize))
+        writeStoredZipEntry(archive, libraryPath, library)
+    }
+}
+
+fun littleEndian(bytes: ByteArray, offset: Int, byteCount: Int): Long {
+    require(offset >= 0 && offset + byteCount <= bytes.size) { "Malformed ZIP or ELF data" }
+    return (0 until byteCount).fold(0L) { value, index -> value or ((bytes[offset + index].toLong() and 0xff) shl (index * 8)) }
+}
+
+fun zipEntryDataOffsets(archiveFile: File): Map<String, Long> {
+    val bytes = archiveFile.readBytes()
+    val endOfCentralDirectory = (bytes.size - 22 downTo maxOf(0, bytes.size - 0xffff - 22)).firstOrNull { offset ->
+        littleEndian(bytes, offset, 4) == 0x06054b50L
+    } ?: throw GradleException("Malformed Google Messages link archive")
+    fun safeOffset(value: Long): Int {
+        check(value <= Int.MAX_VALUE.toLong()) { "Malformed Google Messages link archive" }
+        return value.toInt()
+    }
+    var offset = safeOffset(littleEndian(bytes, endOfCentralDirectory + 16, 4))
+    return buildMap {
+        while (offset < bytes.size && littleEndian(bytes, offset, 4) == 0x02014b50L) {
+            val nameLength = littleEndian(bytes, offset + 28, 2).toInt()
+            val extraLength = littleEndian(bytes, offset + 30, 2).toInt()
+            val commentLength = littleEndian(bytes, offset + 32, 2).toInt()
+            val localHeaderOffset = safeOffset(littleEndian(bytes, offset + 42, 4))
+            val name = bytes.copyOfRange(offset + 46, offset + 46 + nameLength).toString(Charsets.UTF_8)
+            check(littleEndian(bytes, localHeaderOffset, 4) == 0x04034b50L) { "Malformed Google Messages link archive" }
+            put(name, (localHeaderOffset + 30 + littleEndian(bytes, localHeaderOffset + 26, 2) + littleEndian(bytes, localHeaderOffset + 28, 2)))
+            offset += 46 + nameLength + extraLength + commentLength
+        }
+    }
+}
+
+fun elfLoadAlignments(bytes: ByteArray): List<Long> {
+    check(bytes.size >= 64 && bytes.copyOfRange(0, 4).contentEquals(byteArrayOf(0x7f, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte())))
+    check(bytes[4].toInt() == 2 && bytes[5].toInt() == 1)
+    val programOffset = littleEndian(bytes, 32, 8)
+    val programEntrySize = littleEndian(bytes, 54, 2)
+    val programCount = littleEndian(bytes, 56, 2)
+    check(programOffset in 0..Int.MAX_VALUE.toLong() && programEntrySize >= 56)
+    check(programOffset + programEntrySize * programCount <= bytes.size.toLong())
+    return (0 until programCount.toInt()).mapNotNull { index ->
+        val entryOffset = programOffset.toInt() + index * programEntrySize.toInt()
+        if (littleEndian(bytes, entryOffset, 4) == 1L) littleEndian(bytes, entryOffset + 48, 8) else null
+    }.also { alignments -> check(alignments.isNotEmpty()) { "Google Messages link native library has no LOAD segments" } }
+}
+
+fun verifyGoogleMessagesNativeLibraryAlignment(archives: List<File>) {
+    try {
+        archives.forEach { archive ->
+            val offsets = if (archive.extension == "apk") zipEntryDataOffsets(archive) else emptyMap()
+            ZipFile(archive).use { zip ->
+                zip.entries().asSequence()
+                    .filter { entry -> entry.name.matches(Regex("(?:base/)?lib/[^/]+/$googleMessagesNativeLibrary")) }
+                    .forEach { entry ->
+                        if (archive.extension == "apk") {
+                            check(entry.method == ZipEntry.STORED && offsets.getValue(entry.name) % 0x4000 == 0L)
+                        }
+                        val alignments = zip.getInputStream(entry).use { it.readBytes() }.let(::elfLoadAlignments)
+                        check(alignments.all { it >= 0x4000 })
+                    }
+            }
+        }
+    } catch (_: Exception) {
+        throw GradleException("Google Messages link native library verification failed")
+    }
+}
+
 fun verifyRestrictedSetupManifest(mergedManifest: File, variant: String) {
     check(mergedManifest.isFile) { "Expected merged $variant manifest at $mergedManifest" }
     val parserFactory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
@@ -926,6 +1091,7 @@ val verifySideloadGoogleMessagesLink = tasks.register("verifySideloadGoogleMessa
                 googleMessagesLinkArtifacts(listOf(archive), noticePath),
                 peppyGoogleMessagesLink,
             )
+            if (peppyGoogleMessagesLink) verifyGoogleMessagesNativeLibraryAlignment(listOf(archive))
         }
     }
 }
@@ -1011,6 +1177,47 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
             check(runCatching {
                 verifySideloadGoogleMessagesLinkArtifacts(setOf(artifact), false)
             }.isFailure) { "Flag-off guard must reject $artifact" }
+        }
+
+        val alignedGoogleMessagesFixture = fixtureDirectory.resolve("app-sideload-aligned.apk")
+        writeAlignedGoogleMessagesFixture(alignedGoogleMessagesFixture, 0x4000)
+        check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.isSuccess) {
+            "Synthetic 16 KiB-aligned Google Messages library must pass the sideload guard"
+        }
+        writeAlignedGoogleMessagesFixture(alignedGoogleMessagesFixture, 0x1000)
+        check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.isFailure) {
+            "Synthetic 4 KiB-aligned Google Messages library must fail the sideload guard"
+        }
+        writeArchiveFixture(alignedGoogleMessagesFixture, mapOf("lib/arm64-v8a/$googleMessagesNativeLibrary" to elfFixture(0x4000)))
+        check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.isFailure) {
+            "Synthetic ZIP-misaligned Google Messages library must fail the sideload guard"
+        }
+        val compressedGoogleMessagesAab = fixtureDirectory.resolve("app-sideload-compressed.aab")
+        ZipOutputStream(compressedGoogleMessagesAab.outputStream()).use { archive ->
+            archive.putNextEntry(ZipEntry("base/lib/arm64-v8a/$googleMessagesNativeLibrary"))
+            archive.write(elfFixture(0x4000))
+            archive.closeEntry()
+        }
+        check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(compressedGoogleMessagesAab)) }.isSuccess) {
+            "Compressed AAB Google Messages library with aligned ELF must pass the sideload guard"
+        }
+        listOf(
+            ByteArray(3),
+            elfFixture(0x4000).also { writeLittleEndian(it, 32, 4096, 8) },
+            elfFixture(0x4000).also { writeLittleEndian(it, 56, 2, 2) },
+            elfFixture(0x4000).also { writeLittleEndian(it, 32, Int.MAX_VALUE.toLong() + 1, 8) },
+            elfFixture(0x4000).also { it[4] = 1 },
+        ).forEach { malformedElf ->
+            writeAlignedGoogleMessagesFixture(alignedGoogleMessagesFixture, 0x4000, malformedElf)
+            val failure = runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.exceptionOrNull()
+            check(failure?.message == "Google Messages link native library verification failed") {
+                "Malformed ELF must fail with the fixed verification message"
+            }
+        }
+        alignedGoogleMessagesFixture.writeBytes(byteArrayOf(1, 2, 3))
+        val malformedZipFailure = runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.exceptionOrNull()
+        check(malformedZipFailure?.message == "Google Messages link native library verification failed") {
+            "Malformed ZIP must fail with the fixed verification message"
         }
 
         val fixtureAab = fixtureDirectory.resolve("app-release.aab")

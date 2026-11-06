@@ -257,6 +257,7 @@ mod tests {
                     observed_at_ms,
                     capability_revision: 1,
                     feature_bits: 1,
+                    linked_since_ms: Some(observed_at_ms),
                 },
                 &[RcsEligibilityProjection {
                     conversation_id: conversation,
@@ -331,6 +332,7 @@ mod tests {
                     observed_at_ms,
                     capability_revision: 1,
                     feature_bits: 0,
+                    linked_since_ms: None,
                 },
                 &[],
                 observed_at_ms,
@@ -424,6 +426,7 @@ mod tests {
                 observed_at_ms,
                 capability_revision: u64::MAX,
                 feature_bits: u32::MAX,
+                linked_since_ms: Some(observed_at_ms),
             },
             current,
         };

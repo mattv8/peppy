@@ -32,6 +32,7 @@ fn publish_eligible_at(
                 observed_at_ms,
                 capability_revision: revision,
                 feature_bits: 1,
+                linked_since_ms: Some(1_000),
             },
             &[RcsEligibilityProjection {
                 conversation_id,
@@ -920,6 +921,7 @@ fn eligibility_changes_refuse_without_consuming_the_next_sequence() {
                 observed_at_ms: 1_002,
                 capability_revision: 2,
                 feature_bits: 0,
+                linked_since_ms: None,
             },
             &[RcsEligibilityProjection {
                 conversation_id: conversation,
@@ -1137,8 +1139,8 @@ fn global_reservations_keep_stops_available_without_consuming_suppressed_sequenc
             conversations[25],
             config.device_id,
             TypingStateV2::Started,
-            5_001,
-            5_001
+            6_001,
+            6_001
         ),
         None
     );
@@ -1148,8 +1150,8 @@ fn global_reservations_keep_stops_available_without_consuming_suppressed_sequenc
             conversations[0],
             config.device_id,
             TypingStateV2::Stopped,
-            5_002,
-            5_002
+            6_002,
+            6_002
         )
         .unwrap()
         .signal
@@ -1162,8 +1164,8 @@ fn global_reservations_keep_stops_available_without_consuming_suppressed_sequenc
             conversations[0],
             config.device_id,
             TypingStateV2::Stopped,
-            5_003,
-            5_003
+            6_003,
+            6_003
         ),
         None
     );

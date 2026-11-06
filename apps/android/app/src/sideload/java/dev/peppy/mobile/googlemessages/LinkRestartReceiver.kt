@@ -21,9 +21,10 @@ class LinkRestartReceiver : BroadcastReceiver() {
         val work = Runnable {
             try {
                 val applicationContext = context.applicationContext
+                if (!LinkCoreBridge.recordPreStart(applicationContext)) return@Runnable
                 val opened = LinkRuntime.handle(applicationContext) as? LinkOpenResult.Open ?: return@Runnable
                 val status = LinkStatus.parse(opened.handle.status())
-                if (status.state == "linked") testHooks.startService(applicationContext)
+                if (status.state == "linked" && LinkCoreBridge.recordIfNeeded(applicationContext, status)) testHooks.startService(applicationContext)
             } catch (_: Exception) {
                 // A sealed-state or gomobile failure must not leave the broadcast pending.
             } finally {

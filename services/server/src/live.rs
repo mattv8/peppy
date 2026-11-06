@@ -60,12 +60,19 @@ pub(crate) enum LiveReject {
 /// after one minute and the cache is capped to prevent unbounded key growth.
 pub(crate) const LIVE_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) const LIVE_RATE_LIMIT: usize = 120;
+pub(crate) const LIVE_UPGRADE_RATE_LIMIT: usize = 16;
 const LIVE_RATE_BUCKET_CAPACITY: usize = 4_096;
 
-#[derive(Default)]
 pub(crate) struct LiveRateLimiter {
+    limit: usize,
     device: HashMap<DeviceId, LiveRateBucket>,
     address: HashMap<std::net::IpAddr, LiveRateBucket>,
+}
+
+impl Default for LiveRateLimiter {
+    fn default() -> Self {
+        Self::with_limit(LIVE_RATE_LIMIT)
+    }
 }
 
 struct LiveRateBucket {
@@ -74,12 +81,20 @@ struct LiveRateBucket {
 }
 
 impl LiveRateLimiter {
+    pub(crate) fn with_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            device: HashMap::new(),
+            address: HashMap::new(),
+        }
+    }
+
     pub(crate) fn allow(&mut self, device: DeviceId, address: Option<std::net::IpAddr>) -> bool {
         let now = std::time::Instant::now();
         Self::prune(&mut self.device, now);
         Self::prune(&mut self.address, now);
-        if !Self::can_reserve(&self.device, device)
-            || !address.is_none_or(|address| Self::can_reserve(&self.address, address))
+        if !self.can_reserve(&self.device, device)
+            || !address.is_none_or(|address| self.can_reserve(&self.address, address))
         {
             return false;
         }
@@ -110,11 +125,12 @@ impl LiveRateLimiter {
     }
 
     fn can_reserve<K: std::cmp::Eq + std::hash::Hash>(
+        &self,
         buckets: &HashMap<K, LiveRateBucket>,
         key: K,
     ) -> bool {
         match buckets.get(&key) {
-            Some(bucket) => bucket.count < LIVE_RATE_LIMIT,
+            Some(bucket) => bucket.count < self.limit,
             None => buckets.len() < LIVE_RATE_BUCKET_CAPACITY,
         }
     }
@@ -466,6 +482,16 @@ mod tests {
             assert!(limiter.allow(device(2), Some(alternate)));
         }
         assert!(!limiter.allow(device(2), Some(alternate)));
+    }
+
+    #[test]
+    fn upgrade_limiter_keeps_unrelated_device_and_ip_admissible() {
+        let mut limiter = LiveRateLimiter::with_limit(1);
+        let first = "127.0.0.1".parse().unwrap();
+        let second = "127.0.0.2".parse().unwrap();
+        assert!(limiter.allow(device(1), Some(first)));
+        assert!(!limiter.allow(device(1), Some(first)));
+        assert!(limiter.allow(device(2), Some(second)));
     }
 
     #[test]

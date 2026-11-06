@@ -525,6 +525,7 @@ mod tests {
                     observed_at_ms: NOW_MS,
                     capability_revision: 1,
                     feature_bits: 1,
+                    linked_since_ms: Some(NOW_MS),
                 },
                 &[RcsEligibilityProjection {
                     conversation_id,
@@ -753,6 +754,7 @@ mod tests {
                     observed_at_ms: 1_000,
                     capability_revision: 1,
                     feature_bits: 1,
+                    linked_since_ms: Some(1_000),
                 },
                 &[RcsEligibilityProjection {
                     conversation_id: conversation,

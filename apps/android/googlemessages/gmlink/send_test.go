@@ -38,6 +38,7 @@ func TestLegacySendRcsDoesNotSubmitWithoutPrepareCommit(t *testing.T) {
 	link, _ := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
 	done := startSafetyRun(t, link)
+	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
 	link.projectEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
 	if err := link.RefreshConversationIndex(); err != nil {
@@ -75,6 +76,7 @@ func TestOldSettingsCannotReplaceCurrentSendAuthority(t *testing.T) {
 	link, _ := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
 	done := startSafetyRun(t, link)
+	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
 	current := &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{
 		SIMParticipant: &gmproto.SIMParticipant{ID: "current-outgoing"},
@@ -125,6 +127,7 @@ func TestBareSettingsCannotEnableSendAuthority(t *testing.T) {
 	link, _ := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
 	done := startSafetyRun(t, link)
+	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
 	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{
 		SIMParticipant: &gmproto.SIMParticipant{ID: "current-outgoing"},
@@ -152,6 +155,15 @@ func TestBareSettingsCannotEnableSendAuthority(t *testing.T) {
 	if err := awaitSafetyResult(t, done, "Run"); err != nil {
 		t.Fatalf("Run error = %v", err)
 	}
+}
+
+func awaitStreamOpen(t *testing.T, link *Link) {
+	t.Helper()
+	awaitSafety(t, "stream to open", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.streamOpen
+	})
 }
 
 func decodeSendCode(t *testing.T, result string) string {

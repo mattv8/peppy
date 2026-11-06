@@ -1,5 +1,5 @@
 use crate::{
-    ConversationId, Error,
+    ConversationId, Error, RcsCapabilityState,
     rcs_native::{
         NativeCarrierRouteBinding, NativeRcsEvidence, NativeRcsOutgoing, NativeSettingsCurrentness,
         NativeSettingsProvenance,
@@ -166,7 +166,12 @@ pub(crate) fn verify_and_store(
     }
     let outcome = verify(conn, observation, now_ms)?;
     let RcsMappingOutcome::Mapped(mapping) = &outcome else {
-        invalidate_for_refusal(conn, observation, refusal_code(&outcome))?;
+        if !matches!(
+            outcome,
+            RcsMappingOutcome::Refused(RcsMappingRefusal::NonMonotonicRevision)
+        ) {
+            invalidate_for_refusal(conn, observation, refusal_code(&outcome))?;
+        }
         return Ok(outcome);
     };
     put(conn, mapping)?;
@@ -621,6 +626,35 @@ pub(crate) enum ContextUpdate {
 }
 
 const RCS_CONTEXT_KEY: &str = "rcs_mapping_context_v1";
+const RCS_LINK_LIFECYCLE_KEY: &str = "rcs_link_lifecycle_v1";
+
+pub(crate) fn record_link_lifecycle(
+    conn: &Connection,
+    state: RcsCapabilityState,
+) -> Result<bool, Error> {
+    let changed = recorded_link_lifecycle(conn)?.is_none_or(|previous| previous != state);
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![
+            RCS_LINK_LIFECYCLE_KEY,
+            serde_json::to_string(&state).map_err(|_| Error::Database)?
+        ],
+    )?;
+    Ok(changed)
+}
+
+pub(crate) fn recorded_link_lifecycle(
+    conn: &Connection,
+) -> Result<Option<RcsCapabilityState>, Error> {
+    conn.query_row(
+        "SELECT v FROM metadata WHERE k=?",
+        [RCS_LINK_LIFECYCLE_KEY],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| serde_json::from_str(&value).map_err(|_| Error::Database))
+    .transpose()
+}
 
 pub(crate) fn update_context(
     conn: &Connection,
@@ -823,6 +857,9 @@ pub(crate) fn context_is_current(
 }
 
 pub(crate) fn current_link_state(conn: &Connection) -> Result<Option<bool>, Error> {
+    if let Some(state) = recorded_link_lifecycle(conn)? {
+        return Ok(Some(state == RcsCapabilityState::Linked));
+    }
     let value = conn
         .query_row(
             "SELECT v FROM metadata WHERE k=?",

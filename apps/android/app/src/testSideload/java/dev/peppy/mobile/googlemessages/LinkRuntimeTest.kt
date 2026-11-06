@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -22,6 +23,11 @@ import org.robolectric.annotation.Config
 class LinkRuntimeTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
 
+    @Before
+    fun setUp() {
+        LinkCoreBridge.recorder = { _, _ -> true }
+    }
+
     @After
     fun cleanUp() {
         LinkRuntime.resetForTest()
@@ -29,6 +35,8 @@ class LinkRuntimeTest {
         LinkRuntimeTestHooks.storeFactory = null
         LinkRuntimeTestHooks.eventRecorder = null
         LinkRuntimeTestHooks.callbackExecutor = null
+        LinkRuntimeTestHooks.afterClosingCheck = null
+        LinkCoreBridge.resetForTest()
     }
 
     @Test
@@ -99,6 +107,82 @@ class LinkRuntimeTest {
         assertTrue(store.wiped)
         assertEquals(listOf("link/reset_local"), events)
         assertFalse(LinkRuntime.pairingInProgress.get())
+    }
+
+    @Test
+    fun `wipe failure closes captured handle and next reload keeps one open handle`() {
+        val first = CountingHandle()
+        val second = CountingHandle()
+        val store = object : LinkStateStorage {
+            override fun read() = ByteArray(0)
+            override fun write(state: ByteArray) = Unit
+            override fun wipe(): Unit = throw IllegalStateException("wipe_failed")
+        }
+        var opens = 0
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = if (opens++ == 0) first else second
+        }
+        LinkRuntimeTestHooks.storeFactory = { store }
+        LinkRuntime.handle(context)
+
+        val failure = runCatching { LinkRuntime.resetLocalState(context) }.exceptionOrNull()
+        LinkRuntime.handle(context)
+
+        assertEquals("wipe_failed", failure?.message)
+        assertEquals(1, first.closeCalls)
+        assertEquals(2, opens)
+        assertEquals(1, maxOf(first.openHandles, second.openHandles))
+    }
+
+    @Test
+    fun `failed reset lifecycle record reports persistence failure`() {
+        val handle = FakeHandle()
+        val store = InMemoryStore()
+        LinkCoreBridge.recorder = { _, _ -> false }
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { store }
+        LinkRuntime.handle(context)
+
+        val failure = runCatching { LinkRuntime.resetLocalState(context) }.exceptionOrNull()
+
+        assertEquals("persist_failed", failure?.message)
+        assertTrue(handle.closed)
+        assertTrue(store.wiped)
+    }
+
+    @Test
+    fun `opener cannot overtake a detached handle before native close`() {
+        val first = FakeHandle()
+        val second = FakeHandle()
+        val reachedClosingCheck = CountDownLatch(1)
+        val releaseOpener = CountDownLatch(1)
+        val openerDone = CountDownLatch(1)
+        var opens = 0
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle =
+                if (opens++ == 0) first else second
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntime.handle(context)
+        val lease = LinkRuntime.handleLease(context)!!
+        LinkRuntimeTestHooks.afterClosingCheck = {
+            reachedClosingCheck.countDown()
+            releaseOpener.await()
+        }
+
+        Thread { LinkRuntime.handle(context); openerDone.countDown() }.start()
+        assertTrue(reachedClosingCheck.await(1, TimeUnit.SECONDS))
+        val detached = LinkRuntime.detachHandleForServiceStop(lease)!!
+        releaseOpener.countDown()
+
+        Thread.sleep(50)
+        assertEquals(1, opens)
+        assertFalse(first.closed)
+        LinkRuntime.closeDetachedHandle(detached)
+        assertTrue(openerDone.await(1, TimeUnit.SECONDS))
+        assertEquals(2, opens)
     }
 
     @Test
@@ -257,6 +341,34 @@ class LinkRuntimeTest {
     }
 
     @Test
+    fun `close during emoji callback finishes`() {
+        lateinit var host: LinkHost
+        val handle = BlockingCloseHandle()
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        val lease = requireNotNull(LinkRuntime.handleLease(context))
+        val closeFinished = CountDownLatch(1)
+        Thread {
+            LinkRuntime.closeHandleForServiceStop(lease)
+            closeFinished.countDown()
+        }.start()
+        assertTrue(handle.closeEntered.await(1, TimeUnit.SECONDS))
+
+        val emojiReturned = CountDownLatch(1)
+        Thread {
+            host.showEmoji("check")
+            emojiReturned.countDown()
+        }.start()
+
+        assertTrue(emojiReturned.await(1, TimeUnit.SECONDS))
+        handle.allowClose.countDown()
+        assertTrue(closeFinished.await(1, TimeUnit.SECONDS))
+    }
+
+    @Test
     fun `runtime event sink records through the production diagnostic path`() {
         val records = mutableListOf<String>()
         SyncDiagnostics.configureRuntime(enabled = true) { records += it }
@@ -291,7 +403,7 @@ class LinkRuntimeTest {
         override fun wipe() { wiped = true }
     }
 
-    private class FakeHandle(
+    private open class FakeHandle(
         private val accepts: (Long, Long) -> Boolean = { _, _ -> true },
     ) : LinkHandle {
         var closed = false
@@ -304,5 +416,25 @@ class LinkRuntimeTest {
         override fun close() { closed = true }
         override fun status(): String = """{\"state\":\"unlinked\"}"""
         override fun acceptsOutput(generation: Long, revision: Long): Boolean = accepts(generation, revision)
+    }
+
+    private class BlockingCloseHandle : FakeHandle() {
+        val closeEntered = CountDownLatch(1)
+        val allowClose = CountDownLatch(1)
+
+        override fun close() {
+            closeEntered.countDown()
+            allowClose.await()
+            super.close()
+        }
+    }
+
+    private class CountingHandle : FakeHandle() {
+        var closeCalls = 0
+        var openHandles = 1
+        override fun close() {
+            closeCalls++
+            openHandles--
+        }
     }
 }

@@ -225,6 +225,10 @@ class LinkSignInActivity : AppCompatActivity() {
         GoogleMessagesLinkService.start(this)
         val queued = LinkSignInRuntime.executePairing(attempt) {
             try {
+                if (!LinkRuntime.recordPreStart(applicationContext)) {
+                    LinkRuntimeEventSink.record("link", "persist_failed", 0)
+                    return@executePairing
+                }
                 (LinkRuntime.handle(applicationContext) as? LinkOpenResult.Open)?.handle?.pair(CookieFilter.json(cookies))
             } catch (_: Exception) {
                 LinkRuntimeEventSink.record("link", "pair_failed", 0)

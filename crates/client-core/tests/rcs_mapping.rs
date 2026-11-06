@@ -215,7 +215,7 @@ fn mapping_binds_region_identity_and_live_conversation_facts() {
 }
 
 #[test]
-fn self_chat_and_nonmonotonic_revision_are_explicit() {
+fn self_chat_is_explicitly_unsupported() {
     let (_directory, _config, client, _conversation_id) = client_with_participant("+12025550100");
     let mut self_chat = observation("+12025550100", 1);
     self_chat.participants[0].is_me = true;
@@ -375,7 +375,7 @@ fn empty_participants_do_not_create_or_change_a_mapping_candidate() {
 }
 
 #[test]
-fn structured_context_distinguishes_delimiter_collisions() {
+fn ineligible_route_context_is_refused() {
     let (_directory, _config, client, _conversation_id) = client_with_participant("raw-peer");
     let mut malformed_route = observation("raw-peer", 1);
     malformed_route.selected_sim_id = "google-outgoing".into();
@@ -423,7 +423,7 @@ fn malformed_or_multiple_google_observation_revokes_a_stored_mapping() {
 }
 
 #[test]
-fn self_chat_conflict_invalidates_the_original_mapping() {
+fn self_chat_observations_are_refused_without_a_mapping() {
     let (_directory, _config, client, conversation_id) = client_with_participant("+12025550100");
     let mut original = observation("+12025550100", 1);
     original.google_conversation_id = "google-a".into();
@@ -440,6 +440,24 @@ fn self_chat_conflict_invalidates_the_original_mapping() {
         RcsMappingOutcome::Refused(RcsMappingRefusal::SelfChatUnsupported)
     );
     assert!(client.rcs_mapping(conversation_id).unwrap().is_none());
+}
+
+#[test]
+fn older_mapping_revision_preserves_newer_authority() {
+    let (_directory, _config, client, conversation_id) = client_with_participant("raw-peer");
+    let newer = observation("raw-peer", 2);
+    let RcsMappingOutcome::Mapped(mapping) = client.verify_rcs_mapping(&newer, 1_000).unwrap()
+    else {
+        panic!("expected newer mapping");
+    };
+
+    assert_eq!(
+        client
+            .verify_rcs_mapping(&observation("raw-peer", 1), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::NonMonotonicRevision)
+    );
+    assert_eq!(client.rcs_mapping(conversation_id).unwrap(), Some(mapping));
 }
 
 #[test]

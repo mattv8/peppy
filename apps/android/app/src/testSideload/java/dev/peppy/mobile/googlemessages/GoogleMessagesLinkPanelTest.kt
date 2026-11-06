@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -45,6 +47,7 @@ import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -328,6 +331,21 @@ class GoogleMessagesLinkPanelTest {
         compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_unlinked_done)).fetchSemanticsNode()
     }
 
+    @Test fun `unlink remote failure notice requires the authoritative unlink outcome`() {
+        val handle = FakeHandle("linked").apply {
+            unlinkAction = {
+                state = "unlinked"
+                stopCode = "unlink_remote_failed"
+            }
+        }
+        showPanel(FakePanelHost(handle))
+        confirm("google-messages-link-unlink")
+        compose.waitUntil { handle.unlinkCalls == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_unlink_remote_failed)).fetchSemanticsNode()
+    }
+
     @Test fun `persist failure hides reconnect and keeps unlink and remove recovery`() {
         val handle = FakeHandle("linked").apply {
             running = false
@@ -350,13 +368,223 @@ class GoogleMessagesLinkPanelTest {
         check(host.resetCalls == 1)
     }
 
-    @Test fun `throwing confirmed unlink releases busy and exposes recovery`() {
-        val handle = FakeHandle("linked").apply { unlinkAction = { throw IllegalStateException("test") } }
+    @Test fun `throwing reset shows persistence failure and releases the lock`() {
+        val host = FakePanelHost(
+            handle = FakeHandle("unlinked"),
+            openResult = { LinkOpenResult.Unreadable("test") },
+            onReset = { throw IllegalStateException("test") },
+        )
+        showPanel(host)
+        confirm("google-messages-link-reset")
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_persist_failed)).fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-reset").assertIsEnabled()
+        check(host.resetCalls == 1)
+    }
+
+    @Test fun `cancelling an active destructive operation releases the lock`() {
+        val resetEntered = CountDownLatch(1)
+        val releaseReset = CountDownLatch(1)
+        val host = FakePanelHost(
+            handle = FakeHandle("unlinked"),
+            openResult = { LinkOpenResult.Unreadable("test") },
+            onReset = {
+                resetEntered.countDown()
+                awaitIgnoringInterrupts(releaseReset)
+            },
+        )
+        val visible = mutableStateOf(true)
+        GoogleMessagesLinkTestHooks.available = true
+        compose.setContent {
+            PeppyTheme {
+                if (visible.value) GoogleMessagesLinkPanel(host) {}
+            }
+        }
+        confirm("google-messages-link-reset")
+        check(resetEntered.await(5, TimeUnit.SECONDS))
+
+        compose.runOnIdle { visible.value = false }
+        releaseReset.countDown()
+        compose.waitUntil(5_000) { !LinkOperationLock.inProgress.value }
+        assertFalse(LinkOperationLock.inProgress.value)
+    }
+
+    @Test fun `unlink failure shows the reloaded authoritative stop code`() {
+        val handle = FakeHandle("linked").apply {
+            unlinkAction = {
+                stopCode = "persist_failed"
+                throw IllegalStateException("test")
+            }
+        }
         val host = FakePanelHost(handle)
         showPanel(host)
         confirm("google-messages-link-unlink")
         compose.waitUntil { handle.unlinkCalls == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_persist_failed)).fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-unlink").assertIsEnabled()
+    }
+
+    @Test fun `failed relink lifecycle fence prevents native relink and reports persistence failure`() {
+        val handle = FakeHandle("needs_relink")
+        val host = FakePanelHost(handle).apply { recordPreStartResult = false }
+        showPanel(host)
+
+        confirm("google-messages-link-relink")
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        assertEquals(0, handle.relinkCalls)
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_persist_failed)).fetchSemanticsNode()
+    }
+
+    @Test fun `unlink records unlinked before showing success`() {
+        val recordEntered = CountDownLatch(1)
+        val releaseRecord = CountDownLatch(1)
+        val handle = FakeHandle("linked").apply { unlinkAction = { state = "unlinked" } }
+        val host = FakePanelHost(handle).apply {
+            onRecordUnlinked = {
+                recordEntered.countDown()
+                awaitIgnoringInterrupts(releaseRecord)
+            }
+        }
+        showPanel(host)
+        confirm("google-messages-link-unlink")
+        assertTrue(recordEntered.await(5, TimeUnit.SECONDS))
+        check(compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isEmpty())
+
+        releaseRecord.countDown()
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_unlinked_done)).fetchSemanticsNode()
+    }
+
+    @Test fun `failed unlink lifecycle record reports persistence failure instead of success`() {
+        val handle = FakeHandle("linked").apply { unlinkAction = { state = "unlinked" } }
+        val host = FakePanelHost(handle).apply { recordUnlinkedResult = false }
+        showPanel(host)
+
+        confirm("google-messages-link-unlink")
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_persist_failed)).fetchSemanticsNode()
+    }
+
+    @Test fun `remote unlink failure records authoritative local deletion and reports remote failure`() {
+        val records = AtomicInteger()
+        val handle = FakeHandle("linked").apply {
+            unlinkAction = {
+                state = "unlinked"
+                stopCode = "unlink_remote_failed"
+                throw IllegalStateException("unlink_remote_failed")
+            }
+        }
+        val host = FakePanelHost(handle).apply { onRecordUnlinked = { records.incrementAndGet() } }
+        showPanel(host)
+
+        confirm("google-messages-link-unlink")
+        compose.waitUntil { records.get() == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_unlink_remote_failed)).fetchSemanticsNode()
+    }
+
+    @Test fun `persist unlink failure without local deletion does not record unlinked`() {
+        val records = AtomicInteger()
+        val handle = FakeHandle("linked").apply {
+            unlinkAction = { throw IllegalStateException("persist_failed") }
+        }
+        val host = FakePanelHost(handle).apply { onRecordUnlinked = { records.incrementAndGet() } }
+        showPanel(host)
+
+        confirm("google-messages-link-unlink")
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        assertEquals(0, records.get())
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_persist_failed)).fetchSemanticsNode()
+    }
+
+    @Test fun `persist unlink failure with local deletion still records unlinked`() {
+        val records = AtomicInteger()
+        val handle = FakeHandle("linked").apply {
+            unlinkAction = {
+                state = "unlinked"
+                throw IllegalStateException("persist_failed")
+            }
+        }
+        val host = FakePanelHost(handle).apply { onRecordUnlinked = { records.incrementAndGet() } }
+        showPanel(host)
+
+        confirm("google-messages-link-unlink")
+        compose.waitUntil { records.get() == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_persist_failed)).fetchSemanticsNode()
+    }
+
+    @Test fun `recreated panel cannot start a second destructive operation`() {
+        val unlinkEntered = CountDownLatch(1)
+        val releaseUnlink = CountDownLatch(1)
+        val firstHandle = FakeHandle("linked").apply {
+            unlinkAction = {
+                unlinkEntered.countDown()
+                awaitIgnoringInterrupts(releaseUnlink)
+                state = "unlinked"
+            }
+        }
+        val firstHost = FakePanelHost(firstHandle)
+        val secondHost = FakePanelHost(FakeHandle("needs_relink"))
+        val activeHost = mutableStateOf(firstHost)
+        GoogleMessagesLinkTestHooks.available = true
+        compose.setContent {
+            PeppyTheme {
+                key(activeHost.value) {
+                    GoogleMessagesLinkPanel(activeHost.value) {}
+                }
+            }
+        }
+        confirm("google-messages-link-unlink")
+        check(unlinkEntered.await(5, TimeUnit.SECONDS))
+
+        compose.runOnIdle { activeHost.value = secondHost }
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-remove-local").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-remove-local").assertIsNotEnabled()
+
+        releaseUnlink.countDown()
+        compose.waitUntil {
+            runCatching {
+                compose.onNodeWithTag("google-messages-link-remove-local").assertIsEnabled()
+            }.isSuccess
+        }
+    }
+
+    @Test fun `cancelling after pairing acquisition releases pairing ownership`() {
+        val pairingAcquired = CountDownLatch(1)
+        val releasePairing = CountDownLatch(1)
+        val host = FakePanelHost(FakeHandle("needs_relink")).apply {
+            onTryBeginPairing = {
+                pairingAcquired.countDown()
+                awaitIgnoringInterrupts(releasePairing)
+            }
+        }
+        val visible = mutableStateOf(true)
+        GoogleMessagesLinkTestHooks.available = true
+        compose.setContent {
+            PeppyTheme {
+                if (visible.value) GoogleMessagesLinkPanel(host) {}
+            }
+        }
+        confirm("google-messages-link-relink")
+        check(pairingAcquired.await(5, TimeUnit.SECONDS))
+
+        compose.runOnIdle { visible.value = false }
+        releasePairing.countDown()
+        compose.waitUntil(5_000) { !LinkRuntime.pairingInProgress.get() }
+        assertFalse(LinkRuntime.pairingInProgress.get())
     }
 
     @Test fun `notification actions are disabled during held check and unlink`() {
@@ -532,12 +760,24 @@ class GoogleMessagesLinkPanelTest {
         var resetCalls = 0
         val pairingTokens = mutableListOf<Long>()
         val endedTokens = mutableListOf<Long>()
+        var onTryBeginPairing: () -> Unit = {}
+        var recordPreStartResult = true
+        var recordUnlinkedResult = true
+        var onRecordUnlinked: () -> Unit = {}
         val relinkCalls get() = handle.relinkCalls
 
         override fun open(): LinkOpenResult = openResult()
+        override fun recordPreStart(): Boolean = recordPreStartResult
+        override fun recordUnlinked(): Boolean {
+            onRecordUnlinked()
+            return recordUnlinkedResult
+        }
         override fun resetLocalState() { resetCalls++; onReset() }
         override fun pairingInProgress(): Boolean = LinkRuntime.pairingInProgress.get()
-        override fun tryBeginPairing(): Long? = LinkRuntime.tryBeginPairing()?.also(pairingTokens::add)
+        override fun tryBeginPairing(): Long? = LinkRuntime.tryBeginPairing()?.also {
+            pairingTokens += it
+            onTryBeginPairing()
+        }
         override fun endPairing(token: Long) { endedTokens += token; LinkRuntime.endPairing(token) }
         override fun requestNotificationPermission() { permissionRequests++ }
         override fun launchSignIn(onResult: (String?) -> Unit) { signInLaunches++ }

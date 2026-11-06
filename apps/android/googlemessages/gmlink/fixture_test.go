@@ -52,12 +52,14 @@ func setTestOwnerVerification(link *Link) {
 // through phoneFixture.configure, which holds the fixture lock.
 type fixtureKnobs struct {
 	configEmail    string
+	configStatus   int
 	configRedirect bool
 	gateConfig     bool
 	rotateCookie   bool
 	hangConfig     bool
 	hangSignIn     bool
 	hangRefresh    bool
+	gateRefresh    bool
 	gaiaInit       bool
 	gaiaFinish     bool
 	failAction     gmproto.ActionType
@@ -66,19 +68,25 @@ type fixtureKnobs struct {
 	hangAction     gmproto.ActionType
 	gateSend       bool
 	gateAction     gmproto.ActionType
+	gateList       bool
 }
 
 // phoneFixture stands in for Google's servers on localhost. It answers config,
 // sign-in, sends and the long poll, and records every request the link makes.
 type phoneFixture struct {
-	server    *httptest.Server
-	auth      *libgm.AuthData
-	rotations atomic.Int32
-	current   chan []byte
-	pending   [][]byte
-	stop      chan struct{}
-	gate      chan struct{}
-	gateOnce  sync.Once
+	server      *httptest.Server
+	auth        *libgm.AuthData
+	rotations   atomic.Int32
+	current     chan []byte
+	pending     [][]byte
+	stop        chan struct{}
+	gate        chan struct{}
+	gateOnce    sync.Once
+	listOnce    sync.Once
+	streamOnce  sync.Once
+	listReached chan struct{}
+	listRelease chan struct{}
+	streamReady chan struct{}
 
 	mu            sync.Mutex
 	knobs         fixtureKnobs
@@ -97,7 +105,7 @@ type phoneFixture struct {
 // auth is the link's auth: the fixture decrypts its requests and encrypts replies.
 func newPhoneFixture(t *testing.T, auth *libgm.AuthData) *phoneFixture {
 	t.Helper()
-	fixture := &phoneFixture{auth: auth, stop: make(chan struct{}), gate: make(chan struct{})}
+	fixture := &phoneFixture{auth: auth, stop: make(chan struct{}), gate: make(chan struct{}), listReached: make(chan struct{}), listRelease: make(chan struct{}), streamReady: make(chan struct{})}
 	fixture.server = httptest.NewTLSServer(http.HandlerFunc(fixture.serve))
 	installSafetyDialer(t, fixture.server)
 	t.Cleanup(fixture.server.Close)
@@ -194,6 +202,10 @@ func (fixture *phoneFixture) serve(writer http.ResponseWriter, request *http.Req
 			writer.WriteHeader(http.StatusFound)
 			return
 		}
+		if knobs.configStatus != 0 {
+			writer.WriteHeader(knobs.configStatus)
+			return
+		}
 		if knobs.rotateCookie {
 			writer.Header().Add("Set-Cookie", fmt.Sprintf("SAPISID=rotated-%d; Path=/; Secure", fixture.rotations.Add(1)))
 		}
@@ -226,6 +238,16 @@ func (fixture *phoneFixture) serve(writer http.ResponseWriter, request *http.Req
 		fixture.mu.Unlock()
 		if knobs.hangRefresh && first {
 			fixture.hold(request)
+			return
+		}
+		if knobs.gateRefresh && first {
+			// The first refresh waits for openGate, then fails transiently so Connect carries on.
+			select {
+			case <-fixture.gate:
+			case <-fixture.stop:
+				return
+			}
+			writer.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		writer.WriteHeader(http.StatusUnauthorized)
@@ -322,6 +344,7 @@ func (fixture *phoneFixture) handleSend(writer http.ResponseWriter, request *htt
 }
 
 func (fixture *phoneFixture) answerListConversations(data *gmproto.OutgoingRPCData) {
+	knobs := fixture.snapshot()
 	plain, err := fixture.auth.RequestCrypto.Decrypt(data.GetEncryptedProtoData())
 	if err != nil {
 		panic(err)
@@ -333,6 +356,14 @@ func (fixture *phoneFixture) answerListConversations(data *gmproto.OutgoingRPCDa
 	fixture.mu.Lock()
 	fixture.listCalls = append(fixture.listCalls, &request)
 	fixture.mu.Unlock()
+	if knobs.gateList && request.GetFolder() == gmproto.ListConversationsRequest_INBOX {
+		fixture.listOnce.Do(func() { close(fixture.listReached) })
+		select {
+		case <-fixture.listRelease:
+		case <-fixture.stop:
+			return
+		}
+	}
 	fixture.mu.Lock()
 	conversations := append([]*gmproto.Conversation(nil), fixture.conversations...)
 	fixture.mu.Unlock()
@@ -480,6 +511,7 @@ func (fixture *phoneFixture) streamLongPoll(writer http.ResponseWriter, request 
 	}
 	fixture.pending = nil
 	fixture.mu.Unlock()
+	fixture.streamOnce.Do(func() { close(fixture.streamReady) })
 	defer func() {
 		fixture.mu.Lock()
 		if fixture.current == blocks {
@@ -507,6 +539,15 @@ func (fixture *phoneFixture) streamLongPoll(writer http.ResponseWriter, request 
 	}
 }
 
+func (fixture *phoneFixture) awaitStreamReady(t *testing.T) {
+	t.Helper()
+	select {
+	case <-fixture.streamReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not open")
+	}
+}
+
 func mustMarshal(message proto.Message) []byte {
 	encoded, err := proto.Marshal(message)
 	if err != nil {
@@ -520,6 +561,7 @@ type safetyHost struct {
 	mu          sync.Mutex
 	states      [][]byte
 	events      []eventCode
+	delivered   chan eventCode
 	emoji       chan string
 	failPersist bool
 	holdState   string
@@ -529,10 +571,11 @@ type safetyHost struct {
 	holdEvent        string
 	holdEventReached chan struct{}
 	holdEventRelease chan struct{}
+	onEvent          func(kind, code string)
 }
 
 func newSafetyHost() *safetyHost {
-	return &safetyHost{emoji: make(chan string, 4)}
+	return &safetyHost{emoji: make(chan string, 4), delivered: make(chan eventCode, 128)}
 }
 
 func (host *safetyHost) PersistState(state []byte) error {
@@ -628,8 +671,32 @@ func (host *safetyHost) Event(kind, code string, _, _, _ int64) {
 		<-release
 	}
 	host.mu.Lock()
-	defer host.mu.Unlock()
 	host.events = append(host.events, eventCode{kind, code})
+	hook := host.onEvent
+	host.mu.Unlock()
+	if hook != nil {
+		hook(kind, code)
+	}
+	select {
+	case host.delivered <- eventCode{kind, code}:
+	default:
+	}
+}
+
+func (host *safetyHost) awaitEvent(t *testing.T, kind, code string) {
+	t.Helper()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case event := <-host.delivered:
+			if event.kind == kind && event.code == code {
+				return
+			}
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for %s/%s", kind, code)
+		}
+	}
 }
 
 // holdNextEvent makes the next event with the given code block inside Event until the

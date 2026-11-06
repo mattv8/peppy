@@ -2,6 +2,7 @@ package gmlink
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -42,5 +43,36 @@ func TestResolveExistingConversationNeverReturnsParticipantIdentity(t *testing.T
 	}
 	if _, exists := decoded["participant"]; exists {
 		t.Fatalf("participant identity leaked in %s", result)
+	}
+}
+
+func TestVisibleOtherParticipantsCountsNumberlessParticipant(t *testing.T) {
+	conversation := &gmproto.Conversation{Participants: []*gmproto.Participant{
+		{IsMe: true, IsVisible: true},
+		{IsVisible: true, ID: &gmproto.SmallInfo{Number: "synthetic-target"}},
+		{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "synthetic-other"}},
+		{IsVisible: false, ID: &gmproto.SmallInfo{Number: "ignored-target"}},
+	}}
+	if got := len(visibleOtherParticipants(conversation)); got != 2 {
+		t.Fatalf("visible other participants = %d, want 2", got)
+	}
+}
+
+func TestConversationEventsCoalesceAndRequestResyncAtCapacity(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	link.mu.Lock()
+	link.recordConversationEventLocked("synthetic-conversation")
+	link.recordConversationEventLocked("synthetic-conversation")
+	if got := len(link.conversationEvents); got != 1 {
+		link.mu.Unlock()
+		t.Fatalf("coalesced events = %d, want 1", got)
+	}
+	for index := 1; index <= conversationEventLimit; index++ {
+		link.recordConversationEventLocked("synthetic-conversation-" + strconv.Itoa(index))
+	}
+	events := append([]conversationEvent(nil), link.conversationEvents...)
+	link.mu.Unlock()
+	if len(events) != 1 || events[0].Code != "conversation_resync" || events[0].GoogleConversationID != "" {
+		t.Fatalf("overflow events = %+v", events)
 	}
 }

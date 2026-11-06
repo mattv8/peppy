@@ -5,6 +5,7 @@ import android.os.Looper
 import android.webkit.CookieManager
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -27,6 +28,8 @@ class LinkSignInActivityTest {
         LinkRuntime.resetForTest()
         LinkRuntimeTestHooks.engine = null
         LinkRuntimeTestHooks.storeFactory = null
+        LinkRuntimeTestHooks.eventRecorder = null
+        LinkCoreBridge.resetForTest()
     }
 
     @Test
@@ -75,6 +78,42 @@ class LinkSignInActivityTest {
         controller.destroy()
     }
 
+    @Test
+    fun `failed lifecycle fence prevents native pair and records persistence failure`() {
+        val startup = ControlledStartup()
+        val handle = PairCountingHandle()
+        val persistFailure = CountDownLatch(1)
+        LinkSignInActivityTestHooks.startupExecutor = startup::capture
+        LinkSignInActivityTestHooks.awaitSignInReady = { false }
+        LinkCoreBridge.recorder = { _, _ -> false }
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+        LinkRuntimeTestHooks.eventRecorder = { _, code, _ -> if (code == "persist_failed") persistFailure.countDown() }
+
+        val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
+        val activity = controller.get()
+        startup.run()
+        LinkSignInActivity::class.java.getDeclaredField("pendingCookies").apply {
+            isAccessible = true
+            set(activity, FilteredCookies(emptyMap()))
+        }
+        LinkSignInActivity::class.java.getDeclaredMethod("startPairing").apply {
+            isAccessible = true
+            invoke(activity)
+        }
+
+        assertTrue(persistFailure.await(1, TimeUnit.SECONDS))
+        awaitPairingCompletion()
+        assertEquals(0, handle.pairCalls.get())
+        controller.destroy()
+    }
+
+    private fun awaitPairingCompletion() {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+        while (LinkRuntime.pairingInProgress.get() && System.nanoTime() < deadline) Thread.yield()
+        assertFalse(LinkRuntime.pairingInProgress.get())
+    }
+
     private fun assertFinishedWith(activity: LinkSignInActivity, outcome: String) {
         val shadow = shadowOf(activity)
         assertTrue(activity.isFinishing)
@@ -112,7 +151,7 @@ class LinkSignInActivityTest {
         }
     }
 
-    private class LinkedHandle : LinkHandle {
+    private open class LinkedHandle : LinkHandle {
         override fun pair(cookiesJson: ByteArray) = Unit
         override fun relink() = Unit
         override fun run() = Unit
@@ -121,6 +160,11 @@ class LinkSignInActivityTest {
         override fun stop() = Unit
         override fun close() = Unit
         override fun status() = """{"state":"linked"}"""
+    }
+
+    private class PairCountingHandle : LinkedHandle() {
+        val pairCalls = AtomicInteger()
+        override fun pair(cookiesJson: ByteArray) { pairCalls.incrementAndGet() }
     }
 
     private object EmptyLinkStateStorage : LinkStateStorage {

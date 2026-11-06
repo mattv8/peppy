@@ -2,13 +2,10 @@ package gmlink
 
 import (
 	"encoding/json"
-	"time"
 
 	"github.com/google/uuid"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
-
-const sendTimeout = 30 * time.Second
 
 type rcsSendRequest struct {
 	CommandID            string `json:"command_id"`
@@ -23,12 +20,9 @@ type rcsSendResult struct {
 	Code                 string `json:"code"`
 	TmpID                string `json:"tmp_id,omitempty"`
 	GoogleConversationID string `json:"google_conversation_id,omitempty"`
-	AckAtMS              int64  `json:"ack_at_ms,omitempty"`
 }
 
-// SendRcs invokes SendMessage once only after re-fetching the exact conversation
-// and joining its outgoing id to a fresh settings event. An acknowledgement is
-// transport metadata, not delivery evidence.
+// SendRcs parses and validates a legacy request without dispatching a carrier effect.
 func (link *Link) SendRcs(requestJSON string) string {
 	var request rcsSendRequest
 	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil || !validRcsRequest(request) {
@@ -44,7 +38,7 @@ func validRcsRequest(request rcsSendRequest) bool {
 		return false
 	}
 	parsed, err := uuid.Parse(request.TmpID)
-	return err == nil && parsed.Version() == 4
+	return err == nil && parsed.Version() == 4 && parsed.Variant() == uuid.RFC4122 && parsed.String() == request.TmpID
 }
 
 func (link *Link) currentSettings() (*gmproto.Settings, string) {

@@ -190,6 +190,12 @@ pub(crate) fn record_intentional_unlink(
 }
 
 fn recorded_link_state_is_unlinked(conn: &Connection) -> Result<bool, Error> {
+    if matches!(
+        rcs_mapping::recorded_link_lifecycle(conn)?,
+        Some(crate::RcsCapabilityState::Unlinked)
+    ) {
+        return Ok(true);
+    }
     let value = conn
         .query_row(
             "SELECT v FROM metadata WHERE k=?",

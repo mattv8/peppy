@@ -197,7 +197,8 @@ mod tests {
                 assert!(budget.admit_ack(challenger, second * SECOND_MS));
             }
         }
-        assert!(!budget.admit_ack(challenger, 4_001));
+        assert!(!budget.admit_ack(challenger, 5_000));
+        assert!(!budget.admit_ack(challenger, MINUTE_MS - 1));
         assert!(budget.admit_ack(challenger, MINUTE_MS));
     }
 
@@ -261,10 +262,11 @@ mod tests {
     fn ingress_refuses_new_peers_while_full_and_recovers_after_expiry() {
         let mut budget = IngressBudget::default();
         for id in 0..MAX_PEER_RECORDS as u128 {
-            assert!(budget.admit(peer(id), id as u64 * 10));
+            assert!(budget.admit(peer(id), id as u64 * 500));
         }
-        assert!(!budget.admit(peer(101), SECOND_MS));
+        assert!(!budget.admit(peer(101), 50_000));
         assert_eq!(budget.ingress.minute.accepted_at.len(), MAX_PEER_RECORDS);
+        assert_eq!(budget.ingress.second.accepted_at.len(), 1);
         assert_eq!(budget.peers.len(), MAX_PEER_RECORDS);
         assert!(budget.peers.contains_key(&peer(0)));
         assert!(budget.admit(peer(101), MINUTE_MS));

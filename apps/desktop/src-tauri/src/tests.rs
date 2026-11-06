@@ -249,6 +249,7 @@ fn native_snapshot_projects_current_rcs_only_for_the_selected_existing_conversat
                 observed_at_ms: now,
                 capability_revision: 1,
                 feature_bits: 1,
+                linked_since_ms: Some(now),
             },
             &[RcsEligibilityProjection {
                 conversation_id: conversation,
@@ -381,6 +382,7 @@ fn native_snapshot_does_not_project_rcs_eligibility_for_an_implicit_draft_only_s
                 observed_at_ms: now,
                 capability_revision: 1,
                 feature_bits: 1,
+                linked_since_ms: Some(now),
             },
             &[RcsEligibilityProjection {
                 conversation_id: conversation,
@@ -408,6 +410,82 @@ fn native_snapshot_does_not_project_rcs_eligibility_for_an_implicit_draft_only_s
 
     assert!(snapshot.rcs_status.unwrap().eligibilities.is_empty());
     assert_eq!(session.client.pending_outbox_count().unwrap(), outbox_before_snapshot);
+}
+
+#[test]
+fn native_snapshot_hides_rcs_status_unless_encryption_is_displayed_unlocked() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let draft = session
+        .save_draft(&input("new", "", "draft", &["+15555550101"], "0"))
+        .unwrap();
+    let conversation = draft.conversation_id.parse().unwrap();
+    let gateway_id = fixture.binding.device_id.clone();
+    let gateway_device_id = gateway_id.parse().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    session
+        .client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms: now,
+                capability_revision: 1,
+                feature_bits: 1,
+                linked_since_ms: Some(now),
+            },
+            &[RcsEligibilityProjection {
+                conversation_id: conversation,
+                eligibility: RcsEligibility::Eligible,
+                feature_bits: 1,
+                mapping_revision: 1,
+                observed_at_ms: now,
+                gateway_device_id,
+            }],
+            now,
+        )
+        .unwrap();
+    let mut gateway_view = gateway(&gateway_id, true, false);
+    gateway_view.simulated = false;
+    session.set_status(|status| {
+        status.gateways = vec![gateway_view];
+        status.rcs_roster_validated = true;
+    });
+    let rcs_status = || {
+        session
+            .snapshot(None, None, crate::head(), None, Default::default())
+            .unwrap()
+            .0
+            .rcs_status
+    };
+
+    assert!(rcs_status().is_some(), "unlocked positive control must keep rcs_status");
+
+    session
+        .mismatch
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(rcs_status().is_none(), "mismatch must hide rcs_status");
+    session
+        .mismatch
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    let active_epoch = session.client.key_status().unwrap().active_epoch.unwrap();
+    session.set_status(|status| {
+        status.vault = Some(crate::session::VaultSummary {
+            epoch: active_epoch + 1,
+            fingerprint: "synthetic-fingerprint".into(),
+        });
+    });
+    assert!(rcs_status().is_none(), "server-ahead epoch must hide rcs_status");
 }
 
 fn assert_sanitized(json: &str, dir: &Path) {

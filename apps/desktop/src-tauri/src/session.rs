@@ -1624,6 +1624,7 @@ impl Session {
             status.vault.as_ref(),
             &keys,
         );
+        let displayed_unlocked = matches!(encryption_state, EncryptionState::Unlocked { .. });
         let encryption = match encryption_state {
             EncryptionState::Mismatch => dto::Encryption {
                 state: "mismatch",
@@ -1679,7 +1680,7 @@ impl Session {
                     }) && (!explicitly_requested
                         || requested_conversation.is_some()),
                     roster_validated: status.rcs_roster_validated,
-                    unlocked,
+                    unlocked: displayed_unlocked,
                     now_ms: now_ms(),
                 },
             )

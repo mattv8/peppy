@@ -1333,11 +1333,14 @@ impl Client {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        rcs_mapping::record_link_lifecycle(&tx, state)?;
-        tx.execute(
-            "DELETE FROM metadata WHERE k LIKE 'rcs_carrier_only_proof_v1/%'",
-            [],
-        )?;
+        let previous_state = rcs_mapping::recorded_link_lifecycle(&tx)?;
+        let state_changed = rcs_mapping::record_link_lifecycle(&tx, state)?;
+        if state_changed {
+            tx.execute(
+                "DELETE FROM metadata WHERE k LIKE 'rcs_carrier_only_proof_v1/%'",
+                [],
+            )?;
+        }
         let identity = format!("status:{}", ctx.device_id);
         let previous_revision = tx
             .query_row(
@@ -1350,6 +1353,18 @@ impl Client {
         let revision = previous_revision
             .checked_add(1)
             .ok_or(Error::InvalidRequest("RCS capability revision exhausted"))?;
+        let linked_since_ms = if state == RcsCapabilityState::Linked {
+            if previous_state == Some(RcsCapabilityState::Linked) {
+                rcs_capability::linked_since(&tx, ctx.device_id)?.unwrap_or(observed_at_ms)
+            } else {
+                rcs_capability::next_linked_since(&tx, ctx.device_id, observed_at_ms)?
+            }
+        } else {
+            0
+        };
+        if state == RcsCapabilityState::Linked {
+            rcs_capability::record_linked_since(&tx, ctx.device_id, linked_since_ms)?;
+        }
         let status = RcsLinkStatusEvent {
             gateway_device_id: ctx.device_id,
             state,
@@ -1359,6 +1374,7 @@ impl Client {
             observed_at_ms,
             capability_revision: revision,
             feature_bits: 0,
+            linked_since_ms: (state == RcsCapabilityState::Linked).then_some(linked_since_ms),
         };
         publish_rcs_capability_payload(
             &tx,
@@ -7510,7 +7526,12 @@ fn classify(
             "UPDATE outbox SET state='acknowledged' WHERE envelope_id=?",
             params![id],
         )?;
-        if is_self_addressed_explicit_rcs_resend(conn, ctx, envelope)? {
+        let journaled: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM journal WHERE envelope_id=?)",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if !journaled && is_self_addressed_explicit_rcs_resend(conn, ctx, envelope)? {
             return Ok(IngestResult::Journaled);
         }
         return Ok(IngestResult::Duplicate);
@@ -8551,6 +8572,11 @@ fn publish_rcs_capability_payload(
     match payload {
         PrivatePayload::RcsLinkStatus(status) => {
             rcs_capability::apply_status(conn, &status.status, ctx.device_id, sequence)?;
+            rcs_capability::record_observed_at(
+                conn,
+                status.status.gateway_device_id,
+                status.status.observed_at_ms,
+            )?;
         }
         PrivatePayload::RcsLinkEligibility(eligibility) => {
             rcs_capability::apply_eligibility(
@@ -8558,6 +8584,11 @@ fn publish_rcs_capability_payload(
                 &eligibility.eligibility,
                 ctx.device_id,
                 sequence,
+            )?;
+            rcs_capability::record_observed_at(
+                conn,
+                eligibility.eligibility.gateway_device_id,
+                eligibility.eligibility.observed_at_ms,
             )?;
         }
         _ => return Err(Error::Database),
