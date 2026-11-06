@@ -37,6 +37,8 @@ pub const TENANT_TABLES: &[&str] = &[
     "attachment_retention_uses",
     "attachment_retention_devices",
     "attachment_removals",
+    "live_ticket_sessions",
+    "live_tickets",
 ];
 
 const CONTROL_PLANE_TABLES: &[&str] = &[
@@ -55,6 +57,7 @@ const COMMUNITY_RESOLVERS: &[&str] = &[
     "community_resolve_phone_invitation_claim(uuid,bytea)",
     "community_resolve_computer_enrollment(uuid,bytea)",
     "community_resolve_device_admission(uuid)",
+    "community_resolve_live_ticket_vault(bytea)",
     "community_admin_vault_summaries()",
 ];
 
@@ -471,5 +474,16 @@ mod tests {
         for invalid in ["", "1runtime", "runtime;DROP ROLE x", "runtime-role"] {
             assert!(role_identifier(invalid).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod live_ticket_schema_tests {
+    use super::TENANT_TABLES;
+
+    #[test]
+    fn live_ticket_tables_are_part_of_the_tenant_rls_contract() {
+        assert!(TENANT_TABLES.contains(&"live_ticket_sessions"));
+        assert!(TENANT_TABLES.contains(&"live_tickets"));
     }
 }
