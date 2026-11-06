@@ -57,6 +57,9 @@ func TestRefusedPairDoesNotCancelHealthyRun(t *testing.T) {
 	link, _ := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
 	done := startSafetyRun(t, link)
+	awaitSafety(t, "Run to become healthy", func() bool {
+		return strings.Contains(link.Status(), `"healthy":true`)
+	})
 
 	err := link.Pair(canaryCookieJSON(t))
 	if err == nil || err.Error() != "pair_refused" {
