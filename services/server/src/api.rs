@@ -2771,6 +2771,91 @@ fn live_ticket_session_hash(value: &str) -> ApiResult<Vec<u8>> {
         ))
 }
 
+/// Resolves a ticket's tenant through the narrow SECURITY DEFINER function, then
+/// consumes it under that tenant's RLS scope. PostgreSQL supplies acceptance time
+/// after all row locks have been acquired.
+async fn consume_live_ticket(
+    pool: &PgPool,
+    session_id: [u8; 16],
+    secret: [u8; 32],
+) -> ApiResult<Principal> {
+    let digest = Sha256::digest(secret);
+    let vault: Option<Uuid> =
+        sqlx::query_scalar("SELECT vault_id FROM community_resolve_live_ticket_vault($1)")
+            .bind(digest.as_slice())
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    let Some(vault) = vault else {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"));
+    };
+    let session_hash = Sha256::digest(session_id);
+    let mut tx = scope::begin(pool, vault)
+        .await
+        .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    sqlx::query("SET LOCAL lock_timeout='60s'; SET LOCAL statement_timeout='60s'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    let device: Option<Uuid> = sqlx::query_scalar(
+        "SELECT device_id FROM live_tickets WHERE ticket_digest=$1 AND vault_id=$2",
+    )
+    .bind(digest.as_slice())
+    .bind(vault)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    let Some(device) = device else {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"));
+    };
+    let principal = sqlx::query("SELECT d.role,c.token_digest FROM devices d JOIN device_credentials c ON c.vault_id=d.vault_id AND c.device_id=d.device_id WHERE d.vault_id=$1 AND d.device_id=$2 AND d.revoked_at IS NULL AND c.revoked_at IS NULL FOR UPDATE OF d")
+        .bind(vault)
+        .bind(device)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    let Some(principal) = principal else {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"));
+    };
+    let session_open: Option<i32> = sqlx::query_scalar("SELECT 1 FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open' AND lease_until > clock_timestamp() FOR UPDATE")
+        .bind(vault)
+        .bind(device)
+        .bind(&session_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    if session_open.is_none() {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"));
+    }
+    let consumed: Option<i32> = sqlx::query_scalar("UPDATE live_tickets SET consumed_at=clock_timestamp() WHERE ticket_digest=$1 AND vault_id=$2 AND device_id=$3 AND session_id_hash=$4 AND consumed_at IS NULL AND expires_at > clock_timestamp() RETURNING 1")
+        .bind(digest.as_slice())
+        .bind(vault)
+        .bind(device)
+        .bind(&session_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    if consumed.is_none() {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"));
+    }
+    sqlx::query("UPDATE live_ticket_sessions SET lease_until=clock_timestamp()+interval '90 seconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND state='open' AND lease_until > clock_timestamp()")
+        .bind(vault)
+        .bind(device)
+        .bind(&session_hash)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    tx.commit()
+        .await
+        .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"))?;
+    Ok(Principal {
+        vault,
+        device,
+        role: principal.get("role"),
+        token_digest: principal.get("token_digest"),
+    })
+}
+
 async fn live_ticket_tx(
     state: &ApiState,
     p: &Principal,

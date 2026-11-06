@@ -989,6 +989,74 @@ async fn live_ticket_request(
         .unwrap()
 }
 
+async fn issue_ticket(server: &LiveTestServer, session_id: String) -> String {
+    let response = live_ticket_request(server, reqwest::Method::POST, session_id)
+        .await
+        .error_for_status()
+        .unwrap();
+    response.json::<serde_json::Value>().await.unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn ticket_parts(session_id: &str, ticket: &str) -> ([u8; 16], [u8; 32]) {
+    (
+        URL_SAFE_NO_PAD
+            .decode(session_id)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        URL_SAFE_NO_PAD.decode(ticket).unwrap().try_into().unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn live_ticket_consume_is_atomic_and_fails_closed() {
+    let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+    let session = URL_SAFE_NO_PAD.encode([23_u8; 16]);
+    let ticket = issue_ticket(&server, session.clone()).await;
+    let (session_id, secret) = ticket_parts(&session, &ticket);
+    let principal = consume_live_ticket(&server.pool, session_id, secret)
+        .await
+        .unwrap();
+    assert_eq!(principal.vault, server.vault);
+    assert_eq!(principal.device, server.owner_device);
+    assert_eq!(
+        consume_live_ticket(&server.pool, session_id, secret)
+            .await
+            .err()
+            .unwrap()
+            .1,
+        "live_ticket_invalid"
+    );
+
+    sqlx::query("UPDATE live_ticket_sessions SET state='closed', closed_at=clock_timestamp(), lease_until=NULL WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    let expired_session = URL_SAFE_NO_PAD.encode([24_u8; 16]);
+    let expired_ticket = issue_ticket(&server, expired_session.clone()).await;
+    sqlx::query("UPDATE live_tickets SET expires_at=clock_timestamp() WHERE ticket_digest=$1")
+        .bind(Sha256::digest(URL_SAFE_NO_PAD.decode(&expired_ticket).unwrap()).to_vec())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let (session_id, secret) = ticket_parts(&expired_session, &expired_ticket);
+    assert_eq!(
+        consume_live_ticket(&server.pool, session_id, secret)
+            .await
+            .err()
+            .unwrap()
+            .1,
+        "live_ticket_invalid"
+    );
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn expired_provisional_ticket_lease_becomes_terminal() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
