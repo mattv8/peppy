@@ -235,14 +235,26 @@ impl Client {
         self.lock()?
             .conn
             .query_row(
-                "SELECT status_rank FROM rcs_message_status WHERE message_id=?",
+                "SELECT status_rank,rcs_reported FROM rcs_message_status WHERE message_id=? AND status_rank>0",
                 [message_id.to_string()],
                 |row| {
                     Ok(RcsMessageStatusProjection {
                         status: status_from_rank(row.get(0)?)?,
-                        rcs_reported: true,
+                        rcs_reported: row.get(1)?,
                     })
                 },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn rcs_message_reported(&self, message_id: MessageId) -> Result<Option<bool>, Error> {
+        self.lock()?
+            .conn
+            .query_row(
+                "SELECT rcs_reported FROM rcs_message_status WHERE message_id=?",
+                [message_id.to_string()],
+                |row| row.get(0),
             )
             .optional()
             .map_err(Into::into)
@@ -446,6 +458,13 @@ impl Client {
                 if insert_message(&tx, &payload)? != Inserted::New {
                     return Err(Error::Database);
                 }
+                tx.execute(
+                    "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?)",
+                    params![message_id.to_string(), 0, record.rcs_reported],
+                )?;
+                if record.e2ee_reported.is_some() {
+                    publish_metadata(&tx, &ctx, conversation_id, record.e2ee_reported, false)?;
+                }
                 enqueue(
                     &tx,
                     &ctx,
@@ -537,7 +556,7 @@ impl Client {
             RcsProjectedStatus::Delivered => RcsMessageStatus::Delivered,
             RcsProjectedStatus::Read => RcsMessageStatus::Read,
         };
-        if !apply_status(&tx, message_id, status)? {
+        if !apply_status(&tx, message_id, status, true)? {
             return Ok(RcsReceiveOutcome::StatusUnchanged);
         }
         enqueue(
@@ -546,7 +565,11 @@ impl Client {
             EnvelopePurpose::Event,
             None,
             None,
-            &PrivatePayload::RcsMessageStatus { message_id, status },
+            &PrivatePayload::RcsMessageStatus {
+                message_id,
+                status,
+                rcs_reported: true,
+            },
         )?;
         tx.commit()?;
         Ok(RcsReceiveOutcome::StatusApplied)
@@ -803,6 +826,7 @@ fn apply_status(
     conn: &Connection,
     message_id: MessageId,
     status: RcsMessageStatus,
+    rcs_reported: bool,
 ) -> Result<bool, Error> {
     let rank = |status| match status {
         RcsMessageStatus::Sending => 1,
@@ -821,7 +845,7 @@ fn apply_status(
     if current.is_some_and(|current| current >= rank(status)) {
         return Ok(false);
     }
-    conn.execute("INSERT INTO rcs_message_status(message_id,status_rank) VALUES(?,?) ON CONFLICT(message_id) DO UPDATE SET status_rank=excluded.status_rank", params![message_id.to_string(), rank(status)])?;
+    conn.execute("INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?) ON CONFLICT(message_id) DO UPDATE SET status_rank=excluded.status_rank,rcs_reported=excluded.rcs_reported", params![message_id.to_string(), rank(status), rcs_reported])?;
     Ok(true)
 }
 
@@ -840,8 +864,9 @@ pub(crate) fn apply_replicated_status(
     conn: &Connection,
     message_id: MessageId,
     status: RcsMessageStatus,
+    rcs_reported: bool,
 ) -> Result<bool, Error> {
-    apply_status(conn, message_id, status)
+    apply_status(conn, message_id, status, rcs_reported)
 }
 
 pub(crate) fn apply_replicated_metadata(

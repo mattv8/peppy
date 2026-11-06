@@ -3,6 +3,41 @@ mod common;
 
 use common::*;
 use rusqlite::{Connection, OptionalExtension};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn publish_current_gateway(client: &Client, config: &ClientConfig) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let revision = client
+        .rcs_link_status(config.device_id, now_ms)
+        .unwrap()
+        .map_or(1, |status| status.status.capability_revision + 1);
+    client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id: config.device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms: now_ms,
+                capability_revision: revision,
+                feature_bits: 1,
+                linked_since_ms: Some(now_ms),
+            },
+            &[],
+            now_ms,
+        )
+        .unwrap();
+}
+
+fn unlocked(config: &ClientConfig, vault: &Vault) -> Client {
+    let client = common::unlocked(config, vault);
+    publish_current_gateway(&client, config);
+    client
+}
 
 fn status_rank(config: &ClientConfig, message_id: MessageId) -> Option<i64> {
     let connection = Connection::open(&config.database_path).unwrap();
@@ -75,7 +110,7 @@ fn rcs_conversation_metadata_converges_out_of_order_without_provider_identifiers
     );
 
     let mut envelopes = first.pending_outbox().unwrap();
-    assert_eq!(envelopes.len(), 3);
+    assert_eq!(envelopes.len(), 4);
     envelopes.reverse();
     for (index, envelope) in envelopes.iter().enumerate() {
         assert!(!serde_json::to_string(envelope).unwrap().contains("google_"));
@@ -464,6 +499,13 @@ fn incoming_rcs_replay_stale_writer_and_page_floor_are_rejected_without_rows() {
     let mut page = record("page");
     page.google_message_id = "page-message".into();
     page.history_token = Some("page-token".into());
+    page.sent_at_ms = Some(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 1,
+    );
     page.sent_at_ms = Some(10);
     assert_eq!(
         client
@@ -490,6 +532,13 @@ fn page_records_are_imported_while_live_records_remain_unseen() {
     let mut page = record("page");
     page.google_message_id = "page-message".into();
     page.history_token = Some("page-token".into());
+    page.sent_at_ms = Some(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 1,
+    );
     client
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, page)
         .unwrap();

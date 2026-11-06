@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS projection_notification_preferences(generation INTEGE
     mute_with_heads INTEGER NOT NULL, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projection_rcs_message_status(generation INTEGER NOT NULL, message_id TEXT NOT NULL,
-    status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 1 AND 5), PRIMARY KEY(generation,message_id));
+    status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 0 AND 5), rcs_reported INTEGER NOT NULL CHECK(rcs_reported IN (0,1)), PRIMARY KEY(generation,message_id));
 CREATE TABLE IF NOT EXISTS projection_rcs_conversation_metadata(generation INTEGER NOT NULL, conversation_id TEXT NOT NULL,
     rcs_encryption INTEGER CHECK(rcs_encryption IN (0,1)), rcs_history_gap INTEGER NOT NULL CHECK(rcs_history_gap IN (0,1)),
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, producer_device_id TEXT NOT NULL,
@@ -477,7 +477,11 @@ pub(super) fn reduce(
         return Ok(false);
     };
     match payload {
-        PrivatePayload::RcsMessageStatus { message_id, status } => {
+        PrivatePayload::RcsMessageStatus {
+            message_id,
+            status,
+            rcs_reported,
+        } => {
             let rank = match status {
                 RcsMessageStatus::Sending => 1,
                 RcsMessageStatus::Sent => 2,
@@ -486,8 +490,8 @@ pub(super) fn reduce(
                 RcsMessageStatus::Read => 5,
             };
             conn.execute(
-                "INSERT INTO projection_rcs_message_status(generation,message_id,status_rank) VALUES(?,?,?) ON CONFLICT(generation,message_id) DO UPDATE SET status_rank=MAX(status_rank,excluded.status_rank)",
-                params![generation, message_id.to_string(), rank],
+                "INSERT INTO projection_rcs_message_status(generation,message_id,status_rank,rcs_reported) VALUES(?,?,?,?) ON CONFLICT(generation,message_id) DO UPDATE SET status_rank=MAX(status_rank,excluded.status_rank),rcs_reported=excluded.rcs_reported",
+                params![generation, message_id.to_string(), rank, rcs_reported],
             )?;
             Ok(true)
         }
@@ -944,7 +948,7 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
 
     conn.execute("DELETE FROM rcs_message_status", [])?;
     conn.execute(
-        "INSERT INTO rcs_message_status(message_id,status_rank) SELECT message_id,status_rank FROM projection_rcs_message_status WHERE generation=?",
+        "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) SELECT message_id,status_rank,rcs_reported FROM projection_rcs_message_status WHERE generation=?",
         [generation],
     )?;
     conn.execute("DELETE FROM rcs_conversation_metadata", [])?;

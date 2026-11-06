@@ -404,6 +404,7 @@ pub enum PrivatePayload {
     RcsMessageStatus {
         message_id: MessageId,
         status: RcsMessageStatus,
+        rcs_reported: bool,
     },
     RcsLinkStatus(RcsLinkStatusPayload),
     RcsLinkEligibility(RcsLinkEligibilityPayload),
@@ -6676,7 +6677,8 @@ CREATE TABLE rcs_provider_detectors(
 CREATE INDEX rcs_provider_detectors_unresolved ON rcs_provider_detectors(conversation_id,resolved,provider_row_id);
 CREATE TABLE rcs_message_status(
   message_id TEXT PRIMARY KEY,
-  status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 1 AND 5)
+  status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 0 AND 5),
+  rcs_reported INTEGER NOT NULL CHECK(rcs_reported IN (0,1))
 );
 CREATE TABLE rcs_conversation_metadata(
   conversation_id TEXT PRIMARY KEY,
@@ -7820,8 +7822,15 @@ fn apply_record(
                 return Ok(Some(Q::InvalidPayload));
             }
         }
-        (EnvelopePurpose::Event, PrivatePayload::RcsMessageStatus { message_id, status }) => {
-            if !rcs_receive::apply_replicated_status(conn, message_id, status)? {
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::RcsMessageStatus {
+                message_id,
+                status,
+                rcs_reported,
+            },
+        ) => {
+            if !rcs_receive::apply_replicated_status(conn, message_id, status, rcs_reported)? {
                 return Ok(None);
             }
         }
