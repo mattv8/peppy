@@ -1915,6 +1915,10 @@ impl NativeClient {
     }
 
     /// Enables memory-only live typing from host-attested roster and executor facts.
+    ///
+    /// Call this off the UI thread. Hosts must serialize later outcome publication by generation,
+    /// session token/revision, per-conversation sequence, then deadline before any display or
+    /// Google effect.
     pub fn enable_live_typing(
         &self,
         context: typing::NativeLiveEnableContext,
@@ -1930,7 +1934,7 @@ impl NativeClient {
         .map(|generation| generation.0)
     }
 
-    /// Retires the current memory-only live typing incarnation.
+    /// Retires the current memory-only live typing incarnation. Call this off the UI thread.
     pub fn disable_live_typing(&self) -> Result<(), typing::NativeLiveTypingError> {
         typing::with_live_client(&self.client, |client| {
             client
@@ -1940,6 +1944,7 @@ impl NativeClient {
     }
 
     /// Separately controls whether this enabled incarnation seals outbound typing frames.
+    /// Call this off the UI thread.
     pub fn set_typing_sharing(&self, enabled: bool) -> Result<(), typing::NativeLiveTypingError> {
         typing::with_live_client(&self.client, |client| {
             client
@@ -1948,7 +1953,8 @@ impl NativeClient {
         })
     }
 
-    /// Seals a canonical protocol frame for the private live transport.
+    /// Seals a canonical protocol frame for the private live transport. Call this off the UI
+    /// thread.
     pub fn seal_typing_signal_v2(
         &self,
         conversation_id: String,
@@ -1975,6 +1981,10 @@ impl NativeClient {
     }
 
     /// Opens a canonical private live transport frame and returns only sanitized host metadata.
+    ///
+    /// Call this off the UI thread. Before any display or Google effect, hosts must serialize
+    /// outcome publication by generation, session token/revision, per-conversation sequence,
+    /// then deadline.
     pub fn open_typing_signal_v2(
         &self,
         frame_json: String,
@@ -1982,12 +1992,8 @@ impl NativeClient {
     ) -> Result<typing::NativeLiveOutcome, typing::NativeLiveTypingError> {
         let clock = typing::clock(clock)?;
         typing::with_live_client(&self.client, |client| {
-            let frame = match typing::parse_frame(&frame_json) {
-                Some(frame) => frame,
-                None => return Ok(typing::empty_outcome()),
-            };
             client
-                .open_typing_signal_v2(&frame, clock)
+                .open_typing_signal_v2_json(&frame_json, clock)
                 .map_err(typing::live_error)
         })
         .and_then(typing::outcome_view)

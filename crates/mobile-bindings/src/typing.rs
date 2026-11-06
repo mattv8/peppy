@@ -4,7 +4,7 @@ use peppy_client_core::{
     Client, ConversationId, DeviceId, LiveAction, LiveClock, LiveEnableContext, LiveError,
     LiveExecutor, LiveOutcome,
 };
-use peppy_protocol::{EphemeralSignalV2, TypingOriginV2, TypingStateV2};
+use peppy_protocol::{TypingOriginV2, TypingStateV2};
 use std::{str::FromStr, sync::Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -157,12 +157,6 @@ pub(crate) fn state(value: NativeTypingState) -> TypingStateV2 {
     }
 }
 
-pub(crate) fn parse_frame(value: &str) -> Option<EphemeralSignalV2> {
-    let frame = serde_json::from_str::<EphemeralSignalV2>(value).ok()?;
-    frame.validate().ok()?;
-    Some(frame)
-}
-
 pub(crate) fn outbound_view(
     value: Option<peppy_client_core::LiveOutbound>,
 ) -> Result<Option<NativeLiveOutbound>, NativeLiveTypingError> {
@@ -192,15 +186,6 @@ pub(crate) fn outcome_view(value: LiveOutcome) -> Result<NativeLiveOutcome, Nati
             .map(|frame| serde_json::to_string(&frame).map_err(|_| NativeLiveTypingError::Crypto))
             .transpose()?,
     })
-}
-
-pub(crate) fn empty_outcome() -> LiveOutcome {
-    LiveOutcome {
-        generation: peppy_client_core::LiveEnableGeneration(0),
-        session_update: None,
-        action: None,
-        reply: None,
-    }
 }
 
 fn action_view(value: LiveAction) -> NativeLiveAction {
@@ -258,6 +243,20 @@ pub(crate) fn live_error(value: LiveError) -> NativeLiveTypingError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{NativeOpenConfig, open_native_client};
+
+    fn native_client() -> std::sync::Arc<crate::NativeClient> {
+        open_native_client(NativeOpenConfig {
+            database_path: std::env::temp_dir()
+                .join(format!("peppy-live-typing-{}.db", uuid::Uuid::new_v4()))
+                .display()
+                .to_string(),
+            vault_id: uuid::Uuid::new_v4().to_string(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            database_key: vec![7; 32],
+        })
+        .unwrap()
+    }
 
     #[test]
     fn errors_use_the_fixed_host_codes() {
@@ -272,12 +271,36 @@ mod tests {
     }
 
     #[test]
-    fn malformed_frames_have_an_empty_sanitized_outcome() {
-        assert!(parse_frame("not-json").is_none());
-        let outcome = outcome_view(empty_outcome()).unwrap();
-        assert_eq!(outcome.generation, 0);
-        assert_eq!(outcome.session_update, None);
-        assert_eq!(outcome.action, None);
-        assert_eq!(outcome.reply_frame_json, None);
+    fn malformed_frame_still_observes_disabled_admission() {
+        let client = native_client();
+        assert!(matches!(
+            client.open_typing_signal_v2(
+                "not-json".into(),
+                NativeLiveClock {
+                    wall_ms: 1,
+                    mono_ms: 1,
+                },
+            ),
+            Err(NativeLiveTypingError::Disabled)
+        ));
+    }
+
+    #[test]
+    fn invalid_roster_is_rejected_by_the_native_client_boundary() {
+        let client = native_client();
+        assert!(matches!(
+            client.enable_live_typing(
+                NativeLiveEnableContext {
+                    trusted_roster: vec!["not-a-device".into()],
+                    local_gateway_device_id: uuid::Uuid::new_v4().to_string(),
+                    local_executor: NativeLiveExecutor::None,
+                },
+                NativeLiveClock {
+                    wall_ms: 1,
+                    mono_ms: 1,
+                },
+            ),
+            Err(NativeLiveTypingError::InvalidContext)
+        ));
     }
 }

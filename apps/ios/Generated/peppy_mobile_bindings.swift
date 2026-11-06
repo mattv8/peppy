@@ -774,7 +774,7 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func createComposeDraft(conversationId: String?) throws  -> NativeComposeDraft
     
     /**
-     * Retires the current memory-only live typing incarnation.
+     * Retires the current memory-only live typing incarnation. Call this off the UI thread.
      */
     func disableLiveTyping() throws 
     
@@ -798,6 +798,10 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     /**
      * Enables memory-only live typing from host-attested roster and executor facts.
+     *
+     * Call this off the UI thread. Hosts must serialize later outcome publication by generation,
+     * session token/revision, per-conversation sequence, then deadline before any display or
+     * Google effect.
      */
     func enableLiveTyping(context: NativeLiveEnableContext, clock: NativeLiveClock) throws  -> UInt64
     
@@ -920,6 +924,10 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     /**
      * Opens a canonical private live transport frame and returns only sanitized host metadata.
+     *
+     * Call this off the UI thread. Before any display or Google effect, hosts must serialize
+     * outcome publication by generation, session token/revision, per-conversation sequence,
+     * then deadline.
      */
     func openTypingSignalV2(frameJson: String, clock: NativeLiveClock) throws  -> NativeLiveOutcome
     
@@ -1083,7 +1091,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: NativeComposeDraftUpdate) throws  -> NativeComposeDraft
     
     /**
-     * Seals a canonical protocol frame for the private live transport.
+     * Seals a canonical protocol frame for the private live transport. Call this off the UI
+     * thread.
      */
     func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, origin: NativeTypingOrigin, state: NativeTypingState, clock: NativeLiveClock) throws  -> NativeLiveOutbound?
     
@@ -1133,6 +1142,7 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     /**
      * Separately controls whether this enabled incarnation seals outbound typing frames.
+     * Call this off the UI thread.
      */
     func setTypingSharing(enabled: Bool) throws 
     
@@ -1809,7 +1819,7 @@ open func createComposeDraft(conversationId: String?)throws  -> NativeComposeDra
 }
     
     /**
-     * Retires the current memory-only live typing incarnation.
+     * Retires the current memory-only live typing incarnation. Call this off the UI thread.
      */
 open func disableLiveTyping()throws   {try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
         uniffiCallStatus in
@@ -1876,6 +1886,10 @@ open func enableDeferredGatewayMedia(wifiConnected: Bool, mediaWifiOnly: Bool)th
     
     /**
      * Enables memory-only live typing from host-attested roster and executor facts.
+     *
+     * Call this off the UI thread. Hosts must serialize later outcome publication by generation,
+     * session token/revision, per-conversation sequence, then deadline before any display or
+     * Google effect.
      */
 open func enableLiveTyping(context: NativeLiveEnableContext, clock: NativeLiveClock)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
@@ -2365,6 +2379,10 @@ open func openNativePlaintextFile(attachmentId: String)throws  -> NativePlaintex
     
     /**
      * Opens a canonical private live transport frame and returns only sanitized host metadata.
+     *
+     * Call this off the UI thread. Before any display or Google effect, hosts must serialize
+     * outcome publication by generation, session token/revision, per-conversation sequence,
+     * then deadline.
      */
 open func openTypingSignalV2(frameJson: String, clock: NativeLiveClock)throws  -> NativeLiveOutcome  {
     return try  FfiConverterTypeNativeLiveOutcome_lift(try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
@@ -2962,7 +2980,8 @@ open func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: Na
 }
     
     /**
-     * Seals a canonical protocol frame for the private live transport.
+     * Seals a canonical protocol frame for the private live transport. Call this off the UI
+     * thread.
      */
 open func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, origin: NativeTypingOrigin, state: NativeTypingState, clock: NativeLiveClock)throws  -> NativeLiveOutbound?  {
     return try  FfiConverterOptionTypeNativeLiveOutbound.lift(try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
@@ -3201,6 +3220,7 @@ open func setSmsScanCheckpoint(sourceGeneration: String, subscriptionId: String,
     
     /**
      * Separately controls whether this enabled incarnation seals outbound typing frames.
+     * Call this off the UI thread.
      */
 open func setTypingSharing(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
         uniffiCallStatus in
@@ -15812,7 +15832,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_create_compose_draft() != 64980) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_disable_live_typing() != 460) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_disable_live_typing() != 54351) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_discard_unreferenced_attachment() != 15319) {
@@ -15830,7 +15850,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_deferred_gateway_media() != 47618) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_live_typing() != 53016) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_live_typing() != 57279) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_evict_attachment_ciphertext() != 53494) {
@@ -15968,7 +15988,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file() != 2659) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_typing_signal_v2() != 46286) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_typing_signal_v2() != 6893) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity() != 20629) {
@@ -16124,7 +16144,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft() != 5300) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() != 1319) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() != 40376) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_send_compose_draft() != 23646) {
@@ -16187,7 +16207,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_scan_checkpoint() != 31950) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_typing_sharing() != 8197) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_typing_sharing() != 5834) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_acquisitions_after() != 47158) {

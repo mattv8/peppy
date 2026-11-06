@@ -2266,7 +2266,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_create_compose_draft() and 0xFFFF) != 64980) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_disable_live_typing() and 0xFFFF) != 460) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_disable_live_typing() and 0xFFFF) != 54351) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_discard_unreferenced_attachment() and 0xFFFF) != 15319) {
@@ -2284,7 +2284,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_deferred_gateway_media() and 0xFFFF) != 47618) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_live_typing() and 0xFFFF) != 53016) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_live_typing() and 0xFFFF) != 57279) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_evict_attachment_ciphertext() and 0xFFFF) != 53494) {
@@ -2422,7 +2422,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file() and 0xFFFF) != 2659) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_typing_signal_v2() and 0xFFFF) != 46286) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_typing_signal_v2() and 0xFFFF) != 6893) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity() and 0xFFFF) != 20629) {
@@ -2578,7 +2578,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft() and 0xFFFF) != 5300) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() and 0xFFFF) != 1319) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() and 0xFFFF) != 40376) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_send_compose_draft() and 0xFFFF) != 23646) {
@@ -2641,7 +2641,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_scan_checkpoint() and 0xFFFF) != 31950) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_typing_sharing() and 0xFFFF) != 8197) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_typing_sharing() and 0xFFFF) != 5834) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_acquisitions_after() and 0xFFFF) != 47158) {
@@ -3435,7 +3435,7 @@ public interface NativeClientInterface {
     fun `createComposeDraft`(`conversationId`: kotlin.String?): NativeComposeDraft
     
     /**
-     * Retires the current memory-only live typing incarnation.
+     * Retires the current memory-only live typing incarnation. Call this off the UI thread.
      */
     fun `disableLiveTyping`()
     
@@ -3459,6 +3459,10 @@ public interface NativeClientInterface {
     
     /**
      * Enables memory-only live typing from host-attested roster and executor facts.
+     *
+     * Call this off the UI thread. Hosts must serialize later outcome publication by generation,
+     * session token/revision, per-conversation sequence, then deadline before any display or
+     * Google effect.
      */
     fun `enableLiveTyping`(`context`: NativeLiveEnableContext, `clock`: NativeLiveClock): kotlin.ULong
     
@@ -3581,6 +3585,10 @@ public interface NativeClientInterface {
     
     /**
      * Opens a canonical private live transport frame and returns only sanitized host metadata.
+     *
+     * Call this off the UI thread. Before any display or Google effect, hosts must serialize
+     * outcome publication by generation, session token/revision, per-conversation sequence,
+     * then deadline.
      */
     fun `openTypingSignalV2`(`frameJson`: kotlin.String, `clock`: NativeLiveClock): NativeLiveOutcome
     
@@ -3744,7 +3752,8 @@ public interface NativeClientInterface {
     fun `saveComposeDraft`(`draftId`: kotlin.String, `expectedRevision`: kotlin.ULong, `update`: NativeComposeDraftUpdate): NativeComposeDraft
     
     /**
-     * Seals a canonical protocol frame for the private live transport.
+     * Seals a canonical protocol frame for the private live transport. Call this off the UI
+     * thread.
      */
     fun `sealTypingSignalV2`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `origin`: NativeTypingOrigin, `state`: NativeTypingState, `clock`: NativeLiveClock): NativeLiveOutbound?
     
@@ -3794,6 +3803,7 @@ public interface NativeClientInterface {
     
     /**
      * Separately controls whether this enabled incarnation seals outbound typing frames.
+     * Call this off the UI thread.
      */
     fun `setTypingSharing`(`enabled`: kotlin.Boolean)
     
@@ -4796,7 +4806,7 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
 
     
     /**
-     * Retires the current memory-only live typing incarnation.
+     * Retires the current memory-only live typing incarnation. Call this off the UI thread.
      */
     @Throws(NativeLiveTypingException::class)override fun `disableLiveTyping`()
         = 
@@ -4893,6 +4903,10 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
     /**
      * Enables memory-only live typing from host-attested roster and executor facts.
+     *
+     * Call this off the UI thread. Hosts must serialize later outcome publication by generation,
+     * session token/revision, per-conversation sequence, then deadline before any display or
+     * Google effect.
      */
     @Throws(NativeLiveTypingException::class)override fun `enableLiveTyping`(`context`: NativeLiveEnableContext, `clock`: NativeLiveClock): kotlin.ULong {
             return FfiConverterULong.lift(
@@ -5611,6 +5625,10 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
     /**
      * Opens a canonical private live transport frame and returns only sanitized host metadata.
+     *
+     * Call this off the UI thread. Before any display or Google effect, hosts must serialize
+     * outcome publication by generation, session token/revision, per-conversation sequence,
+     * then deadline.
      */
     @Throws(NativeLiveTypingException::class)override fun `openTypingSignalV2`(`frameJson`: kotlin.String, `clock`: NativeLiveClock): NativeLiveOutcome {
             return FfiConverterTypeNativeLiveOutcome.lift(
@@ -6468,7 +6486,8 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
 
     
     /**
-     * Seals a canonical protocol frame for the private live transport.
+     * Seals a canonical protocol frame for the private live transport. Call this off the UI
+     * thread.
      */
     @Throws(NativeLiveTypingException::class)override fun `sealTypingSignalV2`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `origin`: NativeTypingOrigin, `state`: NativeTypingState, `clock`: NativeLiveClock): NativeLiveOutbound? {
             return FfiConverterOptionalTypeNativeLiveOutbound.lift(
@@ -6812,6 +6831,7 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
     /**
      * Separately controls whether this enabled incarnation seals outbound typing frames.
+     * Call this off the UI thread.
      */
     @Throws(NativeLiveTypingException::class)override fun `setTypingSharing`(`enabled`: kotlin.Boolean)
         = 
