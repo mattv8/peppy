@@ -100,6 +100,9 @@ type Link struct {
 	streamEpoch                  uint64
 	streamSource                 libgm.StreamSource
 	streamOpen                   bool
+	preparedTicket               *preparedRcsTicket
+	ticketNow                    func() time.Time
+	sendMessage                  func(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error)
 
 	ownerVerification *ownerVerification
 }

@@ -261,6 +261,7 @@ func (link *Link) indexConversations(conversations []*gmproto.Conversation) {
 }
 
 func (link *Link) applyConversationsLocked(conversations []*gmproto.Conversation) {
+	link.clearPreparedTicketLocked()
 	link.indexConversationsLocked(conversations)
 	link.indexRevision++
 }
@@ -452,6 +453,7 @@ func (link *Link) recordConversationEvent(conversation *gmproto.Conversation) {
 }
 
 func (link *Link) invalidateConversationCompletenessLocked() {
+	link.clearPreparedTicketLocked()
 	link.conversationIndexComplete = false
 	link.conversationIndexGeneration = 0
 	link.conversationIndexStreamEpoch = 0

@@ -1,10 +1,23 @@
 package gmlink
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
+	"time"
 
 	"github.com/google/uuid"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"google.golang.org/protobuf/proto"
+)
+
+const (
+	preparedRcsTicketTTL = 30 * time.Second
+	rcsSendDeadline      = 5 * time.Second
+	maxRcsBodyBytes      = 4096
 )
 
 type rcsSendRequest struct {
@@ -18,8 +31,36 @@ type rcsSendRequest struct {
 
 type rcsSendResult struct {
 	Code                 string `json:"code"`
+	TicketID             string `json:"ticket_id,omitempty"`
 	TmpID                string `json:"tmp_id,omitempty"`
 	GoogleConversationID string `json:"google_conversation_id,omitempty"`
+}
+
+type prepareRcsRequest struct {
+	TmpID                string `json:"tmp_id"`
+	GoogleConversationID string `json:"google_conversation_id"`
+	SnapshotToken        string `json:"snapshot_token"`
+	Content              string `json:"content"`
+}
+
+type commitRcsPermit struct {
+	CommandID            string `json:"command_id"`
+	TmpID                string `json:"tmp_id"`
+	GoogleConversationID string `json:"google_conversation_id"`
+	SnapshotToken        string `json:"snapshot_token"`
+	MappingRevision      uint64 `json:"mapping_revision"`
+	ProofDigest          string `json:"proof_digest"`
+	Content              string `json:"content"`
+}
+
+type preparedRcsTicket struct {
+	id          string
+	expiresAt   time.Time
+	generation  uint64
+	streamEpoch uint64
+	revision    uint64
+	request     prepareRcsRequest
+	payload     *gmproto.SendMessageRequest
 }
 
 // SendRcs parses and validates a legacy request without dispatching a carrier effect.
@@ -39,6 +80,145 @@ func validRcsRequest(request rcsSendRequest) bool {
 	}
 	parsed, err := uuid.Parse(request.TmpID)
 	return err == nil && parsed.Version() == 4 && parsed.Variant() == uuid.RFC4122 && parsed.String() == request.TmpID
+}
+
+// PrepareRcs accepts only the core-selected current Stage 2 target. It creates
+// no transport effect and retains no caller data after a ticket is consumed.
+func (link *Link) PrepareRcs(requestJSON string) string {
+	var request prepareRcsRequest
+	if !decodeFixedJSON(requestJSON, &request) || !validPrepareRcsRequest(request) {
+		return sendJSON(rcsSendResult{Code: "invalid_request"})
+	}
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	now := link.nowForTicketLocked()
+	if link.preparedTicket != nil && !now.Before(link.preparedTicket.expiresAt) {
+		link.clearPreparedTicketLocked()
+	}
+	if link.preparedTicket != nil {
+		return sendJSON(rcsSendResult{Code: "busy"})
+	}
+	if link.closed || !link.hasOwnerVerificationLocked() || link.runGeneration != link.generation {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	if request.SnapshotToken != snapshotToken(link.generation, link.streamEpoch, link.indexRevision) {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	conversation := link.currentSupportedRcsConversationLocked(request.GoogleConversationID, link.generation, link.streamEpoch)
+	if conversation == nil {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	payload, code := validatedPayload(conversation, link.settings, rcsSendRequest{TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID, Content: request.Content})
+	if code != "" {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	ticketID := uuid.NewString()
+	link.preparedTicket = &preparedRcsTicket{id: ticketID, expiresAt: now.Add(preparedRcsTicketTTL), generation: link.generation, streamEpoch: link.streamEpoch, revision: link.indexRevision, request: request, payload: proto.Clone(payload).(*gmproto.SendMessageRequest)}
+	return sendJSON(rcsSendResult{Code: "prepared", TicketID: ticketID})
+}
+
+// CommitPreparedRcs consumes a prepared ticket before dispatch. A transport
+// error after that point is deliberately outcome_unknown rather than retried.
+func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
+	var permit commitRcsPermit
+	if ticketID == "" || !decodeFixedJSON(permitJSON, &permit) || !validCommitRcsPermit(permit) {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	link.mu.Lock()
+	now := link.nowForTicketLocked()
+	ticket := link.preparedTicket
+	if ticket == nil || ticket.id != ticketID || !now.Before(ticket.expiresAt) || !permitMatchesTicket(permit, ticket) {
+		if ticket != nil && !now.Before(ticket.expiresAt) {
+			link.clearPreparedTicketLocked()
+		}
+		link.mu.Unlock()
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	link.preparedTicket = nil
+	link.mu.Unlock()
+
+	link.rpcMu.Lock()
+	defer link.rpcMu.Unlock()
+	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
+	if !ok || generation != ticket.generation || streamEpoch != ticket.streamEpoch {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	link.mu.Lock()
+	current := link.currentSupportedRcsConversationLocked(ticket.request.GoogleConversationID, generation, streamEpoch)
+	if current == nil || link.indexRevision != ticket.revision || !link.hasOwnerVerificationLocked() {
+		link.mu.Unlock()
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	payload, code := validatedPayload(current, link.settings, rcsSendRequest{TmpID: permit.TmpID, GoogleConversationID: permit.GoogleConversationID, Content: permit.Content})
+	effect := link.sendMessage
+	link.mu.Unlock()
+	if code != "" || !proto.Equal(payload, ticket.payload) {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	if effect == nil {
+		effect = client.SendMessage
+	}
+	ctx, cancel := context.WithTimeout(runCtx, rcsSendDeadline)
+	response, err := effect(ctx, payload)
+	cancel()
+	if err != nil || response == nil {
+		return sendJSON(rcsSendResult{Code: "outcome_unknown"})
+	}
+	if response.GetStatus() == gmproto.SendMessageResponse_SUCCESS {
+		return sendJSON(rcsSendResult{Code: "accepted"})
+	}
+	if response.GetStatus() == gmproto.SendMessageResponse_FAILURE_2 || response.GetStatus() == gmproto.SendMessageResponse_FAILURE_3 || response.GetStatus() == gmproto.SendMessageResponse_FAILURE_4 {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	return sendJSON(rcsSendResult{Code: "outcome_unknown"})
+}
+
+// CancelPreparedRcs removes an unconsumed ticket. It is intentionally idempotent
+// only in its refusal: a consumed or unknown ticket cannot be revived.
+func (link *Link) CancelPreparedRcs(ticketID string) string {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if link.preparedTicket == nil || link.preparedTicket.id != ticketID {
+		return sendJSON(rcsSendResult{Code: "rejected"})
+	}
+	link.clearPreparedTicketLocked()
+	return sendJSON(rcsSendResult{Code: "cancelled"})
+}
+
+func (link *Link) clearPreparedTicketLocked() { link.preparedTicket = nil }
+
+func (link *Link) nowForTicketLocked() time.Time {
+	if link.ticketNow != nil {
+		return link.ticketNow()
+	}
+	return time.Now()
+}
+
+func decodeFixedJSON(input string, output any) bool {
+	decoder := json.NewDecoder(bytes.NewBufferString(input))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(output) != nil {
+		return false
+	}
+	return decoder.Decode(&struct{}{}) == io.EOF
+}
+
+func validPrepareRcsRequest(request prepareRcsRequest) bool {
+	parsed, err := uuid.Parse(request.TmpID)
+	return err == nil && parsed.Version() == 4 && parsed.Variant() == uuid.RFC4122 && parsed.String() == request.TmpID && request.GoogleConversationID != "" && request.SnapshotToken != "" && request.Content != "" && len(request.Content) <= maxRcsBodyBytes
+}
+
+func validCommitRcsPermit(permit commitRcsPermit) bool {
+	digest, err := base64.StdEncoding.DecodeString(permit.ProofDigest)
+	return err == nil && len(digest) == 32 && permit.CommandID != "" && permit.MappingRevision != 0 && validPrepareRcsRequest(prepareRcsRequest{TmpID: permit.TmpID, GoogleConversationID: permit.GoogleConversationID, SnapshotToken: permit.SnapshotToken, Content: permit.Content})
+}
+
+func permitMatchesTicket(permit commitRcsPermit, ticket *preparedRcsTicket) bool {
+	return permit.TmpID == ticket.request.TmpID && permit.GoogleConversationID == ticket.request.GoogleConversationID && permit.SnapshotToken == ticket.request.SnapshotToken && permit.Content == ticket.request.Content
+}
+
+func snapshotToken(generation, streamEpoch, revision uint64) string {
+	return fmt.Sprintf("%d:%d:%d", generation, streamEpoch, revision)
 }
 
 func (link *Link) currentSettings() (*gmproto.Settings, string) {
