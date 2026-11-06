@@ -405,6 +405,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
       # Like the Rust caches, only production saves Gradle's cache (see the
       # save step at the end of this job).
       - name: Restore Gradle cache
@@ -433,6 +437,11 @@ jobs:
           sdkmanager_status=${PIPESTATUS[1]}
           set -e
           exit "$sdkmanager_status"
+      - name: Build Google Messages AAR
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          apps/android/googlemessages/build-aar.sh
+          apps/android/googlemessages/check-licenses.sh
       - name: Verify and build Android native libraries
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
@@ -478,7 +487,7 @@ jobs:
           retention-days: 7
       - name: Lint and assemble Android artifacts
         working-directory: apps/android
-        run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload
+        run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink
       - name: Verify release SMS diagnostics policy
         working-directory: apps/android
         run: ./gradlew --console=plain --dependency-verification=strict :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest
