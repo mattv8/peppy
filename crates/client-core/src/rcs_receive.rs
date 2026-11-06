@@ -368,10 +368,14 @@ impl Client {
                 [conversation_id.to_string()],
             )?;
             tx.commit()?;
-            return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::GatewayUnavailable));
+            return Ok(RcsReceiveOutcome::Rejected(
+                RcsReceiveCode::GatewayUnavailable,
+            ));
         }
         if record.history_token.is_some()
-            && record.sent_at_ms.is_none_or(|sent_at_ms| sent_at_ms <= ownership.proof_time_ms)
+            && record
+                .sent_at_ms
+                .is_none_or(|sent_at_ms| sent_at_ms <= ownership.proof_time_ms)
         {
             return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor));
         }
@@ -494,11 +498,32 @@ impl Client {
         {
             return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::OwnershipStale));
         }
-        let message_id: Option<String> = tx.query_row(
+        let mut message_id: Option<String> = tx.query_row(
             "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=? AND conversation_id=?",
             params![application.google_message_id, application.google_conversation_id, conversation_id.to_string()],
             |row| row.get(0),
         ).optional()?.flatten();
+        if message_id.is_none()
+            && let Some(tmp_id) = application.tmp_id.as_deref()
+        {
+            message_id = tx
+                .query_row(
+                    "SELECT c.message_id FROM rcs_send_ledger l JOIN commands c ON c.command_id=l.command_id WHERE l.tmp_id=? AND l.google_conversation_id=?",
+                    params![tmp_id, application.google_conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(message_id) = message_id.as_deref() {
+                record_identity(
+                    &tx,
+                    conversation_id,
+                    ownership_generation,
+                    &application.google_message_id,
+                    &application.google_conversation_id,
+                    Some(message_id.parse().map_err(|_| Error::Database)?),
+                )?;
+            }
+        }
         let Some(message_id) = message_id else {
             return Ok(RcsReceiveOutcome::Rejected(
                 RcsReceiveCode::IdentityConflict,
@@ -732,7 +757,9 @@ fn record_identity(
         .optional()?;
     if let Some((existing_conversation, existing_message)) = existing {
         if existing_conversation != conversation_id.to_string() {
-            return Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::IdentityConflict));
+            return Ok(RcsIdentityOutcome::Rejected(
+                RcsReceiveCode::IdentityConflict,
+            ));
         }
         if existing_message.is_none() && message_id.is_some() {
             conn.execute(
