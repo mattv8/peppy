@@ -106,6 +106,8 @@ pub struct RcsConversationMetadata {
     pub transport: RcsConversationTransport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rcs_encryption: Option<bool>,
+    #[serde(default)]
+    pub rcs_history_gap: bool,
     pub logical_revision: u64,
     pub writer_device_id: String,
 }
@@ -183,25 +185,10 @@ impl Client {
                 "stale RCS conversation metadata writer",
             ));
         }
-        let revision = metadata_clock(&tx, conversation_id)?
-            .checked_add(1)
-            .ok_or(Error::Database)?;
-        let metadata = RcsConversationMetadata {
-            conversation_id,
-            transport: RcsConversationTransport::Rcs,
-            rcs_encryption,
-            logical_revision: revision,
-            writer_device_id: ctx.device_id.to_string(),
-        };
-        let (_, sequence) = enqueue(
-            &tx,
-            &ctx,
-            EnvelopePurpose::Event,
-            None,
-            None,
-            &PrivatePayload::RcsConversationMetadata(metadata.clone()),
-        )?;
-        apply_metadata(&tx, &metadata, ctx.device_id, sequence)?;
+        let history_gap = load_receive_state(&tx, conversation_id)?
+            .map(|state| history_gap(state.alert))
+            .unwrap_or(false);
+        publish_metadata(&tx, &ctx, conversation_id, rcs_encryption, history_gap)?;
         tx.commit()?;
         Ok(true)
     }
@@ -213,15 +200,16 @@ impl Client {
         self.lock()?
             .conn
             .query_row(
-                "SELECT rcs_encryption,logical_revision,writer_device_id FROM rcs_conversation_metadata WHERE conversation_id=?",
+                "SELECT rcs_encryption,rcs_history_gap,logical_revision,writer_device_id FROM rcs_conversation_metadata WHERE conversation_id=?",
                 [conversation_id.to_string()],
                 |row| {
                     Ok(RcsConversationMetadata {
                         conversation_id,
                         transport: RcsConversationTransport::Rcs,
                         rcs_encryption: row.get::<_, Option<i64>>(0)?.map(|value| value != 0),
-                        logical_revision: u64::try_from(row.get::<_, i64>(1)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                        writer_device_id: row.get(2)?,
+                        rcs_history_gap: row.get::<_, bool>(1)?,
+                        logical_revision: u64::try_from(row.get::<_, i64>(2)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        writer_device_id: row.get(3)?,
                     })
                 },
             )
@@ -240,15 +228,15 @@ impl Client {
             return Err(Error::InvalidRequest("invalid RCS ownership checkpoint"));
         }
         let mut store = self.lock()?;
-        let tx = store
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = next_generation(&tx, conversation_id)?;
         tx.execute(
             "INSERT INTO rcs_lane_ownership(conversation_id,owner,ownership_generation,history_token,detector_floor,observed_detector_high_water,alert_code) VALUES(?,?,?,?,?,?,NULL)
              ON CONFLICT(conversation_id) DO UPDATE SET owner=excluded.owner,ownership_generation=excluded.ownership_generation,history_token=excluded.history_token,detector_floor=excluded.detector_floor,observed_detector_high_water=excluded.observed_detector_high_water,alert_code=NULL",
             params![conversation_id.to_string(), RcsReceiveOwner::Link.code(), generation, initial_history_token, provider_floor, provider_floor],
         )?;
+        publish_metadata(&tx, &ctx, conversation_id, None, false)?;
         tx.commit()?;
         Ok(RcsOwnership {
             conversation_id,
@@ -278,9 +266,8 @@ impl Client {
             return Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::CursorInvalid));
         }
         let mut store = self.lock()?;
-        let tx = store
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (conn, _) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(ownership) = load_ownership(&tx, conversation_id)? else {
             return Ok(RcsIdentityOutcome::Rejected(
                 RcsReceiveCode::ConversationUnproven,
@@ -551,9 +538,8 @@ impl Client {
             return Err(Error::InvalidRequest("invalid RCS provider detector"));
         }
         let mut store = self.lock()?;
-        let tx = store
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (conn, _) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let conversation_id = detector.conversation_id.to_string();
         tx.execute(
             "UPDATE rcs_lane_ownership SET observed_detector_high_water=MAX(observed_detector_high_water,?) WHERE conversation_id=?",
@@ -610,9 +596,8 @@ impl Client {
         conversation_id: ConversationId,
     ) -> Result<RcsCutover, Error> {
         let mut store = self.lock()?;
-        let tx = store
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(ownership) = load_ownership(&tx, conversation_id)? else {
             return Err(Error::NotFound);
         };
@@ -643,6 +628,13 @@ impl Client {
         tx.execute(
             "UPDATE rcs_lane_ownership SET owner=?,ownership_generation=?,history_token=NULL,detector_floor=?,alert_code=? WHERE conversation_id=?",
             params![RcsReceiveOwner::Provider.code(), generation, freeze_detector_floor, alert_code, conversation_id.to_string()],
+        )?;
+        publish_metadata(
+            &tx,
+            &ctx,
+            conversation_id,
+            None,
+            ambiguous_detector_alert || alert == RcsReceiveAlert::DetectorOverflow,
         )?;
         tx.commit()?;
         Ok(RcsCutover {
@@ -786,10 +778,49 @@ fn apply_metadata(
     let revision = i64::try_from(metadata.logical_revision).map_err(|_| Error::Database)?;
     let sequence = i64::try_from(sequence).map_err(|_| Error::Database)?;
     conn.execute(
-        "INSERT INTO rcs_conversation_metadata(conversation_id,transport,rcs_encryption,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(?,'rcs',?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET rcs_encryption=excluded.rcs_encryption,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>rcs_conversation_metadata.logical_revision OR (excluded.logical_revision=rcs_conversation_metadata.logical_revision AND excluded.writer_device_id>rcs_conversation_metadata.writer_device_id)",
-        params![metadata.conversation_id.to_string(), metadata.rcs_encryption.map(i64::from), revision, metadata.writer_device_id, producer.to_string(), sequence],
+        "INSERT INTO rcs_conversation_metadata(conversation_id,transport,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(?,'rcs',?,?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET rcs_encryption=excluded.rcs_encryption,rcs_history_gap=excluded.rcs_history_gap,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>rcs_conversation_metadata.logical_revision OR (excluded.logical_revision=rcs_conversation_metadata.logical_revision AND excluded.writer_device_id>rcs_conversation_metadata.writer_device_id)",
+        params![metadata.conversation_id.to_string(), metadata.rcs_encryption.map(i64::from), metadata.rcs_history_gap, revision, metadata.writer_device_id, producer.to_string(), sequence],
     )?;
     Ok(true)
+}
+
+fn history_gap(alert: RcsReceiveAlert) -> bool {
+    alert != RcsReceiveAlert::None
+}
+
+fn publish_metadata(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    conversation_id: ConversationId,
+    rcs_encryption: Option<bool>,
+    rcs_history_gap: bool,
+) -> Result<(), Error> {
+    let existing: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT rcs_encryption FROM rcs_conversation_metadata WHERE conversation_id=?",
+            [conversation_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let metadata = RcsConversationMetadata {
+        conversation_id,
+        transport: RcsConversationTransport::Rcs,
+        rcs_encryption: rcs_encryption.or_else(|| existing.flatten().map(|value| value != 0)),
+        rcs_history_gap,
+        logical_revision: metadata_clock(conn, conversation_id)?
+            .checked_add(1)
+            .ok_or(Error::Database)?,
+        writer_device_id: ctx.device_id.to_string(),
+    };
+    let (_, sequence) = enqueue(
+        conn,
+        ctx,
+        EnvelopePurpose::Event,
+        None,
+        None,
+        &PrivatePayload::RcsConversationMetadata(metadata.clone()),
+    )?;
+    apply_metadata(conn, &metadata, ctx.device_id, sequence).map(|_| ())
 }
 
 fn next_generation(conn: &Connection, conversation_id: ConversationId) -> Result<i64, Error> {

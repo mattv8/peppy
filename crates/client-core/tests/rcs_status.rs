@@ -75,7 +75,7 @@ fn rcs_conversation_metadata_converges_out_of_order_without_provider_identifiers
     );
 
     let mut envelopes = first.pending_outbox().unwrap();
-    assert_eq!(envelopes.len(), 2);
+    assert_eq!(envelopes.len(), 3);
     envelopes.reverse();
     for (index, envelope) in envelopes.iter().enumerate() {
         assert!(!serde_json::to_string(envelope).unwrap().contains("google_"));
@@ -93,7 +93,7 @@ fn rcs_conversation_metadata_converges_out_of_order_without_provider_identifiers
         .unwrap();
     assert_eq!(metadata.transport, RcsConversationTransport::Rcs);
     assert_eq!(metadata.rcs_encryption, Some(true));
-    assert_eq!(metadata.logical_revision, 2);
+    assert_eq!(metadata.logical_revision, 3);
     assert!(
         !serde_json::to_string(&metadata)
             .unwrap()
@@ -122,10 +122,11 @@ fn stale_metadata_generation_is_rejected_without_writing() {
             .unwrap_err(),
         Error::InvalidRequest("stale RCS conversation metadata writer")
     );
-    assert_eq!(
-        client.rcs_conversation_metadata(conversation).unwrap(),
-        None
-    );
+    assert!(!client
+        .rcs_conversation_metadata(conversation)
+        .unwrap()
+        .unwrap()
+        .rcs_history_gap);
 }
 
 #[test]
@@ -150,6 +151,59 @@ fn rcs_conversation_metadata_omits_encryption_until_reported() {
             .rcs_encryption,
         None
     );
+}
+
+#[test]
+fn rcs_metadata_replicates_a_history_gap_through_cutover_and_relink() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let first_config = config(&directory, "first", &vault);
+    let second_config = config(&directory, "second", &vault);
+    let first = unlocked(&first_config, &vault);
+    let second = unlocked(&second_config, &vault);
+    let conversation = ConversationId::new();
+    let owner = first
+        .begin_rcs_link_ownership(conversation, "first", 0)
+        .unwrap();
+    first
+        .publish_rcs_conversation_metadata(conversation, owner.ownership_generation, None)
+        .unwrap();
+    first
+        .record_rcs_provider_detector(RcsProviderDetector {
+            conversation_id: conversation,
+            provider_row_id: 1,
+            provider_thread_id: 1,
+            provider_type: 1,
+            observed_at_ms: 1,
+            observed_generation: owner.ownership_generation,
+        })
+        .unwrap();
+    first.begin_rcs_unlink_cutover(conversation).unwrap();
+
+    let mut server = Server::default();
+    server.upload(&first);
+    server.sync(&second);
+    assert!(second
+        .rcs_conversation_metadata(conversation)
+        .unwrap()
+        .unwrap()
+        .rcs_history_gap);
+
+    let _relink = first
+        .begin_rcs_link_ownership(conversation, "relink", 1)
+        .unwrap();
+    assert!(!first
+        .rcs_conversation_metadata(conversation)
+        .unwrap()
+        .unwrap()
+        .rcs_history_gap);
+    server.upload(&first);
+    server.sync(&second);
+    assert!(!second
+        .rcs_conversation_metadata(conversation)
+        .unwrap()
+        .unwrap()
+        .rcs_history_gap);
 }
 
 #[test]

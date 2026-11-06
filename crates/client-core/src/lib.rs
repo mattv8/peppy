@@ -6632,6 +6632,7 @@ CREATE TABLE rcs_conversation_metadata(
   conversation_id TEXT PRIMARY KEY,
   transport TEXT NOT NULL CHECK(transport='rcs'),
   rcs_encryption INTEGER CHECK(rcs_encryption IN (0,1)),
+  rcs_history_gap INTEGER NOT NULL CHECK(rcs_history_gap IN (0,1)),
   logical_revision INTEGER NOT NULL CHECK(logical_revision > 0),
   writer_device_id TEXT NOT NULL,
   producer_device_id TEXT NOT NULL,
