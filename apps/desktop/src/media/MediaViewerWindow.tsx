@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ImageOff, Loader2, RotateCw, X } from "@peppy/desktop-ui";
 import { bridge } from "../bridge/bridge";
+import { useAccentColor } from "../shell/useAccentColor";
 import { MediaActionsProvider } from "./MediaActionsContext";
 import { MediaLightbox } from "./MediaLightbox";
 import type { MediaPageItem } from "./MediaPanel";
@@ -62,6 +63,7 @@ function MediaViewerShell({ state, close, retry }: { state: ViewerState; close: 
 
 export function InvalidMediaViewerWindow({ close = defaultClose }: { close?: () => void }) {
   useViewerTheme();
+  useAccentColor();
   useViewerTitle();
   useEffect(() => { const key = (event: KeyboardEvent) => { if (event.key === "Escape" && !event.defaultPrevented && !event.repeat && !document.fullscreenElement) close(); }; document.addEventListener("keydown", key); return () => document.removeEventListener("keydown", key); }, [close]);
   return <MediaViewerShell state="error" close={close} />;
@@ -74,6 +76,7 @@ export function MediaViewerWindow({ conversationId, attachmentId, messageId, clo
   const cache = useRef<{ items: MediaPageItem[]; newerCursor?: unknown; olderCursor?: unknown }>({ items: [] });
   const loadVersion = useRef(0);
   useViewerTheme();
+  useAccentColor();
   useViewerTitle();
   const load = async () => {
     const version = ++loadVersion.current;

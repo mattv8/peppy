@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NavigationPosition, RecipientPosition } from "@peppy/desktop-ui";
 import {
+  persistAccentColor,
   persistLayoutPatch,
   persistRecipientPosition,
+  readAccentColor,
   readCompactTimestamps,
   readContactsDetailWidth,
   readGroupSenderAvatars,
@@ -28,6 +30,59 @@ afterEach(() => {
 });
 
 describe("layout persistence", () => {
+  it("reads only a valid saved accent color", () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ accentColor: 61 }));
+    expect(readAccentColor()).toBe(61);
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ accentColor: "61" }));
+    expect(readAccentColor()).toBeNull();
+  });
+
+  it("merges accent color with sibling layout keys", () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ sibling: "kept", theme: "dark" }));
+
+    expect(persistAccentColor(61)).toBe(true);
+
+    expect(JSON.parse(localStorage.getItem(LAYOUT_KEY)!)).toEqual({
+      sibling: "kept",
+      theme: "dark",
+      accentColor: 61,
+    });
+  });
+
+  it("re-reads the latest layout before persisting accent color", () => {
+    persistAccentColor(61);
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ sibling: "newer" }));
+
+    persistAccentColor(60);
+
+    expect(JSON.parse(localStorage.getItem(LAYOUT_KEY)!)).toEqual({ sibling: "newer", accentColor: 60 });
+  });
+
+  it("deletes a saved accent color for the default", () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ accentColor: 61, sibling: "kept" }));
+
+    expect(persistAccentColor(null)).toBe(true);
+
+    expect(JSON.parse(localStorage.getItem(LAYOUT_KEY)!)).toEqual({ sibling: "kept" });
+  });
+
+  it("does not overwrite malformed saved layout JSON with an accent color", () => {
+    localStorage.setItem(LAYOUT_KEY, "{");
+    const write = vi.spyOn(memoryStorage, "setItem");
+
+    expect(persistAccentColor(61)).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("reports failed accent color writes", () => {
+    vi.stubGlobal("localStorage", {
+      getItem: () => "{}",
+      setItem: () => { throw new Error("unavailable"); },
+    });
+
+    expect(persistAccentColor(61)).toBe(false);
+  });
+
   it("does not write when the saved layout JSON is malformed", () => {
     localStorage.setItem(LAYOUT_KEY, "{");
     const write = vi.spyOn(memoryStorage, "setItem");

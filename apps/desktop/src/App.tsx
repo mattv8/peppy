@@ -137,6 +137,8 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 import { GatewayPicker } from "./setup/GatewayPicker";
 import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars } from "./shell/layout-persistence";
+import { CORAL_ACCENT_INDEX, accentAttribute, accentSwatchColor } from "./shell/accent-color";
+import { useAccentColor } from "./shell/useAccentColor";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { conversationContactAddress } from "./contacts/conversation-contact";
 import { hiddenTimeIds } from "./conversation/timestamp-bursts";
@@ -1063,6 +1065,9 @@ function SettingsView({
   canUnlock,
   theme,
   onTheme,
+  accentColor,
+  onAccentColor,
+  accentError,
   navigationPosition,
   onNavigationPosition,
   popoutMode,
@@ -1107,6 +1112,9 @@ function SettingsView({
   canUnlock: boolean;
   theme: Theme;
   onTheme(theme: Theme): void;
+  accentColor: number | null;
+  onAccentColor(accentColor: number | null): void;
+  accentError?: string;
   navigationPosition: NavigationPosition;
   onNavigationPosition(position: NavigationPosition): void;
   popoutMode: PopoutMode;
@@ -1375,6 +1383,13 @@ function SettingsView({
             </select>
           </label>
         </div>
+        <div id="settings-accent-color-row" className="settings-control-row settings-theme-row">
+          <div className="settings-field">
+            <label htmlFor="settings-accent-color-trigger">Accent color</label>
+            <TonePicker id="settings-accent-color" variant="field" seed="accent" value={accentColor ?? undefined} automaticIndex={CORAL_ACCENT_INDEX} label="Accent color" defaultLabel="Default (Coral)" swatchColor={accentSwatchColor} describedBy={accentError ? "settings-accent-color-error" : undefined} onSelect={onAccentColor} />
+          </div>
+          {accentError && <p id="settings-accent-color-error" className="settings-error" role="alert">{accentError}</p>}
+        </div>
         <fieldset id="settings-navigation-position" aria-describedby="settings-navigation-position-hint">
           <legend>Navigation position</legend>
           <p id="settings-navigation-position-hint" className="settings-field-hint">Choose where the navigation buttons appear.</p>
@@ -1638,6 +1653,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       return "system";
     }
   });
+  const { accentColor, selectAccentColor, error: accentError } = useAccentColor();
   const persistedTheme = useRef(theme);
   useEffect(() => {
     if (theme === persistedTheme.current) return;
@@ -4647,6 +4663,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         ref={mainRef}
         id="composer-shell"
         className={`theme-${theme}${headPanel ? " head-panel-shell" : ""}`}
+        data-accent={accentAttribute(accentColor)}
         data-bridge-mode={snapshot?.mode ?? "unavailable"}
         data-platform={platform}
         inert={lifecyclePending ? true : undefined}
@@ -4696,6 +4713,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       ref={mainRef}
       id="desktop-shell"
       className={`theme-${theme}`}
+      data-accent={accentAttribute(accentColor)}
       data-bridge-mode={snapshot?.mode ?? "unavailable"}
       data-platform={platform}
       data-navigation={navigationPosition}
@@ -5000,6 +5018,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               canUnlock={canRecoverNativeSync}
               theme={theme}
               onTheme={setTheme}
+              accentColor={accentColor}
+              onAccentColor={selectAccentColor}
+              accentError={accentError}
               navigationPosition={navigationPosition}
               onNavigationPosition={changeNavigationPosition}
               popoutMode={popoutMode}

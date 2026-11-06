@@ -1,4 +1,5 @@
 import type { NavigationPosition, PopoutMode, RecipientPosition } from "@peppy/desktop-ui";
+import { parseAccentColor } from "./accent-color";
 
 const LAYOUT_KEY = "peppy.layout.v1";
 
@@ -17,6 +18,34 @@ type LayoutPatch = {
 };
 
 type StoredLayout = Record<string, unknown>;
+
+export function readAccentColor(): number | null {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
+    return typeof stored === "object" && stored !== null && !Array.isArray(stored)
+      ? parseAccentColor((stored as StoredLayout).accentColor)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function persistAccentColor(value: number | null): boolean {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
+    const layout: StoredLayout = typeof stored === "object" && stored !== null && !Array.isArray(stored)
+      ? stored as StoredLayout
+      : {};
+    const accentColor = parseAccentColor(value);
+    if (accentColor === null) delete layout.accentColor;
+    else layout.accentColor = accentColor;
+    // localStorage has no atomic read/merge/write operation across windows.
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function readContactsDetailWidth(): number | undefined {
   try {
