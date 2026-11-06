@@ -1795,10 +1795,26 @@ async fn membership_admission_key_triggers_bump_and_discriminate() {
                     bump: 1,
                 },
                 MembershipCase {
+                    label: "admission key epoch rebind",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE vault_admission_keys SET key_epoch=2 WHERE vault_id='{vault}' AND key_epoch=1"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "admission profile fingerprint rebind",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE vault_admission_keys SET profile_fingerprint=repeat('e',64) WHERE vault_id='{vault}' AND key_epoch=2"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
                     label: "admission key delete",
                     writer: Writer::Runtime,
                     sql: format!(
-                        "DELETE FROM vault_admission_keys WHERE vault_id='{vault}' AND key_epoch=1"
+                        "DELETE FROM vault_admission_keys WHERE vault_id='{vault}' AND key_epoch=2"
                     ),
                     bump: 1,
                 },

@@ -73,7 +73,7 @@ CREATE TRIGGER vault_key_profiles_invalidate_membership_version
 AFTER INSERT OR DELETE ON vault_key_profiles
 FOR EACH ROW EXECUTE FUNCTION membership_version_invalidate();
 CREATE TRIGGER vault_admission_keys_invalidate_membership_version
-AFTER INSERT OR DELETE OR UPDATE OF admission_public_key, vault_id ON vault_admission_keys
+AFTER INSERT OR DELETE OR UPDATE OF vault_id, key_epoch, profile_fingerprint, admission_public_key ON vault_admission_keys
 FOR EACH ROW EXECUTE FUNCTION membership_version_invalidate();
 
 INSERT INTO membership_versions(vault_id, version)
