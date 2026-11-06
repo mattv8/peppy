@@ -28,8 +28,8 @@ pub fn message_view(
 mod tests {
     use super::*;
     use peppy_client_core::{
-        ClientConfig, ConversationId, DatabaseKey, DeviceId, Direction, MessagePayload, MessageRecord,
-        SourceSequence,
+        ClientConfig, ConversationId, DatabaseKey, DeviceId, Direction, MessagePayload,
+        MessageRecord, SourceSequence,
     };
 
     fn client() -> Client {
