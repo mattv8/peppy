@@ -164,6 +164,7 @@ pub(crate) fn verify_and_store(
         ContextUpdate::Changed => invalidate_all_mappings(conn, "context_changed")?,
         ContextUpdate::Unchanged | ContextUpdate::Advanced => {}
     }
+    record_accepted_carrier_route(conn, observation, now_ms)?;
     let outcome = verify(conn, observation, now_ms)?;
     let RcsMappingOutcome::Mapped(mapping) = &outcome else {
         if !matches!(
@@ -626,6 +627,7 @@ pub(crate) enum ContextUpdate {
 }
 
 const RCS_CONTEXT_KEY: &str = "rcs_mapping_context_v1";
+const RCS_ACCEPTED_CARRIER_ROUTE_KEY: &str = "rcs_accepted_carrier_route_v1";
 const RCS_LINK_LIFECYCLE_KEY: &str = "rcs_link_lifecycle_v1";
 
 pub(crate) fn record_link_lifecycle(
@@ -856,6 +858,35 @@ pub(crate) fn context_is_current(
         && (!require_linked || context.link_state == RcsLinkState::Linked as u8))
 }
 
+pub(crate) fn context_matches_carrier_proof(
+    conn: &Connection,
+    link_generation: u64,
+    session_generation: u64,
+    context_revision: u64,
+    identity_region: &str,
+    canonicalizer_revision: u32,
+) -> Result<bool, Error> {
+    let Some(value) = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let context: RcsContext = serde_json::from_str(&value).map_err(|_| Error::Database)?;
+    Ok(context.link_state == RcsLinkState::Linked as u8
+        && (
+            context.link_generation,
+            context.session_generation,
+            context.context_revision,
+        ) == (link_generation, session_generation, context_revision)
+        && context.identity_region == identity_region
+        && context.canonicalizer_revision == canonicalizer_revision)
+}
+
 pub(crate) fn current_link_state(conn: &Connection) -> Result<Option<bool>, Error> {
     if let Some(state) = recorded_link_lifecycle(conn)? {
         return Ok(Some(state == RcsCapabilityState::Linked));
@@ -873,6 +904,23 @@ pub(crate) fn current_link_state(conn: &Connection) -> Result<Option<bool>, Erro
             Ok(context.link_state == RcsLinkState::Linked as u8)
         })
         .transpose()
+}
+
+pub(crate) fn confirmed_own_identity(conn: &Connection) -> Result<Option<String>, Error> {
+    let Some(value) = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let context: RcsContext = serde_json::from_str(&value).map_err(|_| Error::Database)?;
+    Ok((context.link_state == RcsLinkState::Linked as u8)
+        .then(|| canonical_e164(&context.own_identity))
+        .flatten())
 }
 
 pub(crate) fn has_live_mapping(
@@ -908,6 +956,12 @@ pub(crate) fn carrier_route_context(
     {
         return Ok(None);
     }
+    let Some(route) = accepted_carrier_route(conn)? else {
+        return Ok(None);
+    };
+    if route.context != context {
+        return Ok(None);
+    }
     Ok(Some(crate::ValidatedCarrierRouteContext::new(
         context.sim_id.clone(),
         context.link_generation,
@@ -915,7 +969,52 @@ pub(crate) fn carrier_route_context(
         context.context_revision,
         context.identity_region,
         context.canonicalizer_revision,
+        Some(route.own_identity),
     )))
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct AcceptedCarrierRoute {
+    context: RcsContext,
+    own_identity: String,
+}
+
+fn accepted_carrier_route(conn: &Connection) -> Result<Option<AcceptedCarrierRoute>, Error> {
+    conn.query_row(
+        "SELECT v FROM metadata WHERE k=?",
+        [RCS_ACCEPTED_CARRIER_ROUTE_KEY],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| serde_json::from_str(&value).map_err(|_| Error::Database))
+    .transpose()
+}
+
+fn record_accepted_carrier_route(
+    conn: &Connection,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<(), Error> {
+    let Some(own_identity) = canonical_e164(&observation.selected_sim_own_identity) else {
+        return Ok(());
+    };
+    if !native_attestation_is_current(observation, now_ms, &own_identity) {
+        return Ok(());
+    }
+    let context: RcsContext =
+        serde_json::from_str(&context_value(observation)).map_err(|_| Error::Database)?;
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![
+            RCS_ACCEPTED_CARRIER_ROUTE_KEY,
+            serde_json::to_string(&AcceptedCarrierRoute {
+                context,
+                own_identity
+            })
+            .map_err(|_| Error::Database)?
+        ],
+    )?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

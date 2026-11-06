@@ -31,6 +31,7 @@ impl ValidatedCarrierRouteContext {
         context_revision: u64,
         identity_region: String,
         canonicalizer_revision: u32,
+        confirmed_own_identity: Option<String>,
     ) -> Self {
         Self {
             subscription_id,
@@ -39,7 +40,7 @@ impl ValidatedCarrierRouteContext {
             context_revision,
             identity_region,
             canonicalizer_revision,
-            confirmed_own_identity: None,
+            confirmed_own_identity,
         }
     }
 }
@@ -281,7 +282,7 @@ fn valid_snapshot(
         && !route.subscription_id.is_empty()
 }
 
-fn resolved_region(conn: &Connection) -> Result<Option<String>, ()> {
+pub(crate) fn resolved_region(conn: &Connection) -> Result<Option<String>, ()> {
     let mut statement = conn
         .prepare("SELECT body FROM contact_books WHERE forgotten=0")
         .map_err(|_| ())?;
@@ -597,7 +598,7 @@ mod tests {
 
     #[test]
     fn snapshot_binding_requires_exact_current_values() {
-        let route = ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1);
+        let route = ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1, None);
         let snapshot = ConversationCandidateSnapshot {
             code: "conversation_candidate_snapshot".into(),
             snapshot_token: "1:2:3".into(),
@@ -636,7 +637,7 @@ mod tests {
             rusqlite::params![TARGET, conversation_id.to_string()],
         )
         .unwrap();
-        let route = ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1);
+        let route = ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1, None);
         let snapshot = r#"{
             "code":"conversation_candidate_snapshot",
             "snapshot_token":"1:2:3",
@@ -673,7 +674,7 @@ mod tests {
                 &conn,
                 conversation_id,
                 TARGET,
-                ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1),
+                ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1, None),
                 "{not-json}",
                 1_000,
             ),
