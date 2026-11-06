@@ -988,7 +988,7 @@ pub unsafe extern "C" fn peppy_browser_free_response(response: *mut u8) {
 mod tests {
     use super::*;
     use peppy_client_core::{
-        ComposeDraftUpdate, Cursor, DraftId, GatewayRoute, IncomingSms, OutgoingSms,
+        Client, ClientConfig, ComposeDraftUpdate, Cursor, DatabaseKey, DraftId, GatewayRoute, IncomingSms, OutgoingSms,
         RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent,
     };
     use peppy_crypto::{create_vault_check_header, derive_root_key};
@@ -1007,9 +1007,10 @@ mod tests {
     fn snapshot_projects_only_the_current_selected_conversation_for_a_valid_gateway() {
         let root = tempfile::tempdir().unwrap();
         let vault = VaultId::new();
+        let device = DeviceId::new();
         let gateway = DeviceId::new();
         let mut core = BrowserCore::new(root.path().to_path_buf());
-        open(&mut core, vault, gateway, [7; 32]);
+        open(&mut core, vault, device, [7; 32]);
         let profile = KeyProfile::new(vault.0, 1).unwrap();
         let header = create_vault_check_header(
             &derive_root_key("passphrase", &profile).unwrap(),
@@ -1032,8 +1033,18 @@ mod tests {
             .unwrap()
             .conversation_id;
         let now = now_ms();
-        core.client()
-            .unwrap()
+        let gateway_directory = tempfile::tempdir().unwrap();
+        let gateway_core = Client::open(
+            ClientConfig {
+                database_path: gateway_directory.path().join("gateway.db"),
+                vault_id: vault,
+                device_id: gateway,
+            },
+            DatabaseKey::new(&[3; 32]).unwrap(),
+        )
+        .unwrap();
+        gateway_core.unlock(&profile, &header, "passphrase").unwrap();
+        gateway_core
             .publish_rcs_capability(
                 &RcsLinkStatusEvent {
                     gateway_device_id: gateway,
@@ -1056,6 +1067,10 @@ mod tests {
                 now,
             )
             .unwrap();
+        for (index, envelope) in gateway_core.pending_outbox().unwrap().iter().enumerate() {
+            core.client().unwrap().ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+        }
+        core.client().unwrap().apply_pending(100).unwrap();
         value(&core.dispatch(
             &json!({"command":"set_host_context","args":{"gateways":[{"id":gateway,"name":"Gateway","simId":"sim","online":true,"simulated":false,"supportsSms":true,"supportsMms":false}]}}).to_string(),
         ));
@@ -1068,7 +1083,10 @@ mod tests {
         value(&core.dispatch(
             &json!({"command":"_worker_apply_server_context","args":{
                 "connection":"connected",
-                "devices":{"devices":[{"device_id":gateway,"role":"gateway","revoked":false}]},
+                "devices":{"devices":[
+                    {"device_id":device,"role":"device","revoked":false},
+                    {"device_id":gateway,"role":"gateway","revoked":false}
+                ]},
                 "capabilities":{"capabilities":[{"device_id":gateway,"simulator":false,"capabilities":{"sims":[{"subscription_id":"sim","sms":"available","mms":"unavailable"}]}}]}
             }}).to_string(),
         ));
@@ -1105,7 +1123,10 @@ mod tests {
             value(&core.dispatch(
                 &json!({"command":"_worker_apply_server_context","args":{
                     "connection":"connected",
-                    "devices":{"devices":[{"device_id":gateway,"role":"gateway","revoked":false}]},
+                    "devices":{"devices":[
+                        {"device_id":device,"role":"device","revoked":false},
+                        {"device_id":gateway,"role":"gateway","revoked":false}
+                    ]},
                     "capabilities":{"capabilities":[{"device_id":gateway,"simulator":false,"capabilities":{"sims":[{"subscription_id":"sim","sms":"available","mms":"unavailable"}]}}]}
                 }}).to_string(),
             ));
@@ -1127,18 +1148,17 @@ mod tests {
                     .is_empty()
             );
         }
-        let revoked: Value = serde_json::from_str(
-            &core.dispatch(
+        value(&core.dispatch(
                 &json!({"command":"_worker_apply_server_context","args":{
                     "connection":"connected",
-                    "devices":{"devices":[{"device_id":gateway,"role":"gateway","revoked":true}]},
+                    "devices":{"devices":[
+                        {"device_id":device,"role":"device","revoked":false},
+                        {"device_id":gateway,"role":"gateway","revoked":true}
+                    ]},
                     "capabilities":{"capabilities":[]}
                 }})
                 .to_string(),
-            ),
-        )
-        .unwrap();
-        assert_eq!(revoked["error"]["code"], "device-revoked");
+        ));
         let revoked_snapshot = value(&core.dispatch(
             &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
         ));
@@ -1148,7 +1168,7 @@ mod tests {
             outbox_before_snapshot
         );
         value(&core.dispatch(r#"{"command":"close","args":{}}"#));
-        open(&mut core, vault, gateway, [7; 32]);
+        open(&mut core, vault, device, [7; 32]);
         value(&core.dispatch(
             &json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string(),
         ));

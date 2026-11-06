@@ -229,32 +229,42 @@ pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
         .get_json("/v1/capabilities", MAX_JSON_BYTES)
         .await
         .map_err(sync_net_error)?;
-    let views = gateway_views(&devices, &capabilities);
-    let device_role = extract_device_role(&devices, &session.binding.device_id);
+    apply_gateway_refresh(session, &devices, &capabilities);
+    Ok(())
+}
+
+pub(crate) fn apply_gateway_refresh(
+    session: &Session,
+    devices: &DevicesResponse,
+    capabilities: &CapabilitiesResponse,
+) {
+    let views = gateway_views(devices, capabilities);
+    let device_role = extract_device_role(devices, &session.binding.device_id);
     let rcs_roster_validated = device_role.is_some();
+    let revoked_device_ids = devices
+        .devices
+        .iter()
+        .filter(|device| device.revoked)
+        .map(|device| device.device_id.clone())
+        .collect();
     let changed = {
         let mut status = session.status.lock().unwrap_or_else(|p| p.into_inner());
         let changed = !status.gateways_known
             || status.gateways != views
             || status.device_role != device_role
-            || status.rcs_roster_validated != rcs_roster_validated;
+            || status.rcs_roster_validated != rcs_roster_validated
+            || status.revoked_device_ids != revoked_device_ids;
         status.gateways = views.clone();
         status.gateways_known = true;
         status.rcs_roster_validated = rcs_roster_validated;
         status.device_role = device_role;
-        status.revoked_device_ids = devices
-            .devices
-            .iter()
-            .filter(|device| device.revoked)
-            .map(|device| device.device_id.clone())
-            .collect();
+        status.revoked_device_ids = revoked_device_ids;
         changed
     };
     if changed {
         session.persist_gateways(&views);
         session.notify();
     }
-    Ok(())
 }
 
 /// Drains published snapshot records and applies journaled records in bounded steps, yielding
