@@ -37,8 +37,7 @@ mod conversation_tones;
 mod deferred_media;
 mod device_succession;
 mod ephemeral;
-/// Temporary private staging boundary; C3 consumes this policy module and removes the allowance.
-#[allow(dead_code)]
+mod ephemeral_v2;
 mod ephemeral_v2_policy;
 /// Temporary private staging boundary; C3 consumes this session module and removes the allowance.
 #[allow(dead_code)]
@@ -59,6 +58,9 @@ pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, Deferr
 pub use ephemeral::{
     MAX_TYPING_ROSTER, TYPING_START_INTERVAL_MS, TYPING_STARTS_PER_MINUTE, TypingOrigin,
     TypingState, TypingView,
+};
+pub use ephemeral_v2::{
+    LiveClock, LiveEnableContext, LiveEnableGeneration, LiveError, LiveExecutor, LiveOutbound,
 };
 mod media_paging;
 mod mms;
@@ -1130,6 +1132,7 @@ pub(crate) struct Store {
     keys: BTreeMap<u32, EpochKeys>,
     active_epoch: Option<u32>,
     ephemeral: ephemeral::EphemeralTypingState,
+    ephemeral_v2: ephemeral_v2::EphemeralV2State,
     pub(crate) media_dir: PathBuf,
     pub(crate) media_cache: media_cache::MediaCacheState,
 }
@@ -1455,6 +1458,7 @@ impl Client {
             keys: BTreeMap::new(),
             active_epoch: None,
             ephemeral: ephemeral::EphemeralTypingState::default(),
+            ephemeral_v2: ephemeral_v2::EphemeralV2State::default(),
             media_dir,
             media_cache: media_cache::MediaCacheState::default(),
         };
@@ -2055,8 +2059,46 @@ impl Client {
     /// Clears process-only typing state when the host locks its session. Restarting also creates
     /// a fresh empty state; this method never writes the database.
     pub fn clear_ephemeral_typing(&self) -> Result<(), Error> {
-        self.lock()?.ephemeral.clear();
+        let mut store = self.lock()?;
+        store.ephemeral.clear();
+        store.ephemeral_v2.disable();
         Ok(())
+    }
+
+    /// Enables a fresh, memory-only v2 typing incarnation from trusted host context.
+    pub fn enable_live_typing(
+        &self,
+        context: LiveEnableContext,
+        clock: LiveClock,
+    ) -> Result<LiveEnableGeneration, LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::enable(&mut store, context, clock)
+    }
+
+    /// Retires v2 typing state without consulting a clock or writing SQLite.
+    pub fn disable_live_typing(&self) -> Result<(), Error> {
+        self.lock()?.ephemeral_v2.disable();
+        Ok(())
+    }
+
+    /// Seals v2 typing only after checking fresh eligibility under the Store lock.
+    pub fn seal_typing_signal_v2(
+        &self,
+        conversation_id: ConversationId,
+        gateway_device_id: DeviceId,
+        origin: peppy_protocol::TypingOriginV2,
+        state: peppy_protocol::TypingStateV2,
+        clock: LiveClock,
+    ) -> Result<Option<LiveOutbound>, LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::seal(
+            &mut store,
+            conversation_id,
+            gateway_device_id,
+            origin,
+            state,
+            clock,
+        )
     }
 
     /// Exports both purpose keys of an unlocked epoch for OS secure storage. The root key and

@@ -13,6 +13,10 @@ path = "tests/integration.rs"
 name = "ephemeral"
 path = "tests/ephemeral.rs"
 
+[[test]]
+name = "ephemeral_v2_runtime"
+path = "tests/ephemeral_v2_runtime.rs"
+
 [dependencies]
 base64.workspace = true
 peppy-crypto.workspace = true
