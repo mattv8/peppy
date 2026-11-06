@@ -39,6 +39,7 @@ pub const TENANT_TABLES: &[&str] = &[
     "attachment_removals",
     "live_ticket_sessions",
     "live_tickets",
+    "live_ticket_device_authority",
 ];
 
 const CONTROL_PLANE_TABLES: &[&str] = &[
@@ -48,7 +49,11 @@ const CONTROL_PLANE_TABLES: &[&str] = &[
     "vault_requests",
 ];
 const ADMISSION_TABLES: &[&str] = &["instance_admission_windows", "instance_admission_sources"];
-const LIVE_TICKET_TABLES: &[&str] = &["live_ticket_sessions", "live_tickets"];
+const LIVE_TICKET_TABLES: &[&str] = &[
+    "live_ticket_sessions",
+    "live_tickets",
+    "live_ticket_device_authority",
+];
 const LIVE_TICKET_RESOLVER: &str = "community_resolve_live_ticket_vault(bytea)";
 const TENANT_SCOPE_POLICY_EXPRESSION: &str =
     "((vault_id)::text = NULLIF(current_setting('peppy.vault_id'::text, true), ''::text))";
@@ -526,5 +531,6 @@ mod live_ticket_schema_tests {
     fn live_ticket_tables_are_part_of_the_tenant_rls_contract() {
         assert!(TENANT_TABLES.contains(&"live_ticket_sessions"));
         assert!(TENANT_TABLES.contains(&"live_tickets"));
+        assert!(TENANT_TABLES.contains(&"live_ticket_device_authority"));
     }
 }

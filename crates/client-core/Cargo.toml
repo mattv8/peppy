@@ -29,6 +29,10 @@ path = "tests/rcs_receive.rs"
 name = "rcs_status"
 path = "tests/rcs_status.rs"
 
+[[test]]
+name = "rcs_target"
+path = "tests/rcs_target.rs"
+
 [dependencies]
 base64.workspace = true
 peppy-crypto.workspace = true

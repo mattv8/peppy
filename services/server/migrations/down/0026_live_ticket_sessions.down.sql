@@ -5,3 +5,4 @@ BEGIN
 END $$;
 DROP TABLE live_tickets;
 DROP TABLE live_ticket_sessions;
+DROP TABLE live_ticket_device_authority;

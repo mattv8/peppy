@@ -6,6 +6,7 @@ pub mod health;
 pub mod instance;
 pub(crate) mod live;
 pub(crate) mod live_postgres;
+pub(crate) mod live_ticket_authority;
 pub(crate) mod live_ticket_maintenance;
 pub mod live_ticket_upgrade;
 pub mod presence;
