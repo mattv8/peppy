@@ -1,6 +1,36 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "peppy.typing_indicator_direct": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Typing"
+          }
+        }
+      }
+    },
+    "peppy.typing_indicator_group": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone is typing"
+          }
+        }
+      }
+    },
+    "peppy.typing_announce_direct": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The other person is typing"
+          }
+        }
+      }
+    },
     "peppy.typing_share_label": {
       "localizations": {
         "en": {
@@ -1056,7 +1086,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This can copy only messages the phone provider exposes. Peppy cannot grant this access. If it is not allowed, copy the command and run it with external Android Debug Bridge (adb). It does not add RCS sending support. Replies still use SMS or MMS. Phone and app versions can expose only some RCS content."
+            "value": "This can copy only messages the phone provider exposes. Peppy cannot grant this access. If it is not allowed, copy the command and run it with external Android Debug Bridge (adb). It does not change how replies are sent. Phone and app versions can expose only some RCS content."
           }
         }
       }
@@ -1176,7 +1206,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Recover RCS and MMS content your messaging app restricts. Peppy cannot send RCS."
+            "value": "Recover RCS and MMS content your messaging app restricts. This does not change how replies are sent."
           }
         }
       }
@@ -1346,7 +1376,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy does not become your default messaging app. This does not add RCS sending or guarantee any message history. Replies still use SMS or MMS."
+            "value": "Peppy does not become your default messaging app. This does not change how replies are sent or guarantee any message history."
           }
         }
       }
@@ -2766,7 +2796,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "iOS cannot capture or send carrier SMS/MMS. Use an Android phone for carrier messaging. RCS is unavailable."
+            "value": "iOS cannot capture or send carrier SMS/MMS. Use an Android phone for carrier messaging. This iPhone cannot send or receive RCS."
           }
         }
       }
@@ -2981,16 +3011,6 @@
         }
       }
     },
-    "peppy.help_android_messaging_limits": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "MMS messages sync after the phone finishes downloading them and uploading encrypted copies.\n\nRCS requires a verified carrier or OEM integration and is not available in this build.\n\nAndroid can delay background sync in Doze or battery saver. Force-stopping Peppy pauses capture until you open it again. Some one-time-code texts may not reach companion apps."
-          }
-        }
-      }
-    },
     "peppy.help_android_mms_capture": {
       "localizations": {
         "en": {
@@ -3046,7 +3066,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Best effort. Messages you read in your phone's messaging app are marked read in Peppy, including after time away. SMS always counts; MMS counts when MMS sync is on. This needs SMS sync and SMS read access. Reading an SMS in Peppy can also mark it read on your phone, which needs notification access and Android 9 or later. Peppy never marks messages unread. RCS conversations are stored privately by your messaging app and cannot be read by Peppy. When marking SMS read on your phone, Peppy skips ambiguous or unseen conversations, and pending phone attempts expire after one day."
+            "value": "Best effort. Messages you read in your phone's messaging app are marked read in Peppy, including after time away. SMS always counts; MMS counts when MMS sync is on. This needs SMS sync and SMS read access. Reading an SMS in Peppy can also mark it read on your phone, which needs notification access and Android 9 or later. Peppy never marks messages unread. This setting covers SMS and MMS only. It does not track RCS conversations in your messaging app. When marking SMS read on your phone, Peppy skips ambiguous or unseen conversations, and pending phone attempts expire after one day."
           }
         }
       }
@@ -4826,7 +4846,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy can keep read status in step between your phone's messaging app and Peppy.\n\nFrom your phone: when you read an SMS or downloaded MMS in your messaging app, Peppy marks that one message read in Peppy and on your other devices. This only reads the message's read flag. It does not change your phone's messages, and dismissing a notification does not count as reading. It also catches up after time away, but only for messages Peppy already captured and still shows as unread. It needs SMS sync and SMS read access, and MMS needs MMS sync. Notification access is not needed. RCS messages are kept privately by your messaging app and cannot be read by Peppy.\n\nFrom Peppy: when you read an SMS in Peppy, Peppy can ask your phone's messaging app to use its own mark-read action. This is best effort, covers SMS only, and needs notification access and Android 9 or later. It updates the messaging app's read status for the whole conversation, and a message arriving at that moment or RCS messages Peppy cannot inspect may also be marked read. It acts only when exact message-time evidence is unambiguous; time is not a guaranteed conversation identity. Notification access can see all notifications, but this path inspects only the current default messaging app. Older reads in Peppy are not sent to your phone.\n\nRead status syncs encrypted through your configured server to your authorized devices, like your other messages. Peppy never marks messages unread."
+            "value": "Peppy can keep read status in step between your phone's messaging app and Peppy.\n\nFrom your phone: when you read an SMS or downloaded MMS in your messaging app, Peppy marks that one message read in Peppy and on your other devices. This only reads the message's read flag. It does not change your phone's messages, and dismissing a notification does not count as reading. It also catches up after time away, but only for messages Peppy already captured and still shows as unread. It needs SMS sync and SMS read access, and MMS needs MMS sync. Notification access is not needed. This covers SMS and MMS only. It does not track RCS messages in your messaging app.\n\nFrom Peppy: when you read an SMS in Peppy, Peppy can ask your phone's messaging app to use its own mark-read action. This is best effort, covers SMS only, and needs notification access and Android 9 or later. It updates the messaging app's read status for the whole conversation, and a message arriving at that moment, or an RCS message this setting does not track, may also be marked read. It acts only when exact message-time evidence is unambiguous; time is not a guaranteed conversation identity. Notification access can see all notifications, but this path inspects only the current default messaging app. Older reads in Peppy are not sent to your phone.\n\nRead status syncs encrypted through your configured server to your authorized devices, like your other messages. Peppy never marks messages unread."
           }
         }
       }
@@ -5277,16 +5297,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Carrier messaging is unavailable on this device"
-          }
-        }
-      }
-    },
-    "peppy.rcs_unavailable": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "RCS is unavailable"
           }
         }
       }
