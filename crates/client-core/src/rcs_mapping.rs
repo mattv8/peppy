@@ -887,6 +887,49 @@ pub(crate) fn has_proven_mapping(
     .map_err(Into::into)
 }
 
+pub(crate) fn has_live_mapping(
+    conn: &Connection,
+    conversation_id: ConversationId,
+) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_conversation_mappings WHERE peppy_conversation_id=? AND invalidated_at_ms IS NULL)",
+        [conversation_id.to_string()],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+pub(crate) fn carrier_route_context(
+    conn: &Connection,
+    subscription_id: Option<&str>,
+) -> Result<Option<crate::ValidatedCarrierRouteContext>, Error> {
+    let Some(value) = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let context: RcsContext = serde_json::from_str(&value).map_err(|_| Error::Database)?;
+    if context.sim_id.is_empty()
+        || context.link_state != RcsLinkState::Linked as u8
+        || subscription_id.is_some_and(|subscription_id| subscription_id != context.sim_id)
+    {
+        return Ok(None);
+    }
+    Ok(Some(crate::ValidatedCarrierRouteContext::new(
+        context.sim_id.clone(),
+        context.link_generation,
+        context.session_generation,
+        context.context_revision,
+        context.identity_region,
+        context.canonicalizer_revision,
+    )))
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct RcsContext {
     link_generation: u64,

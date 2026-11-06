@@ -1,5 +1,6 @@
 use crate::{
     CommandId, ConversationId, Error, MessagePayload,
+    conversation_match::canonical_address,
     rcs_mapping::{
         self, RCS_MAPPING_FRESHNESS_MS, RcsConversationType, RcsMapping, RcsMappingClass,
         RcsMappingObservation, RcsSendMode,
@@ -24,6 +25,9 @@ const RCS_TARGET_IDENTITY_PREFIX: &str = "rcs_target_identity_v1/";
 pub struct CarrierOnlyProof {
     pub conversation_id: ConversationId,
     pub recipients: Vec<String>,
+    pub canonical_recipient: String,
+    pub identity_region: String,
+    pub canonicalizer_revision: u32,
     pub subscription_id: String,
     pub observed_at_ms: i64,
     pub link_generation: u64,
@@ -40,7 +44,9 @@ struct IntentionalUnlinkContext {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StoredCarrierOnlyProof {
-    recipients: Vec<String>,
+    canonical_recipient: String,
+    identity_region: String,
+    canonicalizer_revision: u32,
     subscription_id: String,
     observed_at_ms: i64,
     expires_at_ms: i64,
@@ -69,6 +75,7 @@ pub(crate) fn record_carrier_only_proof(
         .checked_add(RCS_MAPPING_FRESHNESS_MS)
         .ok_or(Error::InvalidRequest("carrier-only proof is not current"))?;
     if proof.subscription_id.is_empty()
+        || rcs_mapping::has_live_mapping(conn, proof.conversation_id)?
         || !rcs_mapping::context_is_current(
             conn,
             proof.link_generation,
@@ -79,9 +86,14 @@ pub(crate) fn record_carrier_only_proof(
     {
         return Err(Error::InvalidRequest("carrier-only proof is not current"));
     }
-    let recipients = canonical_recipients(&proof.recipients)?;
+    canonical_recipients(&proof.recipients)?;
+    if proof.canonical_recipient.is_empty() || proof.identity_region.is_empty() {
+        return Err(Error::InvalidRequest("invalid carrier-only recipient"));
+    }
     let stored = StoredCarrierOnlyProof {
-        recipients,
+        canonical_recipient: proof.canonical_recipient.clone(),
+        identity_region: proof.identity_region.clone(),
+        canonicalizer_revision: proof.canonicalizer_revision,
         subscription_id: proof.subscription_id.clone(),
         observed_at_ms: proof.observed_at_ms,
         expires_at_ms,
@@ -141,7 +153,9 @@ pub(crate) fn carrier_admission(
         if proof.expires_at_ms >= now_ms
             && (0..=RCS_MAPPING_FRESHNESS_MS).contains(&current_age)
             && proof.subscription_id == subscription_id
-            && proof.recipients == canonical_recipients(recipients)?
+            && recipients.len() == 1
+            && proof.canonical_recipient
+                == canonical_address(&recipients[0], Some(&proof.identity_region))
             && rcs_mapping::context_is_current(
                 conn,
                 proof.link_generation,

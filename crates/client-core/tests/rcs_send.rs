@@ -125,6 +125,9 @@ fn carrier_proof(command: &ReceivedCommand) -> CarrierOnlyProof {
     CarrierOnlyProof {
         conversation_id: command.message.record.conversation_id,
         recipients: command.message.recipients.clone(),
+        canonical_recipient: "raw:peer-local".into(),
+        identity_region: "US".into(),
+        canonicalizer_revision: 1,
         subscription_id: command.subscription_id.clone(),
         observed_at_ms: 1_000,
         link_generation: 1,
@@ -538,6 +541,9 @@ fn record_media_carrier_proof(gateway: &Client, conversation_id: ConversationId)
             &CarrierOnlyProof {
                 conversation_id,
                 recipients: vec!["peer-local".into()],
+                canonical_recipient: "raw:peer-local".into(),
+                identity_region: "US".into(),
+                canonicalizer_revision: 1,
                 subscription_id: "sim-local".into(),
                 observed_at_ms: 1_000,
                 link_generation: 1,

@@ -154,7 +154,7 @@ pub use rcs_receive::{
     RcsReceiveState, RcsStatusApplication,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
-pub use rcs_target::{RcsTargetClassification, ValidatedCarrierRouteContext, classify_rcs_target};
+pub use rcs_target::{RcsTargetClassification, RcsTargetDecision, ValidatedCarrierRouteContext};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -1453,6 +1453,45 @@ impl Client {
         rcs_send::record_carrier_only_proof(&transaction, proof, now_ms)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn carrier_route_context(
+        &self,
+        _conversation_id: ConversationId,
+        subscription_id: &str,
+    ) -> Result<Option<ValidatedCarrierRouteContext>, Error> {
+        rcs_mapping::carrier_route_context(&self.lock()?.conn, Some(subscription_id))
+    }
+
+    pub fn classify_and_commit_rcs_target(
+        &self,
+        conversation_id: ConversationId,
+        recipient: &str,
+        snapshot_json: &str,
+        now_ms: i64,
+    ) -> Result<RcsTargetDecision, Error> {
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(route) = rcs_mapping::carrier_route_context(&transaction, None)? else {
+            return Ok(RcsTargetClassification::Unknown {
+                snapshot_token: None,
+            });
+        };
+        let decision = rcs_target::classify_rcs_target(
+            &transaction,
+            conversation_id,
+            recipient,
+            route,
+            snapshot_json,
+            now_ms,
+        );
+        if let RcsTargetClassification::NotFoundComplete { carrier_only_proof } = &decision {
+            rcs_target::commit_complete_absence(&transaction, carrier_only_proof, now_ms)?;
+        }
+        transaction.commit()?;
+        Ok(decision)
     }
     /// Returns whether current, content-free RCS evidence permits a typing signal for a
     /// conversation. It is a gate only; it does not create durable state or grant send authority.
