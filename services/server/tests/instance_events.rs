@@ -73,6 +73,7 @@ impl Fixture {
                 replay_retention: Duration::from_secs(604_800),
                 relay_url: None,
                 web_client: None,
+                web_live_trusted_origin: None,
             },
             self.pool.clone(),
         )

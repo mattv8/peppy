@@ -2,7 +2,7 @@ use std::{env, fmt, net::SocketAddr, path::PathBuf, time::Duration};
 
 use ipnet::IpNet;
 use thiserror::Error;
-use url::Url;
+use url::{Origin, Url};
 
 use crate::web_client::WebClientConfig;
 
@@ -25,6 +25,7 @@ pub struct Config {
     /// Fixed operator relay origin. The server never receives provider/manage credentials.
     pub relay_url: Option<Url>,
     pub web_client: Option<WebClientConfig>,
+    pub web_live_trusted_origin: Option<Origin>,
 }
 
 impl fmt::Debug for Config {
@@ -150,6 +151,26 @@ impl Config {
         let replay_retention = Duration::from_secs(u64::from(replay_retention_days) * 86_400);
         let relay_url = relay_url(&get, production)?;
         let web_client = web_client_config(&get, public_api_url.as_ref())?;
+        let web_live_trusted_origin = get("PEPPY_WEB_LIVE_TRUSTED_ORIGIN")
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                let url: Url =
+                    value
+                        .parse()
+                        .map_err(|source: url::ParseError| ConfigError::Invalid {
+                            name: "PEPPY_WEB_LIVE_TRUSTED_ORIGIN",
+                            message: source.to_string(),
+                        })?;
+                let origin = url.origin();
+                if url.scheme() != "https" || origin.ascii_serialization() != value {
+                    return Err(ConfigError::Invalid {
+                        name: "PEPPY_WEB_LIVE_TRUSTED_ORIGIN",
+                        message: "must be a canonical HTTPS origin".into(),
+                    });
+                }
+                Ok(origin)
+            })
+            .transpose()?;
         let trusted_proxy_cidrs = get("TRUSTED_PROXY_CIDRS")
             .unwrap_or_default()
             .split(',')
@@ -235,6 +256,7 @@ impl Config {
             replay_retention,
             relay_url,
             web_client,
+            web_live_trusted_origin,
         })
     }
 }

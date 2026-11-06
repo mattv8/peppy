@@ -123,6 +123,7 @@ impl Fixture {
             replay_retention: Duration::from_secs(7 * 86_400),
             relay_url: None,
             web_client: None,
+            web_live_trusted_origin: None,
         }
     }
 

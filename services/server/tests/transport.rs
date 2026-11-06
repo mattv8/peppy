@@ -244,6 +244,7 @@ impl TestServer {
                     replay_retention: options.replay_retention,
                     relay_url,
                     web_client: None,
+                    web_live_trusted_origin: None,
                 };
                 peppy_server::ServerBuilder::new(config, server_pool)
                     .build()

@@ -793,6 +793,7 @@ fn test_config(s3: S3Config) -> Config {
         replay_retention: Duration::from_secs(86_400),
         relay_url: None,
         web_client: None,
+        web_live_trusted_origin: None,
     }
 }
 
