@@ -1,9 +1,11 @@
 package gmlink
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -211,4 +213,86 @@ func (link *Link) projectRcsEventFor(queued queuedEvent, wrapped *libgm.WrappedM
 		requireGeneration: true,
 		requireRevision:   true,
 	})
+}
+
+const rcsGapPageSize int64 = 100
+
+var rcsGapPageTimeout = 5 * time.Second
+
+func decodeOpaquePageToken(token string) (*gmproto.Cursor, bool) {
+	if token == "" {
+		return nil, true
+	}
+	data, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(data) <= 8 {
+		return nil, false
+	}
+	cursor := &gmproto.Cursor{
+		LastItemTimestamp: int64(binary.BigEndian.Uint64(data[:8])),
+		LastItemID:        string(data[8:]),
+	}
+	if cursor.GetLastItemID() == "" || opaquePageToken(cursor) != token {
+		return nil, false
+	}
+	return cursor, true
+}
+
+// FetchRcsGap returns one bounded history page projected through the receive contract.
+func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
+	cursor, ok := decodeOpaquePageToken(pageToken)
+	if googleConversationID == "" || !ok {
+		return encodeRcsPage(rcsPageFailure("invalid_page_token"))
+	}
+
+	link.rpcMu.Lock()
+	defer link.rpcMu.Unlock()
+	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
+	if !ok {
+		return encodeRcsPage(rcsPageFailure("gap_unavailable"))
+	}
+
+	link.mu.Lock()
+	conversation := cloneConversation(link.conversationRecords[googleConversationID])
+	owned := link.hasOwnerVerificationLocked() && conversation != nil && conversation.GetType() == gmproto.ConversationType_RCS
+	fetch := link.fetchMessages
+	link.mu.Unlock()
+	if !owned {
+		return encodeRcsPage(rcsPageFailure("conversation_unproven"))
+	}
+	if fetch == nil {
+		fetch = client.FetchMessages
+	}
+
+	ctx, cancel := context.WithTimeout(runCtx, rcsGapPageTimeout)
+	page, err := fetch(ctx, googleConversationID, rcsGapPageSize, cursor)
+	cancel()
+	if err != nil {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			return encodeRcsPage(rcsPageFailure("gap_deadline"))
+		case errors.Is(err, context.Canceled):
+			return encodeRcsPage(rcsPageFailure("gap_cancelled"))
+		default:
+			return encodeRcsPage(rcsPageFailure("gap_failed"))
+		}
+	}
+	if !link.rcsGapOwned(generation, streamEpoch) {
+		return encodeRcsPage(rcsPageFailure("stale_generation"))
+	}
+	return encodeRcsPage(projectRcsPage(page, conversation))
+}
+
+func (link *Link) rcsGapOwned(generation, streamEpoch uint64) bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	return !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasOwnerVerificationLocked()
+}
+
+func rcsPageFailure(code string) rcsPageProjection {
+	return rcsPageProjection{Code: code, Records: []rcsReceiveRecord{}, Signals: []rcsPageSignal{}}
+}
+
+func encodeRcsPage(result rcsPageProjection) string {
+	encoded, _ := json.Marshal(result)
+	return string(encoded)
 }

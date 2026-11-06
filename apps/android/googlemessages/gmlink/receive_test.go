@@ -1,9 +1,11 @@
 package gmlink
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
@@ -383,5 +385,123 @@ func TestLinkDropsOldReceiveGenerationAndPreservesOrder(t *testing.T) {
 		if projection.Record == nil || projection.Record.GoogleMessageID != want {
 			t.Fatalf("record %d = %+v", index, projection.Record)
 		}
+	}
+}
+
+func fetchGapTestLink(fetch func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error)) *Link {
+	return &Link{
+		client:            &libgm.Client{},
+		state:             stateLinked,
+		running:           true,
+		runCtx:            context.Background(),
+		generation:        7,
+		runGeneration:     7,
+		streamEpoch:       3,
+		ownerVerification: &ownerVerification{generation: 7},
+		conversationRecords: map[string]*gmproto.Conversation{
+			"conversation-1": {ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS},
+		},
+		fetchMessages: fetch,
+	}
+}
+
+func decodeGapResult(t *testing.T, encoded string) rcsPageProjection {
+	t.Helper()
+	var result rcsPageProjection
+	if err := json.Unmarshal([]byte(encoded), &result); err != nil {
+		t.Fatalf("decode result: %v (%q)", err, encoded)
+	}
+	return result
+}
+
+func TestFetchRcsGapReturnsEmptyPage(t *testing.T) {
+	calls := 0
+	link := fetchGapTestLink(func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+		calls++
+		return &gmproto.ListMessagesResponse{}, nil
+	})
+
+	got := decodeGapResult(t, link.FetchRcsGap("conversation-1", ""))
+
+	if got.Code != "ok" || got.HasMore || len(got.Records) != 0 || len(got.Signals) != 0 || calls != 1 {
+		t.Fatalf("result = %#v, calls = %d", got, calls)
+	}
+}
+
+func TestFetchRcsGapContinuesFromOpaquePageToken(t *testing.T) {
+	start := &gmproto.Cursor{LastItemID: "start", LastItemTimestamp: 1234}
+	next := &gmproto.Cursor{LastItemID: "next", LastItemTimestamp: 5678}
+	link := fetchGapTestLink(func(_ context.Context, conversationID string, count int64, cursor *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+		if conversationID != "conversation-1" || count != rcsGapPageSize || cursor.GetLastItemID() != "start" || cursor.GetLastItemTimestamp() != 1234 {
+			t.Fatalf("fetch arguments = %q, %d, %#v", conversationID, count, cursor)
+		}
+		return &gmproto.ListMessagesResponse{Messages: []*gmproto.Message{textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message}, Cursor: next}, nil
+	})
+
+	got := decodeGapResult(t, link.FetchRcsGap("conversation-1", opaquePageToken(start)))
+
+	if got.Code != "ok" || !got.HasMore || got.NextCursor != opaquePageToken(next) || len(got.Records) != 1 {
+		t.Fatalf("result = %#v", got)
+	}
+}
+
+func TestFetchRcsGapRejectsMalformedPageToken(t *testing.T) {
+	called := false
+	link := fetchGapTestLink(func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+		called = true
+		return nil, nil
+	})
+
+	got := decodeGapResult(t, link.FetchRcsGap("conversation-1", "not-a-token"))
+
+	if got.Code != "invalid_page_token" || called {
+		t.Fatalf("result = %#v, called = %t", got, called)
+	}
+}
+
+func TestFetchRcsGapHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	link := fetchGapTestLink(func(ctx context.Context, _ string, _ int64, _ *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+		return nil, ctx.Err()
+	})
+	link.runCtx = ctx
+
+	got := decodeGapResult(t, link.FetchRcsGap("conversation-1", ""))
+
+	if got.Code != "gap_cancelled" || got.HasMore || got.NextCursor != "" || len(got.Records) != 0 {
+		t.Fatalf("result = %#v", got)
+	}
+}
+
+func TestFetchRcsGapDropsPageAfterGenerationChanges(t *testing.T) {
+	var link *Link
+	link = fetchGapTestLink(func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+		link.mu.Lock()
+		link.generation++
+		link.mu.Unlock()
+		return &gmproto.ListMessagesResponse{Messages: []*gmproto.Message{textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message}}, nil
+	})
+
+	got := decodeGapResult(t, link.FetchRcsGap("conversation-1", ""))
+
+	if got.Code != "stale_generation" || got.HasMore || got.NextCursor != "" || len(got.Records) != 0 {
+		t.Fatalf("result = %#v", got)
+	}
+}
+
+func TestFetchRcsGapUsesPerPageDeadline(t *testing.T) {
+	previous := rcsGapPageTimeout
+	rcsGapPageTimeout = time.Millisecond
+	defer func() { rcsGapPageTimeout = previous }()
+	link := fetchGapTestLink(func(ctx context.Context, _ string, _ int64, _ *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+
+	got := decodeGapResult(t, link.FetchRcsGap("conversation-1", ""))
+
+	if got.Code != "gap_deadline" || got.HasMore || got.NextCursor != "" || len(got.Records) != 0 {
+		t.Fatalf("result = %#v", got)
 	}
 }

@@ -69,6 +69,7 @@ type Link struct {
 	authCaptureRevision uint64
 	authPersistRevision uint64
 	authSnapshot        func(*libgm.AuthData) (*libgm.AuthData, error)
+	fetchMessages       func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error)
 
 	outputMu              sync.Mutex
 	outputCond            *sync.Cond
