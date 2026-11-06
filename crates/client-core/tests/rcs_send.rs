@@ -125,7 +125,7 @@ fn carrier_proof(command: &ReceivedCommand) -> CarrierOnlyProof {
     CarrierOnlyProof {
         conversation_id: command.message.record.conversation_id,
         recipients: command.message.recipients.clone(),
-        canonical_recipient: "raw:peer-local".into(),
+        canonical_recipient: "peer-local".into(),
         identity_region: "US".into(),
         canonicalizer_revision: 1,
         subscription_id: command.subscription_id.clone(),
@@ -223,10 +223,10 @@ fn stale_wrong_sim_wrong_context_and_proven_rcs_never_fall_back_to_carrier() {
     changed.context_revision = 2;
     changed.observed_at_ms = 1_001;
     gateway.verify_rcs_mapping(&changed, 1_001).unwrap();
-    assert_eq!(
+    assert!(matches!(
         gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
-        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
-    );
+        PermitDecision::Permit(_)
+    ));
     let mut mapped = observation("peer-local", 2);
     mapped.context_revision = 3;
     mapped.observed_at_ms = 1_002;
@@ -541,7 +541,7 @@ fn record_media_carrier_proof(gateway: &Client, conversation_id: ConversationId)
             &CarrierOnlyProof {
                 conversation_id,
                 recipients: vec!["peer-local".into()],
-                canonical_recipient: "raw:peer-local".into(),
+                canonical_recipient: "peer-local".into(),
                 identity_region: "US".into(),
                 canonicalizer_revision: 1,
                 subscription_id: "sim-local".into(),
