@@ -158,7 +158,8 @@ import {
   type DraftNoticeEvent,
 } from "./drafts/DraftStore";
 import { DraftNotice } from "./drafts/DraftNotice";
-import { DraftSyncStatus } from "./drafts/DraftSyncStatus";
+import { DraftSyncStatus, draftSyncNeedsAttention, useDraftExpiryClock } from "./drafts/DraftSyncStatus";
+import type { DraftResolutionResult } from "./drafts/DraftConflictReviewDialog";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
 import { measureComposerChrome } from "./conversation/composerChrome";
 import { IsolatedText } from "./notices/IsolatedText";
@@ -4348,6 +4349,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const accountIdentityKey = snapshot ? `${snapshot.connection.origin ?? ""}|${snapshot.sessionScopeId ?? ""}` : null;
   const accountNotice = useAccountNotice(accountIdentityKey);
   const [ribbonOpenFailed, setRibbonOpenFailed] = useState(false);
+  const draftStatusNow = useDraftExpiryClock(slot?.id ? draftViews[slot.id]?.sync?.expiresAt : undefined);
 
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable" || lockCode === "app-lock-checking"))
@@ -4586,13 +4588,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }
   if (composerFeedback?.key === slotKey) noticeCandidates.push({ kind: composerFeedback.kind ?? "send-failed", detail: composerFeedback.message, sequence: draftNoticeSequence.current + 1 });
   const visibleDraftNotice = selectDraftNotice(noticeCandidates);
-  const statusActive = Boolean(unavailableReason || mmsLimitShown || visibleDraftNotice || activeDraftView?.sync);
-  const resolveDraftConflict = async (branchId: string | null) => {
-    if (!activeDraftView?.id || !slotKey || resolutionRef.current !== undefined) return;
+  const localSaveState = slotKey ? store.saveState(slotKey) : "idle";
+  const hasDraftConflicts = Boolean(activeDraftView?.sync?.conflicts.length);
+  const statusActive = Boolean(unavailableReason || mmsLimitShown || visibleDraftNotice || draftSyncNeedsAttention({ draft: activeDraftView, offline: serverOffline, localSaveState, now: draftStatusNow }));
+  const resolveDraftConflict = async (branchId: string | null): Promise<DraftResolutionResult> => {
+    if (resolutionRef.current !== undefined) return { ok: false, message: "A version is already being applied." };
+    if (!activeDraftView?.id || !slotKey)
+      return { ok: false, message: "The draft changed. Review the latest versions before choosing." };
     const resolvedKey = store.resolve(slotKey);
     if (hasInFlightAttachmentPreparation(attachmentPreparationInFlight.current, resolvedKey, key => store.resolve(key))) {
-      setComposerNotice(resolvedKey, "Wait for images to finish preparing before choosing a draft version.", "warning", "attachment-feedback");
-      return;
+      return { ok: false, message: "Wait for images to finish preparing before choosing a version." };
     }
     const operation = Date.now();
     resolutionRef.current = operation;
@@ -4608,23 +4613,32 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const valid = mountedRef.current && resolutionRef.current === operation
       && sessionGeneration === draftSessionGenerationRef.current && session === currentSearchSessionKey()
       && revision !== undefined && current?.id === draftId && current.generation === generation;
-    if (!valid || !flushed.ok) {
-      if (valid) setComposerNotice(resolvedKey, `Couldn't resolve draft conflict: ${flushed.ok ? "the draft changed while reviewing" : flushed.error}`);
+    if (!valid) {
       if (resolutionRef.current === operation) {
         resolutionRef.current = undefined;
         setResolvingDraftConflict(false);
       }
-      return;
+      return { ok: false, message: "The draft changed. Review the latest versions before choosing." };
+    }
+    if (!flushed.ok) {
+      if (resolutionRef.current === operation) {
+        resolutionRef.current = undefined;
+        setResolvingDraftConflict(false);
+      }
+      return { ok: false, message: flushed.error };
     }
     try {
       const resolved = await bridge.resolve_draft_conflict({ draftId, keepBranchId: branchId });
-      if (!mountedRef.current || resolutionRef.current !== operation || sessionGeneration !== draftSessionGenerationRef.current || session !== currentSearchSessionKey()) return;
+      if (!mountedRef.current || resolutionRef.current !== operation || sessionGeneration !== draftSessionGenerationRef.current || session !== currentSearchSessionKey())
+        return { ok: false, message: "The draft changed. Review the latest versions before choosing." };
       applyAuthoritativeDraft(resolved);
       if (store.resolve(selectedRef.current ?? "") === resolvedKey)
         document.getElementById("composer-textarea")?.focus();
+      return { ok: true };
     } catch (error) {
       if (mountedRef.current && resolutionRef.current === operation && sessionGeneration === draftSessionGenerationRef.current && session === currentSearchSessionKey())
-        setComposerNotice(resolvedKey, `Couldn't resolve draft conflict: ${errorText(error)}`);
+        return { ok: false, message: errorText(error) };
+      return { ok: false, message: "The draft changed. Review the latest versions before choosing." };
     } finally {
       if (resolutionRef.current === operation) {
         resolutionRef.current = undefined;
@@ -4737,7 +4751,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         statusActive={statusActive}
         statusSlot={
           <>
-            <span id="unavailable-hint" hidden={!unavailableReason}>
+            <span id="unavailable-hint" hidden={!unavailableReason || hasDraftConflicts}>
               Sending unavailable: {composerUnavailableReason}
             </span>
             {mmsLimitShown && route.kind === "route" && (
@@ -4753,8 +4767,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               local={content}
               attachments={attachmentViews}
               offline={serverOffline}
-              localSaveState={slotKey ? store.saveState(slotKey) : "idle"}
-              resolving={resolvingDraftConflict}
+              localSaveState={localSaveState}
               onResolveConflict={resolveDraftConflict}
               onAcknowledgeNotice={acknowledgeDraftSyncNotice}
             />

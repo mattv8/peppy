@@ -136,11 +136,13 @@ describe("composer pasted attachments", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Add attachment" }));
     await waitFor(() => expect(bridge.pick_attachments).toHaveBeenCalledOnce());
-    fireEvent.click(screen.getByText("Review versions"));
-    fireEvent.click(screen.getByRole("button", { name: "Keep this version" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    fireEvent.click(screen.getByRole("radio", { name: /This device/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Use selected version" }));
 
     await waitFor(() => expect(bridge.resolve_draft_conflict).not.toHaveBeenCalled());
-    expect(document.querySelector('[data-draft-notice="attachment-feedback"]')).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("Wait for images to finish preparing before choosing a version.");
+    expect(document.querySelector('[data-draft-notice="attachment-feedback"]')).toBeNull();
     await act(async () => picker.resolve([]));
     expect(textarea).toBeInTheDocument();
   });
@@ -168,8 +170,9 @@ describe("composer pasted attachments", () => {
     vi.mocked(bridge.resolve_draft_conflict).mockReturnValueOnce(resolution.promise);
     await renderComposer();
 
-    fireEvent.click(screen.getByText("Review versions"));
-    fireEvent.click(screen.getByRole("button", { name: "Keep this version" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    fireEvent.click(screen.getByRole("radio", { name: /This device/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Use selected version" }));
     await waitFor(() => expect(bridge.resolve_draft_conflict).toHaveBeenCalledOnce());
     fireEvent.click(conversationButton("conv-river"));
     await waitFor(() => expect(conversationButton("conv-river")).toHaveAttribute("aria-current", "location"));

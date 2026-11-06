@@ -3720,11 +3720,11 @@ describe("draft durability", () => {
         { id: "remote-image-1", name: "one.png", mediaType: "image/png", byteSize: 10, state: "ready" },
         { id: "remote-image-2", name: "two.png", mediaType: "image/png", byteSize: 12, state: "ready" },
       ],
-      sync: { state: "synced", expiresAt: "2026-11-07T00:00:00Z", conflicts: [], notice: null, sendRequiresConnection: false },
+      sync: { state: "synced", expiresAt: "2028-11-07T00:00:00Z", conflicts: [], notice: null, sendRequiresConnection: false },
     });
     render(<App />);
     await waitFor(() => expect(message()).toHaveValue("sent from another device"));
-    expect(screen.getByText("Draft synced")).toBeInTheDocument();
+    expect(document.querySelector("#draft-sync-status")).toBeNull();
     expect(document.querySelector('[data-attachment-id="remote-image-1"]')).toBeInTheDocument();
 
     host.drafts.delete("terminal-source");
@@ -3741,7 +3741,7 @@ describe("draft durability", () => {
     expect(message()).toHaveValue("");
     expect(document.querySelector('[data-attachment-id="remote-image-1"]')).not.toBeInTheDocument();
     expect(document.querySelector('[data-attachment-id="remote-image-2"]')).not.toBeInTheDocument();
-    expect(screen.queryByText("Draft synced")).not.toBeInTheDocument();
+    expect(document.querySelector("#draft-sync-status")).toBeNull();
   });
 
   it("keeps edits made while a remote terminal refresh is pending", async () => {

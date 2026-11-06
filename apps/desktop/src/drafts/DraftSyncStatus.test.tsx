@@ -1,127 +1,159 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Draft } from "@peppy/desktop-ui/bridge-contracts";
-import { DraftSyncStatus } from "./DraftSyncStatus";
+import { DraftSyncStatus, draftSyncNeedsAttention } from "./DraftSyncStatus";
 
-const draft = {
-  id: "draft-1", conversationId: "conversation-1", text: "local caption", recipientIds: ["+12025550123"], attachmentIds: ["local-image"], revision: "1",
-  sync: {
-    state: "synced" as const, expiresAt: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(), sendRequiresConnection: true,
-    notice: "restored-after-expiry" as const,
-    conflicts: [{ branchId: "branch-2", text: "other caption", attachmentIds: ["other-image"], recipientIds: ["+12025550124"] }],
-  },
+const now = Date.parse("2026-01-01T00:00:00Z");
+const local = {
+  text: "local caption",
+  recipientIds: ["+12025550123"],
+  attachmentIds: ["local-image"],
 };
+
+function draft(overrides: Partial<Draft["sync"]> = {}): Draft {
+  return {
+    id: "draft-1",
+    conversationId: "conversation-1",
+    text: local.text,
+    recipientIds: local.recipientIds,
+    attachmentIds: local.attachmentIds,
+    revision: "1",
+    sync: {
+      state: "synced",
+      expiresAt: null,
+      sendRequiresConnection: false,
+      notice: null,
+      conflicts: [],
+      ...overrides,
+    },
+  };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const conflict = { branchId: "branch-2", text: "other", recipientIds: [], attachmentIds: [] };
+
+type StatusProps = Partial<ComponentProps<typeof DraftSyncStatus>>;
+
+function statusElement(props: StatusProps = {}) {
+  return <div id="composer-field"><textarea id="composer-textarea" /><DraftSyncStatus
+    draft={draft()}
+    local={local}
+    attachments={{}}
+    offline={false}
+    localSaveState="idle"
+    onResolveConflict={vi.fn().mockResolvedValue({ ok: true })}
+    onAcknowledgeNotice={vi.fn()}
+    {...props}
+  /></div>;
+}
+
+function renderStatus(props: StatusProps = {}) {
+  return render(statusElement(props));
+}
 
 afterEach(() => cleanup());
 
+describe("draftSyncNeedsAttention", () => {
+  it.each([
+    ["has no draft", undefined, false, "idle", false],
+    ["is synced", draft(), false, "idle", false],
+    ["is syncing", draft({ state: "syncing" }), false, "idle", false],
+    ["is saving remotely", draft({ state: "saving" }), false, "idle", false],
+    ["is saved locally", draft({ state: "saved-local" }), false, "idle", false],
+    ["is local only", draft({ state: "local-only" }), false, "idle", false],
+    ["has a failed local save", draft(), false, "failed", true],
+    ["has conflicts", draft({ conflicts: [{ branchId: "branch-2", text: "other", recipientIds: [], attachmentIds: [] }] }), false, "idle", true],
+    ["has a failed sync", draft({ state: "failed" }), false, "idle", true],
+    ["has a paused sync", draft({ state: "paused" }), false, "idle", true],
+    ["requires a connection while offline", draft({ sendRequiresConnection: true }), true, "idle", true],
+    ["expires within one day", draft({ expiresAt: new Date(now + 60_000).toISOString() }), false, "idle", true],
+    ["has expired", draft({ expiresAt: new Date(now - 60_000).toISOString() }), false, "idle", true],
+    ["has a notice", draft({ notice: "kept-after-sent" }), false, "idle", true],
+  ] as const)("returns %s", (_name, statusDraft, offline, localSaveState, expected) => {
+    expect(draftSyncNeedsAttention({ draft: statusDraft, offline, localSaveState, now })).toBe(expected);
+  });
+});
+
 describe("DraftSyncStatus", () => {
-  it("updates expiry when the minute timer crosses the warning threshold", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-    render(<DraftSyncStatus draft={{ ...draft, sync: { ...draft.sync, expiresAt: "2026-01-02T00:00:30Z", conflicts: [] } }} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    expect(screen.getByText(/Expires Jan/)).toBeInTheDocument();
-    act(() => vi.advanceTimersByTime(60_000));
-    expect(screen.getByText("Expires within 24 hours")).toBeInTheDocument();
-    cleanup();
-    vi.useRealTimers();
+  it("hides the status row for an ordinary synced draft", () => {
+    render(<DraftSyncStatus draft={draft()} local={local} attachments={{}} offline={false} localSaveState="idle" onResolveConflict={vi.fn().mockResolvedValue({ ok: true })} onAcknowledgeNotice={vi.fn()} />);
+
+    expect(document.querySelector("#draft-sync-status")).not.toBeInTheDocument();
   });
 
-  it("shows sync recovery, expiry, offline sending, and conflict resolution", () => {
-    const resolve = vi.fn();
-    const acknowledge = vi.fn();
-    render(<DraftSyncStatus draft={draft} local={draft} offline localSaveState="idle" attachments={{
-      "local-image": { id: "local-image", name: "local.png", state: "ready" },
-      "other-image": { id: "other-image", name: "other.png", state: "ready" },
-    }} onResolveConflict={resolve} onAcknowledgeNotice={acknowledge} />);
+  it("opens conflict review from the attention row", () => {
+    render(<div id="composer-field"><textarea id="composer-textarea" /><DraftSyncStatus draft={draft({ conflicts: [{ branchId: "branch-2", text: "other", recipientIds: [], attachmentIds: [] }] })} local={local} attachments={{}} offline={false} localSaveState="idle" onResolveConflict={vi.fn().mockResolvedValue({ ok: true })} onAcknowledgeNotice={vi.fn()} /></div>);
 
-    expect(screen.getByText("Draft synced")).toBeInTheDocument();
-    expect(screen.getByText("Reconnect to send this synced draft.")).toBeInTheDocument();
-    expect(screen.getByText("Expires within 24 hours")).toBeInTheDocument();
-    expect(screen.getByText("Offline changes restored as a new draft.")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Dismiss"));
-    fireEvent.click(screen.getByText("Review versions"));
-    expect(screen.getByText("other caption")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Choose other version"));
-    expect(resolve).toHaveBeenCalledWith("branch-2");
-    expect(acknowledge).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+
+    expect(screen.getByRole("dialog", { name: "Review draft versions" })).toBeInTheDocument();
   });
 
-  it("opens expiry policy help deliberately and returns focus to its opener", () => {
-    render(<DraftSyncStatus draft={draft} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
+  it.each([
+    ["local save failure", draft({ state: "failed", conflicts: [conflict] }), true, "failed", "Draft not saved on this device. Keep this window open."],
+    ["conflicts", draft({ state: "failed", conflicts: [conflict] }), true, "idle", "Draft versions need review"],
+    ["sync failure", draft({ state: "failed", sendRequiresConnection: true }), true, "idle", "Draft sync failed."],
+    ["paused sync", draft({ state: "paused", sendRequiresConnection: true }), true, "idle", "Saved on this device. Sync paused."],
+    ["offline send", draft({ sendRequiresConnection: true }), true, "idle", "Reconnect to send this synced draft."],
+  ] as const)("shows %s as the primary reason", (_name, statusDraft, offline, localSaveState, message) => {
+    renderStatus({ draft: statusDraft, offline, localSaveState });
 
-    const info = screen.getByRole("button", { name: "About draft expiry" });
-    fireEvent.click(info);
-    expect(screen.getByRole("dialog", { name: "Draft expiry" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(document.activeElement).toBe(info);
+    expect(document.querySelector("[data-draft-sync-message]")).toHaveTextContent(message);
   });
 
-  it("closes expiry help when the draft identity changes", () => {
-    const { rerender } = render(<DraftSyncStatus draft={draft} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "About draft expiry" }));
-    expect(screen.getByRole("dialog", { name: "Draft expiry" })).toBeInTheDocument();
+  it("dismisses a sync notice", () => {
+    const onAcknowledgeNotice = vi.fn();
+    renderStatus({ draft: draft({ notice: "kept-after-sent" }), onAcknowledgeNotice });
 
-    rerender(<DraftSyncStatus draft={{ ...draft, id: "draft-2" }} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    expect(screen.queryByRole("dialog", { name: "Draft expiry" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    expect(onAcknowledgeNotice).toHaveBeenCalledOnce();
   });
 
-  it("does not reopen expiry help after its context disappears and returns", () => {
-    const { rerender } = render(<DraftSyncStatus draft={draft} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "About draft expiry" }));
-    rerender(<DraftSyncStatus draft={{ ...draft, sync: { ...draft.sync, expiresAt: null } }} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    rerender(<DraftSyncStatus draft={draft} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
+  it("closes review when the draft changes identity", () => {
+    const { rerender } = renderStatus({ draft: draft({ conflicts: [conflict] }) });
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
 
-    expect(screen.queryByRole("dialog", { name: "Draft expiry" })).not.toBeInTheDocument();
+    rerender(statusElement({ draft: { ...draft({ conflicts: [conflict] }), id: "draft-2" } }));
+
+    expect(screen.queryByRole("dialog", { name: "Review draft versions" })).not.toBeInTheDocument();
   });
 
-  it("keeps expiry help open through same-draft deadline updates", () => {
-    const { rerender } = render(<DraftSyncStatus draft={draft} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "About draft expiry" }));
-    rerender(<DraftSyncStatus draft={{ ...draft, sync: { ...draft.sync, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() } }} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
+  it("closes review and returns focus to the composer when conflicts disappear", () => {
+    const { rerender } = renderStatus({ draft: draft({ conflicts: [conflict] }) });
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
 
-    expect(screen.getByRole("dialog", { name: "Draft expiry" })).toBeInTheDocument();
+    rerender(statusElement({ draft: draft() }));
+
+    expect(screen.queryByRole("dialog", { name: "Review draft versions" })).not.toBeInTheDocument();
+    expect(document.getElementById("composer-textarea")).toHaveFocus();
   });
 
-  it("contains Escape while expiry help is open", () => {
-    const closeComposer = vi.fn();
-    window.addEventListener("keydown", closeComposer);
-    render(<DraftSyncStatus draft={draft} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "About draft expiry" }));
-    fireEvent.keyDown(screen.getByRole("dialog", { name: "Draft expiry" }), { key: "Escape" });
+  it("shows expiry help when the 24-hour warning begins", () => {
+    vi.useFakeTimers({ now, toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      renderStatus({ draft: draft({ expiresAt: new Date(now + DAY_MS + 60_000).toISOString() }) });
+      expect(document.querySelector("#draft-sync-status")).not.toBeInTheDocument();
 
-    expect(closeComposer).not.toHaveBeenCalled();
-    expect(screen.queryByRole("dialog", { name: "Draft expiry" })).not.toBeInTheDocument();
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(closeComposer).toHaveBeenCalledOnce();
-    window.removeEventListener("keydown", closeComposer);
+      act(() => { vi.advanceTimersByTime(60_001); });
+
+      expect(screen.getByText("Expires within 24 hours")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("returns focus to the composer textarea when expiry context disappears", () => {
-    const renderStatus = (statusDraft: Draft) => <div id="composer-field"><textarea id="composer-textarea" /><DraftSyncStatus draft={statusDraft} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} /></div>;
-    const { rerender } = render(renderStatus(draft));
-    fireEvent.click(screen.getByRole("button", { name: "About draft expiry" }));
-    rerender(renderStatus({ ...draft, sync: { ...draft.sync, expiresAt: null } }));
+  it("keeps the primary attention reason ahead of additional facts", () => {
+    render(<DraftSyncStatus draft={draft({
+      state: "failed",
+      sendRequiresConnection: true,
+      expiresAt: new Date(now + 60_000).toISOString(),
+      notice: "restored-after-expiry",
+    })} local={local} attachments={{}} offline localSaveState="failed" onResolveConflict={vi.fn().mockResolvedValue({ ok: true })} onAcknowledgeNotice={vi.fn()} />);
 
-    expect(document.activeElement).toBe(document.getElementById("composer-textarea"));
-  });
-
-  it("keeps local and remote save failures distinct", () => {
-    const { rerender } = render(<DraftSyncStatus draft={{ ...draft, sync: { ...draft.sync, state: "failed", conflicts: [] } }} local={draft} offline={false} localSaveState="idle" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    expect(screen.getByText("Draft sync failed.")).toBeInTheDocument();
-
-    rerender(<DraftSyncStatus draft={draft} local={draft} offline={false} localSaveState="failed" attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    expect(screen.getByText("Draft not saved on this device. Keep this window open.")).toBeInTheDocument();
-  });
-
-  it("keeps conflict replacement consequences beside disabled resolving choices", () => {
-    render(<DraftSyncStatus draft={draft} local={draft} offline={false} localSaveState="idle" resolving attachments={{}} onResolveConflict={vi.fn()} onAcknowledgeNotice={vi.fn()} />);
-    fireEvent.click(screen.getByText("Review versions"));
-
-    const choices = screen.getAllByRole("button", { name: /Keep this version|Choose other version/ });
-    expect(choices).toHaveLength(2);
-    expect(choices[0]).toHaveAttribute("aria-describedby");
-    expect(choices[0]).toBeDisabled();
-    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(document.querySelector("[data-draft-sync-message]")).toHaveTextContent("Draft not saved on this device. Keep this window open.");
+    expect(screen.getByText("New 30-day period")).toBeInTheDocument();
   });
 });
