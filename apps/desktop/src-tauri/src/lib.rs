@@ -5463,6 +5463,7 @@ pub fn run() {
                 std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
                     .map_err(|_| "could not protect native app data")?;
             }
+            live_typing::install_events(app.handle());
             let handle = app.handle().clone();
             // State hints only; no payload, no focus or window changes.
             let notifier: Notifier = Arc::new(move || {
@@ -5862,6 +5863,8 @@ pub fn run() {
         save_draft,
         discard_draft,
         send_draft,
+        live_typing::send_typing,
+        live_typing::set_typing_sharing,
         mark_seen,
         mark_all_read,
         pick_attachments,

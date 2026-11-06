@@ -9,19 +9,99 @@ use peppy_desktop_api::rcs_status::{
 use peppy_protocol::LiveHelloV2;
 use std::{
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::time::{sleep, timeout, Instant};
+use tokio::{
+    sync::mpsc,
+    time::{sleep, timeout, Instant},
+};
 use tokio_tungstenite::{
     tungstenite::{self, client::IntoClientRequest, protocol::WebSocketConfig, Message},
     WebSocketStream,
 };
 
 use crate::{
+    error::BridgeResult,
     session::{NetStatus, Session},
     sync::jitter,
+    AppState,
 };
+
+const TYPING_EVENT: &str = "peppy://typing";
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+pub(crate) fn install_events(app: &tauri::AppHandle) {
+    let _ = APP_HANDLE.set(app.clone());
+}
+
+pub(crate) struct LiveTypingHost {
+    outbound: Mutex<Option<mpsc::Sender<String>>>,
+    sharing: AtomicBool,
+    started: Instant,
+}
+
+impl Default for LiveTypingHost {
+    fn default() -> Self {
+        Self {
+            outbound: Mutex::new(None),
+            sharing: AtomicBool::new(true),
+            started: Instant::now(),
+        }
+    }
+}
+
+impl LiveTypingHost {
+    fn attach(&self) -> mpsc::Receiver<String> {
+        let (sender, receiver) = mpsc::channel(1);
+        *self
+            .outbound
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
+        receiver
+    }
+
+    fn detach(&self) {
+        self.outbound
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+    }
+
+    fn send_with(&self, frame: impl FnOnce() -> Option<String>) -> bool {
+        let outbound = self
+            .outbound
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(sender) = outbound.as_ref() else {
+            return false;
+        };
+        frame().is_some_and(|frame| sender.try_send(frame).is_ok())
+    }
+
+    fn sharing(&self) -> bool {
+        self.sharing.load(Ordering::Acquire)
+    }
+
+    fn set_sharing(&self, enabled: bool) {
+        self.sharing.store(enabled, Ordering::Release);
+    }
+
+    fn clock(&self) -> LiveClock {
+        clock(self.started)
+    }
+
+    fn mono_ms(&self) -> u64 {
+        self.started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+}
 
 pub(crate) type GatewayDeviceId = DeviceId;
 
@@ -169,11 +249,15 @@ const LIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVE_MAX_FRAME: usize = 64 * 1024;
 const INBOUND_QUEUE_LIMIT: usize = 64;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct TypingDisplayState {
     pub conversation_id: ConversationId,
     pub state: peppy_protocol::TypingStateV2,
-    pub expires_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<String>,
+    #[serde(skip)]
+    deadline_mono: u64,
 }
 
 #[derive(Default)]
@@ -184,6 +268,7 @@ struct InboundTyping {
     displays: HashMap<ConversationId, TypingDisplayState>,
     peers: HashMap<DeviceId, (u64, u64)>,
     sequences: HashMap<(DeviceId, ConversationId), u64>,
+    events: Vec<TypingDisplayState>,
 }
 impl InboundTyping {
     fn push(&mut self, frame: String) -> bool {
@@ -200,18 +285,48 @@ impl InboundTyping {
     }
     fn clear(&mut self) {
         self.frames.clear();
+        for conversation_id in self.displays.keys().copied().collect::<Vec<_>>() {
+            self.events.push(TypingDisplayState {
+                conversation_id,
+                state: peppy_protocol::TypingStateV2::Stopped,
+                expires_at_ms: None,
+                deadline_mono: 0,
+            });
+        }
         self.displays.clear();
         self.peers.clear();
         self.sequences.clear();
     }
-    fn expire(&mut self, mono: u64) {
+    fn next_deadline(&self) -> Option<u64> {
         self.displays
-            .retain(|_, display| display.expires_at_ms > mono);
+            .values()
+            .map(|display| display.deadline_mono)
+            .min()
+    }
+
+    fn expire(&mut self, mono: u64) {
+        let expired = self
+            .displays
+            .iter()
+            .filter_map(|(conversation_id, display)| {
+                (display.deadline_mono <= mono).then_some(*conversation_id)
+            })
+            .collect::<Vec<_>>();
+        for conversation_id in expired {
+            self.displays.remove(&conversation_id);
+            self.events.push(TypingDisplayState {
+                conversation_id,
+                state: peppy_protocol::TypingStateV2::Stopped,
+                expires_at_ms: None,
+                deadline_mono: 0,
+            });
+        }
     }
     fn publish(
         &mut self,
         outcome: LiveOutcome,
         generation: Option<LiveEnableGeneration>,
+        clock: LiveClock,
     ) -> Option<String> {
         if Some(outcome.generation) != generation {
             return None;
@@ -249,19 +364,32 @@ impl InboundTyping {
                     return reply;
                 }
                 *last = sequence;
-                self.displays.insert(
+                let display = TypingDisplayState {
                     conversation_id,
-                    TypingDisplayState {
-                        conversation_id,
-                        state,
-                        expires_at_ms: deadline_mono,
-                    },
-                );
+                    state,
+                    expires_at_ms: (state == peppy_protocol::TypingStateV2::Started).then(|| {
+                        u64::try_from(clock.wall_ms)
+                            .unwrap_or(0)
+                            .saturating_add(deadline_mono.saturating_sub(clock.mono_ms))
+                            .to_string()
+                    }),
+                    deadline_mono,
+                };
+                if state == peppy_protocol::TypingStateV2::Started {
+                    self.displays.insert(conversation_id, display.clone());
+                } else {
+                    self.displays.remove(&conversation_id);
+                }
+                self.events.push(display);
             }
             LiveAction::GatewayTypingIntent { .. } => self.gateway_intent_drops += 1,
         }
         reply
     }
+    fn drain_events(&mut self) -> impl Iterator<Item = TypingDisplayState> + '_ {
+        self.events.drain(..)
+    }
+
     fn update_peer(&mut self, update: PeerSessionUpdate) {
         self.peers.insert(
             update.peer_device_id,
@@ -274,12 +402,119 @@ impl InboundTyping {
     }
 }
 
+fn emit_events(inbound: &mut InboundTyping) {
+    let Some(app) = APP_HANDLE.get() else {
+        inbound.events.clear();
+        return;
+    };
+    use tauri::Emitter as _;
+    for event in inbound.drain_events() {
+        let _ = app.emit(TYPING_EVENT, event);
+    }
+}
+
+fn send_typing_for_session(
+    session: &Session,
+    conversation_id: ConversationId,
+    state: peppy_protocol::TypingStateV2,
+    clock: LiveClock,
+) -> bool {
+    let gateway = {
+        let status = session
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        resolve_typing_target(
+            &status,
+            RcsSnapshotInputs {
+                client: &session.client,
+                now_ms: clock.wall_ms,
+            },
+            conversation_id,
+        )
+    };
+    let Some(gateway) = gateway else {
+        return false;
+    };
+    session.live_typing.send_with(|| {
+        let outbound = session
+            .client
+            .seal_typing_signal_v2(
+                conversation_id,
+                gateway,
+                peppy_protocol::TypingOriginV2::VaultDevice,
+                state,
+                clock,
+            )
+            .ok()??;
+        serde_json::to_string(&outbound.signal).ok()
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn send_typing(
+    window: tauri::WebviewWindow,
+    app_state: tauri::State<'_, AppState>,
+    conversation_id: String,
+    state: peppy_protocol::TypingStateV2,
+) -> BridgeResult<()> {
+    crate::require_main_or_composer(window.label())?;
+    let session = app_state.require_session().await?;
+    let Ok(conversation_id) = conversation_id.parse::<ConversationId>() else {
+        return Ok(());
+    };
+    if window.label() != crate::tray::MAIN
+        && crate::effective_composer_conversation(
+            &app_state,
+            window.label(),
+            &session,
+            Some(&conversation_id.to_string()),
+        )? != Some(conversation_id)
+    {
+        return Ok(());
+    }
+    let _ = send_typing_for_session(
+        &session,
+        conversation_id,
+        state,
+        session.live_typing.clock(),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn set_typing_sharing(
+    window: tauri::WebviewWindow,
+    app_state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> BridgeResult<()> {
+    crate::require_main_or_composer(window.label())?;
+    let session = app_state.require_session().await?;
+    session.live_typing.set_sharing(enabled);
+    let _ = session.client.set_typing_sharing(enabled);
+    Ok(())
+}
+
+fn apply_enable_context(
+    state: &mut LiveTypingState,
+    session: &Session,
+    context: Option<LiveEnableContext>,
+    clock: LiveClock,
+) -> Result<Option<LiveEnableGeneration>, LiveError> {
+    let generation = state.apply(&session.client, context, clock)?;
+    if generation.is_some() {
+        session
+            .client
+            .set_typing_sharing(session.live_typing.sharing())?;
+    }
+    Ok(generation)
+}
+
 pub(crate) fn start(session: Arc<Session>) {
     session.track_worker(tokio::spawn(supervise(session.clone())));
 }
 
 async fn supervise(session: Arc<Session>) {
-    let started = Instant::now();
     let mut state = LiveTypingState::default();
     let mut inbound = InboundTyping::default();
     let mut backoff = Duration::from_secs(1);
@@ -327,37 +562,76 @@ async fn supervise(session: Arc<Session>) {
                 },
             )
         };
-        if state
-            .apply(&session.client, context, clock(started))
-            .is_err()
-        {
-            disable(&mut state, &session);
-        }
+        let enabled = match apply_enable_context(
+            &mut state,
+            &session,
+            context,
+            session.live_typing.clock(),
+        ) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => {
+                disable(&mut state, &session);
+                false
+            }
+        };
+        let mut outbound = enabled.then(|| session.live_typing.attach());
         loop {
+            let elapsed_mono = session.live_typing.mono_ms();
+            let expiry_delay = inbound
+                .next_deadline()
+                .map(|deadline| Duration::from_millis(deadline.saturating_sub(elapsed_mono)));
             tokio::select! {
                 _ = session.cancel.cancelled() => {
+                    session.live_typing.detach();
                     disable(&mut state, &session);
                     inbound.clear();
+                    emit_events(&mut inbound);
                     let _ = socket.close(None).await;
                     return;
+                }
+                frame = async {
+                    match outbound.as_mut() {
+                        Some(receiver) => receiver.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match frame {
+                    Some(frame) => {
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                _ = async {
+                    match expiry_delay {
+                        Some(delay) => sleep(delay).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    inbound.expire(session.live_typing.mono_ms());
+                    emit_events(&mut inbound);
                 }
                 frame = socket.next() => match frame {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(Message::Text(frame))) => {
                         inbound.push(frame.to_string());
                         while let Some(frame) = inbound.take() {
-                            if let Some(reply) = process_inbound_frame(&session.client, &mut inbound, &frame, state.generation(), clock(started)) {
+                            if let Some(reply) = process_inbound_frame(&session.client, &mut inbound, &frame, state.generation(), session.live_typing.clock()) {
                                 let _ = socket.send(Message::Text(reply.into())).await;
                             }
-                            inbound.expire(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
+                            inbound.expire(session.live_typing.mono_ms());
+                            emit_events(&mut inbound);
                         }
                     }
                     Some(Ok(_)) => {}
                 }
             }
         }
+        session.live_typing.detach();
         disable(&mut state, &session);
         inbound.clear();
+        emit_events(&mut inbound);
         if !wait_or_cancel(&session, jitter(backoff)).await {
             return;
         }
@@ -373,7 +647,7 @@ fn process_inbound_frame(
     clock: LiveClock,
 ) -> Option<String> {
     let outcome = client.open_typing_signal_v2_json(frame_json, clock).ok()?;
-    let reply = inbound.publish(outcome, generation);
+    let reply = inbound.publish(outcome, generation, clock);
     inbound.expire(clock.mono_ms);
     reply
 }
@@ -640,23 +914,87 @@ mod tests {
         inbound.publish(
             display_outcome(peer, conversation, 1, 2, 2, 10),
             Some(LiveEnableGeneration(2)),
+            clock(),
         );
         assert!(inbound.displays.is_empty());
         inbound.publish(
             display_outcome(peer, conversation, 2, 1, 2, 10),
             Some(LiveEnableGeneration(2)),
+            clock(),
         );
         assert!(inbound.displays.is_empty());
         inbound.publish(
             display_outcome(peer, conversation, 2, 2, 2, 10),
             Some(LiveEnableGeneration(2)),
+            clock(),
         );
         assert_eq!(inbound.displays.len(), 1);
         inbound.publish(
             display_outcome(peer, conversation, 2, 2, 2, 11),
             Some(LiveEnableGeneration(2)),
+            clock(),
         );
-        assert_eq!(inbound.displays[&conversation].expires_at_ms, 10);
+        assert_eq!(inbound.displays[&conversation].deadline_mono, 10);
+        assert_eq!(
+            inbound.displays[&conversation].expires_at_ms.as_deref(),
+            Some("10009")
+        );
+    }
+
+    #[test]
+    fn clearing_an_active_display_queues_a_stopped_window_event() {
+        let peer = DeviceId::new();
+        let conversation = ConversationId::new();
+        let mut inbound = InboundTyping::default();
+        inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 1,
+        });
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 1, 1, 10),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
+        inbound.events.clear();
+
+        inbound.clear();
+
+        let event = inbound.drain_events().next().unwrap();
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "conversationId": conversation,
+                "state": "stopped"
+            })
+        );
+    }
+
+    #[test]
+    fn next_display_expiry_uses_the_earliest_active_deadline() {
+        let peer = DeviceId::new();
+        let first = ConversationId::new();
+        let second = ConversationId::new();
+        let mut inbound = InboundTyping::default();
+        inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 1,
+        });
+        inbound.publish(
+            display_outcome(peer, first, 1, 1, 1, 20),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
+        inbound.publish(
+            display_outcome(peer, second, 1, 1, 2, 10),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
+
+        assert_eq!(inbound.next_deadline(), Some(10));
     }
 
     #[test]
@@ -673,6 +1011,7 @@ mod tests {
         inbound.publish(
             display_outcome(peer, conversation, 1, 1, 1, 10),
             Some(LiveEnableGeneration(1)),
+            clock(),
         );
         inbound.expire(10);
         assert!(inbound.displays.is_empty());
@@ -689,7 +1028,7 @@ mod tests {
                 deadline_mono: 11,
             }),
         };
-        inbound.publish(outcome, Some(LiveEnableGeneration(1)));
+        inbound.publish(outcome, Some(LiveEnableGeneration(1)), clock());
         assert!(inbound.displays.is_empty());
         assert_eq!(inbound.gateway_intent_drops, 1);
     }
@@ -864,6 +1203,93 @@ mod tests {
             None
         );
         assert!(inbound.displays.contains_key(&conversation));
+    }
+
+    fn enable_test_session(session: &Session, fixture: &crate::tests::Fixture) {
+        roster_refresh(session, &fixture.binding.device_id, false);
+        install_gateway(session, &fixture.binding.device_id);
+        let context = {
+            let status = session.status.lock().unwrap();
+            enable_context(&status, inputs(session))
+        };
+        apply_enable_context(&mut LiveTypingState::default(), session, context, clock()).unwrap();
+    }
+
+    #[test]
+    fn host_clock_uses_one_monotonic_origin() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open(&fixture, &fixture.binding, &[]);
+        let first = session.live_typing.clock();
+        std::thread::sleep(Duration::from_millis(2));
+        let second = session.live_typing.clock();
+
+        assert!(second.mono_ms > first.mono_ms);
+    }
+
+    #[test]
+    fn sharing_off_produces_no_outbound_frame() {
+        let (fixture, session, conversation) = session_with_linked_eligible_gateway();
+        session.live_typing.set_sharing(false);
+        enable_test_session(&session, &fixture);
+        let mut outbound = session.live_typing.attach();
+
+        assert!(!send_typing_for_session(
+            &session,
+            conversation,
+            peppy_protocol::TypingStateV2::Started,
+            clock(),
+        ));
+        assert!(matches!(
+            outbound.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn send_without_an_eligible_target_produces_no_frame() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open(&fixture, &fixture.binding, &[]);
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let mut outbound = session.live_typing.attach();
+
+        assert!(!send_typing_for_session(
+            &session,
+            ConversationId::new(),
+            peppy_protocol::TypingStateV2::Started,
+            clock(),
+        ));
+        assert!(matches!(
+            outbound.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn disconnected_send_is_dropped_without_replay() {
+        let (fixture, session, conversation) = session_with_linked_eligible_gateway();
+        enable_test_session(&session, &fixture);
+
+        assert!(!send_typing_for_session(
+            &session,
+            conversation,
+            peppy_protocol::TypingStateV2::Started,
+            clock(),
+        ));
+        let mut outbound = session.live_typing.attach();
+        assert!(matches!(
+            outbound.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(send_typing_for_session(
+            &session,
+            conversation,
+            peppy_protocol::TypingStateV2::Started,
+            clock(),
+        ));
+        assert!(outbound.try_recv().is_ok());
     }
 
     #[tokio::test]

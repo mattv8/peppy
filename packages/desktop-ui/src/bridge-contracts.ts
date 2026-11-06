@@ -45,6 +45,11 @@ export type { AccountAccessResult, AccountNoticeDto, AccountNoticeKindDto, Accou
 export type { RcsConversationEligibility, RcsEligibilityState, RcsGatewayState, RcsGatewayStatus, RcsStatusSnapshot } from "@peppy/generated/rcs-status";
 
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
+export type TypingSignal = {
+  conversationId: string;
+  state: "started" | "stopped";
+  expiresAtMs?: string;
+};
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
@@ -244,6 +249,9 @@ export interface DesktopBridge {
   subscribe_maximize_button_hover(listener: (hovered: boolean) => void): () => void;
   /** `ready` resolves once the native listener is installed and rejects if registration fails; legacy callers may ignore it. */
   subscribe_drafts?(listener: (draft: Draft) => void): (() => void) & { ready?: Promise<void> };
+  send_typing?(input: { conversationId: string; state: TypingSignal["state"] }): Promise<void>;
+  set_typing_sharing?(input: { enabled: boolean }): Promise<void>;
+  subscribe_typing?(listener: (signal: TypingSignal) => void): (() => void) & { ready?: Promise<void> };
   subscribe_lifecycle(listener: (request: { id: string; action: "quit" | "close" | "collapse" }) => void): () => void;
   subscribe_lifecycle_finished(listener: (result: { id: string; ok: boolean }) => void): () => void;
   acknowledge_lifecycle(id: string, ok: boolean): Promise<void>;
