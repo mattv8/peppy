@@ -508,9 +508,9 @@ fn apply(tray: &tauri::tray::TrayIcon<tauri::Wry>, badge: &TrayBadge) -> tauri::
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_fence_accepts_parts, badge_without_session, classify_session_security, inbox_unread_total, observe_lock,
-        observe_slot, same_session, should_retry_busy, unread_total, ApplyFence, RefreshState,
-        TrayBadge, MAX_BUSY_RETRIES,
+        apply_fence_accepts_parts, badge_without_session, classify_session_security,
+        inbox_unread_total, observe_lock, observe_slot, same_session, should_retry_busy,
+        unread_total, ApplyFence, RefreshState, TrayBadge, MAX_BUSY_RETRIES,
     };
     use crate::session::{encryption_state, EncryptionState, VaultSummary};
     use peppy_client_core::{Conversation, ConversationFolder, ConversationId, KeyStatus};
