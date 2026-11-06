@@ -537,6 +537,7 @@ impl Client {
         {
             return Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::OwnershipStale));
         }
+        let mut identity_recorded = false;
         let mut message_id: Option<String> = tx.query_row(
             "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=? AND conversation_id=?",
             params![application.google_message_id, application.google_conversation_id, conversation_id.to_string()],
@@ -553,7 +554,7 @@ impl Client {
             )
             .optional()?;
             if let Some(message_id) = message_id.as_deref() {
-                if let RcsIdentityOutcome::Rejected(code) = record_identity(
+                match record_identity(
                     &tx,
                     conversation_id,
                     ownership_generation,
@@ -561,7 +562,11 @@ impl Client {
                     &application.google_conversation_id,
                     Some(message_id.parse().map_err(|_| Error::Database)?),
                 )? {
-                    return Ok(RcsReceiveOutcome::Rejected(code));
+                    RcsIdentityOutcome::Recorded => identity_recorded = true,
+                    RcsIdentityOutcome::Duplicate => {}
+                    RcsIdentityOutcome::Rejected(code) => {
+                        return Ok(RcsReceiveOutcome::Rejected(code));
+                    }
                 }
             }
         }
@@ -579,6 +584,9 @@ impl Client {
             RcsProjectedStatus::Read => RcsMessageStatus::Read,
         };
         if !apply_status(&tx, message_id, status, true)? {
+            if identity_recorded {
+                tx.commit()?;
+            }
             return Ok(RcsReceiveOutcome::StatusUnchanged);
         }
         enqueue(
