@@ -41,6 +41,26 @@ describe("ComposerAttachmentTray", () => {
     expect(screen.getByRole("button", { name: "Remove two.png" })).toHaveFocus();
   });
 
+  it("binds full attachment names and returned errors, and retries only the selected attachment", () => {
+    const retry = vi.fn();
+    const longName = "a-very-long-unbroken-attachment-name-that-must-remain-available.png";
+    const returnedError = "The server rejected this attachment because its encrypted upload token expired.";
+    render(<ComposerAttachmentTray
+      attachments={[
+        { id: "first", name: longName, state: "failed", error: returnedError },
+        { id: "second", name: "second.png", state: "failed" },
+      ]}
+      onRetryAttachment={retry}
+      onFocusTextarea={() => {}}
+    />);
+
+    expect(screen.getByText(longName)).toHaveTextContent(longName);
+    expect(screen.getByRole("alert")).toHaveTextContent(returnedError);
+    fireEvent.click(screen.getByRole("button", { name: `Retry ${longName}` }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(retry).toHaveBeenCalledWith("first");
+  });
+
   it("announces status changes and removals but not its initial contents", () => {
     const { container, rerender } = render(<ComposerAttachmentTray attachments={attachments} onFocusTextarea={() => {}} />);
     const liveRegion = container.querySelector("[aria-live=polite]")!;

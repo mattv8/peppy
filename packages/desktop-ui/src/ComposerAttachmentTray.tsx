@@ -136,10 +136,10 @@ export function ComposerAttachmentTray({
             <li key={attachment.id} data-attachment-id={attachment.id} className="attachment-chip" data-attachment-state={attachment.draftState ?? attachment.state}>
               <AttachmentPreview attachment={attachment} />
               <div className="attachment-copy">
-                <span className="attachment-name" title={attachment.name}>{attachment.name}</span>
+                <span className="attachment-name">{attachment.name}</span>
                 <span className="attachment-state">{status.icon}{status.text}</span>
                 {canRetry && <button type="button" className="attachment-retry" aria-label={`Retry ${attachment.name}`} onClick={() => onRetryAttachment?.(attachment.id)}><RotateCcw size={14} aria-hidden />Retry</button>}
-                {attachment.error && <span className="attachment-error" role="alert" title={attachment.error}>{attachment.error}</span>}
+                {attachment.error && <span className="attachment-error" role="alert">{attachment.error}</span>}
               </div>
               {onRemoveAttachment && <button ref={(button) => { if (button) removeButtons.current.set(attachment.id, button); else removeButtons.current.delete(attachment.id); }} type="button" className="attachment-remove" aria-label={`Remove ${attachment.name}`} title={`Remove ${attachment.name}`} onClick={() => { onRemoveAttachment(attachment.id); focusAfterRemoval(attachment.id); }}><X size={14} aria-hidden /></button>}
             </li>

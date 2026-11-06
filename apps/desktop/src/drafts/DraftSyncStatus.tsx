@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { formatDateTime, type Attachment } from "@peppy/desktop-ui";
+import { useEffect, useRef, useState } from "react";
+import { formatDateTime, Info, Modal, type Attachment } from "@peppy/desktop-ui";
 import type { Draft, DraftConflictView } from "@peppy/desktop-ui/bridge-contracts";
 
 type DraftSyncStatusProps = {
@@ -35,13 +35,14 @@ function VersionSummary({ id, label, text, recipientIds, attachmentIds, attachme
   gatewayId?: string;
   simId?: string;
 }) {
+  const hasSelectedRoute = Boolean(gatewayId || simId);
   return <li id={id} data-draft-version={label}>
     <strong>{label}</strong>
     <dl>
       <dt>Caption</dt><dd>{text || "No caption"}</dd>
       <dt>Images</dt><dd>{attachmentIds.length ? <ul>{attachmentIds.map(id => <li key={id}>{attachments[id]?.name ?? "Image details loading"}</li>)}</ul> : "No images"}</dd>
       <dt>Recipients</dt><dd>{recipientIds.length ? recipientIds.join(", ") : "No recipients"}</dd>
-      <dt>Route</dt><dd>{gatewayId && simId ? `${gatewayId} / ${simId}` : "Automatic route"}</dd>
+      <dt>Route</dt><dd>{hasSelectedRoute ? <><span>Selected phone and SIM</span><details id={`${id}-route-details`}><summary>Phone and SIM details</summary><dl><dt>Phone ID</dt><dd>{gatewayId ?? "Not specified"}</dd><dt>SIM ID</dt><dd>{simId ?? "Not specified"}</dd></dl></details></> : "Automatic selection"}</dd>
     </dl>
   </li>;
 }
@@ -54,18 +55,23 @@ function Conflict({ conflict, local, attachments, onResolve, resolving }: {
   resolving?: boolean;
 }) {
   const branchHook = `draft-conflict-${conflict.branchId}`;
+  const consequenceId = `${branchHook}-consequence`;
   return <section id={branchHook} data-draft-conflict={conflict.branchId} role="alert">
     <p>Another version of this draft needs review before sending. Choosing a version replaces the other versions.</p>
     <details id={`${branchHook}-review`}>
       <summary>Review versions</summary>
-      <ul>
-        <VersionSummary id={`${branchHook}-local`} label="This device" {...local} attachments={attachments} />
-        <VersionSummary id={`${branchHook}-other`} label="Other version" text={conflict.text} recipientIds={conflict.recipientIds} attachmentIds={conflict.attachmentIds} gatewayId={conflict.gatewayId} simId={conflict.simId} attachments={attachments} />
-      </ul>
-      <div id={`${branchHook}-actions`} data-draft-conflict-actions>
-        <button type="button" disabled={resolving} onClick={() => onResolve(null)}>Keep this version</button>
-        <button type="button" disabled={resolving} onClick={() => onResolve(conflict.branchId)}>Choose other version</button>
+      <div data-draft-conflict-review>
+        <ul>
+          <VersionSummary id={`${branchHook}-local`} label="This device" {...local} attachments={attachments} />
+          <VersionSummary id={`${branchHook}-other`} label="Other version" text={conflict.text} recipientIds={conflict.recipientIds} attachmentIds={conflict.attachmentIds} gatewayId={conflict.gatewayId} simId={conflict.simId} attachments={attachments} />
+        </ul>
       </div>
+      <p id={consequenceId}>Choosing a version replaces the other versions.</p>
+      <div id={`${branchHook}-actions`} data-draft-conflict-actions>
+        <button type="button" aria-describedby={consequenceId} disabled={resolving} onClick={() => onResolve(null)}>Keep this version</button>
+        <button type="button" aria-describedby={consequenceId} disabled={resolving} onClick={() => onResolve(conflict.branchId)}>Choose other version</button>
+      </div>
+      {resolving && <p role="status">Resolving draft version…</p>}
     </details>
   </section>;
 }
@@ -73,29 +79,49 @@ function Conflict({ conflict, local, attachments, onResolve, resolving }: {
 export function DraftSyncStatus({ draft, local, attachments, offline, localSaveState, resolving, onResolveConflict, onAcknowledgeNotice }: DraftSyncStatusProps) {
   const sync = draft?.sync;
   const [now, setNow] = useState(() => Date.now());
+  const [expiryHelpOpen, setExpiryHelpOpen] = useState(false);
+  const expiryInfoOpener = useRef<HTMLElement>(null);
+  const composerTextarea = useRef<HTMLElement>(null);
+  const expiry = expiryLabel(sync?.expiresAt ?? null, now);
+  const hasExpiry = expiry !== undefined;
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+  useEffect(() => {
+    setExpiryHelpOpen(false);
+  }, [draft?.id, hasExpiry]);
   if (!sync) return null;
-  const expiry = expiryLabel(sync.expiresAt, now);
-  const stateText = localSaveState === "failed" ? "Draft not saved. Retry saving before closing."
+  const stateText = localSaveState === "failed" ? "Draft not saved on this device. Keep this window open."
     : localSaveState === "saving" ? "Saving draft…"
     : sync.state === "synced" ? "Draft synced"
     : sync.state === "syncing" ? "Syncing draft…"
     : sync.state === "saving" ? "Saving draft…"
     : sync.state === "paused" ? "Saved on this device. Sync paused."
-    : sync.state === "failed" ? "Draft not saved. Retry saving before closing."
+    : sync.state === "failed" ? "Draft sync failed."
     : "Saved on this device";
   const notice = sync.notice === "restored-after-expiry" ? "Offline changes restored as a new draft."
     : sync.notice === "kept-after-sent" ? "Your offline edits were kept as a new draft."
     : undefined;
+  const expiryDialog = expiryHelpOpen && expiry && <div id="draft-expiry-help" onKeyDownCapture={(event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    setExpiryHelpOpen(false);
+  }}><Modal id="draft-expiry-info-dialog" title="Draft expiry" opener={expiryInfoOpener} focusFallback={composerTextarea} onDismiss={() => setExpiryHelpOpen(false)} actions={<button id="draft-expiry-info-dismiss" className="secondary-button" type="button" onClick={() => setExpiryHelpOpen(false)}>Close</button>}>
+      <div id="draft-expiry-info-body" data-draft-expiry-info-body>
+        <p>Images stored online only for a draft are permanently deleted 30 days after the server saves a change to its caption or images.</p>
+        <p>Opening the draft or retrying an upload does not extend this time.</p>
+        <p>This expiry does not delete sent images, public copies, or images still used by another active draft.</p>
+      </div>
+    </Modal></div>;
   return <footer id="draft-sync-status" data-draft-sync-state={sync.state} data-draft-sync-offline={offline || undefined}>
     <span data-draft-sync-message aria-live="polite">{stateText}</span>
     {sync.sendRequiresConnection && offline && <span data-draft-send-connection>Reconnect to send this synced draft.</span>}
-    {expiry && <span data-draft-expiry-warning={expiry.nearExpiry || undefined}>{expiry.label}<details><summary>About draft expiry</summary><p>Draft-only remote images are permanently deleted 30 days after the server accepts a caption or attachment edit. Opening or retrying does not renew this. Sent media, public copies, and other live drafts are protected.</p></details></span>}
+    {expiry && <span data-draft-expiry-warning={expiry.nearExpiry || undefined}><span>{expiry.label}</span><button id="draft-expiry-info-button" data-draft-expiry-info-button type="button" aria-label="About draft expiry" aria-haspopup="dialog" title="About draft expiry" onClick={(event) => { expiryInfoOpener.current = event.currentTarget; composerTextarea.current = event.currentTarget.closest("#composer-field")?.querySelector<HTMLTextAreaElement>("#composer-textarea") ?? null; setExpiryHelpOpen(true); }}><Info size={16} aria-hidden="true" /></button></span>}
     {sync.notice === "restored-after-expiry" && <span data-draft-expiry-renewed>New 30-day period</span>}
     {notice && <span data-draft-sync-notice>{notice} <button type="button" onClick={onAcknowledgeNotice}>Dismiss</button></span>}
     {sync.conflicts.map(conflict => <Conflict key={conflict.branchId} conflict={conflict} local={local} attachments={attachments} resolving={resolving} onResolve={onResolveConflict} />)}
+    {expiryDialog}
   </footer>;
 }

@@ -1458,7 +1458,7 @@ function SettingsView({
           <p id="settings-compact-timestamps-hint" className="settings-field-hint">Hides times on messages sent within an hour of the next one.</p>
         </div>
         <fieldset id="settings-attachment-layout">
-          <legend>Attachment previews</legend>
+          <legend>Attached image layout</legend>
           <label className="settings-check">
             <input type="radio" name="attachment-layout" value="tiles" checked={attachmentLayout === "tiles"} onChange={() => onAttachmentLayout("tiles")} />
             Preview tiles
@@ -4741,9 +4741,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               Sending unavailable: {composerUnavailableReason}
             </span>
             {mmsLimitShown && route.kind === "route" && (
-              <span className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "fallback"}>
-                {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
-              </span>
+              <dl className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "default"}>
+                <div><dt>Estimated size</dt><dd>{fileSize(estimateBytes)}</dd></div>
+                <div><dt>{route.gateway.mmsLimitSource === "carrier" ? "Carrier limit" : "Default limit"}</dt><dd>{fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)}</dd></div>
+                <div><dt>Recipients</dt><dd>up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)}</dd></div>
+              </dl>
             )}
             <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
             <DraftSyncStatus

@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { AttachmentView, DesktopSnapshot, Draft, DraftInput, PreparedPastedAttachments } from "@peppy/desktop-ui/bridge-contracts";
 import { App, hasInFlightAttachmentPreparation } from "./App";
 import { bridge, fixtureBridge } from "./bridge/bridge";
@@ -195,7 +195,7 @@ describe("composer pasted attachments", () => {
     await renderComposer();
 
     expect(await screen.findByText("saved-photo.png")).toBeInTheDocument();
-    expect(screen.getByText("42 B")).toBeInTheDocument();
+    expect(within(document.querySelector("#attachment-tray-region")!).getByText("42 B")).toBeInTheDocument();
   });
 
   it("renders and persists the attachment preview setting", async () => {
