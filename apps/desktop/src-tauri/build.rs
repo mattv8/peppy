@@ -25,6 +25,8 @@ const COMMANDS: &[&str] = &[
     "save_draft",
     "discard_draft",
     "send_draft",
+    "send_typing",
+    "set_typing_sharing",
     "mark_seen",
     "mark_all_read",
     "pick_attachments",

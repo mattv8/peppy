@@ -34,6 +34,8 @@
     "allow-save-draft",
     "allow-discard-draft",
     "allow-send-draft",
+    "allow-send-typing",
+    "allow-set-typing-sharing",
     "allow-mark-seen",
     "allow-mark-all-read",
     "allow-pick-attachments",

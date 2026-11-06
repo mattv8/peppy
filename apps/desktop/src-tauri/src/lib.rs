@@ -219,6 +219,8 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "open_external_url",
     "save_draft",
     "send_draft",
+    "send_typing",
+    "set_typing_sharing",
     "mark_seen",
     "pick_attachments",
     "retry_attachment",
@@ -239,6 +241,35 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "close_head_panel",
     "acknowledge_lifecycle",
 ];
+
+#[cfg(test)]
+#[test]
+fn typing_commands_are_acl_granted_to_main_and_composer_windows() {
+    const APP_MANIFEST: &str = include_str!("../build.rs");
+    const MAIN_CAPABILITY: &str = include_str!("../capabilities/default.json");
+    const COMPOSER_CAPABILITY: &str = include_str!("../capabilities/composer.json");
+
+    for command in ["send_typing", "set_typing_sharing"] {
+        assert!(
+            APP_MANIFEST.contains(&format!("\"{command}\",")),
+            "{command} must be declared in the app manifest"
+        );
+
+        let permission = format!("\"allow-{}\"", command.replace('_', "-"));
+        assert!(
+            MAIN_CAPABILITY.contains(&permission),
+            "{command} must be granted to the main window"
+        );
+        assert!(
+            COMPOSER_CAPABILITY.contains(&permission),
+            "{command} must be granted to composer windows"
+        );
+        assert!(
+            COMPOSER_COMMANDS.contains(&command),
+            "{command} must be listed as a composer command"
+        );
+    }
+}
 
 fn window_error() -> BridgeError {
     BridgeError::new(
