@@ -4,7 +4,7 @@ import { currentRcsRoute, type RcsRoute, type RcsRouteInput } from "./rcsRoute";
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 export function useRcsRoute(input: Omit<RcsRouteInput, "nowMs">): RcsRoute {
-  const [, setRenderVersion] = useState(0);
+  const [renderVersion, setRenderVersion] = useState(0);
   const route = currentRcsRoute({ ...input, nowMs: Date.now() });
 
   useEffect(() => {
@@ -24,7 +24,7 @@ export function useRcsRoute(input: Omit<RcsRouteInput, "nowMs">): RcsRoute {
     if (!route.current) return;
     const timeout = window.setTimeout(() => setRenderVersion((version) => version + 1), Math.min(Math.max(route.expiresAtMs - Date.now(), 0), MAX_TIMEOUT_MS));
     return () => window.clearTimeout(timeout);
-  }, [route.current, route.current ? route.expiresAtMs : undefined]);
+  }, [route.current, route.current ? route.expiresAtMs : undefined, renderVersion]);
 
   return route;
 }

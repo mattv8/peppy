@@ -3,6 +3,7 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../../desktop/src/App";
+import * as desktopBridge from "../../desktop/src/bridge/bridge";
 import { installBrowserBridge as installDesktopBrowserBridge } from "../../desktop/src/bridge/bridge";
 import { BrowserBridge } from "./browser-bridge";
 import * as uiBridge from "./ui-bridge";
@@ -64,11 +65,18 @@ describe("browser UI bridge", () => {
       set_notification_context: async () => undefined,
       mark_seen: async () => undefined,
     } as DesktopBridge;
+    const previousBridge = uiBridge.bridge;
+    const previousDesktopBridge = desktopBridge.bridge;
     uiBridge.installBrowserBridge(browserBridge);
     installDesktopBrowserBridge(browserBridge);
 
-    render(createElement(App, { hostKind: "browser" }));
+    try {
+      render(createElement(App, { hostKind: "browser" }));
 
-    await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
+      await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
+    } finally {
+      uiBridge.installBrowserBridge(previousBridge);
+      desktopBridge.installBrowserBridge(previousDesktopBridge);
+    }
   });
 });

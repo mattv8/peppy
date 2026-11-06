@@ -15,7 +15,10 @@ function snapshot(): DesktopSnapshot {
 
 describe("useRcsRoute", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(100); });
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it("expires at the projection deadline without another render", () => {
     const { result } = renderHook(() => useRcsRoute({ snapshot: snapshot(), activeConversationId: "conversation-a", gatewayId: "gateway-a", locked: false }));
@@ -27,8 +30,21 @@ describe("useRcsRoute", () => {
   it("does not postpone expiry after an unrelated rerender", () => {
     const value = snapshot();
     const { result, rerender } = renderHook(({ unrelated }) => useRcsRoute({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", locked: false }), { initialProps: { unrelated: 0 } });
+    act(() => vi.advanceTimersByTime(50));
     rerender({ unrelated: 1 });
+    act(() => vi.advanceTimersByTime(50));
+    expect(result.current).toEqual({ current: false });
+  });
+
+  it("re-arms when the timer fires before Date.now reaches the deadline", () => {
+    const value = snapshot();
+    const { result } = renderHook(() => useRcsRoute({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", locked: false }));
+    let lagMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => new Date().getTime() - lagMs);
+    lagMs = 1;
     act(() => vi.advanceTimersByTime(100));
+    expect(result.current).toEqual({ current: true, expiresAtMs: 200 });
+    act(() => vi.advanceTimersByTime(1));
     expect(result.current).toEqual({ current: false });
   });
 
