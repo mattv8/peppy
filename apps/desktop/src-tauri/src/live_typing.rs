@@ -472,11 +472,19 @@ impl InboundTyping {
     }
 }
 
-fn typing_event_targets(conversation_id: ConversationId) -> [String; 2] {
-    [
-        crate::tray::MAIN.to_owned(),
-        format!("{}{}", crate::tray::COMPOSER_PREFIX, conversation_id),
-    ]
+fn typing_event_targets<'a>(
+    conversation_id: ConversationId,
+    binding: &crate::credentials::Binding,
+    composers: impl IntoIterator<Item = (&'a str, Option<&'a crate::composer_scope::MovedScope>)>,
+) -> Vec<String> {
+    let mut targets = vec![crate::tray::MAIN.to_owned()];
+    targets.extend(composers.into_iter().filter_map(|(label, moved)| {
+        let source = crate::tray::composer_conversation(label)?;
+        (crate::composer_scope::effective_conversation(source, moved, binding, conversation_id)
+            == Some(conversation_id))
+        .then(|| label.to_owned())
+    }));
+    targets
 }
 
 fn drain_publishable_events(
@@ -510,9 +518,19 @@ fn emit_events(
     let Some(app) = APP_HANDLE.get() else {
         return;
     };
-    use tauri::Emitter as _;
+    use tauri::{Emitter as _, Manager as _};
+    let state = app.state::<AppState>();
+    let scopes = state
+        .composer_scopes
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let windows = app.webview_windows();
     for event in events {
-        for target in typing_event_targets(event.conversation_id) {
+        let composers = windows
+            .keys()
+            .filter(|label| crate::tray::composer_conversation(label).is_some())
+            .map(|label| (label.as_str(), scopes.get(label)));
+        for target in typing_event_targets(event.conversation_id, &session.binding, composers) {
             let _ = app.emit_to(target, TYPING_EVENT, event.clone());
         }
     }
@@ -1177,15 +1195,31 @@ mod tests {
     }
 
     #[test]
-    fn typing_events_target_only_main_and_the_matching_composer() {
-        let conversation_id = ConversationId::new();
+    fn typing_events_follow_the_current_composer_mapping() {
+        let source = ConversationId::new();
+        let moved_to = ConversationId::new();
+        let binding = crate::credentials::Binding {
+            origin: "https://example.test".into(),
+            vault_id: "vault".into(),
+            device_id: "device".into(),
+        };
+        let moved = crate::composer_scope::MovedScope {
+            binding: binding.clone(),
+            conversation: moved_to,
+        };
+        let source_label = format!("{}{}", crate::tray::COMPOSER_PREFIX, source);
+        let target_label = format!("{}{}", crate::tray::COMPOSER_PREFIX, moved_to);
 
         assert_eq!(
-            typing_event_targets(conversation_id),
-            [
-                crate::tray::MAIN.to_owned(),
-                format!("{}{}", crate::tray::COMPOSER_PREFIX, conversation_id),
-            ]
+            typing_event_targets(
+                moved_to,
+                &binding,
+                [
+                    (source_label.as_str(), Some(&moved)),
+                    (target_label.as_str(), None),
+                ],
+            ),
+            vec![crate::tray::MAIN.to_owned(), source_label, target_label]
         );
     }
 

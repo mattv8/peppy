@@ -181,7 +181,7 @@ pub struct AppState {
     session: tokio::sync::Mutex<Option<Arc<Session>>>,
     /// Serializes session retirement and opening without holding `session` across a worker drain.
     session_open_lock: tokio::sync::Mutex<()>,
-    composer_scopes: Mutex<HashMap<String, composer_scope::MovedScope>>,
+    pub(crate) composer_scopes: Mutex<HashMap<String, composer_scope::MovedScope>>,
     enrollment: Mutex<enrollment::Controller>,
     /// Serializes credential import and post-dialog credential export against configuration changes.
     import_lock: tokio::sync::Mutex<()>,
