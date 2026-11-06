@@ -188,6 +188,15 @@ object LinkRuntime {
             }
         }
 
+        override fun typingEvent(recordJson: String) = typingEventOwned(recordJson, -1, -1)
+
+        override fun typingEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long) {
+            callbackExecutor().execute {
+                if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
+                (LinkRuntimeTestHooks.typingReceiveSink ?: NoOpTypingReceiveSink).receive(recordJson)
+            }
+        }
+
         override fun showEmoji(value: String) = showEmojiOwned(value, -1, -1)
 
         override fun showEmojiOwned(value: String, ownerGeneration: Long, ownerRevision: Long) {
@@ -251,6 +260,7 @@ internal object LinkRuntimeTestHooks {
     @Volatile var storeFactory: ((Context) -> LinkStateStorage)? = null
     @Volatile var eventRecorder: ((String, String, Long) -> Unit)? = null
     @Volatile var rcsReceiveSink: RcsReceiveSink? = null
+    @Volatile var typingReceiveSink: TypingReceiveSink? = null
     @Volatile var callbackExecutor: Executor? = null
     @Volatile var afterClosingCheck: (() -> Unit)? = null
 }

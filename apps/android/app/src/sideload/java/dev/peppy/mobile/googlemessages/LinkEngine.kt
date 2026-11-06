@@ -7,9 +7,11 @@ interface LinkHost {
     fun persistState(state: ByteArray)
     fun event(kind: String, code: String, value: Long)
     fun rcsEvent(recordJson: String)
+    fun typingEvent(recordJson: String)
     fun showEmoji(emoji: String)
     fun eventOwned(kind: String, code: String, value: Long, generation: Long, revision: Long) = event(kind, code, value)
     fun rcsEventOwned(recordJson: String, generation: Long, revision: Long) = rcsEvent(recordJson)
+    fun typingEventOwned(recordJson: String, generation: Long, revision: Long) = typingEvent(recordJson)
     fun showEmojiOwned(emoji: String, generation: Long, revision: Long) = showEmoji(emoji)
 }
 
@@ -79,5 +81,14 @@ internal fun interface RcsReceiveSink {
 }
 
 internal object NoOpRcsReceiveSink : RcsReceiveSink {
+    override fun receive(recordJson: String) = Unit
+}
+
+
+internal fun interface TypingReceiveSink {
+    fun receive(recordJson: String)
+}
+
+internal object NoOpTypingReceiveSink : TypingReceiveSink {
     override fun receive(recordJson: String) = Unit
 }

@@ -35,6 +35,7 @@ class LinkRuntimeTest {
         LinkRuntimeTestHooks.storeFactory = null
         LinkRuntimeTestHooks.eventRecorder = null
         LinkRuntimeTestHooks.rcsReceiveSink = null
+        LinkRuntimeTestHooks.typingReceiveSink = null
         LinkRuntimeTestHooks.callbackExecutor = null
         LinkRuntimeTestHooks.afterClosingCheck = null
         LinkCoreBridge.resetForTest()
@@ -360,6 +361,31 @@ class LinkRuntimeTest {
         host.rcsEventOwned("accepted", 3, 4)
         queued.runAll()
         host.rcsEventOwned("stale", 3, 4)
+        currentGeneration = 5
+        queued.runAll()
+
+        assertEquals(listOf("accepted"), records)
+    }
+
+    @Test
+    fun `typing sink accepts current owner and drops stale owner`() {
+        lateinit var host: LinkHost
+        val queued = QueueExecutor()
+        var currentGeneration = 3L
+        val records = mutableListOf<String>()
+        val handle = FakeHandle { generation, revision -> generation == currentGeneration && revision == 4L }
+        LinkRuntimeTestHooks.callbackExecutor = queued
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntimeTestHooks.typingReceiveSink = TypingReceiveSink { records += it }
+        LinkRuntime.handle(context)
+
+        host.typingEventOwned("accepted", 3, 4)
+        queued.runAll()
+        host.typingEventOwned("stale", 3, 4)
         currentGeneration = 5
         queued.runAll()
 

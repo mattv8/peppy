@@ -2,9 +2,12 @@ package gmlink
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"google.golang.org/protobuf/proto"
 )
 
 const typingRequestTimeout = 5 * time.Second
@@ -27,9 +30,9 @@ type typingProjection struct {
 }
 
 type gatewayTypingIntent struct {
-	ConversationID string
-	State          typingState
-	DeadlineMono   uint64
+	ConversationID string      `json:"conversation_id"`
+	State          typingState `json:"state"`
+	DeadlineMono   uint64      `json:"deadline_mono"`
 }
 
 type typingSetRequest struct {
@@ -109,4 +112,116 @@ func typingConversationFor(id string, conversations []*gmproto.Conversation) (*g
 
 func typingContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, typingRequestTimeout)
+}
+
+var typingMonotonicOrigin = time.Now()
+
+func (link *Link) projectTypingEventFor(queued queuedEvent, data *gmproto.TypingData) {
+	link.mu.Lock()
+	if link.closed || queued.generation != link.generation || queued.streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(queued.streamSource) || !link.hasOwnerVerificationLocked() {
+		link.mu.Unlock()
+		return
+	}
+	conversations := make([]*gmproto.Conversation, 0, len(link.conversationRecords))
+	for _, conversation := range link.conversationRecords {
+		conversations = append(conversations, cloneConversation(conversation))
+	}
+	revision := link.stateRevision
+	link.mu.Unlock()
+	projection := projectTypingData(data, false, conversations)
+	if projection.Record == nil {
+		return
+	}
+	encoded, _ := json.Marshal(projection.Record)
+	link.enqueueOutput(hostOutput{
+		typingRecord:      string(encoded),
+		generation:        queued.generation,
+		revision:          revision,
+		requireGeneration: true,
+		requireRevision:   true,
+	})
+}
+
+// SetTyping validates one core intent and performs at most one bounded libgm effect.
+func (link *Link) SetTyping(intentJSON string) string {
+	var intent gatewayTypingIntent
+	if err := json.Unmarshal([]byte(intentJSON), &intent); err != nil {
+		return "typing_invalid"
+	}
+
+	link.rpcMu.Lock()
+	defer link.rpcMu.Unlock()
+	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
+	if !ok {
+		return "typing_stale"
+	}
+	link.mu.Lock()
+	if !link.hasOwnerVerificationLocked() {
+		link.mu.Unlock()
+		return "typing_stale"
+	}
+	conversations := make([]*gmproto.Conversation, 0, len(link.conversationRecords))
+	for _, conversation := range link.conversationRecords {
+		conversations = append(conversations, cloneConversation(conversation))
+	}
+	simPayload := typingSIMPayload(intent.ConversationID, link.conversationRecords, link.settings)
+	now := link.typingNowMono
+	effect := link.setTyping
+	link.mu.Unlock()
+	if now == nil {
+		now = func() uint64 { return uint64(time.Since(typingMonotonicOrigin).Milliseconds()) }
+	}
+	arguments, code := typingSetArguments(intent, now(), conversations, simPayload)
+	if code != "ok" {
+		return code
+	}
+	if !link.typingOwned(generation, streamEpoch) {
+		return "typing_stale"
+	}
+	if effect == nil {
+		effect = func(ctx context.Context, conversationID string, payload *gmproto.SIMPayload) error {
+			return client.SetTyping(ctx, conversationID, payload)
+		}
+	}
+	ctx, cancel := typingContext(runCtx)
+	err := effect(ctx, arguments.ConversationID, arguments.SIMPayload)
+	cancel()
+	if err != nil {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			return "typing_deadline"
+		case errors.Is(err, context.Canceled):
+			return "typing_cancelled"
+		default:
+			return "typing_failed"
+		}
+	}
+	if !link.typingOwned(generation, streamEpoch) {
+		return "typing_stale"
+	}
+	return "ok"
+}
+
+func typingSIMPayload(conversationID string, conversations map[string]*gmproto.Conversation, settings *gmproto.Settings) *gmproto.SIMPayload {
+	conversation := conversations[conversationID]
+	if conversation == nil || settings == nil || conversation.GetDefaultOutgoingID() == "" {
+		return nil
+	}
+	var payload *gmproto.SIMPayload
+	for _, card := range settings.GetSIMCards() {
+		if card.GetSIMParticipant().GetID() != conversation.GetDefaultOutgoingID() || !card.GetRCSChats().GetEnabled() || card.GetSIMData().GetSIMPayload() == nil {
+			continue
+		}
+		if payload != nil {
+			return nil
+		}
+		payload, _ = proto.Clone(card.GetSIMData().GetSIMPayload()).(*gmproto.SIMPayload)
+	}
+	return payload
+}
+
+func (link *Link) typingOwned(generation, streamEpoch uint64) bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	return !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasOwnerVerificationLocked()
 }

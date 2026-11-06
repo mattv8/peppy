@@ -200,5 +200,7 @@ func TestCloseKeepsReplacementFencedUntilAdmittedEmojiReturns(t *testing.T) {
 	})
 }
 
-func (*reentrantQueuedCompletionHost) RcsEvent(string, int64, int64) {}
-func (*blockingEmojiHost) RcsEvent(string, int64, int64)             {}
+func (*reentrantQueuedCompletionHost) RcsEvent(string, int64, int64)    {}
+func (*blockingEmojiHost) RcsEvent(string, int64, int64)                {}
+func (*reentrantQueuedCompletionHost) TypingEvent(string, int64, int64) {}
+func (*blockingEmojiHost) TypingEvent(string, int64, int64)             {}

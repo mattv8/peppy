@@ -901,4 +901,5 @@ func awaitEmoji(t *testing.T, host *safetyHost) {
 	}
 }
 
-func (*safetyHost) RcsEvent(string, int64, int64) {}
+func (*safetyHost) RcsEvent(string, int64, int64)    {}
+func (*safetyHost) TypingEvent(string, int64, int64) {}

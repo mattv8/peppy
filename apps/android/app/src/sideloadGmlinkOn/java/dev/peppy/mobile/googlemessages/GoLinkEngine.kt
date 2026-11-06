@@ -47,6 +47,14 @@ private object GoLinkEngine : LinkEngine {
                 }
             }
 
+            override fun typingEvent(recordJson: String, generation: Long, revision: Long) {
+                try {
+                    linkHost.typingEventOwned(recordJson, generation, revision)
+                } catch (_: Throwable) {
+                    // Host typing delivery must not unwind through JNI.
+                }
+            }
+
             override fun showEmoji(emoji: String, generation: Long, revision: Long) {
                 try {
                     linkHost.showEmojiOwned(emoji, generation, revision)

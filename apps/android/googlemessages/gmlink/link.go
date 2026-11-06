@@ -24,6 +24,7 @@ type Host interface {
 	PersistState(sealed []byte) error
 	Event(kind, code string, value, generation, revision int64)
 	RcsEvent(recordJSON string, generation, revision int64)
+	TypingEvent(recordJSON string, generation, revision int64)
 	ShowEmoji(emoji string, generation, revision int64)
 }
 
@@ -70,6 +71,8 @@ type Link struct {
 	authPersistRevision uint64
 	authSnapshot        func(*libgm.AuthData) (*libgm.AuthData, error)
 	fetchMessages       func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error)
+	setTyping           func(context.Context, string, *gmproto.SIMPayload) error
+	typingNowMono       func() uint64
 
 	outputMu              sync.Mutex
 	outputCond            *sync.Cond
@@ -127,6 +130,7 @@ type hostOutput struct {
 	value             int64
 	emoji             string
 	rcsRecord         string
+	typingRecord      string
 	generation        uint64
 	revision          uint64
 	requireGeneration bool
@@ -1086,6 +1090,11 @@ func cloneQueuedEvent(event any) any {
 		if ok {
 			return &libgm.WrappedMessage{Message: cloned, IsOld: settings.IsOld}
 		}
+	case *gmproto.TypingData:
+		cloned, ok := proto.Clone(settings).(*gmproto.TypingData)
+		if ok {
+			return cloned
+		}
 	}
 	return event
 }
@@ -1096,7 +1105,7 @@ func relevantEvent(event any) bool {
 	case *events.AuthTokenRefreshed, *events.GaiaLoggedOut, *events.ListenFatalError, *events.AccountChange,
 		*events.ListenTemporaryError, *events.ListenRecovered, *events.PhoneNotResponding,
 		*events.PhoneRespondingAgain, *events.NoDataReceived, *events.ActiveSessionSet, *gmproto.UserAlertEvent,
-		*gmproto.Conversation, *libgm.WrappedMessage, *libgm.WrappedSettings, *gmproto.Settings, *events.StreamGap,
+		*gmproto.Conversation, *libgm.WrappedMessage, *gmproto.TypingData, *libgm.WrappedSettings, *gmproto.Settings, *events.StreamGap,
 		*libgm.StreamRetired, *libgm.ContinuityLost:
 		return true
 	}
@@ -1241,6 +1250,8 @@ func (link *Link) projectQueuedEvent(queued queuedEvent) {
 		link.recordQueuedConversationEventFor(queued.generation, queued.streamSource, queued.streamEpoch, value, queued.pendingConversationEvent)
 	case *libgm.WrappedMessage:
 		link.projectRcsEventFor(queued, value)
+	case *gmproto.TypingData:
+		link.projectTypingEventFor(queued, value)
 	case *events.GaiaLoggedOut:
 		link.transitionFor(queued.generation, stateNeedsRelink, "relink_needed")
 	case *events.ListenFatalError:
@@ -1696,6 +1707,8 @@ func (link *Link) callHost(output hostOutput) {
 		link.host.ShowEmoji(output.emoji, int64(output.generation), int64(output.revision))
 	case output.rcsRecord != "":
 		link.host.RcsEvent(output.rcsRecord, int64(output.generation), int64(output.revision))
+	case output.typingRecord != "":
+		link.host.TypingEvent(output.typingRecord, int64(output.generation), int64(output.revision))
 	default:
 		link.host.Event(output.kind, output.code, output.value, int64(output.generation), int64(output.revision))
 	}

@@ -434,4 +434,5 @@ func TestTerminalHostEventCanReenterClose(t *testing.T) {
 	}
 }
 
-func (*reentrantCloseHost) RcsEvent(string, int64, int64) {}
+func (*reentrantCloseHost) RcsEvent(string, int64, int64)    {}
+func (*reentrantCloseHost) TypingEvent(string, int64, int64) {}
