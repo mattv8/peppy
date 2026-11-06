@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -47,7 +48,7 @@ func TestM6RichProjectionFailsClosed(t *testing.T) {
 	for index := 0; index < reactionLimit; index++ {
 		many.Reactions = append(many.Reactions, &gmproto.ReactionEntry{Data: &gmproto.ReactionData{Unicode: string(rune(index + 33)), Type: gmproto.EmojiType_LIKE}, ParticipantIDs: []string{"actor"}})
 	}
-	for name, mutate := range map[string]func(*gmproto.Message){"missing_identity": func(m *gmproto.Message) { m.ConversationID = "" }, "nil_status": func(m *gmproto.Message) { m.MessageStatus = nil }, "unknown_status": func(m *gmproto.Message) { m.MessageStatus.Status = gmproto.MessageStatusType_STATUS_UNKNOWN }, "unrecognized_status": func(m *gmproto.Message) { m.MessageStatus.Status = gmproto.MessageStatusType(99) }, "reply_mismatch": func(m *gmproto.Message) { m.ReplyMessage.ConversationID = "other" }, "duplicate_emoji": func(m *gmproto.Message) { m.Reactions = append(m.Reactions, m.Reactions[0]) }, "duplicate_actor": func(m *gmproto.Message) { m.Reactions[0].ParticipantIDs = []string{"actor-a", "actor-a"} }, "unknown_emoji_type": func(m *gmproto.Message) { m.Reactions[0].Data.Type = gmproto.EmojiType_REACTION_TYPE_UNSPECIFIED }, "unrecognized_emoji_type": func(m *gmproto.Message) { m.Reactions[0].Data.Type = gmproto.EmojiType(99) }, "too_many_reactions": func(m *gmproto.Message) { *m = *many }, "empty_actors": func(m *gmproto.Message) { m.Reactions[0].ParticipantIDs = nil }} {
+	for name, mutate := range map[string]func(*gmproto.Message){"missing_identity": func(m *gmproto.Message) { m.ConversationID = "" }, "nil_status": func(m *gmproto.Message) { m.MessageStatus = nil }, "unknown_status": func(m *gmproto.Message) { m.MessageStatus.Status = gmproto.MessageStatusType_STATUS_UNKNOWN }, "unrecognized_status": func(m *gmproto.Message) { m.MessageStatus.Status = gmproto.MessageStatusType(99) }, "reply_mismatch": func(m *gmproto.Message) { m.ReplyMessage.ConversationID = "other" }, "duplicate_emoji": func(m *gmproto.Message) { m.Reactions = append(m.Reactions, m.Reactions[0]) }, "duplicate_actor": func(m *gmproto.Message) { m.Reactions[0].ParticipantIDs = []string{"actor-a", "actor-a"} }, "unknown_emoji_type": func(m *gmproto.Message) { m.Reactions[0].Data.Type = gmproto.EmojiType_REACTION_TYPE_UNSPECIFIED }, "unrecognized_emoji_type": func(m *gmproto.Message) { m.Reactions[0].Data.Type = gmproto.EmojiType(99) }, "too_many_reactions": func(m *gmproto.Message) { m.Reactions = many.Reactions }, "empty_actors": func(m *gmproto.Message) { m.Reactions[0].ParticipantIDs = nil }} {
 		t.Run(name, func(t *testing.T) {
 			candidate := cloneRich(validRichMessage())
 			mutate(candidate)
@@ -120,10 +121,5 @@ func validRichMessage() *gmproto.Message {
 	return &gmproto.Message{MessageID: "message-opaque", ConversationID: "conversation-opaque", ReplyMessage: &gmproto.ReplyMessage{MessageID: "reply-opaque", ConversationID: "conversation-opaque"}, MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_OUTGOING_DELIVERED}, Reactions: []*gmproto.ReactionEntry{{Data: &gmproto.ReactionData{Unicode: "👍", Type: gmproto.EmojiType_LIKE}, ParticipantIDs: []string{"actor-a", "actor-b"}}}}
 }
 func cloneRich(source *gmproto.Message) *gmproto.Message {
-	clone := *source
-	clone.Reactions = append([]*gmproto.ReactionEntry(nil), source.Reactions...)
-	clone.MessageStatus = &gmproto.MessageStatus{Status: source.MessageStatus.GetStatus()}
-	clone.ReplyMessage = &gmproto.ReplyMessage{MessageID: source.ReplyMessage.GetMessageID(), ConversationID: source.ReplyMessage.GetConversationID()}
-	clone.Reactions[0] = &gmproto.ReactionEntry{Data: &gmproto.ReactionData{Unicode: source.Reactions[0].GetData().GetUnicode(), Type: source.Reactions[0].GetData().GetType()}, ParticipantIDs: append([]string(nil), source.Reactions[0].GetParticipantIDs()...)}
-	return &clone
+	return proto.Clone(source).(*gmproto.Message)
 }

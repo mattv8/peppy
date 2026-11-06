@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -47,7 +48,7 @@ func TestM4GroupProjectionFailsClosed(t *testing.T) {
 		"duplicate": func(c *gmproto.Conversation) {
 			c.Participants = append(c.Participants, &gmproto.Participant{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "member-b"}})
 		},
-		"too_many": func(c *gmproto.Conversation) { *c = *tooMany },
+		"too_many": func(c *gmproto.Conversation) { c.Participants = tooMany.Participants },
 		"long_id":  func(c *gmproto.Conversation) { c.ConversationID = string(make([]byte, groupStringLimit+1)) },
 		"long_participant": func(c *gmproto.Conversation) {
 			c.Participants[0].ID.ParticipantID = string(make([]byte, groupStringLimit+1))
@@ -139,9 +140,7 @@ func validGroupConversation() *gmproto.Conversation {
 	return &gmproto.Conversation{ConversationID: "group-opaque", IsGroupChat: true, Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE, Participants: []*gmproto.Participant{{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "member-b"}}, {IsVisible: true, IsMe: true, ID: &gmproto.SmallInfo{ParticipantID: "self"}}}}
 }
 func cloneGroup(source *gmproto.Conversation) *gmproto.Conversation {
-	clone := *source
-	clone.Participants = append([]*gmproto.Participant(nil), source.Participants...)
-	return &clone
+	return proto.Clone(source).(*gmproto.Conversation)
 }
 func groupRequestFixtures() (resolve, create *gmproto.GetOrCreateConversationRequest) {
 	resolve = &gmproto.GetOrCreateConversationRequest{Numbers: []*gmproto.ContactNumber{{Number: "opaque-a"}, {Number: "opaque-b"}}}
