@@ -18,6 +18,10 @@ name = "ephemeral_v2_runtime"
 path = "tests/ephemeral_v2_runtime.rs"
 
 [[test]]
+name = "ephemeral_v2_receive"
+path = "tests/ephemeral_v2_receive.rs"
+
+[[test]]
 name = "rcs_receive"
 path = "tests/rcs_receive.rs"
 
