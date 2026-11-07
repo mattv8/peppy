@@ -18,6 +18,13 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
     override fun acceptsOutput(generation: Long, revision: Long): Boolean = link.acceptsOutput(generation, revision)
     override fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
         link.acceptsStreamOutput(generation, revision, streamEpoch)
+    override fun prepareNativeRcs(requestJson: String): String = link.prepareNativeRcs(requestJson)
+    override fun bindNativeRcsRoute(ticketId: String, linkGeneration: Long, sessionGeneration: Long, contextRevision: Long, mappingRevision: Long, observedAtMs: Long): String =
+        link.bindNativeRcsRoute(ticketId, linkGeneration, sessionGeneration, contextRevision, mappingRevision, observedAtMs)
+    override fun bindNativeRcsTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String = link.bindNativeRcsTarget(ticketId, googleConversationId, snapshotToken)
+    override fun bindNativeRcsFacts(ticketId: String, factsJson: String): String = link.bindNativeRcsFacts(ticketId, factsJson)
+    override fun commitNativeRcs(ticketId: String, commitJson: String): String = link.commitNativeRcs(ticketId, commitJson)
+    override fun revokeNativeSend(ticketId: String): String = link.revokeNativeSend(ticketId)
 }
 
 private object GoLinkEngine : LinkEngine {

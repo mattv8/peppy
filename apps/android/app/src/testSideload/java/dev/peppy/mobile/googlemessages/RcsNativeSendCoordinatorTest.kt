@@ -193,9 +193,9 @@ class RcsNativeSendCoordinatorTest {
         override fun ownerGeneration() = 1L
         override fun isCurrent() = ++currentCalls == 1 || currentAfterBegin
         override fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence): RcsNativePrepared {
-            prepares++; onPrepare?.invoke(); return RcsNativePrepared("ticket", if (invalidPrepared && prepares == 1) "" else CANDIDATE, "run", 1, 1, "pair")
+            prepares++; onPrepare?.invoke(); return RcsNativePrepared("ticket", if (invalidPrepared && prepares == 1) "" else CANDIDATE, "run", 1u, 1u, "pair")
         }
-        override fun bindRoute(ticketId: String, tuple: RcsNativeContextTuple, mappingRevision: Long, observedAtMs: Long) = ROUTE_OBSERVATION
+        override fun bindRoute(ticketId: String, tuple: RcsNativeContextTuple, mappingRevision: ULong, observedAtMs: Long) = ROUTE_OBSERVATION
         override fun bindTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String {
             if (bindTargetFailure) throw IllegalStateException("bind")
             return FULL_OBSERVATION
@@ -217,8 +217,8 @@ class RcsNativeSendCoordinatorTest {
         private val acknowledged: Boolean = true,
     ) : RcsNativeCoreLease {
         var classifiedSnapshot = ""; val verified = mutableListOf<String>(); var begun = ""; var coreCalls = 0; var closes = 0; var preparationCloses = 0; var committedCloses = 0; var refusalRecords = 0; var beginCalls = 0; var acknowledgements = 0
-        override fun nextContextTuple(runIncarnation: String, runGeneration: Long, streamEpoch: Long, pairingEvidenceId: String) = RcsNativeContextTuple(1, 1, 1).also { coreCalls++ }
-        override fun nextMappingRevision(conversationId: String) = 1L.also { coreCalls++ }
+        override fun nextContextTuple(runIncarnation: String, runGeneration: ULong, streamEpoch: ULong, pairingEvidenceId: String) = RcsNativeContextTuple(1u, 1u, 1u).also { coreCalls++ }
+        override fun nextMappingRevision(conversationId: String) = 1uL.also { coreCalls++ }
         override fun verifyMapping(exactObservationJson: String): RcsNativeMappingVerification { verified += exactObservationJson; coreCalls++; return if (exactObservationJson == ROUTE_OBSERVATION) routeVerification else RcsNativeMappingVerification.Mapped }
         override fun classifyTarget(conversationId: String, recipient: String, exactSnapshotJson: String) = target.also { classifiedSnapshot = exactSnapshotJson; coreCalls++ }
         override fun prepare(commandId: String, nowMs: Long): RcsNativePreparation {

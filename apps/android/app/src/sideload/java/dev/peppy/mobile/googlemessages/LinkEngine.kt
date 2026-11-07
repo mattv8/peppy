@@ -31,6 +31,12 @@ interface LinkHandle {
     fun acceptsOutput(generation: Long, revision: Long): Boolean = true
     fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
         acceptsOutput(generation, revision)
+    fun prepareNativeRcs(requestJson: String): String = "{\"code\":\"invalid_request\"}"
+    fun bindNativeRcsRoute(ticketId: String, linkGeneration: Long, sessionGeneration: Long, contextRevision: Long, mappingRevision: Long, observedAtMs: Long): String = "{\"code\":\"rejected\"}"
+    fun bindNativeRcsTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String = "{\"code\":\"rejected\"}"
+    fun bindNativeRcsFacts(ticketId: String, factsJson: String): String = "{\"code\":\"rejected\"}"
+    fun commitNativeRcs(ticketId: String, commitJson: String): String = "{\"code\":\"outcome_unknown\"}"
+    fun revokeNativeSend(ticketId: String): String = "{\"code\":\"none\"}"
 }
 
 data class LinkTypingRequest(

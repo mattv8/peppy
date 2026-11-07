@@ -87,7 +87,7 @@ internal class RcsNativeSendCoordinator(
     private fun recordRefusal(lease: RcsNativeCoreLease) =
         if (lease.recordPreEffectRefusal()) RcsNativeSendOutcome.REFUSED else RcsNativeSendOutcome.OUTCOME_UNKNOWN
 
-    private fun RcsNativePrepared.valid() = ticketId.isNotEmpty() && candidateSnapshotJson.isNotEmpty() && runIncarnation.isNotEmpty() && pairingEvidenceId.isNotEmpty() && runGeneration > 0 && streamEpoch > 0
+    private fun RcsNativePrepared.valid() = ticketId.isNotEmpty() && candidateSnapshotJson.isNotEmpty() && runIncarnation.isNotEmpty() && pairingEvidenceId.isNotEmpty() && runGeneration > 0u && streamEpoch > 0u
 
     private fun RcsNativeRouteEvidence.sameIdentity(other: RcsNativeRouteEvidence) =
         routeId == other.routeId && subscriptionId == other.subscriptionId && ownNumberRaw == other.ownNumberRaw && ownNumberSource == other.ownNumberSource && identityRegion == other.identityRegion

@@ -20,12 +20,12 @@ internal data class RcsNativePrepared(
     val ticketId: String,
     val candidateSnapshotJson: String,
     val runIncarnation: String,
-    val runGeneration: Long,
-    val streamEpoch: Long,
+    val runGeneration: ULong,
+    val streamEpoch: ULong,
     val pairingEvidenceId: String,
 )
 
-internal data class RcsNativeContextTuple(val linkGeneration: Long, val sessionGeneration: Long, val contextRevision: Long)
+internal data class RcsNativeContextTuple(val linkGeneration: ULong, val sessionGeneration: ULong, val contextRevision: ULong)
 
 internal sealed interface RcsNativeTarget {
     data class Found(val googleConversationId: String, val snapshotToken: String) : RcsNativeTarget
@@ -56,7 +56,7 @@ internal interface RcsNativeGoOperation {
     fun ownerGeneration(): Long
     fun isCurrent(): Boolean
     fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence): RcsNativePrepared
-    fun bindRoute(ticketId: String, tuple: RcsNativeContextTuple, mappingRevision: Long, observedAtMs: Long): String
+    fun bindRoute(ticketId: String, tuple: RcsNativeContextTuple, mappingRevision: ULong, observedAtMs: Long): String
     fun bindTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String
     fun bindFacts(ticketId: String, factsJson: String): Boolean
     fun commit(ticketId: String, exactCommitJson: String): RcsNativeCommitResult
@@ -87,8 +87,8 @@ internal open class RcsNativeCommittedHandle(
 }
 
 internal interface RcsNativeCoreLease : AutoCloseable {
-    fun nextContextTuple(runIncarnation: String, runGeneration: Long, streamEpoch: Long, pairingEvidenceId: String): RcsNativeContextTuple
-    fun nextMappingRevision(conversationId: String): Long
+    fun nextContextTuple(runIncarnation: String, runGeneration: ULong, streamEpoch: ULong, pairingEvidenceId: String): RcsNativeContextTuple
+    fun nextMappingRevision(conversationId: String): ULong
     fun verifyMapping(exactObservationJson: String): RcsNativeMappingVerification
     fun classifyTarget(conversationId: String, recipient: String, exactSnapshotJson: String): RcsNativeTarget
     fun prepare(commandId: String, nowMs: Long): RcsNativePreparation

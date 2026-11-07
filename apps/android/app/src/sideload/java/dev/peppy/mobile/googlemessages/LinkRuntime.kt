@@ -145,6 +145,12 @@ object LinkRuntime {
         }
     }
 
+    /** Calls native work on the exact captured owner, never a handle opened after retirement. */
+    internal fun <T> withCapturedLinkOperation(lease: LinkHandleLease, operation: (LinkHandle) -> T): T? = synchronized(nativeOperationLock) {
+        if (!ownsLease(lease)) return@synchronized null
+        operation(lease.handle)
+    }
+
     /** Detaches the captured handle only while [lease] owns it. Native close is always outside the runtime monitor. */
     internal fun detachHandleForServiceStop(lease: LinkHandleLease): LinkHandle? = synchronized(nativeOperationLock) {
         synchronized(this) {
