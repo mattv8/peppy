@@ -4448,6 +4448,22 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
                             LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
                             LiveRevalidation::Cancelled => return,
                         }
+                        #[cfg(test)]
+                        if let Some(status) = live_ticket_after_validation_hook(
+                            &state,
+                            deadline,
+                            Some(&mut cancellation),
+                            &mut readiness,
+                            &mut shutdown,
+                        )
+                        .await
+                        {
+                            match status {
+                                LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
+                                LiveRevalidation::Cancelled => return,
+                                LiveRevalidation::Authorized | LiveRevalidation::Unauthorized => unreachable!(),
+                            }
+                        }
                         if let Some(status) = live_ticket_signal_status(
                             deadline,
                             Some(&mut cancellation),
