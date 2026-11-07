@@ -459,6 +459,68 @@ fn browser_rcs_unreported_message_without_status_row_projects_no_status() {
 }
 
 #[test]
+fn browser_rcs_reported_message_without_status_row_preserves_reported_fact() {
+    let (_directory, client, conversation, generation) = rcs_conversation(true, None);
+    let message_id = client.messages(conversation).unwrap()[0]
+        .payload
+        .record
+        .message_id;
+    client
+        .ingest_rcs_projected_record(
+            conversation,
+            generation,
+            RcsProjectedRecord {
+                google_message_id: "later-message".into(),
+                google_conversation_id: "matrix-conversation".into(),
+                direction: Direction::Incoming,
+                body: "later body".into(),
+                sent_at_ms: Some(now_ms() + 1_000),
+                tmp_id: None,
+                rcs_reported: false,
+                e2ee_reported: None,
+                history_token: None,
+            },
+        )
+        .unwrap();
+    client.apply_pending(100).unwrap();
+    let later_id = client.messages(conversation).unwrap()[1]
+        .payload
+        .record
+        .message_id;
+    let mut browser = browser(client);
+    let snapshot = dispatch(
+        &mut browser,
+        "snapshot",
+        json!({"conversationId": conversation}),
+    );
+    let history = dispatch(
+        &mut browser,
+        "load_history",
+        json!({"conversationId": conversation, "beforeMessageId": later_id}),
+    );
+    let window = dispatch(
+        &mut browser,
+        "load_message_window",
+        json!({"direction": "around", "conversationId": conversation, "messageId": message_id}),
+    );
+    for (path, message) in [
+        (
+            "snapshot",
+            find_message(
+                &find_conversation(&snapshot, conversation)["messages"],
+                message_id,
+            ),
+        ),
+        ("history", find_message(&history["messages"], message_id)),
+        ("window", find_message(&window["messages"], message_id)),
+    ] {
+        assert_eq!(message["transport"], "rcs", "{path}: {message}");
+        assert!(message.get("status").is_none(), "{path}: {message}");
+        assert_eq!(message["rcsReported"], true, "{path}: {message}");
+    }
+}
+
+#[test]
 fn browser_rcs_history_gap_is_projected_after_detector_overflow() {
     let (_directory, client, conversation, generation) = rcs_conversation(true, Some(true));
     for provider_row_id in 0..=1_024 {

@@ -11,6 +11,9 @@ pub fn message_view(
         return Ok(view);
     }
     view.transport = Some("rcs");
+    view.rcs_reported = client
+        .rcs_message_reported(message.payload.record.message_id)?
+        .unwrap_or(false);
     if let Some(status) = client.rcs_message_status(message.payload.record.message_id)? {
         view.status = Some(match status.status {
             RcsMessageStatus::Sending => "submitted",
@@ -19,7 +22,6 @@ pub fn message_view(
             RcsMessageStatus::Read => "read",
             RcsMessageStatus::Failed => "failed-confirmed",
         });
-        view.rcs_reported = status.rcs_reported;
     }
     Ok(view)
 }

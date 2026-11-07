@@ -1028,7 +1028,7 @@ fn all_native_recorders_reject_closed_and_wrong_owners_without_mutating_either_d
     let other_db = persisted::Connection::open(&other.database_path);
     let owner_before = owner_db.send_rows();
     let other_before = other_db.send_rows();
-    for recorder in 0..3 {
+    for recorder in 0..4 {
         let result = match recorder {
             0 => gateway_record_rcs_transport_ack(
                 other.gateway.clone(),
@@ -1036,7 +1036,13 @@ fn all_native_recorders_reject_closed_and_wrong_owners_without_mutating_either_d
                 1_001,
             ),
             1 => gateway_record_rcs_submitted(other.gateway.clone(), committed.command_id()),
-            _ => gateway_record_rcs_pre_effect_refusal(
+            2 => gateway_record_rcs_pre_effect_refusal(
+                other.gateway.clone(),
+                committed.command_id(),
+                committed.tmp_id(),
+                committed.google_conversation_id(),
+            ),
+            _ => gateway_record_rcs_outcome_unknown(
                 other.gateway.clone(),
                 committed.command_id(),
                 committed.tmp_id(),
@@ -1059,12 +1065,79 @@ fn all_native_recorders_reject_closed_and_wrong_owners_without_mutating_either_d
                 committed.tmp_id(),
                 committed.google_conversation_id(),
             ),
+            gateway_record_rcs_outcome_unknown(
+                owner.gateway.clone(),
+                committed.command_id(),
+                committed.tmp_id(),
+                committed.google_conversation_id(),
+            ),
         ] {
             assert!(matches!(result, Err(MobileBindingsError::Closed)));
         }
     }
     assert_eq!(owner_db.send_rows(), owner_before);
     assert_eq!(other_db.send_rows(), other_before);
+}
+
+#[test]
+fn native_outcome_unknown_recorder_is_exact_and_closed_clients_are_rejected() {
+    let fixture = fixture();
+    let committed = native_preparation(&fixture)
+        .begin(observation_json(&fixture), 1_000)
+        .unwrap();
+    assert!(
+        gateway_record_rcs_outcome_unknown(
+            fixture.gateway.clone(),
+            committed.command_id(),
+            "foreign-tmp".into(),
+            committed.google_conversation_id(),
+        )
+        .is_err()
+    );
+    gateway_record_rcs_outcome_unknown(
+        fixture.gateway.clone(),
+        committed.command_id(),
+        committed.tmp_id(),
+        committed.google_conversation_id(),
+    )
+    .unwrap();
+    assert_persisted_send_state(&fixture, "outcome_unknown");
+    fixture.gateway.dispose().unwrap();
+    assert!(matches!(
+        gateway_record_rcs_outcome_unknown(
+            fixture.gateway.clone(),
+            committed.command_id(),
+            committed.tmp_id(),
+            committed.google_conversation_id(),
+        ),
+        Err(MobileBindingsError::Closed)
+    ));
+}
+
+#[test]
+fn explicit_unlink_completion_wrapper_requires_current_unlinked_lifecycle() {
+    let fixture = fixture();
+    assert!(
+        gateway_record_rcs_explicit_unlink_completed(fixture.gateway.clone(), 1_000, 1_000)
+            .is_err()
+    );
+    with_client(&fixture.gateway.client, |core| {
+        core.record_rcs_link_lifecycle(
+            peppy_client_core::RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_000,
+            1_000,
+        )
+    })
+    .unwrap();
+    gateway_record_rcs_explicit_unlink_completed(fixture.gateway.clone(), 1_000, 1_000).unwrap();
+    fixture.gateway.dispose().unwrap();
+    assert!(matches!(
+        gateway_record_rcs_explicit_unlink_completed(fixture.gateway.clone(), 1_000, 1_000),
+        Err(MobileBindingsError::Closed)
+    ));
 }
 
 #[path = "rcs_native_tests/rcs_native_live_ticket_tests.rs"]

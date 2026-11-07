@@ -16275,6 +16275,31 @@ public func gatewayPrepareNativeRcsSend(client: NativeClient, commandId: String,
     )
 })
 }
+/**
+ * Records a host-confirmed, durable owner unlink without accepting mapping observations.
+ */
+public func gatewayRecordRcsExplicitUnlinkCompleted(client: NativeClient, observedAtMs: Int64, nowMs: Int64)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_explicit_unlink_completed(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterInt64.lower(observedAtMs),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+}
+}
+/**
+ * Records uncertainty for the exact admitted native RCS attempt.
+ */
+public func gatewayRecordRcsOutcomeUnknown(client: NativeClient, commandId: String, tmpId: String, googleConversationId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_outcome_unknown(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterString.lower(tmpId),
+        FfiConverterString.lower(googleConversationId),uniffiCallStatus
+    )
+}
+}
 public func gatewayRecordRcsPreEffectRefusal(client: NativeClient, commandId: String, tmpId: String, googleConversationId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_pre_effect_refusal(
@@ -16468,6 +16493,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() != 22733) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_explicit_unlink_completed() != 33636) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_outcome_unknown() != 45222) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal() != 16858) {

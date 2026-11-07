@@ -114,7 +114,7 @@ fn seeded_client() -> Fixture {
                 body: LATEST_BODY.into(),
                 sent_at_ms: Some(now + 2_000),
                 tmp_id: None,
-                rcs_reported: false,
+                rcs_reported: true,
                 e2ee_reported: None,
                 history_token: None,
             },
@@ -204,6 +204,13 @@ fn desktop_rcs_views_do_not_leak_provider_identity() {
     assert_delivered_rcs("snapshot", &snapshot);
     assert_delivered_rcs("history", &history);
     assert_delivered_rcs("window", &window_messages);
+    let reported_without_status = find_body(&all, LATEST_BODY);
+    let reported_without_status = serde_json::to_value(
+        rcs_receive::message_view(client, reported_without_status, vec![]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reported_without_status["rcsReported"], true);
+    assert!(reported_without_status.get("status").is_none());
     assert_eq!(metadata["rcs_encryption"], true, "{metadata}");
     for (path, value) in [
         ("snapshot", Value::Array(snapshot)),

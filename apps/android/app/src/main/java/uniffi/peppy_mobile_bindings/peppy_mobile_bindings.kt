@@ -765,6 +765,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_explicit_unlink_completed(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_outcome_unknown(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_submitted(
@@ -1941,6 +1945,10 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_prepare_native_rcs_send(`client`: Long,`commandId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_explicit_unlink_completed(`client`: Long,`observedAtMs`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_outcome_unknown(`client`: Long,`commandId`: RustBuffer.ByValue,`tmpId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_pre_effect_refusal(`client`: Long,`commandId`: RustBuffer.ByValue,`tmpId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_submitted(`client`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2203,6 +2211,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() and 0xFFFF) != 22733) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_explicit_unlink_completed() and 0xFFFF) != 33636) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_outcome_unknown() and 0xFFFF) != 45222) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal() and 0xFFFF) != 16858) {
@@ -19207,6 +19221,39 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
 }
     )
     }
+    
+
+        /**
+         * Records a host-confirmed, durable owner unlink without accepting mapping observations.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayRecordRcsExplicitUnlinkCompleted`(`client`: NativeClient, `observedAtMs`: kotlin.Long, `nowMs`: kotlin.Long)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_explicit_unlink_completed(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterLong.lower(`observedAtMs`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    
+    
+
+        /**
+         * Records uncertainty for the exact admitted native RCS attempt.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayRecordRcsOutcomeUnknown`(`client`: NativeClient, `commandId`: kotlin.String, `tmpId`: kotlin.String, `googleConversationId`: kotlin.String)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_outcome_unknown(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterString.lower(`tmpId`),
+        FfiConverterString.lower(`googleConversationId`),_status)
+}
+    
     
 
     @Throws(MobileBindingsException::class) fun `gatewayRecordRcsPreEffectRefusal`(`client`: NativeClient, `commandId`: kotlin.String, `tmpId`: kotlin.String, `googleConversationId`: kotlin.String)

@@ -532,6 +532,9 @@ impl BrowserCore {
                     (Vec::new(), None)
                 };
             let reply_context = client.mms_reply_context(conversation.conversation_id).ok();
+            let rcs_metadata = client
+                .rcs_conversation_metadata(conversation.conversation_id)
+                .map_err(core)?;
             views.push(dto::ConversationView {
                 id: conversation.conversation_id.to_string(),
                 name,
@@ -549,14 +552,8 @@ impl BrowserCore {
                 folder_reason: conversation.folder_reason,
                 unblock: conversation.unblock,
                 can_unblock: conversation.can_unblock,
-                rcs_encryption: rcs_receive::conversation_encryption(
-                    client,
-                    conversation.conversation_id,
-                )?,
-                rcs_history_gap: rcs_receive::conversation_history_gap(
-                    client,
-                    conversation.conversation_id,
-                )?,
+                rcs_encryption: rcs_metadata.as_ref().and_then(|item| item.rcs_encryption),
+                rcs_history_gap: rcs_metadata.is_some_and(|item| item.rcs_history_gap),
             });
         }
         for draft in drafts.iter().filter(|draft| {

@@ -365,6 +365,35 @@ pub fn gateway_record_rcs_pre_effect_refusal(
     .map(|_| ())
 }
 
+#[uniffi::export]
+/// Records uncertainty for the exact admitted native RCS attempt.
+pub fn gateway_record_rcs_outcome_unknown(
+    client: Arc<NativeClient>,
+    command_id: String,
+    tmp_id: String,
+    google_conversation_id: String,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.record_native_rcs_outcome_unknown(command_id, &tmp_id, &google_conversation_id)
+    })
+    .map(|_| ())
+}
+
+#[uniffi::export]
+/// Records a host-confirmed, durable owner unlink without accepting mapping observations.
+pub fn gateway_record_rcs_explicit_unlink_completed(
+    client: Arc<NativeClient>,
+    observed_at_ms: i64,
+    now_ms: i64,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        core.record_rcs_explicit_unlink_completed(observed_at_ms, now_ms)
+    })
+}
+
 #[cfg(test)]
 #[path = "rcs_native_tests.rs"]
 mod rcs_native_tests;

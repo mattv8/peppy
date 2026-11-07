@@ -24,10 +24,14 @@ pub(crate) fn message_view(
     client: &Client,
     message: Message,
 ) -> Result<NativeMessage, peppy_client_core::Error> {
-    let rcs = if message.payload.transport == Transport::Rcs {
-        client.rcs_message_status(message.payload.record.message_id)?
+    let (rcs, rcs_reported) = if message.payload.transport == Transport::Rcs {
+        let message_id = message.payload.record.message_id;
+        (
+            client.rcs_message_status(message_id)?,
+            client.rcs_message_reported(message_id)?.unwrap_or(false),
+        )
     } else {
-        None
+        (None, false)
     };
     Ok(NativeMessage {
         message_id: message.payload.record.message_id.to_string(),
@@ -65,7 +69,7 @@ pub(crate) fn message_view(
             }
             .into()
         }),
-        rcs_reported: rcs.is_some_and(|value| value.rcs_reported),
+        rcs_reported,
     })
 }
 

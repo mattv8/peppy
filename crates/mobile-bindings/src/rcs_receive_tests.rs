@@ -112,6 +112,35 @@ fn go_wire_record_empty_status_and_original_go_sample_are_accepted() {
 }
 
 #[test]
+fn go_exported_receive_record_ingests_through_mobile_boundary() {
+    let Ok(path) = std::env::var("PEPPY_RCS_GO_RECEIVE_RECORD_PATH") else {
+        return;
+    };
+    let record = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read Go receive record fixture {path:?}: {error}"));
+    let projection: serde_json::Value = serde_json::from_str(&record)
+        .unwrap_or_else(|error| panic!("decode Go receive record fixture: {error}"));
+    assert_eq!(projection["code"], "ok");
+    let decoded = &projection["record"];
+    assert_eq!(decoded["google_message_id"], "synthetic-message");
+    assert_eq!(decoded["google_conversation_id"], "synthetic-conversation");
+    assert_eq!(decoded["tmp_id"], "synthetic-tmp");
+    assert_eq!(decoded["status"], "delivered");
+
+    let fixture = fixture();
+    let result = fixture
+        .client
+        .gateway_ingest_go_rcs_record_json(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            decoded.to_string(),
+        )
+        .unwrap();
+    assert_eq!(result.record_outcome, "unmatched_outgoing");
+    assert_eq!(result.status_outcome.as_deref(), Some("status_applied"));
+}
+
+#[test]
 fn go_wire_invalid_records_and_stale_generation_do_not_mutate() {
     let fixture = fixture();
     let before = reads(&fixture);
@@ -491,14 +520,15 @@ fn mobile_rcs_status_and_metadata_mapping_is_sanitized() {
             )),
             "inserted"
         );
-        assert!(
-            !fixture
+        assert_eq!(
+            fixture
                 .client
                 .messages(fixture.conversation_id.clone())
                 .unwrap()
                 .pop()
                 .unwrap()
-                .rcs_reported
+                .rcs_reported,
+            reported
         );
         let conversation = fixture.client.list_conversations().unwrap().pop().unwrap();
         assert_eq!(conversation.rcs_encryption, expected);
