@@ -414,6 +414,7 @@ impl Drop for LiveTicketWorkflowDropProbe {
 #[derive(Clone, Default)]
 struct LiveTicketTestHooks {
     operation_budget: Option<Duration>,
+    recheck_operation_budget: Option<Duration>,
     http_operation_budget: Option<Duration>,
     recheck_interval: Option<Duration>,
     lease_duration: Option<Duration>,
@@ -4058,7 +4059,7 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
                 }
             }
             _ = recheck.tick() => {
-                let deadline = ticket.map(|_| live_ticket_operation_deadline(&state));
+                let deadline = ticket.map(|_| live_ticket_recheck_operation_deadline(&state));
                 let revalidation = match ticket {
                     Some(ticket) => live_ticket_revalidate(
                         &state,
@@ -4413,6 +4414,14 @@ fn live_ticket_operation_deadline(_state: &ApiState) -> OperationDeadline {
         return OperationDeadline::after(budget);
     }
     OperationDeadline::after(LIVE_TICKET_OPERATION_BUDGET)
+}
+
+fn live_ticket_recheck_operation_deadline(state: &ApiState) -> OperationDeadline {
+    #[cfg(test)]
+    if let Some(budget) = state.live_ticket_test_hooks.recheck_operation_budget {
+        return OperationDeadline::after(budget);
+    }
+    live_ticket_operation_deadline(state)
 }
 
 fn live_ticket_lease_duration(_state: &ApiState) -> Duration {

@@ -601,6 +601,10 @@ async fn replica_commit_ack_loss_never_installs_a_late_socket() {
     let base = LiveTestServer::start_with_options(options).await;
     let replica_a = ReplicaServer::start(&base, false).await;
     let replica_b = ReplicaServer::start_with_database_url(&base, true, &proxy.proxy_url).await;
+    sqlx::query("SELECT 1")
+        .execute(&replica_b.pool)
+        .await
+        .expect("proxy-backed replica pool must be warm before the bounded request");
     let old_session = lifecycle_session(206);
     let (old_ticket, old_handle) = issue_ticket_with_handle(&base, old_session.clone()).await;
     let mut old_socket = replica_a

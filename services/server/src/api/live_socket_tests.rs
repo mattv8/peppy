@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use futures_util::{SinkExt, StreamExt};
 use peppy_domain::VaultId;
 use peppy_protocol::{EphemeralSignalV2, LiveHelloV2};
@@ -676,8 +676,9 @@ impl LiveTestServer {
     async fn raw_ticket_upgrade_status(&self, protocol: &str) -> StatusCode {
         let address = self.base_url.strip_prefix("http://").unwrap();
         let mut stream = TcpStream::connect(address).await.unwrap();
+        let websocket_key = STANDARD.encode([0_u8; 16]);
         let request = format!(
-            "GET /v1/live HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nOrigin: https://web.peppy.test\r\nSec-WebSocket-Protocol: {protocol}\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
+            "GET /v1/live HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {websocket_key}\r\nOrigin: https://web.peppy.test\r\nSec-WebSocket-Protocol: {protocol}\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
         );
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut bytes = [0_u8; 1024];
@@ -2437,7 +2438,7 @@ async fn commit_forwarded_after_scaled_lease_expiry_is_inert_and_rejected() {
     let proxy = DelayedCommitProxy::start(&database_url).await;
     let lease_duration = Duration::from_millis(700);
     let hooks = LiveTicketTestHooks {
-        operation_budget: Some(Duration::from_millis(250)),
+        recheck_operation_budget: Some(Duration::from_millis(250)),
         recheck_interval: Some(Duration::from_millis(100)),
         lease_duration: Some(lease_duration),
         ..LiveTicketTestHooks::default()

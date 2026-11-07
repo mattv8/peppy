@@ -280,7 +280,13 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use futures_util::FutureExt;
     use peppy_protocol::EphemeralSignalV2Kind;
-    use std::{str::FromStr, sync::Arc};
+    use std::{
+        str::FromStr,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -434,6 +440,81 @@ mod tests {
         )
     }
 
+    async fn forward_client_frame(
+        upstream_write: &mut (impl tokio::io::AsyncWrite + Unpin),
+        kind: u8,
+        length: usize,
+        body: &[u8],
+        listen_forwarded: &AtomicBool,
+        listen_sent: &Signal,
+    ) -> std::io::Result<()> {
+        upstream_write.write_u8(kind).await?;
+        upstream_write.write_u32(length as u32).await?;
+        upstream_write.write_all(body).await?;
+        if kind == b'Q' && body.starts_with(b"LISTEN ") {
+            listen_forwarded.store(true, Ordering::SeqCst);
+            listen_sent.notify_one();
+        }
+        Ok(())
+    }
+
+    async fn await_expected_client_disconnect(
+        client_done: JoinHandle<std::io::Result<()>>,
+        listen_forwarded: &AtomicBool,
+    ) {
+        let error = client_done
+            .await
+            .expect("proxy client forwarder must not panic")
+            .expect_err("proxy client forwarder must end with a disconnect");
+        assert!(
+            listen_forwarded.load(Ordering::SeqCst),
+            "proxy client disconnected before LISTEN was forwarded"
+        );
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ),
+            "unexpected proxy client forwarder error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_listen_forward_failure_cannot_report_disposal() {
+        let (mut upstream_write, upstream_read) = tokio::io::duplex(64);
+        drop(upstream_read);
+        let listen_sent = Arc::new(Signal::new());
+        let listen_forwarded = Arc::new(AtomicBool::new(false));
+        let listen_sent_for_client = listen_sent.clone();
+        let listen_forwarded_for_client = listen_forwarded.clone();
+        let client_done = tokio::spawn(async move {
+            forward_client_frame(
+                &mut upstream_write,
+                b'Q',
+                11,
+                b"LISTEN ",
+                &listen_forwarded_for_client,
+                &listen_sent_for_client,
+            )
+            .await
+        });
+        let (disposed_tx, disposed_rx) = oneshot::channel();
+        let listen_forwarded_for_proxy = listen_forwarded.clone();
+
+        let proxy_done = tokio::spawn(async move {
+            await_expected_client_disconnect(client_done, &listen_forwarded_for_proxy).await;
+            let _ = disposed_tx.send(());
+        });
+
+        assert!(proxy_done.await.unwrap_err().is_panic());
+        assert!(disposed_rx.await.is_err());
+        assert!(!listen_forwarded.load(Ordering::SeqCst));
+        assert!(listen_sent.notified().now_or_never().is_none());
+    }
+
     async fn stalled_listen_proxy(database_url: &str) -> (String, oneshot::Receiver<()>) {
         let upstream = Url::parse(database_url).unwrap();
         let upstream_address = format!(
@@ -454,27 +535,29 @@ mod tests {
             let (mut client_read, mut client_write) = client.into_split();
             let (mut upstream_read, mut upstream_write) = upstream.into_split();
             let listen_sent = Arc::new(Signal::new());
+            let listen_forwarded = Arc::new(AtomicBool::new(false));
             let listen_sent_for_client = listen_sent.clone();
+            let listen_forwarded_for_client = listen_forwarded.clone();
             let client_done = tokio::spawn(async move {
-                let length = client_read.read_u32().await.unwrap() as usize;
+                let length = client_read.read_u32().await? as usize;
                 let mut startup = vec![0; length - 4];
-                client_read.read_exact(&mut startup).await.unwrap();
-                upstream_write.write_u32(length as u32).await.unwrap();
-                upstream_write.write_all(&startup).await.unwrap();
+                client_read.read_exact(&mut startup).await?;
+                upstream_write.write_u32(length as u32).await?;
+                upstream_write.write_all(&startup).await?;
                 loop {
-                    let kind = match client_read.read_u8().await {
-                        Ok(kind) => kind,
-                        Err(_) => return,
-                    };
-                    let length = client_read.read_u32().await.unwrap() as usize;
+                    let kind = client_read.read_u8().await?;
+                    let length = client_read.read_u32().await? as usize;
                     let mut body = vec![0; length - 4];
-                    client_read.read_exact(&mut body).await.unwrap();
-                    if kind == b'Q' && body.starts_with(b"LISTEN ") {
-                        listen_sent_for_client.notify_one();
-                    }
-                    upstream_write.write_u8(kind).await.unwrap();
-                    upstream_write.write_u32(length as u32).await.unwrap();
-                    upstream_write.write_all(&body).await.unwrap();
+                    client_read.read_exact(&mut body).await?;
+                    forward_client_frame(
+                        &mut upstream_write,
+                        kind,
+                        length,
+                        &body,
+                        &listen_forwarded_for_client,
+                        &listen_sent_for_client,
+                    )
+                    .await?;
                 }
             });
 
@@ -484,13 +567,21 @@ mod tests {
                 let mut body = vec![0; length - 4];
                 upstream_read.read_exact(&mut body).await.unwrap();
                 if kind == b'Z' && listen_sent.notified().now_or_never().is_some() {
-                    let _ = client_done.await;
+                    await_expected_client_disconnect(client_done, &listen_forwarded).await;
                     let _ = disposed_tx.send(());
                     return;
                 }
-                client_write.write_u8(kind).await.unwrap();
-                client_write.write_u32(length as u32).await.unwrap();
-                client_write.write_all(&body).await.unwrap();
+                let forwarded = async {
+                    client_write.write_u8(kind).await?;
+                    client_write.write_u32(length as u32).await?;
+                    client_write.write_all(&body).await
+                }
+                .await;
+                if forwarded.is_err() {
+                    await_expected_client_disconnect(client_done, &listen_forwarded).await;
+                    let _ = disposed_tx.send(());
+                    return;
+                }
             }
         });
 
@@ -510,6 +601,8 @@ mod tests {
             .min_connections(0)
             .connect_lazy_with(options);
 
+        // Spend the short deadline on the stalled LISTEN, not cold authentication.
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
         assert!(matches!(
             setup_listener(&pool, Duration::from_millis(100)).await,
             Err(sqlx::Error::PoolTimedOut)
