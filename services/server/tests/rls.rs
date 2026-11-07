@@ -122,6 +122,8 @@ impl Fixture {
             trusted_proxy_cidrs: vec![],
             replay_retention: Duration::from_secs(7 * 86_400),
             relay_url: None,
+            mcp_worker_url: None,
+            mcp_worker_token_file: None,
             web_client: None,
         }
     }

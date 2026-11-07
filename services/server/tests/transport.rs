@@ -243,6 +243,8 @@ impl TestServer {
                     replay_retention: options.replay_retention,
                     relay_url,
                     web_client: None,
+                    mcp_worker_url: None,
+                    mcp_worker_token_file: None,
                 };
                 peppy_server::ServerBuilder::new(config, server_pool)
                     .build()

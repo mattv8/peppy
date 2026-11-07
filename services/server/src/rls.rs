@@ -37,6 +37,11 @@ pub const TENANT_TABLES: &[&str] = &[
     "attachment_retention_uses",
     "attachment_retention_devices",
     "attachment_removals",
+    "mcp_devices",
+    "mcp_grants",
+    "mcp_operations",
+    "mcp_oauth_codes",
+    "mcp_oauth_tokens",
 ];
 
 const CONTROL_PLANE_TABLES: &[&str] = &[
@@ -44,6 +49,8 @@ const CONTROL_PLANE_TABLES: &[&str] = &[
     "instance_sessions",
     "vault_invites",
     "vault_requests",
+    "mcp_oauth_clients",
+    "mcp_oauth_authorizations",
 ];
 const ADMISSION_TABLES: &[&str] = &["instance_admission_windows", "instance_admission_sources"];
 const TENANT_SCOPE_POLICY_EXPRESSION: &str =
@@ -56,6 +63,11 @@ const COMMUNITY_RESOLVERS: &[&str] = &[
     "community_resolve_computer_enrollment(uuid,bytea)",
     "community_resolve_device_admission(uuid)",
     "community_admin_vault_summaries()",
+    "mcp_resolve_access_token(bytea)",
+    "mcp_resolve_code(bytea)",
+    "mcp_resolve_refresh_token(bytea)",
+    "mcp_resolve_token(bytea)",
+    "mcp_sweep_oauth()",
 ];
 
 #[derive(Debug, Error)]

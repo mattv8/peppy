@@ -72,6 +72,8 @@ impl Fixture {
                 trusted_proxy_cidrs: vec![],
                 replay_retention: Duration::from_secs(604_800),
                 relay_url: None,
+                mcp_worker_url: None,
+                mcp_worker_token_file: None,
                 web_client: None,
             },
             self.pool.clone(),

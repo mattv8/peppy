@@ -140,6 +140,8 @@ fn config() -> Config {
         trusted_proxy_cidrs: Vec::new(),
         replay_retention: Duration::from_secs(60),
         relay_url: None,
+        mcp_worker_url: None,
+        mcp_worker_token_file: None,
         web_client: None,
     }
 }
@@ -367,6 +369,7 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
     let device_routes = [
         (Method::GET, "/v1/vault".to_owned()),
         (Method::GET, "/v1/devices".to_owned()),
+        (Method::GET, "/v1/mcp/device".to_owned()),
         (Method::GET, "/v1/devices/self/push-config".to_owned()),
         (Method::GET, "/v1/attachments/storage/status".to_owned()),
         (Method::GET, "/v1/account/access".to_owned()),
@@ -574,6 +577,90 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
             assert_eq!(response[field], "invalid_bearer", "{method} {path}");
         }
     }
+    let owner_mcp_routes = [
+        (Method::GET, "/v1/mcp/grants".to_owned(), json!({})),
+        (
+            Method::GET,
+            format!("/v1/mcp/authorizations/{attachment}"),
+            json!({}),
+        ),
+        (Method::POST, "/v1/mcp/device/prepare".to_owned(), json!({})),
+        (
+            Method::POST,
+            "/v1/mcp/device/activate".to_owned(),
+            json!({
+                "operation_id": attachment,
+                "status": {
+                    "state": "approved", "expires_in_seconds": 60,
+                    "transcript": null, "encrypted_key_package": null,
+                    "transfer_nonce": null, "owner_proof": null,
+                },
+            }),
+        ),
+        (
+            Method::POST,
+            "/v1/mcp/device/complete".to_owned(),
+            json!({
+                "operation_id": attachment,
+                "admission": {
+                    "vault_id": attachment, "device_id": device, "role": "device",
+                    "material": {
+                        "profile": {}, "check_header": "check", "fingerprint": "11".repeat(32),
+                        "key_epoch": 1, "admission_public_key": "key",
+                    },
+                },
+            }),
+        ),
+        (
+            Method::POST,
+            format!("/v1/mcp/grants/{attachment}/revoke"),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            format!("/v1/mcp/authorizations/{attachment}/approve"),
+            json!({"scopes": ["conversations:read"]}),
+        ),
+        (
+            Method::POST,
+            format!("/v1/mcp/authorizations/{attachment}/deny"),
+            json!({}),
+        ),
+    ];
+    for (method, path, body) in owner_mcp_routes {
+        covered.insert(route_key(method.as_str(), &path));
+        for credential in [None, Some("Bearer malformed")] {
+            let (status, _) = authority_request_body(
+                app.clone(),
+                method.clone(),
+                &path,
+                credential,
+                body.to_string(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+        }
+    }
+    // The Axum `any` route authenticates before delegating to rmcp. The SDK is
+    // configured without legacy sessions or replay, so POST is its only
+    // supported method; other methods would be its intentional 405 response.
+    for credential in [None, Some("Bearer malformed")] {
+        let (status, response) = authority_request_body(
+            app.clone(),
+            Method::POST,
+            "/mcp",
+            credential,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "POST /mcp");
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).unwrap()["error"],
+            "invalid_token",
+            "POST /mcp"
+        );
+    }
+    covered.insert(route_key("POST", "/mcp"));
     let instance_routes = [
         (
             "/v1/instance/session",
@@ -754,6 +841,32 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
             "/v1/enrollment/computers/{id}/confirm",
             "computer claim token and signatures",
         ),
+        (
+            "GET",
+            "/.well-known/oauth-protected-resource",
+            "public OAuth protected-resource metadata",
+        ),
+        (
+            "GET",
+            "/.well-known/oauth-authorization-server",
+            "public OAuth authorization-server metadata",
+        ),
+        (
+            "POST",
+            "/oauth/register",
+            "public dynamic client registration admission",
+        ),
+        (
+            "GET",
+            "/oauth/authorize",
+            "public PKCE authorization request before owner consent",
+        ),
+        (
+            "POST",
+            "/oauth/token",
+            "authorization-code or refresh-token proof",
+        ),
+        ("POST", "/oauth/revoke", "opaque token proof"),
     ] {
         assert!(!reason.is_empty());
         assert!(
@@ -854,30 +967,41 @@ fn declared_route_pairs(source: &str) -> Vec<(String, String)> {
         } else {
             panic!("classify new route constant: {path}");
         };
+        let declared_path = path
+            .split('/')
+            .map(|part| {
+                if part.starts_with('{') && part.ends_with('}') {
+                    "{}"
+                } else {
+                    part
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
         let before = pairs.len();
-        for method in [
-            "get", "post", "put", "patch", "delete", "head", "options", "trace",
-        ] {
-            let needle = format!("{method}(");
-            if handlers.match_indices(&needle).any(|(position, _)| {
-                position == 0
-                    || !handlers.as_bytes()[position - 1].is_ascii_alphanumeric()
-                        && handlers.as_bytes()[position - 1] != b'_'
-            }) {
-                // Only declared parameters are generalized. A newly added literal
-                // numeric/UUID route must not disappear into an existing dynamic route.
-                let declared_path = path
-                    .split('/')
-                    .map(|part| {
-                        if part.starts_with('{') && part.ends_with('}') {
-                            "{}"
-                        } else {
-                            part
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("/");
-                pairs.push((method.to_ascii_uppercase(), declared_path));
+        if handlers.trim() == "any(handle)" {
+            assert_eq!(
+                path, "/mcp",
+                "classify the supported method for new any route"
+            );
+            // rmcp only accepts POST with the configured NeverSessionManager.
+            pairs.push(("POST".to_owned(), declared_path));
+        } else {
+            assert!(
+                !handlers.trim_start().starts_with("any("),
+                "classify new method-router expression for {path}"
+            );
+            for method in [
+                "get", "post", "put", "patch", "delete", "head", "options", "trace",
+            ] {
+                let needle = format!("{method}(");
+                if handlers.match_indices(&needle).any(|(position, _)| {
+                    position == 0
+                        || !handlers.as_bytes()[position - 1].is_ascii_alphanumeric()
+                            && handlers.as_bytes()[position - 1] != b'_'
+                }) {
+                    pairs.push((method.to_ascii_uppercase(), declared_path.clone()));
+                }
             }
         }
         assert!(
@@ -896,6 +1020,18 @@ fn route_inventory_distinguishes_methods_added_to_an_existing_path() {
         pairs,
         vec![route_key("GET", "/one"), route_key("POST", "/one")]
     );
+}
+
+#[test]
+fn route_inventory_classifies_sdk_any_route_by_its_supported_method() {
+    let pairs = declared_route_pairs(r#"Router::new().route("/mcp", any(handle))"#);
+    assert_eq!(pairs, vec![route_key("POST", "/mcp")]);
+}
+
+#[test]
+#[should_panic(expected = "classify new method-router expression")]
+fn route_inventory_rejects_chained_sdk_any_routes() {
+    declared_route_pairs(r#"Router::new().route("/mcp", any(handle).get(other_handler))"#);
 }
 
 #[test]
