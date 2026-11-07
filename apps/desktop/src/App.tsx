@@ -161,6 +161,8 @@ import { DraftNotice } from "./drafts/DraftNotice";
 import { DraftSyncStatus, draftSyncNeedsAttention, useDraftExpiryClock } from "./drafts/DraftSyncStatus";
 import type { DraftResolutionResult } from "./drafts/DraftConflictReviewDialog";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
+import { MmsSizeHelp } from "./drafts/MmsSizeHelp";
+import { planMms } from "./drafts/mmsPlan";
 import { measureComposerChrome } from "./conversation/composerChrome";
 import { IsolatedText } from "./notices/IsolatedText";
 
@@ -179,6 +181,14 @@ type PinFocusRestoreIntent = {
   userMovedFocus: boolean;
   dispose(): void;
 };
+
+const MMS_WARNING_THRESHOLD = 0.8;
+
+function mmsHeaderSize(estimatedBytes: number, limitBytes: number): { text: string; tone: "default" | "warning" | "error" } {
+  if (estimatedBytes > limitBytes) return { text: `${fileSize(estimatedBytes)} of ${fileSize(limitBytes)}`, tone: "error" };
+  if (estimatedBytes >= limitBytes * MMS_WARNING_THRESHOLD) return { text: `${fileSize(estimatedBytes)} of ${fileSize(limitBytes)}`, tone: "warning" };
+  return { text: fileSize(estimatedBytes), tone: "default" };
+}
 
 export { errorText } from "./bridge/bridgeErrors";
 export {
@@ -485,7 +495,8 @@ function routeProblem(
   gateways: GatewayView[],
   requiresMms: boolean,
   recipientCount: number,
-  estimatedBytes: number,
+  mmsPlan: ReturnType<typeof planMms>,
+  oversizedImageName?: string,
 ): string | undefined {
   if (route.kind === "none")
     return gateways.length
@@ -505,8 +516,10 @@ function routeProblem(
   const recipientLimit = Math.min(route.gateway.mmsMaxRecipients ?? 20, 20);
   if (requiresMms && recipientCount > recipientLimit)
     return `this MMS route supports up to ${recipientLimit} recipients`;
-  if (requiresMms && route.gateway.mmsMaxBytes !== undefined && estimatedBytes > route.gateway.mmsMaxBytes)
-    return `the MMS estimate exceeds the ${fileSize(route.gateway.mmsMaxBytes)} limit`;
+  if (requiresMms && mmsPlan.kind === "error")
+    return mmsPlan.imageId && oversizedImageName
+      ? `${oversizedImageName} cannot be resized to fit the MMS limit`
+      : `the MMS estimate exceeds the ${fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit`;
   return undefined;
 }
 
@@ -519,6 +532,17 @@ const recipientCount = (content: DraftContent, conversation?: ConversationView) 
   content.recipientIds.length || conversation?.participants?.length || 1;
 const draftEstimateBytes = (content: DraftContent, attachments: Record<string, AttachmentView>) =>
   new TextEncoder().encode(content.text).length + content.attachmentIds.reduce((total, id) => total + (attachments[id]?.byteSize ?? 0), 0);
+const planDraftMms = (content: DraftContent, route: RouteChoice, attachments: Record<string, AttachmentView>) =>
+  planMms({
+    limitBytes: route.kind === "route" ? route.gateway.mmsMaxBytes ?? 300 * 1024 : 300 * 1024,
+    gatewayVersion: route.kind === "route" ? route.gateway.mmsContentVersion : undefined,
+    text: content.text,
+    images: content.attachmentIds.map((id) => ({
+      id,
+      bytes: attachments[id]?.byteSize ?? 0,
+      mediaType: attachments[id]?.mediaType ?? "",
+    })),
+  });
 
 /* ------------------------------------------------------------------ presentational pieces */
 
@@ -1669,6 +1693,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     Record<string, AttachmentView>
   >({});
   const [draftViews, setDraftViews] = useState<Record<string, Draft>>({});
+  const acknowledgedDraftNoticeRef = useRef<string | undefined>(undefined);
   const [resolvingDraftConflict, setResolvingDraftConflict] = useState(false);
   const resolutionRef = useRef<number | undefined>(undefined);
   const draftSessionGenerationRef = useRef(0);
@@ -1996,6 +2021,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       changed: () => rerender(),
       rekeyed: (from, to) => handlers.current.rekeyed(from, to),
       notice: (key, event) => {
+        if (event === "remote-update" && !document.hasFocus() && !store.hasUndo(key) && !store.retainedText(key)) return;
         if (event === "save-failed") saveFailedKeysRef.current.add(key);
         // A healthy ordinary save stays quiet; "saved" shows only when it settles an earlier failure on this draft.
         if (event === "saved" && !saveFailedKeysRef.current.delete(key)) return;
@@ -3416,12 +3442,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const mmsRequired = requiresMms(content, active);
   const routeRecipients = recipientCount(content, active);
   const estimateBytes = draftEstimateBytes(content, attachmentViews);
+  const mmsPlan = planDraftMms(content, route, attachmentViews);
   const problem = routeProblem(
     route,
     gateways,
     mmsRequired,
     routeRecipients,
-    estimateBytes,
+    mmsPlan,
+    mmsPlan.kind === "error" ? attachmentViews[mmsPlan.imageId ?? ""]?.name : undefined,
   );
   const isNewConversation = Boolean(slotKey) && (
     isLocalDraftKey(slotKey) ||
@@ -3431,6 +3459,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   const edit = (patch: Partial<DraftContent>) => {
     if (!slotKey || deletingId === slotKey || resolvingDraftConflict) return;
+    autoAcknowledgeDraftSyncNotice();
     setDraftNotice((notice) => notice?.key === slotKey && notice.event === "stale-send" ? undefined : notice);
     draftNoticesRef.current.delete(slotKey);
     void store.edit(slotKey, patch);
@@ -3759,6 +3788,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   const send = async () => {
     if (sendingRef.current || !slotKey) return;
+    autoAcknowledgeDraftSyncNotice();
     const session = currentSearchSessionKey();
     sendingRef.current = true;
     setSending(true);
@@ -3794,12 +3824,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       );
       const latestGateways = latestSnapshot?.gateways ?? [];
       const chosen = resolveRoute(current.content, latestGateways);
+      const latestMmsPlan = planDraftMms(current.content, chosen, attachmentViews);
       const blocked = routeProblem(
         chosen,
         latestGateways,
         requiresMms(current.content, latestConversation),
         recipientCount(current.content, latestConversation),
-        draftEstimateBytes(current.content, attachmentViews),
+        latestMmsPlan,
+        latestMmsPlan.kind === "error" ? attachmentViews[latestMmsPlan.imageId ?? ""]?.name : undefined,
       );
       if (blocked || chosen.kind !== "route")
         return setComposerNotice(current.key, `Not sent: ${blocked ?? "choose a phone and SIM"}.`);
@@ -4539,6 +4571,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     : undefined;
   const mmsLimitShown =
     mmsRequired && route.kind === "route" && estimateBytes > 0;
+  const mmsLimitBytes = route.kind === "route" ? route.gateway.mmsMaxBytes ?? 300 * 1024 : 0;
+  const mmsHeader = mmsLimitShown
+    ? mmsPlan.kind === "split"
+      ? { text: `Sends as ${mmsPlan.parts} messages`, tone: "default" as const }
+      : route.kind === "route" && (route.gateway.mmsContentVersion ?? 0) >= 4 && estimateBytes > mmsLimitBytes
+        ? { text: fileSize(estimateBytes), tone: "default" as const }
+        : mmsHeaderSize(estimateBytes, mmsLimitBytes)
+    : undefined;
   const pendingRecipientReason = "finish adding the recipient before sending";
   const effectivePendingRecipient = pendingRecipient && isNewConversation;
   const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : draftSendBlock ?? problem;
@@ -4590,7 +4630,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const visibleDraftNotice = selectDraftNotice(noticeCandidates);
   const localSaveState = slotKey ? store.saveState(slotKey) : "idle";
   const hasDraftConflicts = Boolean(activeDraftView?.sync?.conflicts.length);
-  const statusActive = Boolean(unavailableReason || mmsLimitShown || visibleDraftNotice || draftSyncNeedsAttention({ draft: activeDraftView, offline: serverOffline, localSaveState, now: draftStatusNow }));
+  const statusActive = Boolean(unavailableReason || visibleDraftNotice || activeDraftView?.sync?.notice === "updated-from-other-device" || draftSyncNeedsAttention({ draft: activeDraftView, offline: serverOffline, localSaveState, now: draftStatusNow }));
   const resolveDraftConflict = async (branchId: string | null): Promise<DraftResolutionResult> => {
     if (resolutionRef.current !== undefined) return { ok: false, message: "A version is already being applied." };
     if (!activeDraftView?.id || !slotKey)
@@ -4646,7 +4686,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       }
     }
   };
-  const acknowledgeDraftSyncNotice = () => {
+  const acknowledgeDraftSyncNotice = (restoreFocus = true) => {
     if (!activeDraftView?.id || !slotKey) return;
     const draftId = activeDraftView.id;
     const key = slotKey;
@@ -4658,12 +4698,26 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         setDraftViews((current) => current[draftId]
         ? { ...current, [draftId]: { ...current[draftId], sync: current[draftId].sync ? { ...current[draftId].sync!, notice: null } : undefined } }
         : current);
-        document.getElementById("composer-textarea")?.focus();
+        acknowledgedDraftNoticeRef.current = undefined;
+        if (restoreFocus) document.getElementById("composer-textarea")?.focus();
       })
       .catch((error) => {
+        acknowledgedDraftNoticeRef.current = undefined;
         if (mountedRef.current && generation === draftSessionGenerationRef.current && session === currentSearchSessionKey() && selectedRef.current === key)
           setComposerNotice(key, `Couldn't dismiss draft notice: ${errorText(error)}`);
       });
+  };
+  const autoAcknowledgeDraftSyncNotice = () => {
+    const draftId = activeDraftView?.id;
+    const notice = activeDraftView?.sync?.notice;
+    if (!draftId || !notice) {
+      acknowledgedDraftNoticeRef.current = undefined;
+      return;
+    }
+    const noticeKey = `${draftId}:${notice}`;
+    if (acknowledgedDraftNoticeRef.current === noticeKey) return;
+    acknowledgedDraftNoticeRef.current = noticeKey;
+    acknowledgeDraftSyncNotice(false);
   };
   const onDraftNoticeAction = (action: "retry" | "save-new" | "discard-local" | "undo" | "copy") => {
     if (!slotKey || noticeActionBusyRef.current) return;
@@ -4747,20 +4801,25 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           });
         }}
         attachmentLayout={attachmentLayout}
+        draftKey={slotKey}
+        attachmentHeaderDetail={mmsHeader && route.kind === "route" ? <span className="mms-size-header-detail" data-mms-size-tone={mmsHeader.tone}>
+          <span>{mmsHeader.text}</span>
+          <MmsSizeHelp
+            estimatedSize={fileSize(estimateBytes)}
+            limitLabel={route.gateway.mmsLimitSource === "carrier" ? "Carrier limit" : "Default limit"}
+            limitSize={fileSize(mmsLimitBytes)}
+            limitKilobytes={Math.round(mmsLimitBytes / 1024)}
+            recipientLimit={Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)}
+            resizingImages={(route.gateway.mmsContentVersion ?? 0) >= 4 && estimateBytes > mmsLimitBytes}
+          />
+        </span> : undefined}
         maxAttachments={MAX_DRAFT_ATTACHMENTS}
         statusActive={statusActive}
         statusSlot={
           <>
-            <span id="unavailable-hint" hidden={!unavailableReason || hasDraftConflicts}>
+            <span id="unavailable-hint" className={unavailableReason === draftSendBlock && failedDraftAttachment ? "sr-only" : undefined} hidden={!unavailableReason || hasDraftConflicts}>
               Sending unavailable: {composerUnavailableReason}
             </span>
-            {mmsLimitShown && route.kind === "route" && (
-              <dl className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "default"}>
-                <div><dt>Estimated size</dt><dd>{fileSize(estimateBytes)}</dd></div>
-                <div><dt>{route.gateway.mmsLimitSource === "carrier" ? "Carrier limit" : "Default limit"}</dt><dd>{fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)}</dd></div>
-                <div><dt>Recipients</dt><dd>up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)}</dd></div>
-              </dl>
-            )}
             <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
             <DraftSyncStatus
               draft={activeDraftView}
@@ -4770,6 +4829,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               localSaveState={localSaveState}
               onResolveConflict={resolveDraftConflict}
               onAcknowledgeNotice={acknowledgeDraftSyncNotice}
+              onAutoAcknowledgeNotice={() => acknowledgeDraftSyncNotice(false)}
             />
           </>
         }

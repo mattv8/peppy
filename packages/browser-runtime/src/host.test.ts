@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
-import { browserRememberedUnlock, BrowserWorkerHost, dispatchBrowserRpc, sendBrowserDraft, type BrowserPort, type HostSession } from "./host.js";
+import { browserRememberedUnlock, BrowserWorkerHost, DraftSyncPrompt, dispatchBrowserRpc, sendBrowserDraft, type BrowserPort, type HostSession } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
 import { TransportError } from "./transport.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
@@ -162,6 +162,39 @@ describe("browser host RPC", () => {
     expect(attached.messages).toContainEqual(expect.objectContaining({ id: 2, ok: true }));
     expect(session.calls).toContainEqual(expect.objectContaining({ command: "save_draft", mutation: true }));
     expect(session.calls).toContainEqual(expect.objectContaining({ command: "mark_read_batch", mutation: true }));
+  });
+
+  it("prompts draft sync after each successful draft save", async () => {
+    const session = new FakeSession();
+    const draftSaved = vi.fn();
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => session,
+      network: { start: async () => true, stop: async () => undefined, draftSaved } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "save_draft", args: { input: { text: "first" } } });
+    attached.emit({ id: 2, command: "save_draft", args: { input: { text: "second" } } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+
+    expect(draftSaved).toHaveBeenCalledTimes(2);
+  });
+
+  it("flushes a pending draft prompt on the lifecycle RPC", async () => {
+    const session = new FakeSession();
+    const flushDraftSync = vi.fn();
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => session,
+      network: { start: async () => true, stop: async () => undefined, flushDraftSync } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "flush_draft_sync", args: {} });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    expect(flushDraftSync).toHaveBeenCalledOnce();
   });
 
   it("responds and stops cleanly when unlock negotiation is revoked", async () => {
@@ -2239,5 +2272,63 @@ describe("browser host RPC", () => {
     await expect(dispatchBrowserRpc(session, { id: 10, command: "save_draft", args: { input: { text: "x".repeat(1024 * 1024) } } }))
       .resolves.toMatchObject({ id: 10, ok: false, error: { code: "invalid-request" } });
     expect(session.calls).toEqual([]);
+  });
+});
+
+describe("draft sync prompt", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("debounces saves until two seconds after the last one", () => {
+    vi.useFakeTimers();
+    const run = vi.fn();
+    const prompt = new DraftSyncPrompt(() => true, run);
+
+    prompt.schedule();
+    vi.advanceTimersByTime(1_500);
+    prompt.schedule();
+    vi.advanceTimersByTime(1_999);
+    expect(run).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("flushes once across hidden and pagehide lifecycle signals", () => {
+    vi.useFakeTimers();
+    const run = vi.fn();
+    const prompt = new DraftSyncPrompt(() => true, run);
+
+    prompt.schedule();
+    prompt.flush();
+    prompt.flush();
+    vi.advanceTimersByTime(2_000);
+
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("does not flush when no draft save is pending", () => {
+    const run = vi.fn();
+    const prompt = new DraftSyncPrompt(() => true, run);
+
+    prompt.flush();
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not run disabled draft sync and clears pending timers on teardown", () => {
+    vi.useFakeTimers();
+    const run = vi.fn();
+    const prompt = new DraftSyncPrompt(() => false, run);
+
+    prompt.schedule();
+    prompt.flush();
+    expect(run).not.toHaveBeenCalled();
+
+    prompt.schedule();
+    prompt.stop();
+    vi.advanceTimersByTime(2_000);
+    prompt.flush();
+
+    expect(run).not.toHaveBeenCalled();
   });
 });

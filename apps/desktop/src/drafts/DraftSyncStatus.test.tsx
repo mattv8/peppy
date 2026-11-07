@@ -66,11 +66,13 @@ describe("draftSyncNeedsAttention", () => {
     ["has a failed local save", draft(), false, "failed", true],
     ["has conflicts", draft({ conflicts: [{ branchId: "branch-2", text: "other", recipientIds: [], attachmentIds: [] }] }), false, "idle", true],
     ["has a failed sync", draft({ state: "failed" }), false, "idle", true],
-    ["has a paused sync", draft({ state: "paused" }), false, "idle", true],
+    ["has a paused sync", draft({ state: "paused" }), false, "idle", false],
+    ["has a paused sync while offline", draft({ state: "paused" }), true, "idle", false],
     ["requires a connection while offline", draft({ sendRequiresConnection: true }), true, "idle", true],
     ["expires within one day", draft({ expiresAt: new Date(now + 60_000).toISOString() }), false, "idle", true],
     ["has expired", draft({ expiresAt: new Date(now - 60_000).toISOString() }), false, "idle", true],
     ["has a notice", draft({ notice: "kept-after-sent" }), false, "idle", true],
+    ["has an other-device update", draft({ notice: "updated-from-other-device" }), false, "idle", false],
   ] as const)("returns %s", (_name, statusDraft, offline, localSaveState, expected) => {
     expect(draftSyncNeedsAttention({ draft: statusDraft, offline, localSaveState, now })).toBe(expected);
   });
@@ -95,12 +97,28 @@ describe("DraftSyncStatus", () => {
     ["local save failure", draft({ state: "failed", conflicts: [conflict] }), true, "failed", "Draft not saved on this device. Keep this window open."],
     ["conflicts", draft({ state: "failed", conflicts: [conflict] }), true, "idle", "Draft versions need review"],
     ["sync failure", draft({ state: "failed", sendRequiresConnection: true }), true, "idle", "Draft sync failed."],
-    ["paused sync", draft({ state: "paused", sendRequiresConnection: true }), true, "idle", "Saved on this device. Sync paused."],
     ["offline send", draft({ sendRequiresConnection: true }), true, "idle", "Reconnect to send this synced draft."],
+    ["paused sync that blocks an offline send", draft({ state: "paused", sendRequiresConnection: true }), true, "idle", "Reconnect to send this synced draft."],
   ] as const)("shows %s as the primary reason", (_name, statusDraft, offline, localSaveState, message) => {
     renderStatus({ draft: statusDraft, offline, localSaveState });
 
     expect(document.querySelector("[data-draft-sync-message]")).toHaveTextContent(message);
+  });
+
+  it("stays silent for a paused sync that does not block sending", () => {
+    renderStatus({ draft: draft({ state: "paused" }) });
+
+    expect(document.querySelector("#draft-sync-status")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["restored-after-expiry", "Restored your offline changes."],
+    ["kept-after-sent", "Kept your offline edits as a new draft."],
+  ] as const)("shows the %s notice", (notice, text) => {
+    renderStatus({ draft: draft({ notice }) });
+
+    expect(document.querySelector("[data-draft-sync-notice]")).toHaveTextContent(text);
+    expect(screen.queryByText("New 30-day period")).not.toBeInTheDocument();
   });
 
   it("dismisses a sync notice", () => {
@@ -110,6 +128,23 @@ describe("DraftSyncStatus", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
 
     expect(onAcknowledgeNotice).toHaveBeenCalledOnce();
+  });
+
+  it("shows an other-device update temporarily before acknowledging it", () => {
+    vi.useFakeTimers();
+    const onAcknowledgeNotice = vi.fn();
+    try {
+      renderStatus({ draft: draft({ notice: "updated-from-other-device" }), onAcknowledgeNotice });
+
+      expect(screen.getByRole("status")).toHaveTextContent("Updated from your other device.");
+      expect(document.querySelector("#draft-sync-status")).toContainElement(screen.getByRole("status"));
+
+      act(() => { vi.advanceTimersByTime(4_000); });
+
+      expect(onAcknowledgeNotice).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("closes review when the draft changes identity", () => {
@@ -154,6 +189,6 @@ describe("DraftSyncStatus", () => {
     })} local={local} attachments={{}} offline localSaveState="failed" onResolveConflict={vi.fn().mockResolvedValue({ ok: true })} onAcknowledgeNotice={vi.fn()} />);
 
     expect(document.querySelector("[data-draft-sync-message]")).toHaveTextContent("Draft not saved on this device. Keep this window open.");
-    expect(screen.getByText("New 30-day period")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
   });
 });

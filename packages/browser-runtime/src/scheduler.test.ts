@@ -1549,6 +1549,7 @@ it("recognizes only documented draft-route fallbacks after authenticated evidenc
     const fixture = await unsupported(error);
     await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "connected" });
     expect(fixture.mutations).toContainEqual(["_worker_draft_sync_supported", { supported: false }]);
+    expect(fixture.scheduler.isDraftSyncEnabled).toBe(false);
   }
 
   for (const [error, probeFails] of [

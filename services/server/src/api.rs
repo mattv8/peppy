@@ -268,6 +268,7 @@ pub(super) struct ApiState {
     pub(super) db: PgPool,
     committed: tokio::sync::broadcast::Sender<(Uuid, i64)>,
     presence_changed: tokio::sync::broadcast::Sender<Uuid>,
+    drafts_changed: tokio::sync::broadcast::Sender<Uuid>,
     presence_touches: Arc<std::sync::Mutex<HashMap<(Uuid, Uuid), std::time::Instant>>>,
     storage: Option<Storage>,
     vault_attachment_quota_bytes: i64,
@@ -523,6 +524,7 @@ pub(crate) fn build_router(
     } = authorization;
     let (committed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let (presence_changed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
+    let (drafts_changed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let storage = initialized_storage;
     let relay_url =
         explicit_relay_url.or_else(|| config.as_ref().and_then(|config| config.relay_url.clone()));
@@ -644,6 +646,7 @@ pub(crate) fn build_router(
         db: db.clone(),
         committed: committed.clone(),
         presence_changed,
+        drafts_changed,
         presence_touches: Arc::new(std::sync::Mutex::new(HashMap::new())),
         storage: storage.clone(),
         vault_attachment_quota_bytes,
@@ -2703,6 +2706,7 @@ async fn websocket(
     // Subscribe before replay so a commit between replay and live is never missed.
     let receiver = s.committed.subscribe();
     let presence_receiver = s.presence_changed.subscribe();
+    let drafts_receiver = s.drafts_changed.subscribe();
     let lease = lease.map(|Extension(lease)| lease);
     let shutdown = shutdown.map(|Extension(shutdown)| shutdown);
     Ok(upgrade
@@ -2715,6 +2719,7 @@ async fn websocket(
                 principal,
                 receiver,
                 presence_receiver,
+                drafts_receiver,
                 lease,
                 shutdown,
             )
@@ -2800,12 +2805,14 @@ async fn read_hello(socket: &mut WebSocket, timeout: Duration) -> Result<i64, He
         .ok_or(Rejected(close::INVALID_HELLO, "invalid_hello"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ws_session(
     socket: WebSocket,
     state: ApiState,
     principal: Principal,
     notices: tokio::sync::broadcast::Receiver<(Uuid, i64)>,
     presence_notices: tokio::sync::broadcast::Receiver<Uuid>,
+    drafts_notices: tokio::sync::broadcast::Receiver<Uuid>,
     lease: Option<crate::serving::ConnectionLease>,
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 ) {
@@ -2815,6 +2822,7 @@ async fn ws_session(
         principal,
         notices,
         presence_notices,
+        drafts_notices,
         shutdown,
     )
     .await;
@@ -2827,6 +2835,7 @@ async fn ws_session_inner(
     principal: Principal,
     mut notices: tokio::sync::broadcast::Receiver<(Uuid, i64)>,
     mut presence_notices: tokio::sync::broadcast::Receiver<Uuid>,
+    mut drafts_notices: tokio::sync::broadcast::Receiver<Uuid>,
     mut shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 ) {
     let options = Arc::clone(&state.options);
@@ -2860,7 +2869,7 @@ async fn ws_session_inner(
         "resume_cursor": cursor.to_string(),
         "high_water_cursor": high_water.to_string(),
         "replay_floor_cursor": replay_floor.to_string(),
-        "frame_types": ["ready", "event", "resync_required", "presence_changed"],
+        "frame_types": ["ready", "event", "resync_required", "presence_changed", "drafts_changed"],
     });
     if let Err(stop) = send_frame(&mut socket, ready.to_string(), options.send_timeout).await {
         return stop.close(&mut socket).await;
@@ -2893,6 +2902,9 @@ async fn ws_session_inner(
     // Broadcast is only a latency hint; committed rows are the durable source.
     let mut durable_replay = tokio::time::interval(options.durable_replay_interval);
     durable_replay.tick().await;
+    let mut draft_hint_ready = true;
+    let mut draft_hint_pending = false;
+    let mut draft_hint_cooldown = Box::pin(tokio::time::sleep(Duration::from_secs(3_600)));
     loop {
         let stop = tokio::select! {
             _ = wait_for_shutdown(&mut shutdown) => WsStop::Disconnected,
@@ -2989,6 +3001,44 @@ async fn ws_session_inner(
                     if presence_active { close_presence(&state, &principal, connection_id).await; }
                     return
                 },
+            },
+            draft_notice = drafts_notices.recv() => {
+                match draft_notice {
+                    Ok(vault) if vault == principal.vault => {}
+                    Ok(_) => continue,
+                    // The channel carries hints only; after lag, one local hint
+                    // is enough to prompt the receiver to pull its durable state.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        if presence_active { close_presence(&state, &principal, connection_id).await; }
+                        return
+                    }
+                }
+                if !draft_hint_ready {
+                    draft_hint_pending = true;
+                    continue;
+                }
+                draft_hint_ready = false;
+                draft_hint_cooldown
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + Duration::from_millis(500));
+                if send_frame(&mut socket, json!({"type":"drafts_changed"}).to_string(), options.send_timeout).await.is_err() {
+                    WsStop::Disconnected
+                } else { continue }
+            },
+            _ = &mut draft_hint_cooldown, if !draft_hint_ready => {
+                draft_hint_ready = true;
+                if !draft_hint_pending {
+                    continue;
+                }
+                draft_hint_pending = false;
+                draft_hint_ready = false;
+                draft_hint_cooldown
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + Duration::from_millis(500));
+                if send_frame(&mut socket, json!({"type":"drafts_changed"}).to_string(), options.send_timeout).await.is_err() {
+                    WsStop::Disconnected
+                } else { continue }
             },
         };
         if presence_active {

@@ -68,7 +68,7 @@ impl<'de> Deserialize<'de> for SecretString {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Failure {
     code: &'static str,
-    message: &'static str,
+    message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     current_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,10 +78,10 @@ pub(crate) struct Failure {
 }
 
 impl Failure {
-    fn new(code: &'static str, message: &'static str) -> Self {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
-            message,
+            message: message.into(),
             current_revision: None,
             conversation_id: None,
             draft_id: None,
@@ -123,7 +123,7 @@ pub(crate) fn core(error: CoreError) -> Failure {
         }
         CoreError::StaleDraft { current_revision } => Failure {
             code: "stale-draft",
-            message: "The draft changed elsewhere.",
+            message: "The draft changed elsewhere.".into(),
             current_revision: Some(current_revision.to_string()),
             conversation_id: None,
             draft_id: None,
@@ -134,7 +134,7 @@ pub(crate) fn core(error: CoreError) -> Failure {
             current_revision,
         } => Failure {
             code: "draft-moved",
-            message: "The draft moved to another conversation.",
+            message: "The draft moved to another conversation.".into(),
             current_revision: Some(current_revision.to_string()),
             conversation_id: Some(conversation_id.to_string()),
             draft_id: Some(draft_id.to_string()),

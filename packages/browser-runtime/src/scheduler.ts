@@ -67,6 +67,7 @@ export class BrowserScheduler {
   /** True when this round stopped outbox delivery on a coded server refusal; reset at each round start. */
   private outboxRejected = false;
   private retentionNegotiationResolved = false;
+  private draftSyncEnabled = true;
 
   public constructor(
     private readonly session: SchedulerSession,
@@ -84,6 +85,7 @@ export class BrowserScheduler {
   }
 
   public get producersReady(): boolean { return this.retentionNegotiationResolved; }
+  public get isDraftSyncEnabled(): boolean { return this.draftSyncEnabled; }
 
   public async unlockNewEpoch(passphrase: string): Promise<void> {
     if (!this.protocol || !this.options.rotateEpoch) throw new TransportError("invalid");
@@ -174,7 +176,7 @@ export class BrowserScheduler {
   }
 
   private async syncDrafts(signal: AbortSignal): Promise<void> {
-    if (!this.transport.discard) return;
+    if (!this.transport.discard || !this.draftSyncEnabled) return;
     const drafts = new DraftTransport({
       json: (path: string, request: { method: "GET" | "POST" | "PUT"; body?: unknown; signal?: AbortSignal; limit?: number }) => this.transport.json(path, request),
       discard: (path, request) => this.transport.discard!(path, request),
@@ -196,6 +198,7 @@ export class BrowserScheduler {
     } catch (error) {
       if (await isUnsupportedDraftRoute(error, drafts, signal)) {
         await this.session.mutate("_worker_draft_sync_supported", { supported: false });
+        this.draftSyncEnabled = false;
         return;
       }
       throw error;

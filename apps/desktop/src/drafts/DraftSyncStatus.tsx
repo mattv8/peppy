@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactElement } from "react";
-import { formatDateTime, type Attachment } from "@peppy/desktop-ui";
+import { X, formatDateTime, type Attachment } from "@peppy/desktop-ui";
 import type { Draft } from "@peppy/desktop-ui/bridge-contracts";
 import { DraftConflictReviewDialog, type DraftResolutionResult, type DraftVersionContent } from "./DraftConflictReviewDialog";
 import { DraftExpiryHelp } from "./DraftExpiryHelp";
@@ -12,12 +12,14 @@ type DraftSyncStatusProps = {
   localSaveState: "idle" | "saving" | "failed";
   onResolveConflict: (branchId: string | null) => Promise<DraftResolutionResult>;
   onAcknowledgeNotice: () => void;
+  onAutoAcknowledgeNotice?: () => void;
 };
 
 type DraftSyncAttentionInput = Pick<DraftSyncStatusProps, "draft" | "offline" | "localSaveState"> & { now: number };
 type DraftSyncNotice = NonNullable<Draft["sync"]>["notice"];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const OTHER_DEVICE_NOTICE_MS = 4_000;
 
 function expiryLabel(expiresAt: string | null, now: number): { label: string; nearExpiry: boolean } | undefined {
   if (!expiresAt) return undefined;
@@ -50,10 +52,9 @@ export function draftSyncNeedsAttention({ draft, offline, localSaveState, now }:
   return localSaveState === "failed"
     || sync.conflicts.length > 0
     || sync.state === "failed"
-    || sync.state === "paused"
     || (sync.sendRequiresConnection && offline)
     || expiryLabel(sync.expiresAt, now)?.nearExpiry === true
-    || sync.notice !== null;
+    || (sync.notice !== null && sync.notice !== "updated-from-other-device");
 }
 
 function primaryMessage(props: Pick<DraftSyncStatusProps, "offline" | "localSaveState"> & { draft: Draft }): string | undefined {
@@ -61,25 +62,29 @@ function primaryMessage(props: Pick<DraftSyncStatusProps, "offline" | "localSave
   if (props.localSaveState === "failed") return "Draft not saved on this device. Keep this window open.";
   if (sync.conflicts.length > 0) return "Draft versions need review";
   if (sync.state === "failed") return "Draft sync failed.";
-  if (sync.state === "paused") return "Saved on this device. Sync paused.";
   if (sync.sendRequiresConnection && props.offline) return "Reconnect to send this synced draft.";
   return undefined;
 }
 
 function noticeText(notice: DraftSyncNotice): string | undefined {
-  if (notice === "restored-after-expiry") return "Offline changes restored as a new draft.";
-  if (notice === "kept-after-sent") return "Your offline edits were kept as a new draft.";
+  if (notice === "restored-after-expiry") return "Restored your offline changes.";
+  if (notice === "kept-after-sent") return "Kept your offline edits as a new draft.";
   return undefined;
 }
 
-export function DraftSyncStatus({ draft, local, attachments, offline, localSaveState, onResolveConflict, onAcknowledgeNotice }: DraftSyncStatusProps): ReactElement | null {
+export function DraftSyncStatus({ draft, local, attachments, offline, localSaveState, onResolveConflict, onAcknowledgeNotice, onAutoAcknowledgeNotice }: DraftSyncStatusProps): ReactElement | null {
   const [reviewOpen, setReviewOpen] = useState(false);
   const reviewOpener = useRef<HTMLElement>(null);
   const composerTextarea = useRef<HTMLElement>(null);
   const reviewDraftId = useRef(draft?.id);
+  const acknowledgeNoticeRef = useRef(onAutoAcknowledgeNotice ?? onAcknowledgeNotice);
   const sync = draft?.sync;
   const now = useDraftExpiryClock(sync?.expiresAt);
   const expiry = expiryLabel(sync?.expiresAt ?? null, now);
+
+  useEffect(() => {
+    acknowledgeNoticeRef.current = onAutoAcknowledgeNotice ?? onAcknowledgeNotice;
+  }, [onAcknowledgeNotice, onAutoAcknowledgeNotice]);
 
   useLayoutEffect(() => {
     if (reviewDraftId.current === draft?.id) return;
@@ -88,7 +93,14 @@ export function DraftSyncStatus({ draft, local, attachments, offline, localSaveS
     setReviewOpen(false);
   }, [draft?.id]);
 
-  if (!draft || !sync || !draftSyncNeedsAttention({ draft, offline, localSaveState, now })) return null;
+  useEffect(() => {
+    if (sync?.notice !== "updated-from-other-device") return;
+    const timer = window.setTimeout(() => acknowledgeNoticeRef.current(), OTHER_DEVICE_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [draft?.id, sync?.notice]);
+
+  const updatedFromOtherDevice = sync?.notice === "updated-from-other-device";
+  if (!draft || !sync || (!updatedFromOtherDevice && !draftSyncNeedsAttention({ draft, offline, localSaveState, now }))) return null;
 
   const message = primaryMessage({ draft, offline, localSaveState });
   const notice = noticeText(sync.notice);
@@ -102,8 +114,8 @@ export function DraftSyncStatus({ draft, local, attachments, offline, localSaveS
     {message && <span data-draft-sync-message aria-live="polite">{message}</span>}
     {sync.conflicts.length > 0 && <button id="draft-review-button" className="secondary-button" type="button" aria-haspopup="dialog" onClick={openReview}>Review</button>}
     {expiry?.nearExpiry && <DraftExpiryHelp draftId={draft.id} label={expiry.label} nearExpiry />}
-    {sync.notice === "restored-after-expiry" && <span data-draft-expiry-renewed>New 30-day period</span>}
-    {notice && <span data-draft-sync-notice>{notice} <button type="button" onClick={onAcknowledgeNotice}>Dismiss</button></span>}
+    {updatedFromOtherDevice && <span role="status" data-draft-sync-notice>Updated from your other device.</span>}
+    {notice && <span data-draft-sync-notice>{notice} <button type="button" aria-label="Dismiss" onClick={onAcknowledgeNotice}><X size={16} strokeWidth={1.75} aria-hidden /></button></span>}
     {reviewOpen && sync.conflicts.length > 0 && <DraftConflictReviewDialog draftId={draft.id} local={local} conflicts={sync.conflicts} attachments={attachments} opener={reviewOpener} focusFallback={composerTextarea} onResolve={onResolveConflict} onClose={() => setReviewOpen(false)} />}
   </footer>;
 }

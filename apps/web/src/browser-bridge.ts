@@ -349,6 +349,8 @@ export class BrowserBridge implements DesktopBridge {
     window.addEventListener("focus", this.refreshNotificationContext);
     window.addEventListener("blur", this.refreshNotificationContext);
     document.addEventListener("visibilitychange", this.refreshNotificationContext);
+    document.addEventListener("visibilitychange", this.flushDraftSyncWhenHidden);
+    window.addEventListener("pagehide", this.flushDraftSync);
   }
 
   public onStopped(listener: (reason: string) => void): () => void {
@@ -397,6 +399,8 @@ export class BrowserBridge implements DesktopBridge {
     window.removeEventListener("focus", this.refreshNotificationContext);
     window.removeEventListener("blur", this.refreshNotificationContext);
     document.removeEventListener("visibilitychange", this.refreshNotificationContext);
+    document.removeEventListener("visibilitychange", this.flushDraftSyncWhenHidden);
+    window.removeEventListener("pagehide", this.flushDraftSync);
     this.stoppedListeners.forEach((listener) => listener(reason));
     this.port.close();
   }
@@ -436,6 +440,13 @@ export class BrowserBridge implements DesktopBridge {
   private readonly refreshNotificationContext = (): void => {
     if (!this.notificationContext || this.stopped) return;
     void this.call("set_notification_context", this.notificationContextArgs()).catch(() => undefined);
+  };
+  private readonly flushDraftSyncWhenHidden = (): void => {
+    if (document.visibilityState === "hidden") this.flushDraftSync();
+  };
+  private readonly flushDraftSync = (): void => {
+    if (this.stopped) return;
+    void this.call("flush_draft_sync").catch(() => undefined);
   };
   private notificationContextArgs(): Record<string, unknown> {
     const permission = typeof Notification === "undefined" ? "unsupported" : Notification.permission;

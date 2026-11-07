@@ -1,8 +1,10 @@
 package dev.peppy.mobile.mms
 
 import android.app.PendingIntent
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.core.content.FileProvider
+import dev.peppy.mobile.MmsCallbackStore
 import dev.peppy.mobile.gateway.GatewayTestBase
 import dev.peppy.mobile.gateway.SharedVault
 import dev.peppy.mobile.granted
@@ -68,10 +70,11 @@ class MmsDispatcherTest : GatewayTestBase() {
         body: String,
         recipients: List<String>,
         attachment: File? = null,
+        mediaType: String = "image/png",
         installMedia: Boolean = true,
     ): Pair<String, String?> {
         val desktop = SharedVault.desktop
-        val prepared = attachment?.let { desktop.prepareAttachment(it.path, "image/png", "photo.png") }
+        val prepared = attachment?.let { desktop.prepareAttachment(it.path, mediaType, "photo.${mediaType.substringAfter('/')}") }
         val draft = desktop.createComposeDraft(null)
         val routeJson = org.json.JSONObject().put("gateway_device_id", deviceId).put("subscription_id", route).toString()
         val saved = desktop.saveComposeDraft(
@@ -175,6 +178,38 @@ class MmsDispatcherTest : GatewayTestBase() {
     }
 
     @Test
+    fun laterCommandsInAThreadWaitBehindEarlierTransientMms() {
+        val client = enrollAndUnlock()
+        val image = File.createTempFile("missing", ".png").apply { writeBytes(byteArrayOf(1)); deleteOnExit() }
+        val (first, _) = queueMms(client, "", listOf("+15551234567"), image, installMedia = false)
+        val (later, _) = queueMms(client, "later", listOf("+15551234567"))
+        val carrier = FakeMmsCarrier()
+
+        val summary = dispatcher(client, carrier).dispatch()
+
+        assertTrue(summary.waiting >= 2)
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals(NativePermitState.MEDIA_UNAVAILABLE, client.beginSendAttempt(first).state)
+        assertEquals(NativePermitState.PERMIT, client.beginSendAttempt(later).state)
+    }
+
+    @Test
+    fun callbackRegistrationWaitBlocksLaterSameThreadMms() {
+        val client = enrollAndUnlock()
+        val (first, _) = queueMms(client, "first", listOf("+15551234567"))
+        val (later, _) = queueMms(client, "later", listOf("+15551234567"))
+        val callbacks = MmsCallbackStore(context)
+        assertTrue(callbacks.register(first))
+        val carrier = FakeMmsCarrier()
+
+        val summary = MmsDispatcher(context, client, carrier, routes, true, true, { generous }, callbacks).dispatch()
+
+        assertTrue(summary.waiting >= 2)
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals(NativePermitState.PERMIT, client.beginSendAttempt(later).state)
+    }
+
+    @Test
     fun sizeFailureMakesNoCarrierCallAndClosesPlaintext() {
         val client = enrollAndUnlock()
         val image = File.createTempFile("oversized", ".png").apply { writeBytes(ByteArray(128)); deleteOnExit() }
@@ -188,6 +223,26 @@ class MmsDispatcherTest : GatewayTestBase() {
         assertEquals("FailedBeforeSubmission", client.beginSendAttempt(tooLarge).existingSendState)
         assertFalse("a refused compose closes every plaintext handle", plaintextDirectory.listFiles()?.any() == true)
 
+    }
+
+    @Test
+    fun oversizedJpegIsFittedBeforeTakingTheCarrierPermit() {
+        val client = enrollAndUnlock()
+        val image = File.createTempFile("oversized", ".jpg").apply {
+            val bitmap = Bitmap.createBitmap(1200, 1200, Bitmap.Config.ARGB_8888)
+            for (y in 0 until bitmap.height) for (x in 0 until bitmap.width) bitmap.setPixel(x, y, (x * 31) xor (y * 17))
+            outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 100, it) }
+            bitmap.recycle()
+            deleteOnExit()
+        }
+        val (command, _) = queueMms(client, "", listOf("+15551234567"), image, mediaType = "image/jpeg")
+        val carrier = FakeMmsCarrier()
+
+        val summary = dispatcher(client, carrier, cap = generous.copy(maximumPduBytes = 50L * 1024)).dispatch()
+
+        assertEquals(summary.toString(), 1, summary.submitted)
+        assertEquals(1, carrier.calls.size)
+        assertEquals("SubmittedToOs", client.beginSendAttempt(command).existingSendState)
     }
 
     @Test

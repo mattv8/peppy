@@ -1,10 +1,12 @@
 import "@testing-library/jest-dom/vitest";
 import type { ComponentProps } from "react";
+import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AppTitlebar,
   Composer,
+  mapSelectionThroughEdit,
   installOverlayScrollbars,
   isRecipientPosition,
   NavButtons,
@@ -19,10 +21,79 @@ import {
 } from "./index";
 
 const people = [{ id: "conv-a", name: "Aurora", preview: "Hi", unread: 0 }];
+
+function TestComposer({ draft, onDraftChange }: { draft: string; onDraftChange(value: string): void }) {
+  return <Composer attachments={[]} draft={draft} sendSupported onDraftChange={onDraftChange} onSend={() => {}} />;
+}
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("Composer external draft updates", () => {
+  it.each([
+    ["insertion", "abc", "aXbc", 2, 3],
+    ["deletion", "abc", "ac", 2, 1],
+    ["replaced region", "hello world", "hello there", 8, 6],
+    ["start boundary", "abc", "zabc", 0, 0],
+    ["end boundary", "abc", "abcz", 3, 4],
+    ["emoji replacement", "😀", "😁", 1, 0],
+    ["empty source", "", "text", 0, 4],
+    ["unrelated replacement", "abc", "xyz", 2, 0],
+  ])("maps %s without landing inside a surrogate pair", (_name, oldText, newText, position, expected) => {
+    expect(mapSelectionThroughEdit(oldText, newText, position)).toBe(expected);
+  });
+
+  it("maps the caret through an external draft update", () => {
+    const { rerender } = render(<TestComposer draft="hello brave world" onDraftChange={() => {}} />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(11, 11);
+
+    rerender(<TestComposer draft="hello kind brave world" onDraftChange={() => {}} />);
+
+    expect(textarea.selectionStart).toBe(16);
+    expect(textarea.selectionEnd).toBe(16);
+  });
+
+  it("applies the latest external update after composition ends without a local edit", () => {
+    const { rerender } = render(<TestComposer draft="hello" onDraftChange={() => {}} />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.compositionStart(textarea);
+
+    rerender(<TestComposer draft="remote" onDraftChange={() => {}} />);
+    expect(textarea).toHaveValue("hello");
+
+    fireEvent.compositionEnd(textarea);
+    expect(textarea).toHaveValue("remote");
+  });
+
+  it("defers external updates during composition and drops them after a local edit", () => {
+    function ControlledComposer() {
+      const [draft, setDraft] = useState("hello");
+      const [externalDraft, setExternalDraft] = useState<string | null>(null);
+      return <>
+        <button type="button" onClick={() => setExternalDraft("remote")}>Apply remote</button>
+        <TestComposer draft={externalDraft ?? draft} onDraftChange={(value) => {
+          setExternalDraft(null);
+          setDraft(value);
+        }} />
+      </>;
+    }
+
+    render(<ControlledComposer />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.compositionStart(textarea);
+    fireEvent.click(screen.getByRole("button", { name: "Apply remote" }));
+    expect(textarea).toHaveValue("hello");
+
+    fireEvent.change(textarea, { target: { value: "hello!" } });
+    fireEvent.compositionEnd(textarea);
+
+    expect(textarea).toHaveValue("hello!");
+  });
 });
 
 describe("isPopoutMode", () => {

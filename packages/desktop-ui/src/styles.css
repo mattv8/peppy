@@ -772,7 +772,6 @@ select:focus-visible {
 .attachment-copy { display: grid; min-width: 0; align-content: start; gap: 0; }
 .attachment-name { min-width: 0; overflow-wrap: anywhere; line-height: 16px; white-space: normal; }
 .attachment-state { display: flex; align-items: center; gap: 4px; color: var(--peppy-text-secondary); font-size: 11px; line-height: 16px; }
-.attachment-error { min-width: 0; overflow-wrap: anywhere; color: var(--peppy-error-text); font-size: 11px; white-space: normal; }
 .attachment-chip[data-attachment-state="failed"] .attachment-state, .attachment-chip[data-attachment-state="upload-failed"] .attachment-state, .attachment-chip[data-attachment-state="download-failed"] .attachment-state, .attachment-chip[data-attachment-state="local"] .attachment-state, .attachment-chip[data-attachment-state="unavailable"] .attachment-state { color: var(--peppy-error-text); }
 .attachment-remove, .attachment-retry { display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--peppy-radius-sm); background: transparent; color: var(--peppy-text-secondary); }
 .attachment-remove { grid-column: 2; grid-row: 2; align-self: start; width: 24px; height: 24px; border: 1px solid var(--peppy-border-strong); background: var(--peppy-surface-widget); }
@@ -782,7 +781,7 @@ select:focus-visible {
 #attachment-tray[data-attachment-layout="rows"] .attachment-preview, #attachment-tray[data-attachment-layout="rows"] .attachment-preview img { width: 46px; height: 46px; }
 #attachment-tray[data-attachment-layout="rows"] .attachment-preview { grid-column: 1; grid-row: 1; }
 #attachment-tray[data-attachment-layout="rows"] .attachment-copy { grid-column: 2; grid-row: 1; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
-#attachment-tray[data-attachment-layout="rows"] .attachment-name, #attachment-tray[data-attachment-layout="rows"] .attachment-state, #attachment-tray[data-attachment-layout="rows"] .attachment-error { grid-column: 1; }
+#attachment-tray[data-attachment-layout="rows"] .attachment-name, #attachment-tray[data-attachment-layout="rows"] .attachment-state { grid-column: 1; }
 #attachment-tray[data-attachment-layout="rows"] .attachment-retry { grid-column: 2; grid-row: 1 / span 2; }
 #attachment-tray[data-attachment-layout="rows"] .attachment-remove { position: static; grid-column: 3; grid-row: 1; width: 24px; height: 24px; border: 0; background: transparent; }
 .composer-paste-rejection { margin: 4px 0; overflow-wrap: anywhere; color: var(--peppy-error-text); font-size: 12px; }

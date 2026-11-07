@@ -66,7 +66,8 @@ export type GatewayAvailability = "unknown" | "connected" | "delayed" | "offline
 export type GatewayPresence = { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null };
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type DraftConflictView = { branchId: string; text: string; attachmentIds: string[]; recipientIds: string[]; gatewayId?: string; simId?: string };
-export type DraftSyncView = { state: "local-only" | "saving" | "saved-local" | "syncing" | "synced" | "paused" | "failed"; expiresAt: string | null; conflicts: DraftConflictView[]; notice: "restored-after-expiry" | "kept-after-sent" | null; sendRequiresConnection: boolean };
+export type DraftSyncView = { state: "local-only" | "saving" | "saved-local" | "syncing" | "synced" | "paused" | "failed"; expiresAt: string | null; conflicts: DraftConflictView[]; notice: "restored-after-expiry" | "kept-after-sent" | "updated-from-other-device" | null; sendRequiresConnection: boolean };
+export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: string; revision?: string; parts?: number };
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string; /** Authoritative host views for the draft's attachments. */ attachments?: AttachmentView[]; sync?: DraftSyncView };
 export type PastedImage = { bytes: ArrayBuffer; name: string; mediaType: string };
 /** Successful pasted attachments plus per-file failures. Hosts never discard successful files because another file failed. */
@@ -196,7 +197,7 @@ export interface DesktopBridge {
   save_draft(input: DraftInput): Promise<Draft>;
   discard_draft(input: DiscardDraftInput): Promise<void>;
   /** `accepted` means durably queued in the local encrypted outbox; `revision` is the stored draft revision afterwards. */
-  send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: MessageStatus; reason?: string; revision?: string }>;
+  send_draft(input: SendDraftInput): Promise<SendResultView>;
   mark_seen(visibleMessageIds: string[]): Promise<void>;
   /** Actual number changed, encoded as a canonical unsigned decimal string. */
   mark_all_read(): Promise<string>;

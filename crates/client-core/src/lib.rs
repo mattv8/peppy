@@ -130,13 +130,13 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 46;
+const SCHEMA_VERSION: i64 = 47;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 /// Shared encrypted MMS content format understood by upgraded gateways.
-pub const MMS_CONTENT_VERSION: u32 = 3;
+pub const MMS_CONTENT_VERSION: u32 = 4;
 
 /// An eligible attachment download with its durable demand classification.
 ///
@@ -1040,6 +1040,13 @@ pub struct ComposeDraft {
     pub attachment_ids: Vec<AttachmentId>,
     pub route: Option<GatewayRoute>,
     pub revision: u64,
+}
+
+/// The durable grouping for a split MMS draft send.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftSendParts {
+    pub caption: bool,
+    pub image_groups: Vec<Vec<AttachmentId>>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ComposeDraftUpdate {
@@ -2589,7 +2596,7 @@ impl Client {
         draft_id: DraftId,
         expected_revision: u64,
     ) -> Result<QueuedSend, Error> {
-        self.send_compose_draft_impl(draft_id, expected_revision, None, None, None)
+        self.send_compose_draft_impl(draft_id, expected_revision, None, None, None, None)
     }
 
     /// Sends only if transport classification still matches the caller's preflight decision.
@@ -2606,6 +2613,23 @@ impl Client {
             Some(expected_transport),
             None,
             None,
+            None,
+        )
+    }
+
+    pub fn send_compose_draft_with_parts(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+        parts: DraftSendParts,
+    ) -> Result<QueuedSend, Error> {
+        self.send_compose_draft_impl(
+            draft_id,
+            expected_revision,
+            Some(Transport::Mms),
+            None,
+            None,
+            Some(&parts),
         )
     }
 
@@ -2616,6 +2640,7 @@ impl Client {
         expected_transport: Option<Transport>,
         preset_command_id: Option<CommandId>,
         stored_snapshot: Option<ComposeDraft>,
+        parts: Option<&DraftSendParts>,
     ) -> Result<QueuedSend, Error> {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
@@ -2630,7 +2655,7 @@ impl Client {
         }
         let draft = stored_snapshot.unwrap_or_else(|| current.clone());
         let clear_current = current.revision == expected_revision && current == draft;
-        let route = draft.route.ok_or(Error::InvalidRequest("route"))?;
+        let route = draft.route.as_ref().ok_or(Error::InvalidRequest("route"))?;
         // For one-to-one text replies, the latest record defines the current thread transport;
         // an old legacy picture MMS must not permanently convert a later SMS thread to MMS.
         let latest_transport: Option<Transport> = tx
@@ -2652,7 +2677,7 @@ impl Client {
                     recipients: draft.recipients.clone(),
                     body: draft.text.clone(),
                 },
-                &route,
+                route,
             )?;
             Transport::Sms
         } else {
@@ -2661,29 +2686,35 @@ impl Client {
                 &draft.text,
                 &draft.attachment_ids,
                 None,
-                &route,
+                route,
             )?;
             Transport::Mms
         };
+        if let Some(parts) = parts {
+            validate_draft_send_parts(&draft, parts)?;
+        }
         if expected_transport.is_some_and(|expected| expected != transport) {
             return Err(Error::InvalidRequest("compose transport changed"));
         }
-        let sms = OutgoingSms {
-            conversation_id: draft.conversation_id,
-            recipients: draft.recipients,
-            body: draft.text,
-        };
         let remote_claim_accepted = preset_command_id.is_some();
-        let queued = queue_message(
-            &tx,
-            &ctx,
-            sms,
-            &route,
-            compose_references(&tx, &draft.attachment_ids)?,
-            transport,
-            None,
-            preset_command_id,
-        )?;
+        let queued = if let Some(parts) = parts {
+            queue_split_draft_messages(&tx, &ctx, &draft, route, preset_command_id, parts)?
+        } else {
+            queue_message(
+                &tx,
+                &ctx,
+                OutgoingSms {
+                    conversation_id: draft.conversation_id,
+                    recipients: draft.recipients.clone(),
+                    body: draft.text.clone(),
+                },
+                route,
+                compose_references(&tx, &draft.attachment_ids)?,
+                transport,
+                None,
+                preset_command_id,
+            )?
+        };
         let next = draft.revision.checked_add(1).ok_or(Error::Database)?;
         if clear_current {
             draft_sync::retire_sent_draft(&tx, draft_id, next, !remote_claim_accepted)?;
@@ -2702,6 +2733,7 @@ impl Client {
         expected_revision: u64,
         command_id: CommandId,
         snapshot: ComposeDraft,
+        parts: Option<&DraftSendParts>,
     ) -> Result<QueuedSend, Error> {
         self.send_compose_draft_impl(
             draft_id,
@@ -2709,8 +2741,65 @@ impl Client {
             None,
             Some(command_id),
             Some(snapshot),
+            parts,
         )
     }
+}
+
+pub(crate) fn validate_draft_send_parts(
+    draft: &ComposeDraft,
+    parts: &DraftSendParts,
+) -> Result<(), Error> {
+    if parts.image_groups.is_empty() || (parts.caption && draft.text.trim().is_empty()) {
+        return Err(Error::InvalidRequest("draft send parts"));
+    }
+    let attachment_ids: Vec<_> = parts.image_groups.iter().flatten().copied().collect();
+    if attachment_ids != draft.attachment_ids || parts.image_groups.iter().any(Vec::is_empty) {
+        return Err(Error::InvalidRequest("draft send parts"));
+    }
+    Ok(())
+}
+
+fn queue_split_draft_messages(
+    tx: &rusqlite::Transaction<'_>,
+    ctx: &Ctx,
+    draft: &ComposeDraft,
+    route: &GatewayRoute,
+    preset_command_id: Option<CommandId>,
+    parts: &DraftSendParts,
+) -> Result<QueuedSend, Error> {
+    let mut command_id = preset_command_id;
+    let mut queue_part = |body: String, attachment_ids: &[AttachmentId]| {
+        let queued = queue_message(
+            tx,
+            ctx,
+            OutgoingSms {
+                conversation_id: draft.conversation_id,
+                recipients: draft.recipients.clone(),
+                body,
+            },
+            route,
+            compose_references(tx, attachment_ids)?,
+            Transport::Mms,
+            None,
+            command_id.take(),
+        )?;
+        Ok::<_, Error>(queued)
+    };
+    let first = if parts.caption {
+        queue_part(draft.text.clone(), &[])?
+    } else {
+        queue_part(String::new(), &parts.image_groups[0])?
+    };
+    let groups = if parts.caption {
+        &parts.image_groups[..]
+    } else {
+        &parts.image_groups[1..]
+    };
+    for group in groups {
+        queue_part(String::new(), group)?;
+    }
+    Ok(first)
 }
 
 fn validate_outgoing(sms: &OutgoingSms, route: &GatewayRoute) -> Result<(), Error> {
@@ -5706,6 +5795,25 @@ CREATE TABLE IF NOT EXISTS draft_attachment_failures(
 CREATE TABLE IF NOT EXISTS draft_sync_meta(id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL DEFAULT '0', supported INTEGER NOT NULL DEFAULT 1, bootstrap_complete INTEGER NOT NULL DEFAULT 0);
 INSERT OR IGNORE INTO draft_sync_meta(id,cursor,supported) VALUES(1,'0',1);
 ";
+/// Version 46 -> 47: last accepted draft content for three-way draft merges.
+/// This is local SQLCipher state, with the same at-rest protection as compose drafts.
+const MIGRATION_47: &str = "
+CREATE TABLE IF NOT EXISTS draft_sync_merge_bases(
+  draft_id TEXT PRIMARY KEY, text TEXT NOT NULL, recipients TEXT NOT NULL,
+  attachment_ids TEXT NOT NULL, route TEXT
+);
+CREATE TABLE IF NOT EXISTS draft_sync_merge_fallbacks(
+  draft_id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, record BLOB NOT NULL
+);
+";
+fn apply_migration_47(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(MIGRATION_47)?;
+    add_column_if_missing(
+        conn,
+        "draft_sync",
+        "branch_closed INTEGER NOT NULL DEFAULT 0",
+    )
+}
 fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
         conn,
@@ -5886,6 +5994,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_44)?;
             apply_migration_45(&tx)?;
             tx.execute_batch(MIGRATION_46)?;
+            apply_migration_47(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5894,7 +6003,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=45)) => {
+        Some(version @ (4..=46)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -6017,6 +6126,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 45 {
                 tx.execute_batch(MIGRATION_46)?;
+            }
+            if version <= 46 {
+                apply_migration_47(&tx)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -9785,6 +9897,50 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
         assert_eq!((version, epoch), (SCHEMA_VERSION, 0));
+    }
+
+    #[test]
+    fn migration_47_adds_draft_branch_closed_for_fresh_and_upgraded_databases() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-47.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let fresh = Client::open(config.clone(), DatabaseKey::new(&[47; 32]).unwrap()).unwrap();
+        {
+            let store = fresh.lock().unwrap();
+            let exists: bool = store
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('draft_sync') WHERE name='branch_closed')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists);
+            store
+                .conn
+                .execute_batch("ALTER TABLE draft_sync DROP COLUMN branch_closed")
+                .unwrap();
+            store
+                .conn
+                .execute("UPDATE schema_meta SET version=46", [])
+                .unwrap();
+        }
+        drop(fresh);
+
+        let upgraded = Client::open(config, DatabaseKey::new(&[47; 32]).unwrap()).unwrap();
+        let store = upgraded.lock().unwrap();
+        let exists: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('draft_sync') WHERE name='branch_closed')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists);
     }
 
     #[test]

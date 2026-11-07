@@ -6,8 +6,8 @@
 
 use crate::{
     AttachmentId, AttachmentState, CipherObject, Client, CommandId, ComposeDraft, ConversationId,
-    DraftId, Error, GatewayRoute, PurposeKey, Store, VaultId, attachment_retention, attachment_row,
-    conversation_match, media,
+    DraftId, DraftSendParts, Error, GatewayRoute, PurposeKey, Store, VaultId, attachment_retention,
+    attachment_row, conversation_match, decode, media,
 };
 use peppy_crypto::{FileKey, decrypt, encrypt};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -29,6 +29,8 @@ struct SendIntentSnapshot {
     recipients: Vec<String>,
     attachment_ids: Vec<AttachmentId>,
     route: Option<GatewayRoute>,
+    #[serde(default)]
+    parts: Option<DraftSendParts>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +140,7 @@ pub enum DraftSyncState {
 pub enum DraftNotice {
     RestoredAfterExpiry,
     KeptAfterSent,
+    UpdatedFromOtherDevice,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftConflictVersion {
@@ -307,22 +310,40 @@ impl Client {
                 expires_at_ms,
                 ..
             } => {
+                let pending: Option<Vec<u8>> = store.conn.query_row(
+                    "SELECT pending_sealed_record FROM draft_sync WHERE draft_id=? AND pending_revision_id=?",
+                    params![draft_id.to_string(), revision_id.to_string()],
+                    |row| row.get(0),
+                ).optional()?;
+                if let Some(sealed) = pending {
+                    let record = open_record(&store, draft_id, revision_id, &sealed)?;
+                    store_merge_base(&store.conn, &record)?;
+                }
                 let local_revision: i64 = store.conn.query_row(
                     "SELECT local_revision FROM draft_sync_revisions WHERE draft_id=? AND revision_id=?",
                     params![draft_id.to_string(), revision_id.to_string()],
                     |row| row.get(0),
                 ).optional()?.ok_or(Error::Database)?;
                 store.conn.execute(
-                    "UPDATE draft_sync SET branch_id=?,accepted_revision_id=?,accepted_local_revision=?,pending_revision_id=CASE WHEN pending_revision_id=? THEN NULL ELSE pending_revision_id END,pending_sealed_record=CASE WHEN pending_revision_id=? THEN NULL ELSE pending_sealed_record END,pending_local_revision=CASE WHEN pending_revision_id=? THEN NULL ELSE pending_local_revision END,authored_dirty=CASE WHEN pending_revision_id=? THEN 0 ELSE authored_dirty END,expires_at_ms=?,resolves_json=CASE WHEN pending_revision_id=? THEN NULL ELSE resolves_json END,state=CASE WHEN pending_revision_id=? THEN 'synced' ELSE state END WHERE draft_id=? AND state!='retired' AND (accepted_local_revision IS NULL OR accepted_local_revision<=?)",
+                    "UPDATE draft_sync SET branch_id=?,branch_closed=0,accepted_revision_id=?,accepted_local_revision=?,pending_revision_id=CASE WHEN pending_revision_id=? THEN NULL ELSE pending_revision_id END,pending_sealed_record=CASE WHEN pending_revision_id=? THEN NULL ELSE pending_sealed_record END,pending_local_revision=CASE WHEN pending_revision_id=? THEN NULL ELSE pending_local_revision END,authored_dirty=CASE WHEN pending_revision_id=? THEN 0 ELSE authored_dirty END,expires_at_ms=?,resolves_json=CASE WHEN pending_revision_id=? THEN NULL ELSE resolves_json END,state=CASE WHEN pending_revision_id=? THEN 'synced' ELSE state END WHERE draft_id=? AND state!='retired' AND (accepted_local_revision IS NULL OR accepted_local_revision<=?)",
                     params![branch_id.to_string(), revision_id.to_string(), local_revision, revision_id.to_string(), revision_id.to_string(), revision_id.to_string(), revision_id.to_string(), expires_at_ms, revision_id.to_string(), revision_id.to_string(), draft_id.to_string(), local_revision],
+                )?;
+                store.conn.execute(
+                    "DELETE FROM draft_sync_merge_fallbacks WHERE draft_id=? AND NOT EXISTS(SELECT 1 FROM draft_sync WHERE draft_id=? AND pending_revision_id=?)",
+                    params![draft_id.to_string(), draft_id.to_string(), revision_id.to_string()],
                 )?;
             }
             DraftPushOutcome::Terminated(_) => {
                 unreachable!("handled before acquiring the store lock")
             }
-            DraftPushOutcome::BranchLimit
-            | DraftPushOutcome::AttachmentUnavailable
-            | DraftPushOutcome::Rejected => {
+            DraftPushOutcome::BranchLimit | DraftPushOutcome::Rejected => {
+                store.conn.execute(
+                    "UPDATE draft_sync SET state='failed' WHERE draft_id=? AND state!='retired'",
+                    [draft_id.to_string()],
+                )?;
+                promote_merge_fallback(&store.conn, draft_id)?;
+            }
+            DraftPushOutcome::AttachmentUnavailable => {
                 store.conn.execute(
                     "UPDATE draft_sync SET state='failed' WHERE draft_id=? AND state!='retired'",
                     [draft_id.to_string()],
@@ -384,6 +405,14 @@ impl Client {
             self.resurrect_expired_draft(draft_id)?;
         }
         let mut store = self.lock()?;
+        let merge_key = store.active_epoch.and_then(|epoch| {
+            store
+                .keys
+                .get(&epoch)
+                .and_then(|keys| keys.draft.clone())
+                .map(|key| (epoch, key))
+        });
+        let vault_id = store.config.vault_id;
         let tx = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -399,7 +428,15 @@ impl Client {
                     ..
                 } => {
                     let record = record.ok_or(Error::Database)?;
-                    apply_head(&tx, branch_id, expires_at_ms, attachment_ids, record)?;
+                    apply_head(
+                        &tx,
+                        branch_id,
+                        expires_at_ms,
+                        attachment_ids,
+                        record,
+                        vault_id,
+                        merge_key.as_ref(),
+                    )?;
                 }
                 RemoteDraftChange::BranchClosed {
                     draft_id,
@@ -408,6 +445,11 @@ impl Client {
                     remove_media_references(&tx, "conflict", &branch_id.to_string())?;
                     tx.execute(
                         "DELETE FROM draft_sync_conflicts WHERE remote_draft_id=? AND branch_id=?",
+                        params![draft_id.to_string(), branch_id.to_string()],
+                    )?;
+                    remove_pending_resolve(&tx, draft_id, branch_id)?;
+                    tx.execute(
+                        "UPDATE draft_sync SET branch_closed=1 WHERE draft_id=? AND branch_id=?",
                         params![draft_id.to_string(), branch_id.to_string()],
                     )?;
                 }
@@ -495,6 +537,7 @@ impl Client {
         &self,
         draft_id: DraftId,
         expected_revision: u64,
+        parts: Option<DraftSendParts>,
     ) -> Result<DraftSendGate, Error> {
         let store = self.lock()?;
         let existing: Option<(String, String)> = store
@@ -540,6 +583,9 @@ impl Client {
                 current_revision: draft.revision,
             });
         }
+        if let Some(parts) = parts.as_ref() {
+            crate::validate_draft_send_parts(&draft, parts)?;
+        }
         crate::compose_references(&store.conn, &draft.attachment_ids)?;
         let attachment_ids = draft.attachment_ids.clone();
         let snapshot = serde_json::to_vec(&SendIntentSnapshot {
@@ -548,6 +594,7 @@ impl Client {
             recipients: draft.recipients,
             attachment_ids: draft.attachment_ids,
             route: draft.route,
+            parts,
         })
         .map_err(|_| Error::Database)?;
         store.conn.execute(
@@ -589,17 +636,21 @@ impl Client {
     /// Replays the narrow crash window after a sent terminal commits but before its matching
     /// immutable intent has been queued. The command ID remains the queue idempotency key.
     fn recover_terminal_send_intents(&self) -> Result<(), Error> {
-        let intents: Vec<(String, String, i64)> = {
+        let intents: Vec<(String, String, i64, Vec<u8>)> = {
             let store = self.lock()?;
             store.conn.prepare(
-                "SELECT i.draft_id,i.command_id,i.expected_revision FROM draft_send_intents i JOIN draft_sync_terminals t ON t.draft_id=i.draft_id WHERE t.reason='sent' AND t.command_id=i.command_id AND i.queued=0",
-            )?.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<_, _>>()?
+                "SELECT i.draft_id,i.command_id,i.expected_revision,i.sealed_snapshot FROM draft_send_intents i JOIN draft_sync_terminals t ON t.draft_id=i.draft_id WHERE t.reason='sent' AND t.command_id=i.command_id AND i.queued=0",
+            )?.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?.collect::<Result<_, _>>()?
         };
-        for (draft_id, command_id, expected_revision) in intents {
-            self.send_compose_draft_accepted(
+        for (draft_id, command_id, expected_revision, snapshot) in intents {
+            let parts = serde_json::from_slice::<SendIntentSnapshot>(&snapshot)
+                .map_err(|_| Error::Database)?
+                .parts;
+            self.send_compose_draft_accepted_with_parts(
                 DraftId(parse_uuid(&draft_id)?),
                 u64::try_from(expected_revision).map_err(|_| Error::Database)?,
                 CommandId(parse_uuid(&command_id)?),
+                parts,
             )?;
         }
         Ok(())
@@ -610,6 +661,16 @@ impl Client {
         draft_id: DraftId,
         expected_revision: u64,
         command_id: CommandId,
+    ) -> Result<(), Error> {
+        self.send_compose_draft_accepted_with_parts(draft_id, expected_revision, command_id, None)
+    }
+
+    pub fn send_compose_draft_accepted_with_parts(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+        command_id: CommandId,
+        parts: Option<DraftSendParts>,
     ) -> Result<(), Error> {
         // Acceptance is durable before this call; existing send machinery remains the only code
         // path allowed to create a local command envelope.
@@ -649,14 +710,24 @@ impl Client {
         let draft = ComposeDraft {
             draft_id,
             conversation_id: snapshot.conversation_id,
-            text: snapshot.text,
-            recipients: snapshot.recipients,
-            attachment_ids: snapshot.attachment_ids,
-            route: snapshot.route,
+            text: snapshot.text.clone(),
+            recipients: snapshot.recipients.clone(),
+            attachment_ids: snapshot.attachment_ids.clone(),
+            route: snapshot.route.clone(),
             revision: expected_revision,
         };
+        if parts.is_some() && parts != snapshot.parts {
+            return Err(Error::Conflict);
+        }
+        let parts = snapshot.parts;
         drop(store);
-        self.send_compose_draft_snapshot(draft_id, expected_revision, command_id, draft)?;
+        self.send_compose_draft_snapshot(
+            draft_id,
+            expected_revision,
+            command_id,
+            draft,
+            parts.as_ref(),
+        )?;
         self.lock()?.conn.execute(
             "UPDATE draft_send_intents SET queued=1 WHERE draft_id=?",
             [draft_id.to_string()],
@@ -767,12 +838,12 @@ impl Client {
             Some(json_string(&resolves)?)
         };
         tx.execute(
-            "UPDATE draft_sync SET resolves_json=? WHERE draft_id=?",
+            "UPDATE draft_sync SET resolves_json=?,branch_closed=0 WHERE draft_id=?",
             params![resolves_json, draft_id.to_string()],
         )?;
         if let Some((branch_id, revision_id)) = identity_base {
             tx.execute(
-                "UPDATE draft_sync SET branch_id=?,accepted_revision_id=? WHERE draft_id=?",
+                "UPDATE draft_sync SET branch_id=?,branch_closed=0,accepted_revision_id=? WHERE draft_id=?",
                 params![
                     branch_id.to_string(),
                     revision_id.to_string(),
@@ -934,6 +1005,8 @@ fn apply_head(
     expires_at_ms: i64,
     attachment_ids: Vec<AttachmentId>,
     record: DraftRecordV1,
+    vault_id: VaultId,
+    merge_key: Option<&(u32, PurposeKey)>,
 ) -> Result<(), Error> {
     if attachment_ids != record_attachment_ids(&record) {
         return Err(Error::Crypto);
@@ -950,11 +1023,24 @@ fn apply_head(
             {
                 return acknowledge_echo(conn, &record, branch_id, expires_at_ms);
             }
-            if sync.branch_id.is_some() && sync.branch_id != Some(branch_id) {
+            if (sync.branch_id.is_some() && sync.branch_id != Some(branch_id)) || sync.dirty {
+                if let Some((epoch, key)) = merge_key
+                    && try_merge_head(
+                        conn,
+                        draft_id,
+                        branch_id,
+                        expires_at_ms,
+                        &record,
+                        vault_id,
+                        *epoch,
+                        key,
+                    )?
+                {
+                    return Ok(());
+                }
                 return store_conflict(conn, draft_id, branch_id, &record);
             }
-        }
-        if is_dirty(conn, draft_id)? {
+        } else if is_dirty(conn, draft_id)? {
             return store_conflict(conn, draft_id, branch_id, &record);
         }
         conn.execute(
@@ -1037,7 +1123,7 @@ fn mark_synced(
     expires_at_ms: i64,
 ) -> Result<(), Error> {
     conn.execute(
-        "INSERT INTO draft_sync(draft_id,branch_id,accepted_revision_id,authored_dirty,expires_at_ms,state) VALUES(?,?,?,0,?,'synced') ON CONFLICT(draft_id) DO UPDATE SET branch_id=excluded.branch_id,accepted_revision_id=excluded.accepted_revision_id,pending_revision_id=NULL,pending_sealed_record=NULL,authored_dirty=0,expires_at_ms=excluded.expires_at_ms,state='synced'",
+        "INSERT INTO draft_sync(draft_id,branch_id,accepted_revision_id,authored_dirty,expires_at_ms,state) VALUES(?,?,?,0,?,'synced') ON CONFLICT(draft_id) DO UPDATE SET branch_id=excluded.branch_id,branch_closed=0,accepted_revision_id=excluded.accepted_revision_id,pending_revision_id=NULL,pending_sealed_record=NULL,authored_dirty=0,expires_at_ms=excluded.expires_at_ms,state='synced'",
         params![
             record.draft_id.to_string(),
             branch_id.to_string(),
@@ -1045,6 +1131,7 @@ fn mark_synced(
             expires_at_ms
         ],
     )?;
+    store_merge_base(conn, record)?;
     Ok(())
 }
 
@@ -1056,9 +1143,10 @@ fn acknowledge_echo(
     expires_at_ms: i64,
 ) -> Result<(), Error> {
     conn.execute(
-        "UPDATE draft_sync SET branch_id=?,accepted_revision_id=?,expires_at_ms=?,state=CASE WHEN pending_revision_id IS NULL THEN 'synced' ELSE state END WHERE draft_id=?",
+        "UPDATE draft_sync SET branch_id=?,branch_closed=0,accepted_revision_id=?,expires_at_ms=?,state=CASE WHEN pending_revision_id IS NULL THEN 'synced' ELSE state END WHERE draft_id=?",
         params![branch_id.to_string(), record.revision_id.to_string(), expires_at_ms, record.draft_id.to_string()],
     )?;
+    store_merge_base(conn, record)?;
     Ok(())
 }
 
@@ -1074,6 +1162,7 @@ fn retire_blank_draft(conn: &Connection, draft_id: DraftId) -> Result<(), Error>
         "DELETE FROM draft_sync WHERE draft_id=? AND branch_id IS NULL",
         [draft_id.to_string()],
     )?;
+    clear_merge_state(conn, draft_id)?;
     Ok(())
 }
 
@@ -1083,6 +1172,7 @@ pub(crate) fn queue_discard_if_synced(conn: &Connection, draft_id: DraftId) -> R
         "UPDATE draft_sync SET discard_pending=1 WHERE draft_id=? AND branch_id IS NOT NULL",
         [draft_id.to_string()],
     )?;
+    clear_merge_state(conn, draft_id)?;
     Ok(())
 }
 
@@ -1099,6 +1189,7 @@ pub(crate) fn retire_sent_draft(
         "INSERT INTO draft_sync(draft_id,state,retired_revision,discard_pending) VALUES(?,'retired',?,?) ON CONFLICT(draft_id) DO UPDATE SET pending_revision_id=NULL,pending_sealed_record=NULL,pending_local_revision=NULL,authored_dirty=0,resolves_json=NULL,discard_pending=excluded.discard_pending,state='retired',retired_revision=excluded.retired_revision",
         params![draft_id.to_string(), revision_i64(cleared_revision)?, i64::from(queue_remote_discard)],
     )?;
+    clear_merge_state(conn, draft_id)?;
     Ok(())
 }
 
@@ -1163,22 +1254,26 @@ fn discard_pending(conn: &Connection, draft_id: DraftId) -> Result<bool, Error> 
 
 struct SyncRow {
     branch_id: Option<Uuid>,
+    branch_closed: bool,
     accepted_revision: Option<Uuid>,
     dirty: bool,
     state: String,
 }
 
+type SyncRowColumns = (Option<String>, i64, Option<String>, i64, String);
+
 fn sync_row(conn: &Connection, draft_id: DraftId) -> Result<Option<SyncRow>, Error> {
-    let row: Option<(Option<String>, Option<String>, i64, String)> = conn
+    let row: Option<SyncRowColumns> = conn
         .query_row(
-            "SELECT branch_id,accepted_revision_id,authored_dirty,state FROM draft_sync WHERE draft_id=?",
+            "SELECT branch_id,branch_closed,accepted_revision_id,authored_dirty,state FROM draft_sync WHERE draft_id=?",
             [draft_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()?;
-    row.map(|(branch, accepted, dirty, state)| {
+    row.map(|(branch, branch_closed, accepted, dirty, state)| {
         Ok(SyncRow {
             branch_id: parse_optional_uuid(branch)?,
+            branch_closed: branch_closed != 0,
             accepted_revision: parse_optional_uuid(accepted)?,
             dirty: dirty != 0,
             state,
@@ -1205,6 +1300,40 @@ fn conflicts(conn: &Connection, draft_id: DraftId) -> Result<Vec<(Uuid, DraftRec
         .collect()
 }
 
+fn pending_resolves(conn: &Connection, draft_id: DraftId) -> Result<Vec<Uuid>, Error> {
+    let resolves: Option<String> = conn
+        .query_row(
+            "SELECT resolves_json FROM draft_sync WHERE draft_id=?",
+            [draft_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    resolves
+        .map(|json| serde_json::from_str(&json).map_err(|_| Error::Database))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn remove_pending_resolve(
+    conn: &Connection,
+    draft_id: DraftId,
+    closed_branch_id: Uuid,
+) -> Result<(), Error> {
+    let mut resolves = pending_resolves(conn, draft_id)?;
+    resolves.retain(|branch_id| *branch_id != closed_branch_id);
+    conn.execute(
+        "UPDATE draft_sync SET resolves_json=? WHERE draft_id=?",
+        params![
+            (!resolves.is_empty())
+                .then(|| json_string(&resolves))
+                .transpose()?,
+            draft_id.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
 fn conflict_version(branch_id: Uuid, record: &DraftRecordV1) -> DraftConflictVersion {
     DraftConflictVersion {
         branch_id,
@@ -1223,6 +1352,230 @@ fn record_attachment_ids(record: &DraftRecordV1) -> Vec<AttachmentId> {
         .collect()
 }
 
+#[derive(Deserialize)]
+struct MergeBase {
+    text: String,
+    recipients: Vec<String>,
+    attachment_ids: Vec<AttachmentId>,
+    route: Option<GatewayRoute>,
+}
+
+fn store_merge_base(conn: &Connection, record: &DraftRecordV1) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO draft_sync_merge_bases(draft_id,text,recipients,attachment_ids,route) VALUES(?,?,?,?,?) ON CONFLICT(draft_id) DO UPDATE SET text=excluded.text,recipients=excluded.recipients,attachment_ids=excluded.attachment_ids,route=excluded.route",
+        params![
+            record.draft_id.to_string(),
+            record.text,
+            json_string(&record.recipients)?,
+            json_string(&record_attachment_ids(record))?,
+            route_json(&record.route)?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn merge_base(conn: &Connection, draft_id: DraftId) -> Result<Option<MergeBase>, Error> {
+    let row: Option<(String, String, String, Option<String>)> = conn
+        .query_row(
+            "SELECT text,recipients,attachment_ids,route FROM draft_sync_merge_bases WHERE draft_id=?",
+            [draft_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    row.map(|(text, recipients, attachment_ids, route)| {
+        Ok(MergeBase {
+            text,
+            recipients: serde_json::from_str(&recipients).map_err(|_| Error::Database)?,
+            attachment_ids: serde_json::from_str(&attachment_ids).map_err(|_| Error::Database)?,
+            route: route.map(|value| decode(value.as_bytes())).transpose()?,
+        })
+    })
+    .transpose()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_merge_head(
+    conn: &Connection,
+    draft_id: DraftId,
+    remote_branch_id: Uuid,
+    remote_expires_at_ms: i64,
+    remote: &DraftRecordV1,
+    vault_id: VaultId,
+    epoch: u32,
+    key: &PurposeKey,
+) -> Result<bool, Error> {
+    let Some(base) = merge_base(conn, draft_id)? else {
+        return Ok(false);
+    };
+    let local = crate::load_compose_draft(conn, "draft_id", &draft_id.to_string())?
+        .ok_or(Error::NotFound)?;
+    let remote_attachment_ids = record_attachment_ids(remote);
+    if base.recipients != local.recipients
+        || base.recipients != remote.recipients
+        || base.route != local.route
+        || base.route != remote.route
+        || base.attachment_ids != local.attachment_ids
+        || base.attachment_ids != remote_attachment_ids
+    {
+        return Ok(false);
+    }
+    let Some(text) = merge_text(&base.text, &local.text, &remote.text) else {
+        return Ok(false);
+    };
+    let next = ComposeDraft {
+        text,
+        revision: local.revision.checked_add(1).ok_or(Error::Database)?,
+        ..local
+    };
+    let effective_target = Some(remote_branch_id);
+    let mut resolves = pending_resolves(conn, draft_id)?;
+    resolves.extend(
+        conflicts(conn, draft_id)?
+            .into_iter()
+            .filter(|(branch_id, record)| {
+                record.draft_id == draft_id && effective_target != Some(*branch_id)
+            })
+            .map(|(branch_id, _)| branch_id),
+    );
+    if let Some(branch_id) = sync_row(conn, draft_id)?
+        .and_then(|sync| (!sync.branch_closed).then_some(sync.branch_id).flatten())
+        && effective_target != Some(branch_id)
+    {
+        resolves.push(branch_id);
+    }
+    resolves.sort_unstable();
+    resolves.dedup();
+    resolves.retain(|branch_id| effective_target != Some(*branch_id));
+    // The protocol permits at most three branch closures on one authored revision.
+    if resolves.len() > 3 {
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE compose_drafts SET text=?,revision=? WHERE draft_id=?",
+        params![
+            next.text,
+            revision_i64(next.revision)?,
+            draft_id.to_string()
+        ],
+    )?;
+    // The merged revision is authored on top of the incoming head, not the stale local base.
+    // This matches a fast-forward before sealing the next local revision.
+    conn.execute(
+        "UPDATE draft_sync SET branch_id=?,branch_closed=0,accepted_revision_id=?,expires_at_ms=? WHERE draft_id=?",
+        params![
+            remote_branch_id.to_string(),
+            remote.revision_id.to_string(),
+            remote_expires_at_ms,
+            draft_id.to_string()
+        ],
+    )?;
+    store_merge_base(conn, remote)?;
+    seal_pending(conn, &next, true, vault_id, epoch, key)?;
+    conn.execute(
+        "UPDATE draft_sync SET resolves_json=?,notice='updated-from-other-device' WHERE draft_id=?",
+        params![json_string(&resolves)?, draft_id.to_string()],
+    )?;
+    let encoded_remote = serde_json::to_vec(remote).map_err(|_| Error::Database)?;
+    conn.execute(
+        "INSERT INTO draft_sync_merge_fallbacks(draft_id,branch_id,record) VALUES(?,?,?) ON CONFLICT(draft_id) DO UPDATE SET branch_id=excluded.branch_id,record=excluded.record",
+        params![draft_id.to_string(), remote_branch_id.to_string(), encoded_remote],
+    )?;
+    Ok(true)
+}
+
+fn promote_merge_fallback(conn: &Connection, draft_id: DraftId) -> Result<(), Error> {
+    let fallback: Option<(String, Vec<u8>)> = conn
+        .query_row(
+            "SELECT branch_id,record FROM draft_sync_merge_fallbacks WHERE draft_id=?",
+            [draft_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((branch_id, record)) = fallback else {
+        return Ok(());
+    };
+    let branch_id = parse_uuid(&branch_id)?;
+    let record: DraftRecordV1 = serde_json::from_slice(&record).map_err(|_| Error::Database)?;
+    store_conflict(conn, draft_id, branch_id, &record)?;
+    conn.execute(
+        "DELETE FROM draft_sync_merge_fallbacks WHERE draft_id=?",
+        [draft_id.to_string()],
+    )?;
+    Ok(())
+}
+
+fn merge_text(base: &str, local: &str, remote: &str) -> Option<String> {
+    let local_change = text_change(base, local);
+    let remote_change = text_change(base, remote);
+    if local_change.0 == local_change.1 && local_change.2.is_empty()
+        || remote_change.0 == remote_change.1 && remote_change.2.is_empty()
+    {
+        return None;
+    }
+    // A full replacement has no stable insertion point to merge against. Keep it for explicit
+    // conflict resolution even when both peers happened to choose the same replacement.
+    if local_change.0 == 0
+        && local_change.1 == base.len()
+        && remote_change.0 == 0
+        && remote_change.1 == base.len()
+    {
+        return None;
+    }
+    if local_change == remote_change {
+        let mut merged = String::with_capacity(base.len() + local_change.2.len());
+        merged.push_str(base.get(..local_change.0)?);
+        merged.push_str(local_change.2);
+        merged.push_str(base.get(local_change.1..)?);
+        return Some(merged);
+    }
+    if local_change.1 >= remote_change.0 && remote_change.1 >= local_change.0 {
+        return None;
+    }
+    let (first, second) = if local_change.0 <= remote_change.0 {
+        (local_change, remote_change)
+    } else {
+        (remote_change, local_change)
+    };
+    let mut merged = String::with_capacity(base.len() + first.2.len() + second.2.len());
+    merged.push_str(base.get(..first.0)?);
+    merged.push_str(first.2);
+    merged.push_str(base.get(first.1..second.0)?);
+    merged.push_str(second.2);
+    merged.push_str(base.get(second.1..)?);
+    Some(merged)
+}
+
+fn text_change<'a>(base: &str, edited: &'a str) -> (usize, usize, &'a str) {
+    let prefix = base
+        .chars()
+        .zip(edited.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(character, _)| character.len_utf8())
+        .sum();
+    let suffix = base[prefix..]
+        .chars()
+        .rev()
+        .zip(edited[prefix..].chars().rev())
+        .take_while(|(left, right)| left == right)
+        .map(|(character, _)| character.len_utf8())
+        .sum::<usize>();
+    let base_end = base.len() - suffix;
+    let edited_end = edited.len() - suffix;
+    (prefix, base_end, &edited[prefix..edited_end])
+}
+
+fn clear_merge_state(conn: &Connection, draft_id: DraftId) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM draft_sync_merge_bases WHERE draft_id=?",
+        [draft_id.to_string()],
+    )?;
+    conn.execute(
+        "DELETE FROM draft_sync_merge_fallbacks WHERE draft_id=?",
+        [draft_id.to_string()],
+    )?;
+    Ok(())
+}
+
 fn parse_uuid(value: &str) -> Result<Uuid, Error> {
     Uuid::parse_str(value).map_err(|_| Error::Database)
 }
@@ -1239,6 +1592,7 @@ fn canonical_cursor(value: &str) -> bool {
 }
 
 fn remove_terminal_draft(conn: &Connection, draft_id: DraftId) -> Result<(), Error> {
+    clear_merge_state(conn, draft_id)?;
     let branches: Vec<String> = conn
         .prepare(
             "SELECT branch_id FROM draft_sync_conflicts WHERE draft_id=? OR remote_draft_id=?",
@@ -1570,6 +1924,7 @@ fn notice_from_code(code: &str) -> Option<DraftNotice> {
     match code {
         "restored-after-expiry" => Some(DraftNotice::RestoredAfterExpiry),
         "kept-after-sent" => Some(DraftNotice::KeptAfterSent),
+        "updated-from-other-device" => Some(DraftNotice::UpdatedFromOtherDevice),
         _ => None,
     }
 }
@@ -1787,4 +2142,22 @@ fn install_remote_attachments(conn: &Connection, record: &DraftRecordV1) -> Resu
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SendIntentSnapshot;
+
+    #[test]
+    fn legacy_send_intent_snapshot_defaults_to_single_part_send() {
+        let snapshot = serde_json::json!({
+            "conversation_id": uuid::Uuid::new_v4(),
+            "text": "caption",
+            "recipients": ["+15555550100"],
+            "attachment_ids": [],
+            "route": null,
+        });
+        let parsed: SendIntentSnapshot = serde_json::from_value(snapshot).unwrap();
+        assert!(parsed.parts.is_none());
+    }
 }

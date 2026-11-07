@@ -131,6 +131,420 @@ fn accepted_echo_preserves_a_later_pending_save() {
 }
 
 #[test]
+fn clean_device_fast_forwards_to_a_newer_head() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let sender = unlocked(&config(&dir, "sender", &vault), &vault);
+    let receiver = unlocked(&config(&dir, "receiver", &vault), &vault);
+    let saved = save_draft(&sender, "first", vec![ADDRESS.into()]);
+    let branch_id = uuid::Uuid::new_v4();
+    let first = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&first, branch_id)], "1")
+        .unwrap();
+    let saved = sender
+        .save_compose_draft(
+            saved.draft_id,
+            saved.revision,
+            ComposeDraftUpdate {
+                text: "second".into(),
+                recipients: vec![ADDRESS.into()],
+                attachment_ids: vec![],
+                route: None,
+            },
+        )
+        .unwrap();
+    let second = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&second, branch_id)], "2")
+        .unwrap();
+
+    assert_eq!(
+        receiver
+            .compose_draft(saved.draft_id)
+            .unwrap()
+            .unwrap()
+            .text,
+        "second"
+    );
+}
+
+#[test]
+fn disjoint_caption_edits_are_merged_and_queued() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let sender = unlocked(&config(&dir, "sender", &vault), &vault);
+    let receiver = unlocked(&config(&dir, "receiver", &vault), &vault);
+    let initial = save_draft(&sender, "hello world", vec![ADDRESS.into()]);
+    let branch_id = uuid::Uuid::new_v4();
+    let first = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&first, branch_id)], "1")
+        .unwrap();
+    let local = receiver.compose_draft(initial.draft_id).unwrap().unwrap();
+    receiver
+        .save_compose_draft(
+            local.draft_id,
+            local.revision,
+            ComposeDraftUpdate {
+                text: "hi world".into(),
+                recipients: local.recipients.clone(),
+                attachment_ids: local.attachment_ids.clone(),
+                route: local.route.clone(),
+            },
+        )
+        .unwrap();
+    sender
+        .save_compose_draft(
+            initial.draft_id,
+            initial.revision,
+            ComposeDraftUpdate {
+                text: "hello earth".into(),
+                recipients: vec![ADDRESS.into()],
+                attachment_ids: vec![],
+                route: None,
+            },
+        )
+        .unwrap();
+    let remote = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&remote, branch_id)], "2")
+        .unwrap();
+
+    assert_eq!(
+        receiver
+            .compose_draft(initial.draft_id)
+            .unwrap()
+            .unwrap()
+            .text,
+        "hi earth"
+    );
+    let push = receiver.pending_draft_pushes().unwrap().remove(0);
+    assert_eq!(push.base_revision_id, Some(remote.revision_id));
+    assert!(push.resolves_branch_ids.is_empty());
+    assert_eq!(
+        receiver.draft_sync_status(initial.draft_id).unwrap().notice,
+        Some(DraftNotice::UpdatedFromOtherDevice)
+    );
+}
+
+#[test]
+fn auto_merge_rebases_on_an_incoming_distinct_branch_and_closes_only_the_old_branch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let sender = unlocked(&config(&dir, "sender", &vault), &vault);
+    let receiver = unlocked(&config(&dir, "receiver", &vault), &vault);
+    let initial = save_draft(&sender, "hello world", vec![ADDRESS.into()]);
+    let branch_a = uuid::Uuid::new_v4();
+    let first = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&first, branch_a)], "1")
+        .unwrap();
+    let local = receiver.compose_draft(initial.draft_id).unwrap().unwrap();
+    receiver
+        .save_compose_draft(
+            local.draft_id,
+            local.revision,
+            ComposeDraftUpdate {
+                text: "hi world".into(),
+                recipients: local.recipients.clone(),
+                attachment_ids: local.attachment_ids.clone(),
+                route: local.route.clone(),
+            },
+        )
+        .unwrap();
+    sender
+        .save_compose_draft(
+            initial.draft_id,
+            initial.revision,
+            ComposeDraftUpdate {
+                text: "hello earth".into(),
+                recipients: vec![ADDRESS.into()],
+                attachment_ids: vec![],
+                route: None,
+            },
+        )
+        .unwrap();
+    let remote = sender.pending_draft_pushes().unwrap().remove(0);
+    let branch_b = uuid::Uuid::new_v4();
+    receiver
+        .apply_draft_changes(vec![remote_head(&remote, branch_b)], "2")
+        .unwrap();
+
+    let push = receiver.pending_draft_pushes().unwrap().remove(0);
+    assert_eq!(push.base_revision_id, Some(remote.revision_id));
+    assert_eq!(push.resolves_branch_ids, vec![branch_a]);
+    let sender_draft = sender.compose_draft(initial.draft_id).unwrap().unwrap();
+    sender
+        .save_compose_draft(
+            sender_draft.draft_id,
+            sender_draft.revision,
+            ComposeDraftUpdate {
+                text: "hello mars".into(),
+                recipients: sender_draft.recipients.clone(),
+                attachment_ids: sender_draft.attachment_ids.clone(),
+                route: sender_draft.route.clone(),
+            },
+        )
+        .unwrap();
+    let second_remote = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&second_remote, branch_b)], "3")
+        .unwrap();
+
+    let push = receiver.pending_draft_pushes().unwrap().remove(0);
+    assert_eq!(push.base_revision_id, Some(second_remote.revision_id));
+    assert_eq!(push.resolves_branch_ids, vec![branch_a]);
+}
+
+#[test]
+fn auto_merge_does_not_close_a_tracked_branch_already_closed_remotely() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let sender = unlocked(&config(&dir, "sender", &vault), &vault);
+    let saved = save_draft(&client, "hello world", vec![ADDRESS.into()]);
+    let initial = client.pending_draft_pushes().unwrap().remove(0);
+    let branch_a = uuid::Uuid::new_v4();
+    accept_push(&client, &initial, branch_a);
+    sender
+        .apply_draft_changes(vec![remote_head(&initial, branch_a)], "1")
+        .unwrap();
+    let local = client.compose_draft(saved.draft_id).unwrap().unwrap();
+    client
+        .save_compose_draft(
+            local.draft_id,
+            local.revision,
+            ComposeDraftUpdate {
+                text: "hi world".into(),
+                recipients: local.recipients.clone(),
+                attachment_ids: local.attachment_ids.clone(),
+                route: local.route.clone(),
+            },
+        )
+        .unwrap();
+    let remote = sender.compose_draft(saved.draft_id).unwrap().unwrap();
+    sender
+        .save_compose_draft(
+            remote.draft_id,
+            remote.revision,
+            ComposeDraftUpdate {
+                text: "hello earth".into(),
+                recipients: remote.recipients.clone(),
+                attachment_ids: remote.attachment_ids.clone(),
+                route: remote.route.clone(),
+            },
+        )
+        .unwrap();
+    let remote_push = sender.pending_draft_pushes().unwrap().remove(0);
+    client
+        .apply_draft_changes(
+            vec![RemoteDraftChange::BranchClosed {
+                draft_id: saved.draft_id,
+                branch_id: branch_a,
+            }],
+            "2",
+        )
+        .unwrap();
+    client
+        .apply_draft_changes(vec![remote_head(&remote_push, uuid::Uuid::new_v4())], "3")
+        .unwrap();
+
+    assert_eq!(
+        client.compose_draft(saved.draft_id).unwrap().unwrap().text,
+        "hi earth"
+    );
+    let outgoing = client.pending_draft_pushes().unwrap().remove(0);
+    assert_eq!(outgoing.base_revision_id, Some(remote_push.revision_id));
+    assert!(!outgoing.resolves_branch_ids.contains(&branch_a));
+}
+
+#[test]
+fn closed_tracked_branch_still_requires_remote_send_arbitration() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let saved = save_draft(&client, "remote", vec![ADDRESS.into()]);
+    let push = client.pending_draft_pushes().unwrap().remove(0);
+    let branch_id = uuid::Uuid::new_v4();
+    accept_push(&client, &push, branch_id);
+    client
+        .apply_draft_changes(
+            vec![RemoteDraftChange::BranchClosed {
+                draft_id: saved.draft_id,
+                branch_id,
+            }],
+            "1",
+        )
+        .unwrap();
+
+    assert!(
+        client
+            .begin_draft_send(saved.draft_id, saved.revision, None)
+            .unwrap()
+            .remote
+            .is_some()
+    );
+}
+
+#[test]
+fn closed_tracked_branch_still_queues_a_remote_discard() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let draft = client.recipientless_compose_draft().unwrap();
+    let saved = client
+        .save_compose_draft(
+            draft.draft_id,
+            draft.revision,
+            ComposeDraftUpdate::default(),
+        )
+        .unwrap();
+    let push = client.pending_draft_pushes().unwrap().remove(0);
+    let branch_id = uuid::Uuid::new_v4();
+    accept_push(&client, &push, branch_id);
+    client
+        .apply_draft_changes(
+            vec![RemoteDraftChange::BranchClosed {
+                draft_id: saved.draft_id,
+                branch_id,
+            }],
+            "1",
+        )
+        .unwrap();
+
+    client
+        .discard_compose_draft(saved.draft_id, saved.revision)
+        .unwrap();
+    assert_eq!(
+        client.pending_draft_discards().unwrap(),
+        vec![saved.draft_id]
+    );
+}
+
+#[test]
+fn caption_merge_rejects_touching_changes_and_deduplicates_identical_insertions() {
+    for (base, local_text, remote_text, expected) in [
+        ("ab", "aX", "aYb", None),
+        ("ab", "aYb", "aX", None),
+        ("abcd", "aXcd", "abYd", None),
+        ("a🦀b", "aXb", "a🦀Yb", None),
+        ("ab", "aXb", "aXb", Some("aXb")),
+    ] {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = Vault::new();
+        let sender = unlocked(&config(&dir, "sender", &vault), &vault);
+        let receiver = unlocked(&config(&dir, "receiver", &vault), &vault);
+        let initial = save_draft(&sender, base, vec![ADDRESS.into()]);
+        let branch_id = uuid::Uuid::new_v4();
+        let first = sender.pending_draft_pushes().unwrap().remove(0);
+        receiver
+            .apply_draft_changes(vec![remote_head(&first, branch_id)], "1")
+            .unwrap();
+        let local = receiver.compose_draft(initial.draft_id).unwrap().unwrap();
+        receiver
+            .save_compose_draft(
+                local.draft_id,
+                local.revision,
+                ComposeDraftUpdate {
+                    text: local_text.into(),
+                    recipients: local.recipients.clone(),
+                    attachment_ids: local.attachment_ids.clone(),
+                    route: local.route.clone(),
+                },
+            )
+            .unwrap();
+        sender
+            .save_compose_draft(
+                initial.draft_id,
+                initial.revision,
+                ComposeDraftUpdate {
+                    text: remote_text.into(),
+                    recipients: vec![ADDRESS.into()],
+                    attachment_ids: vec![],
+                    route: None,
+                },
+            )
+            .unwrap();
+        let remote = sender.pending_draft_pushes().unwrap().remove(0);
+        receiver
+            .apply_draft_changes(vec![remote_head(&remote, branch_id)], "2")
+            .unwrap();
+
+        match expected {
+            Some(text) => assert_eq!(
+                receiver
+                    .compose_draft(initial.draft_id)
+                    .unwrap()
+                    .unwrap()
+                    .text,
+                text
+            ),
+            None => assert_eq!(
+                receiver
+                    .draft_sync_status(initial.draft_id)
+                    .unwrap()
+                    .conflicts
+                    .len(),
+                1
+            ),
+        }
+    }
+}
+
+#[test]
+fn overlapping_caption_edits_remain_a_conflict() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let sender = unlocked(&config(&dir, "sender", &vault), &vault);
+    let receiver = unlocked(&config(&dir, "receiver", &vault), &vault);
+    let initial = save_draft(&sender, "hello", vec![ADDRESS.into()]);
+    let branch_id = uuid::Uuid::new_v4();
+    let first = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&first, branch_id)], "1")
+        .unwrap();
+    let local = receiver.compose_draft(initial.draft_id).unwrap().unwrap();
+    receiver
+        .save_compose_draft(
+            local.draft_id,
+            local.revision,
+            ComposeDraftUpdate {
+                text: "hullo".into(),
+                recipients: local.recipients.clone(),
+                attachment_ids: vec![],
+                route: None,
+            },
+        )
+        .unwrap();
+    sender
+        .save_compose_draft(
+            initial.draft_id,
+            initial.revision,
+            ComposeDraftUpdate {
+                text: "hallo".into(),
+                recipients: vec![ADDRESS.into()],
+                attachment_ids: vec![],
+                route: None,
+            },
+        )
+        .unwrap();
+    let remote = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&remote, branch_id)], "2")
+        .unwrap();
+
+    assert_eq!(
+        receiver
+            .draft_sync_status(initial.draft_id)
+            .unwrap()
+            .conflicts
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn clean_remote_head_adopts_into_matching_conversation() {
     let dir = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
@@ -408,7 +822,7 @@ fn downloaded_synced_draft_queues_one_mms_after_verified_install() {
     assert_eq!(received.route, Some(route(&sender_config)));
     assert!(
         receiver
-            .begin_draft_send(saved.draft_id, received.revision)
+            .begin_draft_send(saved.draft_id, received.revision, None)
             .is_err()
     );
     assert!(receiver.pending_outbox().unwrap().is_empty());
@@ -445,7 +859,7 @@ fn downloaded_synced_draft_queues_one_mms_after_verified_install() {
     let route_push = receiver.pending_draft_pushes().unwrap().remove(0);
     accept_push(&receiver, &route_push, uuid::Uuid::new_v4());
     let send = receiver
-        .begin_draft_send(saved.draft_id, routed.revision)
+        .begin_draft_send(saved.draft_id, routed.revision, None)
         .unwrap()
         .remote
         .unwrap();
@@ -929,7 +1343,7 @@ fn abort_draft_send_intent_requires_the_matching_unqueued_command() {
         )
         .unwrap();
     let command = client
-        .begin_draft_send(saved.draft_id, saved.revision)
+        .begin_draft_send(saved.draft_id, saved.revision, None)
         .unwrap()
         .remote
         .unwrap()
@@ -940,7 +1354,7 @@ fn abort_draft_send_intent_requires_the_matching_unqueued_command() {
         .unwrap();
     assert_eq!(
         client
-            .begin_draft_send(saved.draft_id, saved.revision)
+            .begin_draft_send(saved.draft_id, saved.revision, None)
             .unwrap()
             .remote
             .unwrap()
@@ -952,7 +1366,7 @@ fn abort_draft_send_intent_requires_the_matching_unqueued_command() {
         .unwrap();
     assert_ne!(
         client
-            .begin_draft_send(saved.draft_id, saved.revision)
+            .begin_draft_send(saved.draft_id, saved.revision, None)
             .unwrap()
             .remote
             .unwrap()
@@ -1097,7 +1511,7 @@ fn matching_sent_terminal_recovers_one_snapshot_command_after_empty_apply() {
     let push = client.pending_draft_pushes().unwrap().remove(0);
     accept_push(&client, &push, uuid::Uuid::new_v4());
     let remote = client
-        .begin_draft_send(saved.draft_id, saved.revision)
+        .begin_draft_send(saved.draft_id, saved.revision, None)
         .unwrap()
         .remote
         .unwrap();
@@ -1134,11 +1548,11 @@ fn send_intent_keeps_r1_snapshot_after_r2_edit_and_rejects_stale_cas() {
     let push = client.pending_draft_pushes().unwrap().remove(0);
     accept_push(&client, &push, uuid::Uuid::new_v4());
     assert!(matches!(
-        client.begin_draft_send(saved.draft_id, saved.revision + 1),
+        client.begin_draft_send(saved.draft_id, saved.revision + 1, None),
         Err(Error::StaleDraft { .. })
     ));
     let remote = client
-        .begin_draft_send(saved.draft_id, saved.revision)
+        .begin_draft_send(saved.draft_id, saved.revision, None)
         .unwrap()
         .remote
         .unwrap();
@@ -1156,7 +1570,7 @@ fn send_intent_keeps_r1_snapshot_after_r2_edit_and_rejects_stale_cas() {
         .unwrap();
     assert_eq!(
         client
-            .begin_draft_send(saved.draft_id, edited.revision)
+            .begin_draft_send(saved.draft_id, edited.revision, None)
             .unwrap()
             .remote
             .unwrap(),
@@ -1222,7 +1636,7 @@ fn unsupported_sync_uses_legacy_only_for_never_synced_drafts() {
     let local = save_draft(&client, "local", vec![ADDRESS.into()]);
     assert!(
         client
-            .begin_draft_send(local.draft_id, local.revision)
+            .begin_draft_send(local.draft_id, local.revision, None)
             .unwrap()
             .remote
             .is_none()
@@ -1239,7 +1653,7 @@ fn unsupported_sync_uses_legacy_only_for_never_synced_drafts() {
     client.set_draft_sync_supported(false).unwrap();
     assert!(
         client
-            .begin_draft_send(synced.draft_id, synced.revision)
+            .begin_draft_send(synced.draft_id, synced.revision, None)
             .unwrap()
             .remote
             .is_some()
@@ -1271,7 +1685,7 @@ fn intent_reference_prevents_attachment_cleanup_until_abort_and_discard() {
     let push = client.pending_draft_pushes().unwrap().remove(0);
     accept_push(&client, &push, uuid::Uuid::new_v4());
     let command = client
-        .begin_draft_send(saved.draft_id, saved.revision)
+        .begin_draft_send(saved.draft_id, saved.revision, None)
         .unwrap()
         .remote
         .unwrap()

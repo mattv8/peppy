@@ -967,6 +967,103 @@ describe("DraftStore authoritative coordination", () => {
     expect(outcome).toEqual({ ok: false, error: "A stored draft conflicts with local edits. Review both versions before saving." });
     expect(outcome).not.toHaveProperty("reviewRequired");
   });
+
+  it("coalesces rapid edits behind one in-flight save and settles every caller", async () => {
+    let releaseFirst!: (saved: Draft) => void;
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      if (writes.length === 1) return new Promise(resolve => { releaseFirst = resolve; });
+      return draft({ ...input, revision: String(writes.length + 1) });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "" }));
+
+    const first = store.edit("conversation-one", { text: "first" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    const rapidEdits = [
+      store.edit("conversation-one", { text: "second" }),
+      store.edit("conversation-one", { text: "third" }),
+      store.edit("conversation-one", { text: "latest" }),
+    ];
+    releaseFirst(draft({ ...writes[0], revision: "2" }));
+
+    await expect(Promise.all([first, ...rapidEdits])).resolves.toEqual([{ ok: true }, { ok: true }, { ok: true }, { ok: true }]);
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).toMatchObject({ text: "latest", expectedRevision: "2" });
+  });
+
+  it("coalesces two edits made in the same tick", async () => {
+    let releaseFirst!: (saved: Draft) => void;
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      if (writes.length === 1) return new Promise(resolve => { releaseFirst = resolve; });
+      return draft({ ...input, revision: "3" });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "" }));
+
+    const first = store.edit("conversation-one", { text: "first" });
+    const second = store.edit("conversation-one", { text: "second" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toMatchObject({ text: "second" });
+    releaseFirst(draft({ ...writes[0], revision: "2" }));
+
+    await expect(Promise.all([first, second])).resolves.toEqual([{ ok: true }, { ok: true }]);
+    expect(writes).toHaveLength(1);
+  });
+
+  it("fails all coalesced callers without retrying after their pending save fails", async () => {
+    let releaseFirst!: (saved: Draft) => void;
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      if (writes.length === 1) return new Promise(resolve => { releaseFirst = resolve; });
+      if (writes.length === 2) throw { code: "io", message: "disk full" };
+      return draft({ ...input, revision: String(writes.length + 1) });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "" }));
+
+    const first = store.edit("conversation-one", { text: "first" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    const rapidEdits = [
+      store.edit("conversation-one", { text: "second" }),
+      store.edit("conversation-one", { text: "latest" }),
+    ];
+    releaseFirst(draft({ ...writes[0], revision: "2" }));
+
+    await expect(first).resolves.toEqual({ ok: true });
+    await expect(Promise.all(rapidEdits)).resolves.toEqual([
+      { ok: false, error: "disk full" },
+      { ok: false, error: "disk full" },
+    ]);
+    expect(writes).toHaveLength(2);
+  });
+
+  it("flush waits for the latest coalesced content", async () => {
+    const releases: Array<(saved: Draft) => void> = [];
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      return new Promise(resolve => { releases.push(resolve); });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "" }));
+
+    void store.edit("conversation-one", { text: "first" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    void store.edit("conversation-one", { text: "latest" });
+    const flushing = store.flush("conversation-one");
+    releases[0](draft({ ...writes[0], revision: "2" }));
+    await vi.waitFor(() => expect(writes).toHaveLength(2));
+    let flushed = false;
+    void flushing.then(() => { flushed = true; });
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+    releases[1](draft({ ...writes[1], revision: "3" }));
+
+    await expect(flushing).resolves.toEqual({ ok: true });
+    expect(writes[1]).toMatchObject({ text: "latest", expectedRevision: "2" });
+  });
+
 });
 
 describe("DraftStore stale-send review reconciliation", () => {

@@ -46,6 +46,7 @@ class MmsCallbacksTest : GatewayTestBase() {
 
 
     private fun pdu(id: String) = File(context.filesDir, "mms-pdu/$id.pdu")
+    private fun fit(id: String) = File(context.noBackupFilesDir, "mms-fit/$id")
     private fun callback(id: String) = Intent(MmsStatusReceiver.ACTION).setData(android.net.Uri.parse("peppy-mms://callback/$id"))
     private fun pendingResult(code: Int) = android.content.BroadcastReceiver.PendingResult::class.java.declaredConstructors
         .single { it.parameterCount == 9 }.let { constructor ->
@@ -62,7 +63,7 @@ class MmsCallbacksTest : GatewayTestBase() {
     @Test
     fun pendingAndUnknownAttemptsAgeAfterSevenDaysButOwedEvidenceDoesNot() {
         var now = 1_000_000L
-        val store = MmsCallbackStore(context) { now }
+        val store = MmsCallbackStore(context, now = { now })
         val pending = UUID.randomUUID().toString()
         val unknown = UUID.randomUUID().toString()
         val owed = UUID.randomUUID().toString()
@@ -112,13 +113,43 @@ class MmsCallbacksTest : GatewayTestBase() {
         val store = MmsCallbackStore(context)
         assertTrue(store.register(command))
         pdu(command).parentFile!!.mkdirs(); pdu(command).writeText("private plaintext pdu")
+        fit(command).mkdirs(); File(fit(command), "fit.jpg").writeText("private fitted image")
 
         assertTrue(store.record(command, NativeSendResult.SENT))
         assertTrue(MmsCallbackReconciler.apply(client, store, command, NativeSendResult.SENT))
 
         assertEquals("Sent", client.beginSendAttempt(command).existingSendState)
         assertFalse("confirmed core acceptance releases the PDU", pdu(command).exists())
+        assertFalse("confirmed core acceptance releases fitted plaintext", fit(command).exists())
         assertTrue(store.owed().isEmpty())
+    }
+
+    @Test
+    fun cleanupDeletesOnlyFitDirectoriesWithoutPendingOrInflightCommands() {
+        val orphan = UUID.randomUUID().toString()
+        val pending = UUID.randomUUID().toString()
+        fit(orphan).mkdirs(); File(fit(orphan), "fit.jpg").writeText("orphan plaintext")
+        fit(pending).mkdirs(); File(fit(pending), "fit.jpg").writeText("pending plaintext")
+        val store = MmsCallbackStore(context, pendingCommandIds = { setOf(pending) })
+
+        store.cleanup()
+
+        assertFalse(fit(orphan).exists())
+        assertTrue(fit(pending).exists())
+    }
+
+    @Test
+    fun orphanSweepFiltersProtectedDirectoriesBeforeItsBoundedLimit() {
+        val protected = (1..64).map { UUID.randomUUID().toString() }
+        val orphan = UUID.randomUUID().toString()
+        protected.forEach { id -> fit(id).mkdirs() }
+        fit(orphan).mkdirs()
+        val store = MmsCallbackStore(context, pendingCommandIds = { protected.toSet() })
+
+        store.cleanup()
+
+        assertFalse("eligible orphan is not starved behind protected directories", fit(orphan).exists())
+        assertTrue(fit(protected.first()).exists())
     }
 
     @Test

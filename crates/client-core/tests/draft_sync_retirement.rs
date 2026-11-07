@@ -299,7 +299,7 @@ fn accepted_remote_send_retires_locally_without_queuing_a_remote_discard() {
     let push = client.pending_draft_pushes().unwrap().remove(0);
     accept_push(&client, &push, uuid::Uuid::new_v4());
     let gate = client
-        .begin_draft_send(saved.draft_id, saved.revision)
+        .begin_draft_send(saved.draft_id, saved.revision, None)
         .unwrap();
     let remote = gate.remote.unwrap();
 

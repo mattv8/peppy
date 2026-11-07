@@ -708,16 +708,31 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mms-limit {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  margin: 0;
-  color: var(--peppy-text-secondary);
-  font-size: 11px;
+.mms-size-header-detail { display: inline-flex; align-items: center; gap: 4px; color: var(--peppy-text-secondary); }
+.mms-size-header-detail[data-mms-size-tone="warning"] { color: var(--peppy-warning-text); }
+.mms-size-header-detail[data-mms-size-tone="error"] { color: var(--peppy-error-text); }
+#mms-size-info-button { display: inline-grid; width: 28px; height: 28px; margin-block: -6px; padding: 0; place-items: center; color: inherit; }
+#mms-size-info-button,
+#draft-expiry-info-button,
+#draft-sync-status [data-draft-sync-notice] button { border: 0; border-radius: var(--peppy-radius-sm, 4px); background: transparent; }
+#mms-size-info-button:hover,
+#draft-expiry-info-button:hover,
+#draft-sync-status [data-draft-sync-notice] button:hover { background: var(--peppy-surface-hover); }
+#mms-size-info-button:focus-visible,
+#draft-expiry-info-button:focus-visible,
+#draft-sync-status [data-draft-sync-notice] button:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+#draft-sync-status [data-draft-sync-notice] button { display: inline-grid; place-items: center; padding: 0; color: var(--peppy-text-secondary); vertical-align: middle; }
+#mms-size-info-body { display: grid; gap: 8px; margin: 0; }
+#mms-size-info-body div { display: flex; gap: 4px; }
+#mms-size-info-body dd { margin: 0; }
+@media (pointer: coarse) {
+  #mms-size-info-button { min-width: 48px; min-height: 48px; margin-block: -16px; }
 }
-.mms-limit div { display: flex; gap: 4px; }
-.mms-limit dd { margin: 0; }
+@media (forced-colors: active) {
+  #mms-size-info-button,
+  #draft-expiry-info-button,
+  #draft-sync-status [data-draft-sync-notice] button { border: 1px solid ButtonText; color: ButtonText; }
+}
 .file-card {
   display: flex;
   flex-wrap: wrap;

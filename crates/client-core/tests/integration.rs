@@ -24,6 +24,7 @@ mod conversation_tones;
 mod deferred_media;
 mod device_succession;
 mod draft_policy;
+mod draft_send_parts;
 mod draft_sync;
 mod draft_sync_races;
 mod draft_sync_retirement;

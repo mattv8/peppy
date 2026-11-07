@@ -17,6 +17,7 @@ pub mod avatar;
 pub mod compose;
 pub mod gateways;
 pub mod images;
+pub mod mms_plan;
 pub mod notification_activation;
 pub use notification_activation::*;
 pub mod search;
@@ -437,6 +438,8 @@ pub struct SendResultView {
     /// Stored draft revision after the send (the cleared draft), for the next CAS save.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parts: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -794,6 +797,7 @@ pub fn draft_view_with_sync(client: &Client, draft: &ComposeDraft) -> Result<Dra
         notice: status.notice.map(|notice| match notice {
             peppy_client_core::DraftNotice::RestoredAfterExpiry => "restored-after-expiry",
             peppy_client_core::DraftNotice::KeptAfterSent => "kept-after-sent",
+            peppy_client_core::DraftNotice::UpdatedFromOtherDevice => "updated-from-other-device",
         }),
         send_requires_connection: status.send_requires_connection,
     });

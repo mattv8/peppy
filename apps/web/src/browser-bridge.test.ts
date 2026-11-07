@@ -60,6 +60,29 @@ describe("BrowserBridge", () => {
     await expect(state).resolves.toEqual({ mode: "browser" });
   });
 
+  it("flushes pending draft sync when the page hides or unloads, then removes lifecycle listeners", () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const visibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(port.sent).toContainEqual({ id: 1, command: "flush_draft_sync", args: {} });
+
+      window.dispatchEvent(new PageTransitionEvent("pagehide"));
+      expect(port.sent).toContainEqual({ id: 2, command: "flush_draft_sync", args: {} });
+
+      bridge.dispose();
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new PageTransitionEvent("pagehide"));
+      expect(port.sent).toHaveLength(3);
+    } finally {
+      if (visibility) Object.defineProperty(document, "visibilityState", visibility);
+      else delete (document as { visibilityState?: unknown }).visibilityState;
+    }
+  });
+
   it("forwards conversation pin mutations with the canonical arguments", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

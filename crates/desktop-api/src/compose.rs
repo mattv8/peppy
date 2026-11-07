@@ -1,8 +1,11 @@
 //! Shared local draft composition policy for native and browser hosts.
-use crate::{DraftView, GatewayAvailability, GatewayView, SendResultView, draft_view};
+use crate::{
+    DraftView, GatewayAvailability, GatewayView, SendResultView, draft_view,
+    mms_plan::{MmsImage, MmsPlan, MmsPlanError, plan_mms},
+};
 use peppy_client_core::{
     AttachmentId, Client, CommandId, ComposeDraft, ComposeDraftUpdate, ConversationId, DeviceId,
-    Direction, DraftId, Error as CoreError, GatewayRoute, Message, Transport,
+    Direction, DraftId, DraftSendParts, Error as CoreError, GatewayRoute, Message, Transport,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -55,7 +58,7 @@ pub struct DiscardDraftInput {
 pub enum ComposeError {
     Ui {
         code: &'static str,
-        message: &'static str,
+        message: String,
     },
     Core(CoreError),
     AfterRoute {
@@ -65,7 +68,10 @@ pub enum ComposeError {
 }
 
 fn ui(code: &'static str, message: &'static str) -> ComposeError {
-    ComposeError::Ui { code, message }
+    ComposeError::Ui {
+        code,
+        message: message.to_owned(),
+    }
 }
 fn revision(value: &str) -> Result<u64, ComposeError> {
     value
@@ -303,7 +309,7 @@ pub fn send_draft(
     gateways: Option<&[GatewayView]>,
 ) -> Result<SendResultView, ComposeError> {
     let prepared = prepare_draft_send(client, input, gateways)?;
-    queue_prepared_draft_send(client, &prepared, None)
+    queue_prepared_draft_send(client, &prepared, gateways, None)
 }
 
 /// Runs the same local composition policy as `send_draft`, then queues the command ID already
@@ -315,7 +321,7 @@ pub fn send_draft_accepted(
     command_id: CommandId,
 ) -> Result<SendResultView, ComposeError> {
     let prepared = immutable_prepared_draft_send(client, input, gateways)?;
-    queue_prepared_draft_send(client, &prepared, Some(command_id))
+    queue_prepared_draft_send(client, &prepared, gateways, Some(command_id))
 }
 
 /// Validates a stored draft and persists canonical route/recipient fields before a host creates
@@ -433,28 +439,35 @@ pub fn prepare_draft_send(
                 "This MMS phone route does not support that many recipients; the draft was kept.",
             ));
         }
-        let bytes = attachment_info
+        let images = attachment_info
             .iter()
-            .try_fold(0u64, |total, info| {
-                total.checked_add(info.plaintext_bytes).ok_or_else(|| {
-                    ui(
-                        "mms-too-large",
-                        "The MMS is too large to send; the draft was kept.",
-                    )
-                })
-            })?
-            .checked_add(stored.text.len() as u64)
-            .ok_or_else(|| {
-                ui(
-                    "mms-too-large",
-                    "The MMS is too large to send; the draft was kept.",
-                )
-            })?;
-        if bytes > gateway.mms_max_bytes.unwrap_or(FALLBACK_MMS_MAX_BYTES) {
-            return Err(ui(
-                "mms-too-large",
-                "The MMS content already exceeds this route's size limit; the draft was kept.",
-            ));
+            .map(|info| MmsImage {
+                id: info.attachment_id.to_string(),
+                bytes: info.plaintext_bytes,
+                media_type: info.media_type.clone(),
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = plan_mms(
+            gateway.mms_max_bytes.unwrap_or(FALLBACK_MMS_MAX_BYTES),
+            gateway.mms_content_version.unwrap_or(0),
+            &stored.text,
+            &images,
+        ) {
+            let message = match error {
+                MmsPlanError::TooLarge => {
+                    "The MMS content already exceeds this route's size limit; the draft was kept."
+                        .to_owned()
+                }
+                MmsPlanError::NonResizableImageTooLarge { image_id } => attachment_info
+                    .iter()
+                    .find(|info| info.attachment_id.to_string() == image_id)
+                    .map(|info| format!("{} cannot be resized to fit this route's MMS size limit; the draft was kept.", info.display_name))
+                    .unwrap_or_else(|| "An attachment cannot be resized to fit this route's MMS size limit; the draft was kept.".to_owned()),
+            };
+            return Err(ComposeError::Ui {
+                code: "mms-too-large",
+                message,
+            });
         }
     }
     let (draft_id, revision) =
@@ -543,6 +556,7 @@ fn immutable_prepared_draft_send(
 fn queue_prepared_draft_send(
     client: &Client,
     input: &DraftInput,
+    gateways: Option<&[GatewayView]>,
     command_id: Option<CommandId>,
 ) -> Result<SendResultView, ComposeError> {
     let draft_id = DraftId::from_str(&input.id)
@@ -552,6 +566,10 @@ fn queue_prepared_draft_send(
         .resolve_compose_draft_for_send(draft_id, revision)
         .map_err(ComposeError::Core)?;
     let (_, latest_transport) = conversation_context(client, stored.conversation_id)?;
+    let parts = command_id
+        .is_none()
+        .then(|| prepared_draft_send_parts(client, input, gateways))
+        .transpose()?;
     let transport = if !stored.attachment_ids.is_empty()
         || stored.recipients.len() > 1
         || latest_transport == Some(Transport::Mms)
@@ -560,9 +578,14 @@ fn queue_prepared_draft_send(
     } else {
         Transport::Sms
     };
-    let sent = match command_id {
-        Some(command_id) => client.send_compose_draft_accepted(draft_id, revision, command_id),
-        None => client
+    let sent = match (command_id, parts.as_ref().and_then(Option::as_ref)) {
+        (Some(command_id), _) => {
+            client.send_compose_draft_accepted_with_parts(draft_id, revision, command_id, None)
+        }
+        (None, Some(parts)) => client
+            .send_compose_draft_with_parts(draft_id, revision, parts.clone())
+            .map(|_| ()),
+        (None, None) => client
             .send_compose_draft_checked_transport(draft_id, revision, transport)
             .map(|_| ()),
     };
@@ -588,7 +611,76 @@ fn queue_prepared_draft_send(
         status: "queued-local",
         reason: None,
         revision: Some((revision + 1).to_string()),
+        parts: parts
+            .flatten()
+            .map(|parts| (parts.image_groups.len() + usize::from(parts.caption)) as u32),
     })
+}
+
+/// Computes the immutable split plan to persist with a remote draft-send intent.
+pub fn prepared_draft_send_parts(
+    client: &Client,
+    input: &DraftInput,
+    gateways: Option<&[GatewayView]>,
+) -> Result<Option<DraftSendParts>, ComposeError> {
+    let (Some(gateway_id), Some(sim_id), Some(gateways)) = (
+        input.gateway_id.as_deref(),
+        input.sim_id.as_deref(),
+        gateways,
+    ) else {
+        return Ok(None);
+    };
+    let Some(gateway) = find_route(gateways, gateway_id, sim_id) else {
+        return Ok(None);
+    };
+    let images = input
+        .attachment_ids
+        .iter()
+        .map(|id| {
+            let id = AttachmentId::from_str(id)
+                .map_err(|_| ui("invalid-attachment", "The attachment ID is invalid."))?;
+            let info = client.attachment_info(id).map_err(ComposeError::Core)?;
+            Ok(MmsImage {
+                id: id.to_string(),
+                bytes: info.plaintext_bytes,
+                media_type: info.media_type,
+            })
+        })
+        .collect::<Result<Vec<_>, ComposeError>>()?;
+    let plan = plan_mms(
+        gateway.mms_max_bytes.unwrap_or(FALLBACK_MMS_MAX_BYTES),
+        gateway.mms_content_version.unwrap_or(0),
+        &input.text,
+        &images,
+    )
+    .map_err(|_| {
+        ui(
+            "mms-too-large",
+            "The MMS content exceeds this route's size limit; the draft was kept.",
+        )
+    })?;
+    let MmsPlan::Split {
+        caption,
+        image_groups,
+    } = plan
+    else {
+        return Ok(None);
+    };
+    Ok(Some(DraftSendParts {
+        caption,
+        image_groups: image_groups
+            .into_iter()
+            .map(|group| {
+                group
+                    .into_iter()
+                    .map(|id| {
+                        AttachmentId::from_str(&id)
+                            .map_err(|_| ComposeError::Core(CoreError::Database))
+                    })
+                    .collect()
+            })
+            .collect::<Result<_, _>>()?,
+    }))
 }
 
 /// Ensures a draft's live or redirected source belongs to the caller before any operation that
@@ -848,7 +940,7 @@ mod tests {
         assert_eq!(
             fixture
                 .client
-                .begin_draft_send(draft.draft_id, stored.revision),
+                .begin_draft_send(draft.draft_id, stored.revision, None),
             Err(CoreError::DraftNotSynced)
         );
     }
@@ -866,7 +958,18 @@ mod tests {
         mark_synced(&fixture.client, prepared_id);
         let command = fixture
             .client
-            .begin_draft_send(prepared_id, prepared.expected_revision.parse().unwrap())
+            .begin_draft_send(
+                prepared_id,
+                prepared.expected_revision.parse().unwrap(),
+                match prepared_draft_send_parts(
+                    &fixture.client,
+                    &prepared,
+                    Some(&[gateway(GatewayAvailability::Connected)]),
+                ) {
+                    Ok(parts) => parts,
+                    Err(_) => panic!("prepared send should have a valid plan"),
+                },
+            )
             .unwrap()
             .remote
             .unwrap()
@@ -900,7 +1003,7 @@ mod tests {
         assert_eq!(
             fixture
                 .client
-                .begin_draft_send(prepared_id, unchanged.revision)
+                .begin_draft_send(prepared_id, unchanged.revision, None)
                 .unwrap()
                 .remote
                 .unwrap()

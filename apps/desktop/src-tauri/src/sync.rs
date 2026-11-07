@@ -18,7 +18,14 @@ use peppy_client_core::{
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock, Mutex,
+    },
+    time::Duration,
+};
 use tokio::time::{sleep, timeout, Instant};
 use tokio_tungstenite::tungstenite::{
     self, client::IntoClientRequest, protocol::WebSocketConfig, Message,
@@ -26,6 +33,7 @@ use tokio_tungstenite::tungstenite::{
 
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const WORK_INTERVAL: Duration = Duration::from_secs(15);
+const DRAFT_SAVE_WAKE_DELAY: Duration = Duration::from_secs(2);
 const GATEWAY_REFRESH_EVERY: u32 = 4;
 const WS_MAX_MESSAGE: usize = 2 * 1024 * 1024;
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -45,6 +53,15 @@ const DOWNLOAD_UNAVAILABLE_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const APPLY_STEPS: usize = 8;
 const WS_CLOSE_REVOKED: u16 = 4401;
 const WS_CLOSE_RESYNC: u16 = 4409;
+
+struct DraftSaveWake {
+    generation: u64,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+static DRAFT_SAVE_WAKE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static DRAFT_SAVE_WAKES: LazyLock<Mutex<HashMap<usize, DraftSaveWake>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) struct DownloadRetryState {
     attempts: u8,
@@ -153,6 +170,95 @@ pub async fn blocking<T: Send + 'static>(
 
 fn client(session: &Arc<Session>) -> Client {
     session.client.clone()
+}
+
+/// Resets the save debounce for this session. Cancellation fences delayed work from retired
+/// sessions, while the generation ensures a superseded save cannot wake early.
+pub(crate) fn schedule_draft_push(session: Arc<Session>, delay: Duration) {
+    let key = Arc::as_ptr(&session) as usize;
+    let generation = DRAFT_SAVE_WAKE_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let previous = DRAFT_SAVE_WAKES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(
+            key,
+            DraftSaveWake {
+                generation,
+                cancel: cancel.clone(),
+            },
+        );
+    if let Some(previous) = previous {
+        previous.cancel.cancel();
+    }
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = session.cancel.cancelled() => {}
+            _ = cancel.cancelled() => {}
+            _ = sleep(delay) => {
+                let current = {
+                    let mut wakes = DRAFT_SAVE_WAKES
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    if wakes.get(&key).is_some_and(|wake| wake.generation == generation) {
+                        wakes.remove(&key);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if current {
+                    if !session.cancel.is_cancelled() {
+                        session.request_work();
+                    }
+                }
+                return;
+            }
+        }
+        let mut wakes = DRAFT_SAVE_WAKES
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if wakes
+            .get(&key)
+            .is_some_and(|wake| wake.generation == generation)
+        {
+            wakes.remove(&key);
+        }
+    });
+}
+
+pub(crate) async fn schedule_draft_push_after_save(session: Arc<Session>, draft_id: String) {
+    let client = client(&session);
+    let pending = blocking(move || {
+        client
+            .pending_draft_pushes()
+            .map(|pushes| {
+                pushes
+                    .iter()
+                    .any(|push| push.draft_id.to_string() == draft_id)
+            })
+            .map_err(core_error)
+    })
+    .await
+    .unwrap_or(false);
+    if pending && !session.cancel.is_cancelled() {
+        schedule_draft_push(session, DRAFT_SAVE_WAKE_DELAY);
+    }
+}
+
+pub(crate) async fn wake_draft_sync_if_pending(session: Arc<Session>) {
+    let client = client(&session);
+    let pending = blocking(move || {
+        client
+            .pending_draft_pushes()
+            .map(|pushes| !pushes.is_empty())
+            .map_err(core_error)
+    })
+    .await
+    .unwrap_or(false);
+    if pending && !session.cancel.is_cancelled() {
+        session.request_work();
+    }
 }
 
 #[derive(Deserialize)]
@@ -1829,6 +1935,22 @@ fn schedule_presence_refresh(due: &mut Option<Instant>, now: Instant) {
     }
 }
 
+fn handle_live_hint(
+    session: &Session,
+    kind: &str,
+    presence_refresh_due: &mut Option<Instant>,
+) -> bool {
+    match kind {
+        "presence_changed" => schedule_presence_refresh(presence_refresh_due, Instant::now()),
+        "drafts_changed" => {
+            session.request_work();
+            return true;
+        }
+        _ => {}
+    }
+    false
+}
+
 fn close_code(frame: Option<&tungstenite::protocol::CloseFrame>) -> Option<u16> {
     frame.map(|frame| u16::from(frame.code))
 }
@@ -1989,8 +2111,8 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                         let _ = observe_history_progress(session).await;
                     }
                     "resync_required" => return WsEnd::Resync,
-                    "presence_changed" => {
-                        schedule_presence_refresh(&mut presence_refresh_due, Instant::now())
+                    "presence_changed" | "drafts_changed" => {
+                        handle_live_hint(session, &frame.kind, &mut presence_refresh_due);
                     }
                     _ => {}
                 }
@@ -2096,6 +2218,70 @@ mod transport_status_tests {
         },
         time::Duration,
     };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draft_save_wake_debounces_many_saves() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        let wake = session.work_wake.notified();
+
+        for _ in 0..3 {
+            schedule_draft_push(session.clone(), Duration::from_millis(10));
+        }
+
+        tokio::time::timeout(Duration::from_millis(100), wake)
+            .await
+            .expect("the latest save wakes draft sync");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), session.work_wake.notified())
+                .await
+                .is_err(),
+            "cancelled debounce timers must not add a second wake"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replaced_session_cancels_its_draft_save_wake() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        schedule_draft_push(session.clone(), Duration::from_millis(10));
+        session.cancel.cancel();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), session.work_wake.notified())
+                .await
+                .is_err(),
+            "a cancelled session must never receive its delayed wake"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drafts_changed_frame_wakes_draft_sync_but_unknown_frame_does_not() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        let mut presence_refresh_due = None;
+
+        assert!(handle_live_hint(
+            &session,
+            "drafts_changed",
+            &mut presence_refresh_due
+        ));
+        tokio::time::timeout(Duration::from_millis(25), session.work_wake.notified())
+            .await
+            .expect("drafts_changed wakes draft sync");
+
+        assert!(!handle_live_hint(
+            &session,
+            "unknown_frame",
+            &mut presence_refresh_due
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), session.work_wake.notified())
+                .await
+                .is_err(),
+            "unknown frames remain ignored"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transport_revocation_does_not_reopen_the_same_binding() {

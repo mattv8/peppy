@@ -290,6 +290,7 @@ pub(super) async fn put(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "draft_put_commit"))?;
+    let _ = s.drafts_changed.send(principal.vault);
     Ok(Json(PutDraftRevisionResponse {
         branch_id,
         revision_id,
@@ -333,6 +334,7 @@ pub(super) async fn send(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "draft_send_commit"))?;
+    let _ = s.drafts_changed.send(principal.vault);
     Ok(Json(AcceptDraftSendResponse {
         command_id: request.command_id,
         duplicate: false,
@@ -371,5 +373,6 @@ pub(super) async fn discard(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "draft_discard_commit"))?;
+    let _ = s.drafts_changed.send(principal.vault);
     Ok(StatusCode::NO_CONTENT)
 }

@@ -26,6 +26,9 @@ export type DraftSlot = {
   /** While a send is in flight, saves are deferred so they cannot race the atomic send/clear. */
   held: boolean;
   queue: Promise<unknown>;
+  /** The current persist and, at most, one coalesced follow-up persist. */
+  saving?: boolean;
+  pendingSave?: Promise<SaveOutcome>;
   /** Last host version successfully acknowledged for safe stale-save reconciliation. */
   acknowledgedContent: DraftContent;
 };
@@ -565,9 +568,31 @@ export class DraftStore {
 
   private enqueue(slot: DraftSlot): Promise<SaveOutcome> {
     const session = this.sessionGeneration;
-    const run = slot.queue.catch(() => undefined).then(() => this.save(slot, session));
+    if (slot.pendingSave) return slot.pendingSave;
+    if (slot.saving) {
+      let pendingSave!: Promise<SaveOutcome>;
+      const run = slot.queue.catch(() => undefined).then(() => {
+        if (slot.pendingSave === pendingSave) slot.pendingSave = undefined;
+        return this.runSave(slot, session);
+      });
+      pendingSave = run;
+      slot.pendingSave = pendingSave;
+      slot.queue = run.catch(() => undefined);
+      return pendingSave;
+    }
+    slot.saving = true;
+    const run = slot.queue.catch(() => undefined).then(() => this.runSave(slot, session));
     slot.queue = run.catch(() => undefined);
     return run;
+  }
+
+  private async runSave(slot: DraftSlot, session: number): Promise<SaveOutcome> {
+    slot.saving = true;
+    try {
+      return await this.save(slot, session);
+    } finally {
+      slot.saving = false;
+    }
   }
 
   private async save(slot: DraftSlot, session = this.sessionGeneration): Promise<SaveOutcome> {

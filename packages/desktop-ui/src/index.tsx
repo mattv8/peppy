@@ -1304,6 +1304,37 @@ export function RecipientPicker({
   );
 }
 
+export function mapSelectionThroughEdit(oldText: string, newText: string, position: number): number {
+  if (!oldText) return newText.length;
+  if (position >= oldText.length) return newText.length;
+
+  let prefixLength = 0;
+  while (prefixLength < oldText.length && prefixLength < newText.length && oldText[prefixLength] === newText[prefixLength]) prefixLength += 1;
+
+  let suffixLength = 0;
+  while (
+    suffixLength < oldText.length - prefixLength &&
+    suffixLength < newText.length - prefixLength &&
+    oldText[oldText.length - 1 - suffixLength] === newText[newText.length - 1 - suffixLength]
+  ) suffixLength += 1;
+
+  const mappedPosition = position <= prefixLength
+    ? position
+    : position >= oldText.length - suffixLength
+      ? newText.length - (oldText.length - position)
+      : prefixLength;
+  const boundedPosition = Math.max(0, Math.min(mappedPosition, newText.length));
+  return boundedPosition > 0 && boundedPosition < newText.length && isSurrogatePair(newText, boundedPosition - 1, boundedPosition)
+    ? boundedPosition - 1
+    : boundedPosition;
+}
+
+function isSurrogatePair(text: string, highIndex: number, lowIndex: number): boolean {
+  const high = text.charCodeAt(highIndex);
+  const low = text.charCodeAt(lowIndex);
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
+}
+
 export function Composer({
   draft,
   attachments,
@@ -1325,6 +1356,8 @@ export function Composer({
   maxAutoGrowHeight = 176,
   platform,
   attachmentLayout = "tiles",
+  attachmentHeaderDetail,
+  draftKey,
   onPasteImages,
   onRetryAttachment,
   maxAttachments = 10,
@@ -1351,17 +1384,49 @@ export function Composer({
   maxAutoGrowHeight?: number;
   platform?: "macos" | "windows" | "linux";
   attachmentLayout?: AttachmentLayout;
+  attachmentHeaderDetail?: ReactNode;
+  /** Resets textarea state when rendering a different draft with the same text. */
+  draftKey?: string;
   onPasteImages?(files: File[]): void;
   onRetryAttachment?(id: string): void;
   maxAttachments?: number;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pastedCaretRef = useRef<{ draft: string; position: number } | null>(null);
+  const previousDraftRef = useRef(draft);
+  const previousDraftKeyRef = useRef(draftKey);
+  const localDraftRef = useRef<string | null>(null);
+  const compositionValueRef = useRef<string | null>(null);
+  const compositionHasLocalEditRef = useRef(false);
+  const pendingSelectionRef = useRef<{ draft: string; start: number; end: number } | null>(null);
+  const [isComposing, setIsComposing] = useState(false);
   const [pasteRejection, setPasteRejection] = useState<string | null>(null);
   const hasContent = Boolean(draft.trim()) || attachments.length > 0;
   const canSend = sendSupported && !readOnly && hasContent;
   const counter = !attachments.length ? smsCounter(draft) : null;
   const fallbackShown = !sendSupported && !gatewaySlot && !statusSlot;
+  if (draftKey !== previousDraftKeyRef.current) {
+    previousDraftKeyRef.current = draftKey;
+    previousDraftRef.current = draft;
+    localDraftRef.current = null;
+    compositionValueRef.current = null;
+    compositionHasLocalEditRef.current = false;
+    pendingSelectionRef.current = null;
+    pastedCaretRef.current = null;
+  }
+  if (
+    draft !== previousDraftRef.current &&
+    localDraftRef.current !== draft &&
+    pastedCaretRef.current?.draft !== draft &&
+    !isComposing &&
+    textareaRef.current
+  ) {
+    pendingSelectionRef.current = {
+      draft: previousDraftRef.current,
+      start: textareaRef.current.selectionStart,
+      end: textareaRef.current.selectionEnd,
+    };
+  }
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea || composerUserSized) return;
@@ -1371,9 +1436,28 @@ export function Composer({
   useLayoutEffect(() => {
     const pastedCaret = pastedCaretRef.current;
     if (!pastedCaret || pastedCaret.draft !== draft) return;
-    textareaRef.current?.setSelectionRange(pastedCaret.position, pastedCaret.position);
+    const textarea = textareaRef.current;
+    if (textarea && document.activeElement === textarea) textarea.setSelectionRange(pastedCaret.position, pastedCaret.position);
     pastedCaretRef.current = null;
   }, [draft]);
+  useLayoutEffect(() => {
+    if (isComposing && draft !== previousDraftRef.current) {
+      compositionValueRef.current ??= textareaRef.current?.value ?? previousDraftRef.current;
+    }
+    const pendingSelection = pendingSelectionRef.current;
+    if (!isComposing && pendingSelection && pendingSelection.draft !== draft) {
+      const textarea = textareaRef.current;
+      if (textarea && document.activeElement === textarea) {
+        textarea.setSelectionRange(
+          mapSelectionThroughEdit(pendingSelection.draft, draft, pendingSelection.start),
+          mapSelectionThroughEdit(pendingSelection.draft, draft, pendingSelection.end),
+        );
+      }
+    }
+    pendingSelectionRef.current = null;
+    previousDraftRef.current = draft;
+    if (localDraftRef.current === draft) localDraftRef.current = null;
+  }, [draft, isComposing]);
   const keydown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (
       event.key === "Enter" &&
@@ -1410,7 +1494,7 @@ export function Composer({
         <div id="composer-banner-row" hidden={!bannerSlot}>
           {bannerSlot}
         </div>
-        <ComposerAttachmentTray attachments={attachments} layout={attachmentLayout} onRemoveAttachment={onRemoveAttachment} onRetryAttachment={onRetryAttachment} onPaste={pasteImages} onFocusTextarea={() => textareaRef.current?.focus()} />
+        <ComposerAttachmentTray attachments={attachments} layout={attachmentLayout} attachmentHeaderDetail={attachmentHeaderDetail} onRemoveAttachment={onRemoveAttachment} onRetryAttachment={onRetryAttachment} onPaste={pasteImages} onFocusTextarea={() => textareaRef.current?.focus()} />
         <div id="composer-input-row">
         <label htmlFor="composer-textarea" className="sr-only">
           Message
@@ -1419,13 +1503,40 @@ export function Composer({
           ref={textareaRef}
           id="composer-textarea"
           aria-label="Message"
-          value={draft}
+          value={isComposing ? compositionValueRef.current ?? draft : draft}
           readOnly={readOnly}
           onChange={(e) => {
             if (!readOnly) {
               setPasteRejection(null);
+              localDraftRef.current = e.target.value;
+              if (isComposing) {
+                compositionValueRef.current = e.target.value;
+                compositionHasLocalEditRef.current = true;
+              }
               onDraftChange(e.target.value);
             }
+          }}
+          onCompositionStart={(event) => {
+            compositionValueRef.current = event.currentTarget.value;
+            compositionHasLocalEditRef.current = false;
+            setIsComposing(true);
+          }}
+          onCompositionEnd={(event) => {
+            const localValue = event.currentTarget.value;
+            if (compositionHasLocalEditRef.current) {
+              localDraftRef.current = localValue;
+              pendingSelectionRef.current = null;
+              if (draft !== localValue) onDraftChange(localValue);
+            } else if (draft !== localValue) {
+              pendingSelectionRef.current = {
+                draft: localValue,
+                start: event.currentTarget.selectionStart,
+                end: event.currentTarget.selectionEnd,
+              };
+            }
+            compositionValueRef.current = null;
+            compositionHasLocalEditRef.current = false;
+            setIsComposing(false);
           }}
           onKeyDown={keydown}
           onPaste={pasteImages}

@@ -27,6 +27,7 @@ const SEARCH_INDEX_DELAY_MS = 1_000;
 const SEARCH_INDEX_MAX_RETRIES = 3;
 const SEARCH_INDEX_IDLE_RETRY_MS = 100;
 const REMEMBERED_UNLOCK_VALIDATION_INTERVAL_MS = 60_000;
+const DRAFT_SYNC_DEBOUNCE_MS = 2_000;
 const RECOVERY_CLEAR_ERROR: RpcError = { code: "recovery-clear-failed", message: "Browser recovery could not be forgotten." };
 
 export type RpcError = { code: string; message: string; conversationId?: string; currentRevision?: string; draftId?: string };
@@ -109,6 +110,8 @@ export interface BrowserNetwork {
   attachmentRetentionStatus?(): Promise<AttachmentRetentionStatusResult>;
   accountAccess?(): Promise<AccountAccessResult>;
   sendDraft?(args: Record<string, unknown>): Promise<unknown>;
+  draftSaved?(): void;
+  flushDraftSync?(): void;
 }
 
 export interface BrowserHostDependencies {
@@ -119,6 +122,47 @@ export interface BrowserHostDependencies {
   legacySettings?: LegacyNotificationSettings;
   publisher?: PublicCopyTransport & { origin: string };
   notification?: NotificationAdapter;
+}
+
+export class DraftSyncPrompt {
+  private timer?: ReturnType<typeof setTimeout>;
+  private pending = false;
+
+  public constructor(
+    private readonly canRun: () => boolean,
+    private readonly run: () => void,
+  ) {}
+
+  public schedule(): void {
+    this.pending = true;
+    this.cancel();
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.runPending();
+    }, DRAFT_SYNC_DEBOUNCE_MS);
+  }
+
+  public flush(): void {
+    if (!this.pending) return;
+    this.cancel();
+    this.runPending();
+  }
+
+  public stop(): void {
+    this.cancel();
+    this.pending = false;
+  }
+
+  private runPending(): void {
+    if (!this.pending) return;
+    this.pending = false;
+    if (this.canRun()) this.run();
+  }
+
+  private cancel(): void {
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
 }
 
 type LegacyNotificationSettings = {
@@ -897,6 +941,12 @@ export class BrowserWorkerHost {
       this.drainPresentation();
       return;
     }
+    if (request.command === "flush_draft_sync") {
+      if (Object.keys(request.args).length !== 0) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      this.dependencies.network?.flushDraftSync?.();
+      port.postMessage({ id: request.id, ok: true, value: undefined });
+      return;
+    }
     if (request.command === "display_ack") {
       const ids = request.args.ids;
       if (port !== this.presentationPort || !Array.isArray(ids) || ids.some(id => typeof id !== "string")) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
@@ -1020,6 +1070,7 @@ export class BrowserWorkerHost {
     const generationChanged = generation !== this.visibleGeneration();
     if (mutationChanged || successfulSideEffect || generationChanged) {
       this.changed();
+      if (response.ok && command === "save_draft") this.dependencies.network?.draftSaved?.();
       if (command === "unlock") void this.startSearchIndexWhenReady();
       if (command === "load_state" && generationChanged) this.dependencies.network?.wake?.();
       if (command === "retry_attachment") this.dependencies.network?.retryAttachment?.(requiredId(request.args));
@@ -1515,10 +1566,15 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let syncProgress: SchedulerSyncProgress | undefined;
   let activeSession: BrowserSession | undefined;
   const changeListeners = new Set<() => void>();
+  const draftSyncPrompt = new DraftSyncPrompt(
+    () => polling && scheduler?.isDraftSyncEnabled === true && scheduler.status.connection === "connected",
+    () => { void scheduler?.poll().catch(() => undefined); },
+  );
   const stopNetwork = async () => {
     polling = false;
     if (pollTimer !== undefined) clearTimeout(pollTimer);
     pollTimer = undefined;
+    draftSyncPrompt.stop();
     scheduler?.stop();
     enrollmentAbort?.abort();
     retentionAbort?.abort();
@@ -1554,6 +1610,8 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     network: {
       async start() { if (!scheduler || !retentionAbort) return false; const ready = await scheduler.ensureRetentionNegotiated(retentionAbort.signal); if (!polling) { polling = true; schedulePoll(); } return ready; },
       wake() { void scheduler?.poll().catch(() => undefined); },
+      draftSaved() { draftSyncPrompt.schedule(); },
+      flushDraftSync() { draftSyncPrompt.flush(); },
        startHistorySearch(attemptId) { scheduler?.trackHistorySearch(attemptId); void scheduler?.poll().catch(() => undefined); },
        stopHistorySearch(attemptId) { scheduler?.untrackHistorySearch(attemptId); },
       retryAttachment(id) { scheduler?.retryAttachment(id); },

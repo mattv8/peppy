@@ -321,12 +321,39 @@ impl BrowserCore {
                 Ok(json!({}))
             }
             "_worker_draft_begin_send" => {
-                let expected_revision = required_string(&args, "expectedRevision")?
+                let expected_revision: u64 = required_string(&args, "expectedRevision")?
                     .parse()
                     .map_err(|_| invalid())?;
-                let gate = self
-                    .client()?
-                    .begin_draft_send(draft_id(&args)?, expected_revision)
+                let draft_id = draft_id(&args)?;
+                let client = self.client()?;
+                let draft = client
+                    .compose_draft(draft_id)
+                    .map_err(core)?
+                    .ok_or_else(invalid)?;
+                let Some(route) = draft.route.as_ref() else {
+                    return Err(invalid());
+                };
+                let input = DraftInput {
+                    id: draft.draft_id.to_string(),
+                    conversation_id: draft.conversation_id.to_string(),
+                    text: draft.text.clone(),
+                    recipient_ids: draft.recipients.clone(),
+                    attachment_ids: draft
+                        .attachment_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    gateway_id: Some(route.gateway_device_id.to_string()),
+                    sim_id: Some(route.subscription_id.clone()),
+                    expected_revision: expected_revision.to_string(),
+                };
+                let gateways = self
+                    .gateways_known
+                    .then(|| self.context.gateways.as_deref().unwrap_or(&[]));
+                let parts = compose::prepared_draft_send_parts(client, &input, gateways)
+                    .map_err(compose_failure)?;
+                let gate = client
+                    .begin_draft_send(draft_id, expected_revision, parts)
                     .map_err(|error| draft_send_failure(error, expected_revision))?;
                 Ok(
                     json!({"remote": gate.remote.map(|value| json!({"draftId": value.draft_id.to_string(), "revisionId": value.revision_id.to_string(), "commandId": value.command_id.to_string()}))}),

@@ -1,4 +1,4 @@
-import type { ClipboardEvent, ReactElement } from "react";
+import type { ClipboardEvent, ReactElement, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Check, CircleAlert, Clock, Image, ImageOff, Loader, RotateCcw, X } from "lucide-react";
 import type { DraftAttachmentState } from "./bridge-contracts";
@@ -69,6 +69,7 @@ function AttachmentPreview({ attachment }: { attachment: Attachment }) {
 export function ComposerAttachmentTray({
   attachments,
   layout = "tiles",
+  attachmentHeaderDetail,
   onRemoveAttachment,
   onRetryAttachment,
   onPaste,
@@ -76,6 +77,7 @@ export function ComposerAttachmentTray({
 }: {
   attachments: Attachment[];
   layout?: AttachmentLayout;
+  attachmentHeaderDetail?: ReactNode;
   onRemoveAttachment?(id: string): void;
   onRetryAttachment?(id: string): void;
   onPaste?(event: ClipboardEvent<HTMLUListElement>): void;
@@ -126,22 +128,23 @@ export function ComposerAttachmentTray({
     <section id="attachment-tray-region" data-attachment-layout={layout} aria-label="Attached images">
       <header className="attachment-tray-header">
         <span>{attachments.length} {attachments.length === 1 ? "image" : "images"}</span>
-        {totalSize !== null && <span>{formatBytes(totalSize)}</span>}
+        {attachmentHeaderDetail ?? (totalSize !== null && <span>{formatBytes(totalSize)}</span>)}
       </header>
       <ul id="attachment-tray" data-attachment-layout={layout} aria-label="Image list" onPaste={onPaste} tabIndex={hasTrayAction ? undefined : 0}>
         {attachments.map((attachment) => {
           const status = attachmentStatus(attachment);
           const canRetry = Boolean(onRetryAttachment) && (attachment.retryable || status.retryable);
+          const errorDescription = attachment.error && attachment.error !== status.text ? `attachment-error-${attachment.id}` : undefined;
           return (
             <li key={attachment.id} data-attachment-id={attachment.id} className="attachment-chip" data-attachment-state={attachment.draftState ?? attachment.state}>
               <AttachmentPreview attachment={attachment} />
               <div className="attachment-copy">
                 <span className="attachment-name">{attachment.name}</span>
                 <span className="attachment-state">{status.icon}{status.text}</span>
-                {canRetry && <button type="button" className="attachment-retry" aria-label={`Retry ${attachment.name}`} onClick={() => onRetryAttachment?.(attachment.id)}><RotateCcw size={14} aria-hidden />Retry</button>}
-                {attachment.error && <span className="attachment-error" role="alert">{attachment.error}</span>}
+                {canRetry && <button type="button" className="attachment-retry" aria-label={`Retry ${attachment.name}`} aria-describedby={errorDescription} onClick={() => onRetryAttachment?.(attachment.id)}><RotateCcw size={14} aria-hidden />Retry</button>}
+                {attachment.error && attachment.error !== status.text && <span id={`attachment-error-${attachment.id}`} className="sr-only">{attachment.error}</span>}
               </div>
-              {onRemoveAttachment && <button ref={(button) => { if (button) removeButtons.current.set(attachment.id, button); else removeButtons.current.delete(attachment.id); }} type="button" className="attachment-remove" aria-label={`Remove ${attachment.name}`} title={`Remove ${attachment.name}`} onClick={() => { onRemoveAttachment(attachment.id); focusAfterRemoval(attachment.id); }}><X size={14} aria-hidden /></button>}
+              {onRemoveAttachment && <button ref={(button) => { if (button) removeButtons.current.set(attachment.id, button); else removeButtons.current.delete(attachment.id); }} type="button" className="attachment-remove" aria-label={`Remove ${attachment.name}`} aria-describedby={errorDescription} title={`Remove ${attachment.name}`} onClick={() => { onRemoveAttachment(attachment.id); focusAfterRemoval(attachment.id); }}><X size={14} aria-hidden /></button>}
             </li>
           );
         })}

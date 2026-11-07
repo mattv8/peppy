@@ -2307,6 +2307,11 @@ async fn save_draft(
     };
     let save = save_draft_for_window(&state, window.label(), session.clone(), input).await;
     let session_current = save.is_ok() && session_is_current(&state, &session).await;
+    if session_current {
+        if let Ok(draft) = &save {
+            sync::schedule_draft_push_after_save(session.clone(), draft.id.clone()).await;
+        }
+    }
     emit_saved_draft(
         window.app_handle(),
         &state,
@@ -2456,18 +2461,38 @@ async fn send_draft_for_window(
         attachment_retention::ensure_negotiated(&session)?;
     }
     let binding = session.binding.clone();
+    let intent_input = DraftInput {
+        id: input.id.clone(),
+        conversation_id: input.conversation_id.clone(),
+        text: input.text.clone(),
+        recipient_ids: input.recipient_ids.clone(),
+        attachment_ids: input.attachment_ids.clone(),
+        gateway_id: input.gateway_id.clone(),
+        sim_id: input.sim_id.clone(),
+        expected_revision: input.expected_revision.clone(),
+    };
     let remote_send = blocking({
         let session = session.clone();
-        let draft_id = input.id.clone();
-        let expected_revision = input.expected_revision.clone();
+        let draft_id = intent_input.id.clone();
+        let expected_revision = intent_input.expected_revision.clone();
         move || {
+            let (gateways, known) = session.gateways();
             let draft_id = DraftId::from_str(&draft_id).map_err(|_| {
                 BridgeError::new("invalid-draft", "Save the draft before sending it.")
             })?;
             let expected_revision = expected_revision
                 .parse()
                 .map_err(|_| BridgeError::new("invalid-draft", "The draft revision is invalid."))?;
-            match session.client.begin_draft_send(draft_id, expected_revision) {
+            let parts = compose::prepared_draft_send_parts(
+                &session.client,
+                &intent_input,
+                known.then_some(gateways.as_slice()),
+            )
+            .map_err(session::compose_error)?;
+            match session
+                .client
+                .begin_draft_send(draft_id, expected_revision, parts)
+            {
                 Ok(gate) => Ok(gate.remote),
                 Err(peppy_client_core::Error::DraftNotSynced) => Err(BridgeError::new(
                     "draft-syncing",
@@ -6217,6 +6242,20 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             window_placement::window_event(window, event);
+            let draft_sync_backgrounded = matches!(
+                event,
+                WindowEvent::Focused(false) | WindowEvent::CloseRequested { .. }
+            ) && (window.label() == tray::MAIN
+                || tray::composer_conversation(window.label()).is_some());
+            if draft_sync_backgrounded {
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<AppState>();
+                    if let Some(session) = state.uncancelled_session().await {
+                        sync::wake_draft_sync_if_pending(session).await;
+                    }
+                });
+            }
             if matches!(event, WindowEvent::Destroyed) {
                 window_chrome::forget_material(window.label());
                 if let Some(state) = window.app_handle().try_state::<AppState>() {

@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ComposerAttachmentTray } from "./ComposerAttachmentTray";
@@ -41,7 +41,7 @@ describe("ComposerAttachmentTray", () => {
     expect(screen.getByRole("button", { name: "Remove two.png" })).toHaveFocus();
   });
 
-  it("binds full attachment names and returned errors, and retries only the selected attachment", () => {
+  it("shows only the failed status and keeps returned details descriptive", () => {
     const retry = vi.fn();
     const longName = "a-very-long-unbroken-attachment-name-that-must-remain-available.png";
     const returnedError = "The server rejected this attachment because its encrypted upload token expired.";
@@ -55,10 +55,21 @@ describe("ComposerAttachmentTray", () => {
     />);
 
     expect(screen.getByText(longName)).toHaveTextContent(longName);
-    expect(screen.getByRole("alert")).toHaveTextContent(returnedError);
+    const firstTile = document.querySelector<HTMLElement>("[data-attachment-id=first]")!;
+    expect(within(firstTile).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(firstTile).getByText("Upload failed")).toBeVisible();
+    expect(screen.getByRole("button", { name: `Retry ${longName}` })).toHaveAccessibleDescription(returnedError);
+    expect(document.querySelector(".attachment-error")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: `Retry ${longName}` }));
     expect(retry).toHaveBeenCalledOnce();
     expect(retry).toHaveBeenCalledWith("first");
+  });
+
+  it("replaces the total size with header detail when supplied", () => {
+    render(<ComposerAttachmentTray attachments={attachments} attachmentHeaderDetail={<span>Fits in one MMS</span>} onFocusTextarea={() => {}} />);
+
+    expect(screen.getByText("Fits in one MMS")).toBeInTheDocument();
+    expect(screen.queryByText("2 KB")).not.toBeInTheDocument();
   });
 
   it("announces status changes and removals but not its initial contents", () => {
@@ -98,6 +109,7 @@ describe("Composer paste", () => {
     }
     render(<ControlledComposer />);
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    textarea.focus();
     textarea.setSelectionRange(1, 4);
     fireEvent.paste(textarea, { clipboardData: pasteData([new File(["x"], "image.png", { type: "image/png" })], "caption") });
     await waitFor(() => expect(textarea.selectionStart).toBe(8));
@@ -121,7 +133,7 @@ describe("Composer paste", () => {
     render(<Composer {...baseProps} attachments={attachments} maxAttachments={3} onPasteImages={onPasteImages} />);
     fireEvent.paste(screen.getByRole("list", { name: "Image list" }), { clipboardData: pasteData([new File(["x"], "image.png", { type: "image/png" }), new File(["x"], "second.png", { type: "image/png" })]) });
     expect(onPasteImages).toHaveBeenCalledWith([expect.any(File)]);
-    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't add second.png. Up to 10 images per message.");
+    expect(screen.getByText("Couldn't add second.png. Up to 10 images per message.")).toHaveAttribute("role", "alert");
   });
 
   it("does not send when Enter activates attachment controls", () => {
