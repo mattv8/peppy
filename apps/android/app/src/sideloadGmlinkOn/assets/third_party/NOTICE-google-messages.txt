@@ -1,8 +1,8 @@
 Third-party notices for the Google Messages link
 ================================================
 
-This notice applies only when the sideload APK is built with
-peppyGoogleMessagesLink=true.
+This notice is packaged only in sideload APKs that include the Google Messages
+link.
 
 mautrix-gmessages (libgm)
 --------------------------
@@ -31,6 +31,8 @@ The generated gmlink-sources.jar contains go/Seq.java, go/Universe.java and
 go/error.java; those generated bindings and libgojni include the pinned
 golang.org/x/mobile runtime packages bind/seq, bind/java and internal/mobileinit.
 They are listed separately below.
+The Go standard library and runtime from toolchain go1.27.3 are statically linked
+into libgojni.so; see the BSD-3-Clause-go-x-and-mobile.txt text.
 
 github.com/google/uuid v1.6.0
 Copyright (c) 2009,2014 Google Inc. All rights reserved.

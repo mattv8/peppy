@@ -4,23 +4,18 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 inventory=${LICENSE_INVENTORY:-"$root/license-inventory.json"}
 gmlink_assets="$root/../app/src/sideloadGmlinkOn/assets/third_party"
-legacy_assets="$root/../app/src/sideload/assets/third_party"
-if [ -d "$gmlink_assets" ]; then
-    assets=$gmlink_assets
-else
-    assets=$legacy_assets
-fi
-notice=${GOOGLE_MESSAGES_NOTICE:-"$assets/NOTICE-google-messages.txt"}
-modules=$(mktemp)
-if [ ! -f "$root/build/gmlink.aar" ]; then
+notice=${GOOGLE_MESSAGES_NOTICE:-"$gmlink_assets/NOTICE-google-messages.txt"}
+aar=${GOOGLE_MESSAGES_AAR:-"$root/build/gmlink.aar"}
+if [ ! -f "$aar" ]; then
     printf '%s\n' 'build the AAR first' >&2
     exit 1
 fi
+modules=$(mktemp)
 trap 'rm -f "$modules"' EXIT
 
 cd "$root"
 go list -m -json all > "$modules"
-python3 - "$inventory" "$modules" "$root/build/gmlink.aar" "$gmlink_assets" "$legacy_assets" "$notice" <<'PY'
+python3 - "$inventory" "$modules" "$aar" "$gmlink_assets" "$notice" "$root/go.mod" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -30,7 +25,7 @@ import sys
 import tempfile
 import zipfile
 
-inventory_path, modules_path, aar_path, *asset_paths, notice_path = map(pathlib.Path, sys.argv[1:])
+inventory_path, modules_path, aar_path, assets_path, notice_path, go_mod_path = map(pathlib.Path, sys.argv[1:])
 inventory = json.loads(inventory_path.read_text())
 decoder = json.JSONDecoder()
 modules_text = modules_path.read_text()
@@ -50,8 +45,9 @@ entries = {entry["path"]: entry for entry in inventory["modules"]}
 if set(entries) != set(resolved):
     raise SystemExit("license inventory does not match the resolved module graph")
 
+notice_text = notice_path.read_text()
 notice_modules = {}
-for line in notice_path.read_text().splitlines():
+for line in notice_text.splitlines():
     if line.startswith("* "):
         module_and_version, *details = line[2:].split(" — ")
         if len(details) != 2:
@@ -76,13 +72,20 @@ distributed_modules = {
 if notice_modules != distributed_modules:
     raise SystemExit("Google Messages notice module list does not match distributed inventory")
 
+toolchain = re.search(r"^toolchain (go\S+)$", go_mod_path.read_text(), re.MULTILINE)
+if toolchain is None:
+    raise SystemExit("Google Messages module has no toolchain declaration")
+expected_attribution = (
+    f"The Go standard library and runtime from toolchain {toolchain.group(1)} are "
+    "statically linked into libgojni.so; see the BSD-3-Clause-go-x-and-mobile.txt text."
+)
+if expected_attribution not in " ".join(notice_text.split()):
+    raise SystemExit("Google Messages notice lacks Go standard library attribution")
+
 
 def notice_asset(asset_name):
-    for assets_path in asset_paths:
-        asset = assets_path / asset_name
-        if asset.is_file():
-            return asset
-    return None
+    asset = assets_path / asset_name
+    return asset if asset.is_file() else None
 
 linked = {}
 with zipfile.ZipFile(aar_path) as aar, tempfile.TemporaryDirectory() as temporary_directory:

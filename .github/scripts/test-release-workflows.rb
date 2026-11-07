@@ -41,14 +41,14 @@ android_ci_steps = ci_jobs.fetch('android').fetch('steps')
 android_ci_go = android_ci_steps.find { |step| step['uses']&.start_with?('actions/setup-go@') }
 android_ci_aar = android_ci_steps.find { |step| step['name'] == 'Build Google Messages AAR' }
 assert.call(android_ci_go && android_ci_go.fetch('uses') == 'actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00' && android_ci_go.fetch('with') == { 'go-version' => '1.27.3', 'cache' => false }, 'public Android CI must pin Go 1.27.3 without a shared cache')
-assert.call(android_ci_aar && android_ci_aar.fetch('run').include?('export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/build-aar.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses.sh'), 'public Android CI must build the Google Messages AAR and check its licenses with the pinned NDK')
+assert.call(android_ci_aar && android_ci_aar.fetch('run').include?('export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/build-aar.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses-test.sh'), 'public Android CI must build the Google Messages AAR and run its license checks with the pinned NDK')
 android_ci_sideload_steps = android_ci_steps.select { |step| step['run']&.match?(/:app:\w*Sideload/) }
 assert.call(!android_ci_sideload_steps.empty? && android_ci_steps.index(android_ci_go) < android_ci_steps.index(android_ci_aar) && android_ci_sideload_steps.all? { |step| android_ci_steps.index(android_ci_aar) < android_ci_steps.index(step) }, 'public Android CI must provision Go and build the AAR before every sideload Gradle task')
 android_packaging = android_ci_steps.find { |step| step['name'] == 'Lint and assemble Android artifacts' }
 assert.call(!android_packaging.nil?, 'public CI must retain the Android lint and packaging step')
 android_packaging_command = Shellwords.shellsplit(android_packaging.fetch('run'))
 android_packaging_flags = android_packaging_command.reject { |token| token.start_with?(':') }
-expected_android_packaging_flags = ['./gradlew', '--console=plain', '--dependency-verification=strict', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2']
+expected_android_packaging_flags = ['./gradlew', '--console=plain', '--dependency-verification=strict', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2', '-PpeppyGoogleMessagesLink=true']
 assert.call(android_packaging_flags == expected_android_packaging_flags, 'public CI Android packaging must use strict dependency verification, the 4 GiB JVM override, two-worker bound, and diagnostic flags')
 android_packaging_tasks = android_packaging_command.select { |token| token.start_with?(':') }
 assert.call(android_packaging_tasks == %w[:app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink], 'public CI Android packaging must verify the merged release manifest, sideload link, linting, and debug artifacts')
@@ -411,17 +411,18 @@ trusted_android_build = android_steps.find { |step| step['name'] == 'Build trust
 android_artifacts_go = android_steps.find { |step| step['uses']&.start_with?('actions/setup-go@') }
 android_artifacts_aar = android_steps.find { |step| step['name'] == 'Build Google Messages AAR' }
 assert.call(android_artifacts_go && android_artifacts_go.fetch('uses') == 'actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00' && android_artifacts_go.fetch('with') == { 'go-version' => '1.27.3', 'cache' => false }, 'Android artifact builds must pin Go 1.27.3 without a shared cache')
-assert.call(android_artifacts_aar && android_artifacts_aar.fetch('run').include?('export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"') && android_artifacts_aar.fetch('run').include?('apps/android/googlemessages/build-aar.sh') && android_artifacts_aar.fetch('run').include?('apps/android/googlemessages/check-licenses.sh'), 'Android artifact builds must build the Google Messages AAR and check its licenses with the pinned NDK')
+assert.call(android_artifacts_aar && android_artifacts_aar.fetch('if') == "inputs.trusted_update_build && vars.PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF != ''" && android_artifacts_aar.fetch('run').include?('export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"') && android_artifacts_aar.fetch('run').include?('apps/android/googlemessages/build-aar.sh') && android_artifacts_aar.fetch('run').include?('apps/android/googlemessages/check-licenses.sh'), 'Android artifact builds must build the Google Messages AAR only after protected licensing sign-off')
 android_artifacts_sideload_steps = android_steps.select { |step| step['run']&.match?(/:app:\w*Sideload/) }
 assert.call(!android_artifacts_sideload_steps.empty? && android_steps.index(android_artifacts_go) < android_steps.index(android_artifacts_aar) && android_artifacts_sideload_steps.all? { |step| android_steps.index(android_artifacts_aar) < android_steps.index(step) }, 'Android artifact builds must provision Go and build the AAR before every sideload Gradle task')
-assert.call(trusted_android_build.fetch('run').include?(':app:assembleSideload') && trusted_android_build.fetch('run').include?(':app:verifySideloadGoogleMessagesLink') && trusted_android_build.fetch('run').include?(':app:bundleRelease'), 'trusted Android builds must assemble and verify the linked sideload APK and clean release AAB')
+assert.call(trusted_android_build.fetch('run').include?(':app:assembleSideload') && trusted_android_build.fetch('run').include?(':app:verifySideloadGoogleMessagesLink') && trusted_android_build.fetch('run').include?(':app:bundleRelease'), 'trusted Android builds must assemble and verify the sideload APK and clean release AAB')
+assert.call(trusted_android_build.fetch('env').fetch('PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF') == '${{ vars.PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF }}' && trusted_android_build.fetch('run').include?('if [[ -n "$PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF" ]]; then') && trusted_android_build.fetch('run').include?("google_messages_link_args+=('-PpeppyGoogleMessagesLink=true')"), 'trusted Android builds must enable the Google Messages link only after protected licensing sign-off')
 assert.call(trusted_android_build.fetch('run').include?('app/build/outputs/apk/sideload/app-sideload-unsigned.apk'), 'trusted Android builds must stage the unsigned sideload APK')
 assert.call(trusted_android_build.fetch('run').include?(':app:bundleRelease :app:mergeReleaseNativeDebugMetadata -PpeppyDistribution=play'), 'trusted Android builds must produce release native debug symbols with the Play bundle')
 assert.call(!android_validation.nil? && !android_stop_gradle.nil?, 'trusted Android builds must validate inputs and stop Gradle before signing')
 assert.call(android_stop_gradle.fetch('working-directory') == 'apps/android' && android_stop_gradle.fetch('run') == './gradlew --stop', 'trusted Android builds must stop Gradle in the Android project before signing')
 assert.call(android_steps.index(android_precheck) < android_steps.index(android_checkout) && android_steps.index(android_checkout) < android_steps.index(android_guard) && android_steps.index(android_guard) < android_steps.index(android_validation) && android_steps.index(android_validation) < android_steps.index(android_stop_gradle) && android_steps.index(android_stop_gradle) < android_steps.index(android_sign), 'Android trust validation and Gradle shutdown must precede secret-scoped signing')
 android_distribution_verification = android_steps.find { |step| step['name'] == 'Verify trusted Android distribution metadata and symbols' }
-assert.call(android_distribution_verification && android_distribution_verification.fetch('run').include?('verify-android-distribution.sh') && android_steps.index(android_sign) < android_steps.index(android_distribution_verification), 'trusted Android builds must run final distribution verification after signing')
+assert.call(android_distribution_verification && android_distribution_verification.fetch('env').fetch('PEPPY_GOOGLE_MESSAGES_LINK_EXPECTED') == "${{ vars.PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF != '' && 'true' || 'false' }}" && android_distribution_verification.fetch('run').include?('verify-android-distribution.sh') && android_steps.index(android_sign) < android_steps.index(android_distribution_verification), 'trusted Android builds must pass the protected licensing expectation to final distribution verification after signing')
 android_sign_env = android_sign.fetch('env')
 %w[PEPPY_ANDROID_KEYSTORE_BASE64 PEPPY_ANDROID_KEYSTORE_PASSWORD PEPPY_ANDROID_KEY_ALIAS PEPPY_ANDROID_KEY_PASSWORD].each do |name|
   assert.call(android_sign_env.fetch(name) == "${{ inputs.trusted_update_build && secrets.#{name} || '' }}", "Android signer must receive #{name} only for trusted builds")
@@ -490,7 +491,7 @@ end
 
 workflow_text = Dir[File.join(root, 'workflows', '*.{yml,yaml}')].sort.map { |path| File.read(path) }.join("\n")
 assert.call(!workflow_text.include?('peppyGoogleMessagesLink=false'), 'workflows must not disable the Google Messages link with a default-off flag')
-assert.call(!workflow_text.include?('-PpeppyGoogleMessagesLink=true'), 'release workflows must not explicitly enable the Google Messages link')
+assert.call(workflow_text.include?("google_messages_link_args+=('-PpeppyGoogleMessagesLink=true')"), 'trusted release workflows must enable the Google Messages link only through the licensing gate')
 android_build_script = File.read(File.join(root, '..', 'apps', 'android', 'app', 'build.gradle.kts'))
 assert.call(android_build_script.include?('require(explicit != true) { "peppyGoogleMessagesLink cannot be enabled for Play distribution" }'), 'Play distribution must reject the Google Messages link during configuration')
 workflow_text.each_line.select { |line| line.include?(':app:bundleRelease') }.each do |line|
@@ -538,7 +539,8 @@ Dir.mktmpdir('peppy-android-release-test') do |fixture|
     'ANDROID_VERSION_CODE' => '45',
     'PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID' => 'test-server-client-id',
     'PEPPY_ANDROID_NATIVE_PROFILE' => 'release',
-    'PEPPY_TEST_GRADLE_CAPTURE' => capture
+    'PEPPY_TEST_GRADLE_CAPTURE' => capture,
+    'PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF' => ''
   )
   stdout, stderr, status = Open3.capture3(
     step_env, 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', trusted_android_build_steps.first.fetch('run'),
@@ -568,6 +570,22 @@ Dir.mktmpdir('peppy-android-release-test') do |fixture|
     assert.call(arguments.count { |token| token.start_with?('-PpeppyDistribution=') } == 1 && arguments.include?("-PpeppyDistribution=#{distribution}"), "trusted Android #{distribution} build must select the #{distribution} distribution")
     assert.call(arguments.include?('-PpeppyVersionName=1.2.3') && arguments.include?('-PpeppyVersionCode=45'), "trusted Android #{distribution} build must receive the release version arguments")
   end
+  assert.call(!direct_invocation.include?('-PpeppyGoogleMessagesLink=true'), 'trusted Android builds without protected licensing sign-off must build an unlinked sideload APK')
+
+  File.delete(capture)
+  stdout, stderr, status = Open3.capture3(
+    step_env.merge('PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF' => 'review-fixture'), 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', trusted_android_build_steps.first.fetch('run'),
+    chdir: fixture
+  )
+  assert.call(status.success?, "trusted Android release step with licensing sign-off must succeed against the fake checkout: #{stdout}#{stderr}")
+  tokens = File.binread(capture).force_encoding(Encoding::UTF_8).split("\0")
+  invocations = [[]]
+  tokens.each { |token| token == 'END' ? invocations << [] : invocations.last << token }
+  invocations.pop
+  assert.call(invocations.length == 2, 'signed-off trusted Android release build must invoke Gradle exactly twice')
+  direct_invocation, play_invocation = invocations
+  assert.call(direct_invocation.count('-PpeppyGoogleMessagesLink=true') == 1, 'signed-off direct Android build must enable the Google Messages link exactly once')
+  assert.call(play_invocation.count('-PpeppyGoogleMessagesLink=true').zero?, 'signed-off Play Android build must not enable the Google Messages link')
 end
 
 puts 'release workflow tests passed'

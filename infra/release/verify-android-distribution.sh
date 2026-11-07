@@ -7,9 +7,18 @@ set +x
   exit 2
 }
 
+google_messages_link_expected=${PEPPY_GOOGLE_MESSAGES_LINK_EXPECTED:-}
+case "$google_messages_link_expected" in
+  true|false) ;;
+  *) echo 'PEPPY_GOOGLE_MESSAGES_LINK_EXPECTED must be true or false' >&2; exit 2 ;;
+esac
+
 direct_apk=$1
 play_aab=$2
 symbols_archive=$3
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+license_inventory="$script_dir/../../apps/android/googlemessages/license-inventory.json"
+[ -f "$license_inventory" ] || { echo "license inventory not found: $license_inventory" >&2; exit 1; }
 for artifact in "$direct_apk" "$play_aab" "$symbols_archive"; do
   [ -f "$artifact" ] || { echo "artifact not found: $artifact" >&2; exit 1; }
 done
@@ -82,7 +91,8 @@ materialize_play_apks() {
 
 materialize_play_apks universal --mode=universal
 materialize_play_apks default
-python3 - "$direct_apk" "$play_aab" "${play_apks[@]}" <<'PY'
+python3 - "$direct_apk" "$play_aab" "$google_messages_link_expected" "$license_inventory" "${play_apks[@]}" <<'PY'
+import json
 import pathlib
 import re
 import sys
@@ -95,9 +105,35 @@ DEX_PREFIX = b"Ldev/peppy/gmlink/"
 AGPL_TEXT = b"GNU AFFERO GENERAL PUBLIC LICENSE"
 GOOGLE_MESSAGES_NOTICE = b"Third-party notices for the Google Messages link"
 GOOGLE_MESSAGES_NOTICE_FILENAME = "NOTICE-google-messages.txt"
+
+
+def required_license_assets(inventory_path):
+    try:
+        modules = json.loads(inventory_path.read_text())["modules"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise SystemExit(f"could not read Google Messages license inventory: {error}")
+    assets = set()
+    for module in modules:
+        if not module.get("distributed"):
+            continue
+        asset = module.get("asset")
+        if not isinstance(asset, str) or not asset:
+            raise SystemExit("distributed Google Messages module has no license asset")
+        assets.add(f"assets/third_party/{asset}")
+        exception = module.get("licenseExceptions")
+        if exception is not None:
+            exception_asset = exception.get("asset")
+            if not isinstance(exception_asset, str) or not exception_asset:
+                raise SystemExit("Google Messages license exception has no asset")
+            assets.add(f"assets/third_party/{exception_asset}")
+    return assets
+
+
+LICENSE_ASSETS = required_license_assets(pathlib.Path(sys.argv[4]))
 DIRECT_ASSETS = (
     "assets/third_party/AGPL-3.0.txt",
     "assets/third_party/NOTICE-google-messages.txt",
+    *sorted(LICENSE_ASSETS - {"assets/third_party/AGPL-3.0.txt"}),
 )
 
 
@@ -126,22 +162,29 @@ def prohibited(entries):
         for name, content in entries.items()
     ):
         return "Google Messages notice content"
+    if any(asset in entries for asset in LICENSE_ASSETS):
+        return "Google Messages license asset"
     return None
 
 
 direct_entries = contents(pathlib.Path(sys.argv[1]))
-for abi in DIRECT_ABIS:
-    required_library = f"lib/{abi}/libgojni.so"
-    if required_library not in direct_entries:
-        raise SystemExit(f"direct APK is missing {required_library}")
-if not dex_contains(direct_entries):
-    raise SystemExit("direct APK is missing dev/peppy/gmlink/ dex classes")
-for asset in DIRECT_ASSETS:
-    if asset not in direct_entries:
-        raise SystemExit(f"direct APK is missing {asset}")
+if sys.argv[3] == "true":
+    for abi in DIRECT_ABIS:
+        required_library = f"lib/{abi}/libgojni.so"
+        if required_library not in direct_entries:
+            raise SystemExit(f"direct APK is missing {required_library}")
+    if not dex_contains(direct_entries):
+        raise SystemExit("direct APK is missing dev/peppy/gmlink/ dex classes")
+    for asset in DIRECT_ASSETS:
+        if asset not in direct_entries:
+            raise SystemExit(f"direct APK is missing {asset}")
+else:
+    found = prohibited(direct_entries)
+    if found:
+        raise SystemExit(f"direct APK contains {found}")
 
 play_archives = (("Play AAB", pathlib.Path(sys.argv[2])),) + tuple(
-    (f"Play APK {pathlib.Path(path).name}", pathlib.Path(path)) for path in sys.argv[3:]
+    (f"Play APK {pathlib.Path(path).name}", pathlib.Path(path)) for path in sys.argv[5:]
 )
 for label, archive_path in play_archives:
     found = prohibited(contents(archive_path))

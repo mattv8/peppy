@@ -236,6 +236,7 @@ jobs:
           set -e
           exit "$sdkmanager_status"
       - name: Build Google Messages AAR
+        if: inputs.trusted_update_build && vars.PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF != ''
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           apps/android/googlemessages/build-aar.sh
@@ -260,6 +261,7 @@ jobs:
           ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
           PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID }}
           PEPPY_ANDROID_NATIVE_PROFILE: release
+          PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF: ${{ vars.PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF }}
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           infra/compose/verify-android-native.sh
@@ -273,7 +275,11 @@ jobs:
             gradle_args+=("-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE")
           fi
           mkdir -p ../../dist/android-release
-          ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintSideload :app:assembleSideload :app:verifySideloadGoogleMessagesLink -PpeppyDistribution=direct "${gradle_args[@]}"
+          google_messages_link_args=()
+          if [[ -n "$PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF" ]]; then
+            google_messages_link_args+=('-PpeppyGoogleMessagesLink=true')
+          fi
+          ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintSideload :app:assembleSideload :app:verifySideloadGoogleMessagesLink -PpeppyDistribution=direct "${gradle_args[@]}" "${google_messages_link_args[@]}"
           install -m 0644 app/build/outputs/apk/sideload/app-sideload-unsigned.apk ../../dist/android-release/peppy-android-unsigned.apk
           ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease :app:mergeReleaseNativeDebugMetadata -PpeppyDistribution=play "${gradle_args[@]}"
           install -m 0644 app/build/outputs/bundle/release/app-release.aab ../../dist/android-release/peppy-android-unsigned.aab
@@ -295,6 +301,7 @@ jobs:
         if: inputs.trusted_update_build
         env:
           BUNDLETOOL_JAR: ${{ runner.temp }}/bundletool.jar
+          PEPPY_GOOGLE_MESSAGES_LINK_EXPECTED: ${{ vars.PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF != '' && 'true' || 'false' }}
         run: |
           export LLVM_NM="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           bash infra/release/verify-android-distribution.sh dist/android-release/peppy-android.apk dist/android-release/peppy-android.aab dist/android-release/peppy-android-native-debug-symbols.zip

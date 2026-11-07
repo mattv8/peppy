@@ -443,6 +443,7 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           apps/android/googlemessages/build-aar.sh
           apps/android/googlemessages/check-licenses.sh
+          apps/android/googlemessages/check-licenses-test.sh
       - name: Verify and build Android native libraries
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
@@ -450,11 +451,15 @@ jobs:
       - name: Verify native RCS cross-language contract
         env:
           PEPPY_RCS_GO_OBSERVATION_PATH: ${{ runner.temp }}/rcs-go-observations.json
+
+          PEPPY_RCS_GO_RECEIVE_RECORD_PATH: ${{ runner.temp }}/rcs-go-receive-record.json
           PEPPY_RCS_NATIVE_FIXTURE_PATH: ${{ runner.temp }}/rcs-rust-commit.json
         run: |
-          rm -f "$PEPPY_RCS_GO_OBSERVATION_PATH" "$PEPPY_RCS_NATIVE_FIXTURE_PATH"
-          (cd apps/android/googlemessages && go test -race -tags rcs_native_contract ./gmlink -run '^TestNativeRcsExportObservationFixture$' -count=1)
+          rm -f "$PEPPY_RCS_GO_OBSERVATION_PATH" "$PEPPY_RCS_GO_RECEIVE_RECORD_PATH" "$PEPPY_RCS_NATIVE_FIXTURE_PATH"
+          (cd apps/android/googlemessages && go test -race -tags rcs_native_contract ./gmlink -run '^TestNativeRcsExport(ObservationFixture|ReceiveRecord)$' -count=1)
           test -s "$PEPPY_RCS_GO_OBSERVATION_PATH"
+          test -s "$PEPPY_RCS_GO_RECEIVE_RECORD_PATH"
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_receive_tests::go_exported_receive_record_ingests_through_mobile_boundary -- --exact
           cargo test --locked -p peppy-client-core --test integration rcs_send::native_handoff::actual_go_observations_verify_classify_and_begin -- --exact --ignored
           test -s "$PEPPY_RCS_NATIVE_FIXTURE_PATH"
           (cd apps/android/googlemessages && go test -race -tags rcs_native_contract ./gmlink -run '^TestNativeRcsContractRustFixture$' -count=1)
@@ -500,7 +505,7 @@ jobs:
           retention-days: 7
       - name: Lint and assemble Android artifacts
         working-directory: apps/android
-        run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink
+        run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink -PpeppyGoogleMessagesLink=true
       - name: Verify release SMS diagnostics policy
         working-directory: apps/android
         run: ./gradlew --console=plain --dependency-verification=strict :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest

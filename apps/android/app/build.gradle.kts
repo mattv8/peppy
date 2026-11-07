@@ -50,7 +50,7 @@ fun resolveGoogleMessagesLink(distribution: String, explicitValue: String?): Boo
         require(explicit != true) { "peppyGoogleMessagesLink cannot be enabled for Play distribution" }
         return false
     }
-    return explicit ?: (distribution == "direct")
+    return explicit ?: false
 }
 
 val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
@@ -1135,7 +1135,8 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
             "Play distribution must reject an explicit Google Messages link property"
         }
         check(!resolveGoogleMessagesLink("play", null)) { "Play distribution must disable the Google Messages link" }
-        check(resolveGoogleMessagesLink("direct", null)) { "Direct distribution must enable the Google Messages link" }
+        check(!resolveGoogleMessagesLink("direct", null)) { "Direct distribution must disable the Google Messages link by default" }
+        check(resolveGoogleMessagesLink("direct", "true")) { "Explicit true must enable the Google Messages link for direct distribution" }
         check(!resolveGoogleMessagesLink("direct", "false")) { "Explicit false must disable the Google Messages link" }
 
         val fixtureDirectory = layout.buildDirectory.dir("tmp/restricted-setup-exclusion-fixtures").get().asFile
