@@ -57,6 +57,16 @@ pub(crate) struct LiveTypingHost {
     #[cfg(test)]
     expire_requests: AtomicUsize,
     #[cfg(test)]
+    expire_progress: tokio::sync::Notify,
+    #[cfg(test)]
+    expiry_offers_while_pending: AtomicUsize,
+    #[cfg(test)]
+    supervisor_turns: AtomicUsize,
+    #[cfg(test)]
+    supervisor_progress: tokio::sync::Notify,
+    #[cfg(test)]
+    suspend_ticks_enabled: AtomicBool,
+    #[cfg(test)]
     reevaluate_sends: AtomicUsize,
     #[cfg(test)]
     socket_wakes: AtomicUsize,
@@ -131,6 +141,16 @@ impl Default for LiveTypingHost {
             refresh_wakes: AtomicUsize::new(0),
             #[cfg(test)]
             expire_requests: AtomicUsize::new(0),
+            #[cfg(test)]
+            expire_progress: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            expiry_offers_while_pending: AtomicUsize::new(0),
+            #[cfg(test)]
+            supervisor_turns: AtomicUsize::new(0),
+            #[cfg(test)]
+            supervisor_progress: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            suspend_ticks_enabled: AtomicBool::new(true),
             #[cfg(test)]
             reevaluate_sends: AtomicUsize::new(0),
             #[cfg(test)]
@@ -219,8 +239,27 @@ impl LiveTypingHost {
     /// At most one `Expire` is outstanding; the actor clears the flag when it handles it.
     fn mark_expire_queued(&self) {
         #[cfg(test)]
-        self.expire_requests.fetch_add(1, Ordering::AcqRel);
+        {
+            self.expire_requests.fetch_add(1, Ordering::AcqRel);
+            self.expire_progress.notify_waiters();
+        }
         self.expire_queued.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn record_supervisor_turn(&self) {
+        self.supervisor_turns.fetch_add(1, Ordering::AcqRel);
+        self.supervisor_progress.notify_waiters();
+    }
+
+    #[cfg(test)]
+    fn set_suspend_ticks_enabled(&self, enabled: bool) {
+        self.suspend_ticks_enabled.store(enabled, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn suspend_ticks_enabled(&self) -> bool {
+        self.suspend_ticks_enabled.load(Ordering::Acquire)
     }
 
     fn clear_expire_queued(&self) {
@@ -1579,12 +1618,21 @@ async fn run_socket(
     let mut suspend_tick = tokio::time::interval(LIVE_SUSPEND_TICK);
     suspend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        #[cfg(test)]
+        session.live_typing.record_supervisor_turn();
         // A pending Expire already covers the published deadline; wait for the actor to publish.
         let deadline = if session.live_typing.expire_pending() {
             None
         } else {
             published.borrow().next_deadline
         };
+        #[cfg(test)]
+        if session.live_typing.expire_pending() && deadline.is_some() {
+            session
+                .live_typing
+                .expiry_offers_while_pending
+                .fetch_add(1, Ordering::AcqRel);
+        }
         let expiry_delay = deadline.map(|deadline| {
             Duration::from_millis(deadline.saturating_sub(session.live_typing.mono_ms()))
         });
@@ -1601,7 +1649,16 @@ async fn run_socket(
             _ = session.live_context_wake.notified() => {
                 session.live_typing.request_reevaluate();
             }
-            _ = suspend_tick.tick() => {
+            _ = suspend_tick.tick(), if {
+                #[cfg(test)]
+                {
+                    session.live_typing.suspend_ticks_enabled()
+                }
+                #[cfg(not(test))]
+                {
+                    true
+                }
+            } => {
                 match ask(session, |reply| Cmd::SuspendTick { reply }).await {
                     Some(false) => {}
                     Some(true) => return SocketEnd::Lost,
@@ -3991,6 +4048,34 @@ mod tests {
             .unwrap_or(0)
     }
 
+    async fn wait_for_expire_requests(session: &Session, expected: usize) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let progress = session.live_typing.expire_progress.notified();
+                if session.live_typing.expire_requests.load(Ordering::Acquire) >= expected {
+                    return;
+                }
+                progress.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {expected} queued Expire requests"));
+    }
+
+    async fn advance_supervisor_turns(session: &Session, additional_turns: usize) {
+        let target =
+            session.live_typing.supervisor_turns.load(Ordering::Acquire) + additional_turns;
+        while session.live_typing.supervisor_turns.load(Ordering::Acquire) < target {
+            let progress = session.live_typing.supervisor_progress.notified();
+            session.live_context_wake.notify_one();
+            if session.live_typing.supervisor_turns.load(Ordering::Acquire) < target {
+                timeout(Duration::from_secs(5), progress)
+                    .await
+                    .expect("timed out waiting for a supervisor turn");
+            }
+        }
+    }
+
     fn hold_store(session: &Session) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
         let store_client = session.client.clone();
         let (held, reached) = std::sync::mpsc::channel();
@@ -4106,6 +4191,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (fixture, session, conversation) = real_supervisor_session(&origin);
+        session.live_typing.set_suspend_ticks_enabled(false);
         let (conv_a, conv_b) = (ConversationId::new(), ConversationId::new());
         let gateway: DeviceId = fixture.binding.device_id.parse().unwrap();
         let peer = peer_sender(&fixture, gateway, &[conv_a, conv_b]);
@@ -4170,12 +4256,23 @@ mod tests {
         .await
         .expect("the actor never reached the Store");
 
-        // Several supervisor turns pass while the actor stays blocked.
-        sleep(Duration::from_millis(200)).await;
+        // Wake the supervisor so it recomputes the now-overdue deadline, then observe the enqueue
+        // before driving more turns. This establishes both sides of the exactly-one assertion.
+        session.live_context_wake.notify_one();
+        wait_for_expire_requests(&session, 1).await;
+        advance_supervisor_turns(&session, 8).await;
         assert_eq!(
             session.live_typing.expire_requests.load(Ordering::Acquire),
             1,
-            "supervisor turns queued more than one Expire"
+            "supervisor turns must queue exactly one Expire"
+        );
+        assert_eq!(
+            session
+                .live_typing
+                .expiry_offers_while_pending
+                .load(Ordering::Acquire),
+            0,
+            "a pending expiry must not be offered again"
         );
 
         release.send(()).unwrap();
@@ -4238,7 +4335,7 @@ mod tests {
         assert_eq!(
             session.live_typing.refresh_wakes.load(Ordering::Acquire),
             1,
-            "the refresh inbox queued more than one wake"
+            "the refresh inbox must queue exactly one wake"
         );
 
         release.send(()).unwrap();
@@ -4371,7 +4468,7 @@ mod tests {
         assert_eq!(
             session.live_typing.reevaluate_sends.load(Ordering::Acquire),
             1,
-            "blocked wakes queued more than one Reevaluate"
+            "blocked wakes must queue exactly one Reevaluate"
         );
 
         release.send(()).unwrap();
@@ -4436,7 +4533,7 @@ mod tests {
         assert_eq!(
             session.live_typing.socket_wakes.load(Ordering::Acquire) - wakes_before,
             1,
-            "socket flaps queued more than one wake"
+            "socket flaps must queue exactly one wake"
         );
 
         release.send(()).unwrap();
@@ -4482,7 +4579,7 @@ mod tests {
         assert_eq!(
             session.live_typing.socket_wakes.load(Ordering::Acquire) - wakes_before,
             1,
-            "socket flaps queued more than one wake"
+            "socket flaps must queue exactly one wake"
         );
         release.send(()).unwrap();
         holder.join().unwrap();
