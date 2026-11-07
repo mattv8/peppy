@@ -1,0 +1,492 @@
+use std::{
+    fs, io,
+    io::Write,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use peppy_hosted_api::mcp::{
+    McpWorkerActivateRequest, McpWorkerCallRequest, McpWorkerCancelRequest,
+    McpWorkerCompleteRequest, McpWorkerPrepareRequest, McpWorkerRevokeRequest,
+    McpWorkerStatusRequest,
+};
+use serde_json::{Value, json};
+use tokio::sync::Mutex;
+
+use crate::{config::WorkerConfig, enrollment::EnrollmentManager, registry::RuntimeRegistry};
+
+/// How often abandoned claimants are swept even without enrollment traffic.
+const CLAIM_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+pub struct WorkerHttp {
+    token: Arc<str>,
+    enrollments: Arc<Mutex<EnrollmentManager>>,
+    runtimes: Arc<RuntimeRegistry>,
+}
+
+impl WorkerHttp {
+    pub fn new(config: WorkerConfig) -> Result<Self, std::io::Error> {
+        let token = load_or_create_control_token(&config.worker_token_file)?;
+        let runtimes = RuntimeRegistry::open(config.clone()).map_err(std::io::Error::other)?;
+        Ok(Self {
+            token: Arc::from(token.trim()),
+            enrollments: Arc::new(Mutex::new(EnrollmentManager::new(config))),
+            runtimes: Arc::new(runtimes),
+        })
+    }
+
+    pub async fn start_sync(&self) {
+        self.runtimes.start_sync().await;
+        let enrollments = self.enrollments.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(CLAIM_SWEEP_INTERVAL);
+            loop {
+                interval.tick().await;
+                enrollments.lock().await.sweep_expired(Instant::now());
+            }
+        });
+    }
+
+    pub async fn shutdown(&self) {
+        self.runtimes.shutdown().await;
+    }
+
+    pub fn router(self) -> Router {
+        let control = Router::new()
+            .route("/healthz", get(healthz))
+            .route("/internal/mcp/prepare", post(prepare))
+            .route("/internal/mcp/activate", post(activate))
+            .route("/internal/mcp/complete", post(complete))
+            .route("/internal/mcp/cancel", post(cancel))
+            .route("/internal/mcp/status", post(status))
+            .route("/internal/mcp/revoke", post(revoke))
+            .layer(DefaultBodyLimit::max(64 * 1024));
+        let calls = Router::new()
+            .route("/internal/mcp/call", post(call))
+            .layer(DefaultBodyLimit::max(4 * 1024 * 1024));
+        control.merge(calls).with_state(self)
+    }
+}
+
+fn load_or_create_control_token(path: &Path) -> io::Result<String> {
+    match read_control_token(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => create_control_token(path),
+        result => result,
+    }
+}
+
+fn read_control_token(path: &Path) -> io::Result<String> {
+    let token = fs::read_to_string(path)?;
+    if token.trim().len() < 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid worker token",
+        ));
+    }
+    Ok(token)
+}
+
+fn create_control_token(path: &Path) -> io::Result<String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "worker token requires a private directory",
+            )
+        })?;
+    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    libsodium_rs::ensure_init().map_err(io::Error::other)?;
+    let mut bytes = [0_u8; 32];
+    libsodium_rs::random::fill_bytes(&mut bytes);
+    let token = URL_SAFE_NO_PAD.encode(bytes);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return read_control_token(path);
+        }
+        Err(error) => return Err(error),
+    };
+    file.write_all(token.as_bytes())?;
+    file.sync_all()?;
+    fs::File::open(parent)?.sync_all()?;
+    Ok(token)
+}
+
+async fn healthz() -> &'static str {
+    "ok"
+}
+
+fn authorize(headers: &HeaderMap, state: &WorkerHttp) -> Result<(), StatusCode> {
+    let value = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let supplied = value
+        .strip_prefix("Bearer ")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if subtle_eq(supplied.as_bytes(), state.token.as_bytes()) {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+fn subtle_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
+}
+
+async fn prepare(
+    State(state): State<WorkerHttp>,
+    headers: HeaderMap,
+    Json(request): Json<McpWorkerPrepareRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&headers, &state)?;
+    state
+        .enrollments
+        .lock()
+        .await
+        .prepare(request)
+        .map(|value| Json(serde_json::to_value(value).expect("worker DTO serializes")))
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+async fn activate(
+    State(state): State<WorkerHttp>,
+    headers: HeaderMap,
+    Json(request): Json<McpWorkerActivateRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&headers, &state)?;
+    state
+        .enrollments
+        .lock()
+        .await
+        .activate(request)
+        .map(|value| Json(serde_json::to_value(value).expect("worker DTO serializes")))
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+async fn complete(
+    State(state): State<WorkerHttp>,
+    headers: HeaderMap,
+    Json(request): Json<McpWorkerCompleteRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&headers, &state)?;
+    let vault_id = request.vault_id;
+    let runtime = state
+        .enrollments
+        .lock()
+        .await
+        .complete(request)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    state
+        .runtimes
+        .insert(runtime)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({"vault_id": vault_id, "state":"offline"})))
+}
+
+async fn cancel(
+    State(state): State<WorkerHttp>,
+    headers: HeaderMap,
+    Json(request): Json<McpWorkerCancelRequest>,
+) -> Result<StatusCode, StatusCode> {
+    authorize(&headers, &state)?;
+    state.enrollments.lock().await.cancel(request);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn status(
+    State(state): State<WorkerHttp>,
+    headers: HeaderMap,
+    Json(request): Json<McpWorkerStatusRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&headers, &state)?;
+    let runtime = state.runtimes.get(request.vault_id).await;
+    Ok(Json(
+        status_response(request.vault_id, runtime.as_deref()).await,
+    ))
+}
+
+pub(crate) async fn status_response(
+    vault_id: uuid::Uuid,
+    runtime: Option<&crate::runtime::Runtime>,
+) -> Value {
+    let (state_name, last_synced_at) = match runtime {
+        Some(runtime) => {
+            let state_name = match runtime.state().await {
+                crate::runtime::RuntimeState::Offline => "offline",
+                crate::runtime::RuntimeState::Online => "online",
+                crate::runtime::RuntimeState::NeedsApproval => "needs_approval",
+                crate::runtime::RuntimeState::Revoked => "revoked",
+            };
+            (
+                state_name,
+                runtime.last_synced_at().await.and_then(sync_timestamp),
+            )
+        }
+        None => ("needs_approval", None),
+    };
+    json!({"vault_id": vault_id, "state": state_name, "last_synced_at": last_synced_at})
+}
+
+fn sync_timestamp(time: std::time::SystemTime) -> Option<String> {
+    let elapsed = time.duration_since(std::time::UNIX_EPOCH).ok()?;
+    let seconds: libc::time_t = elapsed.as_secs().try_into().ok()?;
+    let mut utc = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: both pointers refer to valid, correctly aligned storage, and
+    // gmtime_r initializes utc before returning a non-null pointer.
+    let utc = unsafe {
+        if libc::gmtime_r(&seconds, utc.as_mut_ptr()).is_null() {
+            return None;
+        }
+        utc.assume_init()
+    };
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        utc.tm_year + 1900,
+        utc.tm_mon + 1,
+        utc.tm_mday,
+        utc.tm_hour,
+        utc.tm_min,
+        utc.tm_sec,
+        elapsed.subsec_millis(),
+    ))
+}
+
+async fn revoke(
+    State(state): State<WorkerHttp>,
+    headers: HeaderMap,
+    Json(request): Json<McpWorkerRevokeRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state)?;
+    state
+        .runtimes
+        .revoke(request.vault_id, request.device_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn call(
+    State(state): State<WorkerHttp>,
+    headers: HeaderMap,
+    Json(request): Json<McpWorkerCallRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&headers, &state)?;
+    let runtime = state
+        .runtimes
+        .get(request.vault_id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if runtime.device_id().0 != request.device_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    runtime
+        .ensure_live()
+        .await
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let result = match request.request.get("method").and_then(Value::as_str) {
+        Some("tools/list") => crate::tools::list_tools(&request.scopes),
+        Some("tools/call") => {
+            let _work = runtime.work_guard().await;
+            crate::tools::call_tool(&runtime, &request)
+                .await
+                .map_err(|_| StatusCode::BAD_REQUEST)?
+        }
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    runtime
+        .ensure_live()
+        .await
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    if serde_json::to_vec(&result)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .len()
+        > 4 * 1024 * 1024
+    {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    Ok(Json(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkerHttp, create_control_token, load_or_create_control_token, subtle_eq};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use std::{fs, io, net::SocketAddr};
+
+    use crate::config::WorkerConfig;
+
+    #[test]
+    fn generated_control_tokens_have_independent_32_byte_random_values() {
+        let root = tempfile::tempdir().unwrap();
+        let first = load_or_create_control_token(&root.path().join("first/token")).unwrap();
+        let second = load_or_create_control_token(&root.path().join("second/token")).unwrap();
+        assert_eq!(URL_SAFE_NO_PAD.decode(&first).unwrap().len(), 32);
+        assert_eq!(URL_SAFE_NO_PAD.decode(&second).unwrap().len(), 32);
+        assert!(first != second, "independent token files reused a secret");
+    }
+
+    #[test]
+    fn existing_control_token_is_preserved_byte_for_byte() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("token");
+        let original = format!("  {}\n", "existing-control-token".repeat(3));
+        fs::write(&path, &original).unwrap();
+        assert!(load_or_create_control_token(&path).unwrap() == original);
+        assert!(create_control_token(&path).unwrap() == original);
+        assert!(fs::read(&path).unwrap() == original.as_bytes());
+    }
+
+    #[test]
+    fn invalid_existing_control_token_is_never_replaced_even_by_racing_creator() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("token");
+        for original in [
+            b"".as_slice(),
+            b"short",
+            b"                                 ",
+            b"\xff\xfe",
+        ] {
+            fs::write(&path, original).unwrap();
+            assert_eq!(
+                load_or_create_control_token(&path).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                create_control_token(&path).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert!(fs::read(&path).unwrap() == original);
+        }
+    }
+
+    #[test]
+    fn control_token_comparison_rejects_wrong_length_and_bytes() {
+        assert!(subtle_eq(b"secret", b"secret"));
+        assert!(!subtle_eq(b"secret", b"secreu"));
+        assert!(!subtle_eq(b"secret", b"short"));
+    }
+
+    #[tokio::test]
+    async fn revoke_missing_binding_directory_returns_no_content() {
+        let root = tempfile::tempdir().unwrap();
+        let config = WorkerConfig {
+            api_url: "http://127.0.0.1:1".into(),
+            public_api_url: "http://127.0.0.1:1".into(),
+            state_dir: root.path().join("state"),
+            key_file: root.path().join("storage-key"),
+            worker_token_file: root.path().join("control-token"),
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        };
+        let worker = WorkerHttp::new(config.clone()).unwrap();
+        let token = fs::read_to_string(&config.worker_token_file).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, worker.router()).await.unwrap();
+        });
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/internal/mcp/revoke"))
+            .bearer_auth(token.trim())
+            .json(&serde_json::json!({
+                "vault_id": uuid::Uuid::new_v4(),
+                "device_id": uuid::Uuid::new_v4(),
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancel_requires_the_control_token_and_rejects_malformed_bodies() {
+        let root = tempfile::tempdir().unwrap();
+        let config = WorkerConfig {
+            api_url: "http://127.0.0.1:1".into(),
+            public_api_url: "http://127.0.0.1:1".into(),
+            state_dir: root.path().join("state"),
+            key_file: root.path().join("storage-key"),
+            worker_token_file: root.path().join("control-token"),
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        };
+        let worker = WorkerHttp::new(config.clone()).unwrap();
+        let token = fs::read_to_string(&config.worker_token_file).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/internal/mcp/cancel",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, worker.router()).await.unwrap();
+        });
+        let body = serde_json::json!({
+            "vault_id": uuid::Uuid::new_v4(),
+            "owner_device_id": uuid::Uuid::new_v4(),
+            "invitation_id": uuid::Uuid::new_v4(),
+        });
+        let client = reqwest::Client::new();
+
+        let missing = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(missing.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let wrong = client
+            .post(&url)
+            .bearer_auth("not-the-control-token-value-0000000000")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let malformed = client
+            .post(&url)
+            .bearer_auth(token.trim())
+            .header("content-type", "application/json")
+            .body("{")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), reqwest::StatusCode::BAD_REQUEST);
+        let accepted = client
+            .post(&url)
+            .bearer_auth(token.trim())
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), reqwest::StatusCode::NO_CONTENT);
+        server.abort();
+    }
+}

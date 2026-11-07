@@ -14,12 +14,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod transport;
-pub use transport::http_client;
+pub use transport::{HttpTransport, http_client, private_http_transport};
 
 #[derive(Debug, Error)]
 pub enum SimulatorError {
     #[error("SIMULATED gateway HTTP request failed")]
     Http,
+    #[error("SIMULATED gateway {0} request was rejected by the server")]
+    Rejected(RejectedEndpoint),
     #[error("SIMULATED gateway received invalid response")]
     Response,
     #[error("SIMULATED gateway file operation failed")]
@@ -30,6 +32,21 @@ pub enum SimulatorError {
     Core,
     #[error("SIMULATED identity has prior producer history; fresh pairing required")]
     FreshPairingRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RejectedEndpoint {
+    Outbox,
+    Media,
+}
+
+impl std::fmt::Display for RejectedEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Outbox => "outbox",
+            Self::Media => "media",
+        })
+    }
 }
 
 /// Persisted non-secret simulator routing state.  The database key is deliberately separate and
@@ -210,8 +227,19 @@ pub async fn sync_http(
     api_origin: &str,
     token: &str,
 ) -> Result<usize, SimulatorError> {
-    let api_origin = canonical_origin(api_origin)?;
-    let http = http_client(&api_origin)?;
+    let transport = transport::transport_for_validated_origin(canonical_origin(api_origin)?)?;
+    sync_http_with_transport(client, &transport, token).await
+}
+
+/// Syncs through a host-configured private transport whose origin and redirect policy were
+/// validated when it was constructed.
+pub async fn sync_http_with_transport(
+    client: &Client,
+    transport: &HttpTransport,
+    token: &str,
+) -> Result<usize, SimulatorError> {
+    let api_origin = transport.origin();
+    let http = transport.client();
     let after = client.receive_cursor().map_err(|_| SimulatorError::Core)?.0;
     let response = http
         .get(format!("{api_origin}/v1/events?after={after}&limit=100"))
@@ -220,7 +248,7 @@ pub async fn sync_http(
         .await
         .map_err(|_| SimulatorError::Http)?;
     if response.status() == reqwest::StatusCode::CONFLICT {
-        return resync_snapshot(client, &api_origin, token).await;
+        return resync_snapshot_with_transport(client, transport, token).await;
     }
     let response = read_bounded_json(response).await?;
     let events = response["events"]
@@ -283,7 +311,16 @@ pub async fn resync_snapshot(
     api_origin: &str,
     token: &str,
 ) -> Result<usize, SimulatorError> {
-    import_snapshot(client, api_origin, token, None).await
+    let transport = transport::transport_for_validated_origin(canonical_origin(api_origin)?)?;
+    resync_snapshot_with_transport(client, &transport, token).await
+}
+
+async fn resync_snapshot_with_transport(
+    client: &Client,
+    transport: &HttpTransport,
+    token: &str,
+) -> Result<usize, SimulatorError> {
+    import_snapshot(client, transport, token, None).await
 }
 
 /// Bootstraps a newly created simulator database from immutable history before any controls,
@@ -295,17 +332,18 @@ pub async fn bootstrap_snapshot(
     token: &str,
     own_device_id: DeviceId,
 ) -> Result<usize, SimulatorError> {
-    import_snapshot(client, api_origin, token, Some(own_device_id)).await
+    let transport = transport::transport_for_validated_origin(canonical_origin(api_origin)?)?;
+    import_snapshot(client, &transport, token, Some(own_device_id)).await
 }
 
 async fn import_snapshot(
     client: &Client,
-    api_origin: &str,
+    transport: &HttpTransport,
     token: &str,
     reject_producer: Option<DeviceId>,
 ) -> Result<usize, SimulatorError> {
-    let api_origin = canonical_origin(api_origin)?;
-    let http = http_client(&api_origin)?;
+    let api_origin = transport.origin();
+    let http = transport.client();
     let snapshot = read_bounded_json(
         http.get(format!("{api_origin}/v1/snapshot"))
             .bearer_auth(token)
@@ -422,8 +460,17 @@ pub async fn upload_pending(
     api_origin: &str,
     token: &str,
 ) -> Result<usize, SimulatorError> {
-    let api_origin = canonical_origin(api_origin)?;
-    let http = http_client(&api_origin)?;
+    let transport = transport::transport_for_validated_origin(canonical_origin(api_origin)?)?;
+    upload_pending_with_transport(client, &transport, token).await
+}
+
+pub async fn upload_pending_with_transport(
+    client: &Client,
+    transport: &HttpTransport,
+    token: &str,
+) -> Result<usize, SimulatorError> {
+    let api_origin = transport.origin();
+    let http = transport.client();
     let mut uploaded = 0_usize;
     loop {
         client
@@ -448,11 +495,16 @@ pub async fn upload_pending(
                 if is_producer_identity_conflict(reqwest::StatusCode::CONFLICT, &body) {
                     return Err(SimulatorError::FreshPairingRequired);
                 }
+                if body
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+                {
+                    return Err(SimulatorError::Rejected(RejectedEndpoint::Outbox));
+                }
                 return Err(SimulatorError::Http);
             }
-            response
-                .error_for_status()
-                .map_err(|_| SimulatorError::Http)?;
+            upload_response(response, RejectedEndpoint::Outbox).await?;
             client
                 .ack_outbox(envelope.envelope_id)
                 .map_err(|_| SimulatorError::Core)?;
@@ -469,10 +521,30 @@ pub async fn drain_media(
     token: &str,
     state_dir: &Path,
 ) -> Result<(), SimulatorError> {
-    let api_origin = canonical_origin(api_origin)?;
-    let http = http_client(&api_origin)?;
+    let transport = transport::transport_for_validated_origin(canonical_origin(api_origin)?)?;
+    drain_media_with_transport(client, &transport, token, state_dir).await
+}
+
+pub async fn drain_media_with_transport(
+    client: &Client,
+    transport: &HttpTransport,
+    token: &str,
+    state_dir: &Path,
+) -> Result<(), SimulatorError> {
+    upload_media_with_transport(client, transport, token).await?;
+    download_media_with_transport(client, transport, token, state_dir).await
+}
+
+/// Uploads pending attachment ciphertext without exposing media keys to the host.
+pub async fn upload_media_with_transport(
+    client: &Client,
+    transport: &HttpTransport,
+    token: &str,
+) -> Result<(), SimulatorError> {
+    let api_origin = transport.origin();
+    let http = transport.client();
     for item in client.pending_uploads().map_err(|_| SimulatorError::Core)? {
-        let reservation = read_bounded_json(http.post(format!("{api_origin}/v1/attachments/reserve"))
+        let reservation = read_upload_json(http.post(format!("{api_origin}/v1/attachments/reserve"))
             .bearer_auth(token).json(&serde_json::json!({"attachment_id":item.attachment_id.0,"declared_ciphertext_bytes":item.ciphertext_bytes,"declared_ciphertext_sha256":item.ciphertext_sha256}))
             .send().await.map_err(|_| SimulatorError::Http)?).await?;
         let remote = reservation["attachment_id"]
@@ -485,35 +557,50 @@ pub async fn drain_media(
             .await
             .map_err(|_| SimulatorError::Io)?;
         let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(source));
-        http.put(format!("{api_origin}/v1/attachments/{remote}/upload"))
-            .bearer_auth(token)
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| SimulatorError::Http)?
-            .error_for_status()
-            .map_err(|_| SimulatorError::Http)?;
-        http.post(format!("{api_origin}/v1/attachments/{remote}/finalize"))
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|_| SimulatorError::Http)?
-            .error_for_status()
-            .map_err(|_| SimulatorError::Http)?;
+        upload_response(
+            http.put(format!("{api_origin}/v1/attachments/{remote}/upload"))
+                .bearer_auth(token)
+                .body(body)
+                .send()
+                .await
+                .map_err(|_| SimulatorError::Http)?,
+            RejectedEndpoint::Media,
+        )
+        .await?;
+        upload_response(
+            http.post(format!("{api_origin}/v1/attachments/{remote}/finalize"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| SimulatorError::Http)?,
+            RejectedEndpoint::Media,
+        )
+        .await?;
         client
             .mark_attachment_uploaded(item.attachment_id, remote)
             .map_err(|_| SimulatorError::Core)?;
     }
+    Ok(())
+}
+
+/// Installs pending attachment ciphertext after removing stale simulator-only partial files.
+pub async fn download_media_with_transport(
+    client: &Client,
+    transport: &HttpTransport,
+    token: &str,
+    state_dir: &Path,
+) -> Result<(), SimulatorError> {
+    let api_origin = transport.origin();
+    let http = transport.client();
     let download_dir = state_dir.join("SIMULATED-downloads");
-    tokio::fs::create_dir_all(&download_dir)
-        .await
-        .map_err(|_| SimulatorError::Io)?;
+    ensure_download_dir(state_dir, &download_dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&download_dir, fs::Permissions::from_mode(0o700))
             .map_err(|_| SimulatorError::Io)?;
     }
+    remove_stale_download_parts(&download_dir).await?;
     for item in client
         .pending_downloads()
         .map_err(|_| SimulatorError::Core)?
@@ -522,7 +609,13 @@ pub async fn drain_media(
             .remote_object_id
             .as_deref()
             .ok_or(SimulatorError::Response)?;
-        let target = download_dir.join(format!("{}.ppss", item.attachment_id.0));
+        remove_file_if_present(&download_dir.join(format!("{}.ppss", item.attachment_id.0)))
+            .await?;
+        let target = download_dir.join(format!(
+            "{}.{}.part",
+            item.attachment_id.0,
+            uuid::Uuid::new_v4()
+        ));
         let download = async {
             let mut output_options = tokio::fs::OpenOptions::new();
             output_options.write(true).create_new(true);
@@ -564,10 +657,76 @@ pub async fn drain_media(
                 .map_err(|_| SimulatorError::Core)
         }
         .await;
-        let _ = tokio::fs::remove_file(target).await;
+        let _ = tokio::fs::remove_file(&target).await;
         download?;
     }
     Ok(())
+}
+
+async fn upload_response(
+    response: reqwest::Response,
+    endpoint: RejectedEndpoint,
+) -> Result<reqwest::Response, SimulatorError> {
+    if response.status().is_client_error() {
+        return match read_bounded_json_body(response).await {
+            Ok(body)
+                if body
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some() =>
+            {
+                Err(SimulatorError::Rejected(endpoint))
+            }
+            _ => Err(SimulatorError::Http),
+        };
+    }
+    response
+        .error_for_status()
+        .map_err(|_| SimulatorError::Http)
+}
+
+async fn read_upload_json(
+    response: reqwest::Response,
+) -> Result<serde_json::Value, SimulatorError> {
+    read_bounded_json_body(upload_response(response, RejectedEndpoint::Media).await?).await
+}
+
+async fn remove_stale_download_parts(download_dir: &Path) -> Result<(), SimulatorError> {
+    let mut entries = tokio::fs::read_dir(download_dir)
+        .await
+        .map_err(|_| SimulatorError::Io)?;
+    while let Some(entry) = entries.next_entry().await.map_err(|_| SimulatorError::Io)? {
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "part")
+        {
+            remove_file_if_present(&entry.path()).await?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_download_dir(state_dir: &Path, download_dir: &Path) -> Result<(), SimulatorError> {
+    fs::create_dir_all(state_dir).map_err(|_| SimulatorError::Io)?;
+    match fs::symlink_metadata(download_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+            Err(SimulatorError::Io)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(download_dir).map_err(|_| SimulatorError::Io)
+        }
+        Err(_) => Err(SimulatorError::Io),
+    }
+}
+
+async fn remove_file_if_present(path: &Path) -> Result<(), SimulatorError> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(SimulatorError::Io),
+    }
 }
 
 fn open_private_effect_log(path: &Path) -> Result<std::fs::File, SimulatorError> {
@@ -764,6 +923,7 @@ mod fake_http_tests {
         body::Bytes,
         extract::State,
         http::StatusCode,
+        response::{IntoResponse, Response},
         routing::{get, post, put},
     };
     use peppy_client_core::{
@@ -791,12 +951,17 @@ mod fake_http_tests {
         ciphertext: Vec<u8>,
         events: Vec<serde_json::Value>,
         downloads: Vec<Download>,
+        reject_events: bool,
+        reject_media: bool,
     }
 
     type Shared = Arc<Mutex<FakeState>>;
 
-    async fn reserve() -> Json<serde_json::Value> {
-        Json(serde_json::json!({ "attachment_id": REMOTE }))
+    async fn reserve(State(state): State<Shared>) -> Response {
+        if state.lock().unwrap().reject_media {
+            return policy_rejection();
+        }
+        Json(serde_json::json!({ "attachment_id": REMOTE })).into_response()
     }
 
     async fn upload(State(state): State<Shared>, body: Bytes) -> StatusCode {
@@ -811,10 +976,22 @@ mod fake_http_tests {
     async fn event(
         State(state): State<Shared>,
         Json(envelope): Json<serde_json::Value>,
-    ) -> Json<serde_json::Value> {
+    ) -> Response {
         let mut state = state.lock().unwrap();
+        if state.reject_events {
+            return policy_rejection();
+        }
         state.events.push(envelope);
         Json(serde_json::json!({ "cursor": state.events.len().to_string(), "duplicate": false }))
+            .into_response()
+    }
+
+    fn policy_rejection() -> Response {
+        (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"code":"operation_not_permitted"})),
+        )
+            .into_response()
     }
 
     async fn download(State(state): State<Shared>) -> (StatusCode, Vec<u8>) {
@@ -939,21 +1116,31 @@ mod fake_http_tests {
         assert_eq!(pending[0].remote_object_id.as_deref(), Some(REMOTE));
 
         let desktop_dir = temp.path().join("desktop-state");
-        let partial = desktop_dir
-            .join("SIMULATED-downloads")
-            .join(format!("{}.ppss", attachment.attachment_id.0));
+        let download_dir = desktop_dir.join("SIMULATED-downloads");
+        fs::create_dir_all(&download_dir).unwrap();
+        let stale_partial = download_dir.join("interrupted.part");
+        let legacy_partial = download_dir.join(format!("{}.ppss", attachment.attachment_id.0));
+        fs::write(&stale_partial, b"partial").unwrap();
+        fs::write(&legacy_partial, b"legacy").unwrap();
         state.lock().unwrap().downloads = vec![Download::ServerError, Download::Truncated];
         assert!(matches!(
             drain_media(&desktop, &origin, "token", &desktop_dir).await,
             Err(SimulatorError::Http)
         ));
-        assert!(!partial.exists(), "HTTP failure left a partial download");
-        // A leftover partial would make this attempt fail on create_new with Io instead.
+        assert!(!stale_partial.exists(), "stale partial was not removed");
+        assert!(!legacy_partial.exists(), "legacy partial was not removed");
         assert!(matches!(
             drain_media(&desktop, &origin, "token", &desktop_dir).await,
             Err(SimulatorError::Core)
         ));
-        assert!(!partial.exists(), "install failure left a partial download");
+        assert!(
+            fs::read_dir(&download_dir).unwrap().all(|entry| entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "part")),
+            "install failure left a partial download"
+        );
         assert_eq!(
             desktop
                 .attachment_info(attachment.attachment_id)
@@ -965,12 +1152,167 @@ mod fake_http_tests {
         drain_media(&desktop, &origin, "token", &desktop_dir)
             .await
             .unwrap();
-        assert!(!partial.exists());
+        assert!(fs::read_dir(&download_dir).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "part")
+        }));
         assert!(desktop.pending_downloads().unwrap().is_empty());
         let plaintext = desktop
             .open_native_plaintext(attachment.attachment_id)
             .unwrap();
         assert_eq!(fs::read(plaintext.path()).unwrap(), png);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_rejected_outbox_waits_until_after_downloads() {
+        let state: Shared = Arc::default();
+        let origin = start_fake(state.clone()).await;
+        let temp = TempDir::new().unwrap();
+        let vault = vault();
+        let gateway = client(temp.path(), "gateway", &vault, DeviceId::new());
+        let desktop = client(temp.path(), "desktop", &vault, DeviceId::new());
+        let png = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/media/valid-1x1.png"),
+        )
+        .unwrap();
+        let source = temp.path().join("incoming.png");
+        fs::write(&source, &png).unwrap();
+        let attachment = gateway
+            .prepare_attachment(&source, "image/png", "incoming.png")
+            .unwrap();
+        gateway
+            .capture_incoming_mms(IncomingMms {
+                conversation_id: None,
+                sender_address: "+15555550100".into(),
+                body: "SIMULATED image".into(),
+                recipients: Vec::new(),
+                subject: None,
+                provider_message_id: Some("fake-mms-1".into()),
+                imported: false,
+                attachment_ids: vec![attachment.attachment_id],
+            })
+            .unwrap();
+        upload_media_with_transport(&gateway, &private_http_transport(&origin).unwrap(), "token")
+            .await
+            .unwrap();
+        assert_eq!(upload_pending(&gateway, &origin, "token").await.unwrap(), 1);
+        deliver(&desktop, &state, 1);
+        assert_eq!(desktop.pending_downloads().unwrap().len(), 1);
+
+        desktop
+            .capture_incoming_mms(IncomingMms {
+                conversation_id: None,
+                sender_address: "+15555550101".into(),
+                body: "local pending outbox".into(),
+                recipients: Vec::new(),
+                subject: None,
+                provider_message_id: Some("fake-mms-2".into()),
+                imported: false,
+                attachment_ids: Vec::new(),
+            })
+            .unwrap();
+        assert!(!desktop.pending_outbox_batch(100).unwrap().is_empty());
+        state.lock().unwrap().reject_events = true;
+
+        download_media_with_transport(
+            &desktop,
+            &private_http_transport(&origin).unwrap(),
+            "token",
+            &temp.path().join("desktop-state"),
+        )
+        .await
+        .unwrap();
+        assert!(desktop.pending_downloads().unwrap().is_empty());
+        assert_eq!(
+            fs::read(
+                desktop
+                    .open_native_plaintext(attachment.attachment_id)
+                    .unwrap()
+                    .path()
+            )
+            .unwrap(),
+            png
+        );
+        assert!(matches!(
+            upload_pending(&desktop, &origin, "token").await,
+            Err(SimulatorError::Rejected(RejectedEndpoint::Outbox))
+        ));
+        assert!(!desktop.pending_outbox_batch(100).unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_rejected_attachment_upload_is_classified_separately() {
+        let state: Shared = Arc::default();
+        state.lock().unwrap().reject_media = true;
+        let origin = start_fake(state).await;
+        let temp = TempDir::new().unwrap();
+        let vault = vault();
+        let client = client(temp.path(), "gateway", &vault, DeviceId::new());
+        let source = temp.path().join("outgoing.png");
+        fs::write(&source, b"ciphertext input").unwrap();
+        let attachment = client
+            .prepare_attachment(&source, "image/png", "outgoing.png")
+            .unwrap();
+        client
+            .capture_incoming_mms(IncomingMms {
+                conversation_id: None,
+                sender_address: "+15555550100".into(),
+                body: "attachment pending upload".into(),
+                recipients: Vec::new(),
+                subject: None,
+                provider_message_id: Some("fake-mms-3".into()),
+                imported: false,
+                attachment_ids: vec![attachment.attachment_id],
+            })
+            .unwrap();
+
+        assert!(matches!(
+            upload_media_with_transport(
+                &client,
+                &private_http_transport(&origin).unwrap(),
+                "token",
+            )
+            .await,
+            Err(SimulatorError::Rejected(RejectedEndpoint::Media))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_download_directory_is_rejected_without_touching_its_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let external_part = external.path().join("x.part");
+        fs::write(&external_part, b"preserve").unwrap();
+        fs::set_permissions(external.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let original_permissions = fs::metadata(external.path()).unwrap().permissions().mode();
+        let state_dir = temp.path().join("state");
+        fs::create_dir(&state_dir).unwrap();
+        symlink(external.path(), state_dir.join("SIMULATED-downloads")).unwrap();
+        let vault = vault();
+        let client = client(temp.path(), "client", &vault, DeviceId::new());
+
+        assert!(matches!(
+            download_media_with_transport(
+                &client,
+                &private_http_transport("http://127.0.0.1:1").unwrap(),
+                "token",
+                &state_dir,
+            )
+            .await,
+            Err(SimulatorError::Io)
+        ));
+        assert_eq!(fs::read(&external_part).unwrap(), b"preserve");
+        assert_eq!(
+            fs::metadata(external.path()).unwrap().permissions().mode(),
+            original_permissions
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
