@@ -90,8 +90,8 @@ fn mirrored_banner_source_metadata_uses_structured_app_fields_only() {
     let phone = unlocked(&config(&dir, "source-phone", &vault), &vault);
     let desktop = unlocked(&config(&dir, "source-desktop", &vault), &vault);
     let mut server = Server::default();
-    let mut notification = capture("source", "one", "malicious title text");
-    notification.title = "malicious title text".into();
+    let mut notification = capture("source", "one", "malicious group attachment title");
+    notification.title = "malicious group attachment title".into();
     notification.app_name = "Mail".into();
     notification.app_icon_png_base64 = Some("iVBORw0KGgoAAAANSUhEUgAAACAAAAAg".into());
     phone.capture_notification(notification).unwrap();
@@ -106,7 +106,29 @@ fn mirrored_banner_source_metadata_uses_structured_app_fields_only() {
     );
     assert_ne!(
         candidate.source_name.as_deref(),
-        Some("malicious title text")
+        Some("malicious group attachment title")
+    );
+}
+
+#[test]
+fn mirrored_banner_with_missing_app_name_does_not_fall_back_to_private_title() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "missing-app-phone", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "missing-app-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let mut notification = capture("missing-app", "one", "private attachment");
+    notification.app_name = String::new();
+    notification.title = "private group title".into();
+    phone.capture_notification(notification).unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+
+    let candidate = desktop.pending_banner_candidates(1).unwrap().remove(0);
+    assert_eq!(candidate.source_name, None);
+    assert_ne!(
+        candidate.source_name.as_deref(),
+        Some("private group title")
     );
 }
 
@@ -532,6 +554,31 @@ fn filters_purge_only_notification_banners_and_locked_capture_has_no_queue() {
             .notifications
             .is_empty()
     );
+}
+
+#[test]
+fn locked_reopen_hides_a_populated_pending_banner_queue_until_unlock() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone_cfg = config(&dir, "locked-reopen-phone", &vault);
+    let desktop_cfg = config(&dir, "locked-reopen-desktop", &vault);
+    let phone = unlocked(&phone_cfg, &vault);
+    let desktop = unlocked(&desktop_cfg, &vault);
+    let mut server = Server::default();
+    phone
+        .capture_notification(capture("locked-reopen", "one", "private body"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    assert_eq!(desktop.pending_banner_candidates(10).unwrap().len(), 1);
+
+    drop(desktop);
+    let locked = open(&desktop_cfg);
+    assert!(locked.pending_banner_candidates(10).unwrap().is_empty());
+    locked
+        .unlock(&vault.profile, &vault.header, PASSPHRASE)
+        .unwrap();
+    assert_eq!(locked.pending_banner_candidates(10).unwrap().len(), 1);
 }
 
 #[test]

@@ -29,7 +29,8 @@ pub(crate) fn toast_xml(
 }
 
 fn escape_text(text: &str) -> String {
-    text.replace('&', "&amp;")
+    xml_1_0(text)
+        .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
@@ -38,6 +39,18 @@ fn escape_attribute(text: &str) -> String {
     escape_text(text)
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+fn xml_1_0(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            matches!(
+                *character as u32,
+                0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -56,6 +69,20 @@ mod tests {
                 NotificationPersistence { seconds: Some(5) },
             ),
             "<toast duration=\"short\"><visual><binding template=\"ToastGeneric\"><image placement=\"appLogoOverride\" src=\"file:///C:/A&amp;B&lt;&gt;&apos;&quot;.png\"/><text>T&lt;&amp;&gt;\"'</text><text>B&lt;&amp;&gt;\"'</text></binding></visual><audio silent=\"true\"/></toast>"
+        );
+    }
+
+    #[test]
+    fn filters_xml_1_0_invalid_scalars_from_text_and_attributes() {
+        assert_eq!(
+            toast_xml(
+                "valid\t\n\r\u{0000}\u{0008}\u{000B}\u{000C}\u{001F}\u{D7FF}\u{E000}",
+                "body\u{0000}\u{10FFFF}",
+                Some("file:///icon\u{0000}.png"),
+                "",
+                NotificationPersistence { seconds: Some(5) },
+            ),
+            "<toast duration=\"short\"><visual><binding template=\"ToastGeneric\"><image placement=\"appLogoOverride\" src=\"file:///icon.png\"/><text>valid\t\n\r\u{D7FF}\u{E000}</text><text>body\u{10FFFF}</text></binding></visual></toast>"
         );
     }
 

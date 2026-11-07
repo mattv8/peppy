@@ -41,18 +41,26 @@ fn materialize_with_writer<F>(root: &Path, bytes: &[u8], write: F) -> Option<Lea
 where
     F: FnOnce(&Path, &[u8]) -> io::Result<()>,
 {
-    prepare_root(root).ok()?;
+    if prepare_root(root).is_err() {
+        report_io_failure();
+        return None;
+    }
     recover(root);
     // Windows cannot rename a directory while the marker inside it is open, so the owner
     // directory is created in place. Recovery skips it until the marker is locked and complete.
     let directory = root.join(uuid::Uuid::new_v4().to_string());
-    create_private_dir(&directory).ok()?;
+    if create_private_dir(&directory).is_err() {
+        report_io_failure();
+        return None;
+    }
     let marker_path = directory.join(MARKER_NAME);
     let Ok(mut marker) = create_marker(&marker_path) else {
+        report_io_failure();
         let _ = fs::remove_dir(&directory);
         return None;
     };
     if marker.lock().is_err() || marker.write_all(MARKER).is_err() || marker.sync_all().is_err() {
+        report_io_failure();
         drop(marker);
         let _ = fs::remove_file(&marker_path);
         let _ = fs::remove_dir(&directory);
@@ -64,13 +72,23 @@ where
         path: path.clone(),
         marker: Mutex::new(Some(marker)),
     }));
-    write(&path, bytes).ok()?;
-    Some(lease)
+    match write(&path, bytes) {
+        Ok(()) => Some(lease),
+        Err(_) => {
+            report_io_failure();
+            None
+        }
+    }
 }
 
 pub(crate) fn recover(root: &Path) {
-    let Ok(root_metadata) = fs::symlink_metadata(root) else {
-        return;
+    let root_metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(_) => {
+            report_io_failure();
+            return;
+        }
     };
     if root_metadata.file_type().is_symlink()
         || is_reparse_point(&root_metadata)
@@ -78,8 +96,12 @@ pub(crate) fn recover(root: &Path) {
     {
         return;
     }
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => {
+            report_io_failure();
+            return;
+        }
     };
     for entry in entries.flatten() {
         if !canonical_uuid(entry.file_name().as_os_str()) {
@@ -108,7 +130,14 @@ pub(crate) fn recover(root: &Path) {
         let Ok(marker) = OpenOptions::new().read(true).write(true).open(&marker_path) else {
             continue;
         };
-        if fs::read(&marker_path).ok().as_deref() != Some(MARKER) {
+        let marker_contents = match fs::read(&marker_path) {
+            Ok(contents) => contents,
+            Err(_) => {
+                report_io_failure();
+                continue;
+            }
+        };
+        if marker_contents.as_slice() != MARKER {
             continue;
         }
         if marker.try_lock().is_err() {
@@ -117,6 +146,10 @@ pub(crate) fn recover(root: &Path) {
         let mut marker = Some(marker);
         cleanup_owned(&directory, &mut marker);
     }
+}
+
+fn report_io_failure() {
+    eprintln!("peppy: notification icon storage operation failed");
 }
 
 fn prepare_root(root: &Path) -> io::Result<()> {

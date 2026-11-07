@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -12,7 +13,7 @@ import infra.dev.dev_tls as dev_tls
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "infra/dev/dev_tls.py"
-CONFIGURATION_VARIABLES = ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "PEPPY_DEV_CONFIG_ROOT", "PEPPY_DEV_TLS_DIR", "DEBUG")
+CONFIGURATION_VARIABLES = ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "PEPPY_DEV_CONFIG_ROOT", "PEPPY_DEV_TLS_DIR", "PEPPY_SOURCE_TREE", "DEBUG")
 
 
 def run_dev_tls(script, *arguments, **environment):
@@ -65,15 +66,23 @@ def write_apk(path, ca=None):
     return path
 
 
-class DevelopmentTlsTests(unittest.TestCase):
+class IsolatedConfigurationTests(unittest.TestCase):
+    """Route ordinary tests, subprocess and in-process, to a synthetic config root; no real checkout's .env or TLS is read."""
+
     def setUp(self):
-        # A developer .env loaded by just must not override the dotenv each test writes.
         environment = mock.patch.dict(os.environ)
         environment.start()
         self.addCleanup(environment.stop)
-        for name in ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL"):
+        for name in CONFIGURATION_VARIABLES:
             os.environ.pop(name, None)
+        config = tempfile.TemporaryDirectory()
+        self.addCleanup(config.cleanup)
+        self.config_root = Path(config.name)
+        (self.config_root / ".env").write_text("DEBUG=false\n")
+        os.environ["PEPPY_DEV_CONFIG_ROOT"] = str(self.config_root)
 
+
+class DevelopmentTlsTests(IsolatedConfigurationTests):
     def run_helper(self, *arguments, **environment):
         env = os.environ.copy()
         env.pop("DEBUG", None)
@@ -413,7 +422,9 @@ class ConfigurationRootTests(unittest.TestCase):
             script = install_helpers(checkout)
             (checkout / ".git").write_text(f"gitdir: {unrelated / 'metadata'}\n")
             dotenv = run_dev_tls(script, "dotenv-path")
-            self.assertEqual(dotenv.stdout, f"{(checkout / '.env').resolve()}\n")
+            self.assertNotEqual(dotenv.returncode, 0)
+            self.assertEqual(dotenv.stdout, "")
+            self.assertIn("PEPPY_DEV_CONFIG_ROOT", dotenv.stderr)
 
     def test_plain_checkout_without_env_falls_back_to_its_own_root(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -424,15 +435,117 @@ class ConfigurationRootTests(unittest.TestCase):
             enabled = run_dev_tls(script, "enabled")
             self.assertEqual(enabled.stdout, "false\n")
 
+    def test_linked_worktree_of_separate_git_dir_primary_fails_closed_until_overridden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary, linked = root / "primary checkout", root / "linked checkout"
+            primary.mkdir()
+            git(primary, "init", "-q", f"--separate-git-dir={root / 'separate git dir'}")
+            (primary / ".env").write_text("DEBUG=true\n")
+            git(primary, "commit", "-q", "--allow-empty", "-m", "synthetic")
+            git(primary, "worktree", "add", "-q", "--detach", str(linked))
+            script = install_helpers(linked)
+            unresolved = run_dev_tls(script, "dotenv-path")
+            self.assertNotEqual(unresolved.returncode, 0)
+            self.assertEqual(unresolved.stdout, "")
+            self.assertIn("PEPPY_DEV_CONFIG_ROOT", unresolved.stderr)
+            overridden = {"PEPPY_DEV_CONFIG_ROOT": str(primary)}
+            dotenv = run_dev_tls(script, "dotenv-path", **overridden)
+            self.assertEqual(dotenv.returncode, 0, dotenv.stderr)
+            self.assertEqual(dotenv.stdout, f"{(primary / '.env').resolve()}\n")
+            enabled = run_dev_tls(script, "enabled", **overridden)
+            self.assertEqual(enabled.stdout, "true\n")
+            ca = run_dev_tls(script, "ca-path", **overridden)
+            self.assertEqual(ca.stdout, f"{(primary / '.opencode/dev/tls/ca.pem').resolve()}\n")
 
-class ApkTrustTests(unittest.TestCase):
-    def setUp(self):
-        environment = mock.patch.dict(os.environ)
-        environment.start()
-        self.addCleanup(environment.stop)
-        for name in CONFIGURATION_VARIABLES:
-            os.environ.pop(name, None)
+    def test_separate_git_dir_primary_without_env_stays_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary = root / "primary checkout"
+            primary.mkdir()
+            git(primary, "init", "-q", f"--separate-git-dir={root / 'separate git dir'}")
+            git(primary, "commit", "-q", "--allow-empty", "-m", "synthetic")
+            script = install_helpers(primary)
+            enabled = run_dev_tls(script, "enabled")
+            self.assertEqual(enabled.returncode, 0, enabled.stderr)
+            self.assertEqual(enabled.stdout, "false\n")
 
+    def test_linked_worktree_of_bare_repository_fails_closed_until_overridden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary, _ = make_linked_checkout(root)
+            bare = root / "bare.git"
+            git(root, "clone", "-q", "--bare", str(primary), str(bare))
+            bare_linked = root / "bare linked"
+            git(bare, "worktree", "add", "-q", "--detach", str(bare_linked))
+            script = install_helpers(bare_linked)
+            unresolved = run_dev_tls(script, "enabled")
+            self.assertNotEqual(unresolved.returncode, 0)
+            self.assertIn("PEPPY_DEV_CONFIG_ROOT", unresolved.stderr)
+            dotenv = run_dev_tls(script, "dotenv-path", PEPPY_DEV_CONFIG_ROOT=str(primary))
+            self.assertEqual(dotenv.returncode, 0, dotenv.stderr)
+            self.assertEqual(dotenv.stdout, f"{(primary / '.env').resolve()}\n")
+
+    def test_linked_worktree_resolves_from_gitfile_metadata_when_git_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary, linked = make_linked_checkout(root)
+            bin_directory = root / "bin"
+            bin_directory.mkdir()
+            (bin_directory / "python3").symlink_to(sys.executable)
+            script = install_helpers(linked)
+            dotenv = run_dev_tls(script, "dotenv-path", PATH=str(bin_directory))
+            self.assertEqual(dotenv.returncode, 0, dotenv.stderr)
+            self.assertEqual(dotenv.stdout, f"{(primary / '.env').resolve()}\n")
+
+    def test_linked_worktree_with_partial_metadata_fails_closed_until_overridden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            primary, linked = make_linked_checkout(Path(directory))
+            admin = primary / ".git/worktrees/linked"
+            (admin / "commondir").unlink()
+            self.assertTrue((admin / "gitdir").is_file())
+            script = install_helpers(linked)
+            unresolved = run_dev_tls(script, "enabled")
+            self.assertNotEqual(unresolved.returncode, 0)
+            self.assertEqual(unresolved.stdout, "")
+            self.assertIn("PEPPY_DEV_CONFIG_ROOT", unresolved.stderr)
+            dotenv = run_dev_tls(script, "dotenv-path", PEPPY_DEV_CONFIG_ROOT=str(primary))
+            self.assertEqual(dotenv.returncode, 0, dotenv.stderr)
+            self.assertEqual(dotenv.stdout, f"{(primary / '.env').resolve()}\n")
+
+    def test_linked_worktree_with_missing_registration_fails_closed_until_overridden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            primary, linked = make_linked_checkout(Path(directory))
+            shutil.rmtree(primary / ".git/worktrees/linked")
+            script = install_helpers(linked)
+            unresolved = run_dev_tls(script, "prepare")
+            self.assertNotEqual(unresolved.returncode, 0)
+            self.assertIn("PEPPY_DEV_CONFIG_ROOT", unresolved.stderr)
+            self.assertFalse((linked / ".opencode").exists())
+            dotenv = run_dev_tls(script, "dotenv-path", PEPPY_DEV_CONFIG_ROOT=str(primary))
+            self.assertEqual(dotenv.stdout, f"{(primary / '.env').resolve()}\n")
+
+
+class CertificateTests(unittest.TestCase):
+    def test_certificate_der_accepts_exactly_one_pem_certificate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ca = prepare_ca(Path(directory), Path(directory) / "tls")
+            self.assertTrue(dev_tls.certificate_der(ca, "ca"))
+
+    def test_certificate_der_rejects_multiple_pem_certificates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ca = prepare_ca(root, root / "tls")
+            other = root / "other"
+            other.mkdir()
+            other_ca = prepare_ca(other, other / "tls")
+            for bundle in (ca + ca, ca + other_ca):
+                with self.subTest(bundle=bundle.count(b"BEGIN CERTIFICATE")):
+                    with self.assertRaisesRegex(dev_tls.TlsError, "exactly one PEM certificate"):
+                        dev_tls.certificate_der(bundle, "bundle")
+
+
+class ApkTrustTests(IsolatedConfigurationTests):
     def test_verify_apk_accepts_embedded_current_ca(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

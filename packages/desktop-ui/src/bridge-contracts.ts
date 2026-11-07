@@ -79,7 +79,7 @@ export type AppFilter = { sourceDeviceId: string; packageName: string; appName: 
 export type NotificationPreferences = { messageBanners: boolean; mirroredBanners: boolean; preview: "full" | "hidden"; showSource?: boolean; muteWithHeads?: boolean };
 export type NotificationPermissionStatus = "granted" | "quiet" | "denied" | "unknown";
 export type NotificationCheck = { status: NotificationPermissionStatus; testSent: boolean; canOpenSettings: boolean };
-/** Per-device banner on-screen time; `seconds: null` keeps banners until dismissed. */
+/** Per-device banner on-screen time; `seconds: null` requests banners stay until dismissed where the platform supports it. Platforms may shorten or ignore it. */
 export type NotificationPersistence = { seconds: number | null };
 export type NotificationPersistenceSettings = NotificationPersistence & { supported: boolean };
 export const DEFAULT_NOTIFICATION_PERSISTENCE: NotificationPersistence = { seconds: 5 };

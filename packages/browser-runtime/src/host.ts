@@ -41,6 +41,8 @@ export interface BrowserPort {
   onmessage: ((event: MessageEvent<unknown>) => void) | null;
 }
 
+type PresentationContext = { context: BannerContext; sequence: number };
+
 export interface HostSession {
   readonly phase: BrowserSessionPhase;
   query(command: string, args: Record<string, unknown>): Promise<CoreResult>;
@@ -727,7 +729,9 @@ export class BrowserWorkerHost {
   private stopping = false;
   private unsubscribeNetwork?: () => void;
   private presenter?: BannerPresenter;
-  private presentationPort?: BrowserPort;
+  private readonly presentationContexts = new Map<BrowserPort, PresentationContext>();
+  private readonly presentationRecipients = new Map<string, BrowserPort>();
+  private presentationSequence = 0;
   private readonly mediaLeases = new Map<BrowserPort, Map<string, number>>();
   /** View-local interest only; core retains admitted work after a port detaches. */
   private readonly historyAttempts = new Map<BrowserPort, string>();
@@ -774,15 +778,30 @@ export class BrowserWorkerHost {
   }
 
   public async stop(reason = "closed", acknowledge?: () => void): Promise<void> {
-    if (this.stopping) return;
-    this.stopping = true;
+    if (!this.beginStop()) return;
     try {
       if (reason === "revoked") {
         try { await this.owner?.owner.clearRememberedUnlock?.(); } catch {}
       }
+      await this.finishStop(reason, acknowledge);
+    } catch {
+      await this.finishStop(reason, acknowledge);
+    }
+  }
+
+  private beginStop(): boolean {
+    if (this.stopping) return false;
+    this.stopping = true;
+    this.presenter?.clear();
+    this.presentationContexts.clear();
+    this.presentationRecipients.clear();
+    return true;
+  }
+
+  private async finishStop(reason: string, acknowledge?: () => void): Promise<void> {
+    try {
       try { await this.dependencies.network?.stop(); } catch {}
       this.unsubscribeNetwork?.();
-      this.presenter?.clear();
       this.cancelSearchIndex();
       this.owner?.owner.shutdown();
       try { await this.owner?.owner.drain?.(); } catch {}
@@ -810,7 +829,13 @@ export class BrowserWorkerHost {
     const owner = await acquireWorkerOwner({ locks: this.dependencies.locks, name: OWNER_NAME, start: signal => this.dependencies.boot(signal, error => { void this.fatal(error); }), stop: async session => { session.shutdown(); await session.drain?.(); } });
     this.owner = owner;
     try {
-      this.presenter = new BannerPresenter(owner.owner, new MigratingCoreNotificationSettings(owner.owner, this.dependencies.legacySettings, () => { this.changed(); this.dependencies.network?.wake?.(); }), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => this.presentationPort ? candidate => this.presentationPort?.postMessage({ event: "banner", candidate }) : undefined);
+      this.presenter = new BannerPresenter(owner.owner, new MigratingCoreNotificationSettings(owner.owner, this.dependencies.legacySettings, () => { this.changed(); this.dependencies.network?.wake?.(); }), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => {
+        const recipient = this.selectedPresentationPort();
+        return recipient ? candidate => {
+          this.presentationRecipients.set(candidate.id, recipient);
+          recipient.postMessage({ event: "banner", candidate });
+        } : undefined;
+      }, Date.now, ids => ids.forEach(id => this.presentationRecipients.delete(id)));
       this.unsubscribeNetwork = this.dependencies.network?.subscribeChanges?.(() => this.changed());
       if (owner.owner.phase === "ready") { const ready = await this.dependencies.network?.start(); this.producerAdmissionReady = ready !== false; }
       void this.startSearchIndexWhenReady();
@@ -835,9 +860,10 @@ export class BrowserWorkerHost {
       return;
     }
     if (request.command === "lock_sync") {
+      if (!this.beginStop()) return;
       let clearFailed = false;
       try { await this.owner.owner.clearRememberedUnlock?.(); } catch { clearFailed = true; }
-      await this.stop(clearFailed ? "locked-recovery-clear-failed" : "locked", () => port.postMessage(clearFailed ? { id: request.id, ok: false, error: RECOVERY_CLEAR_ERROR } : { id: request.id, ok: true, value: undefined }));
+      await this.finishStop(clearFailed ? "locked-recovery-clear-failed" : "locked", () => port.postMessage(clearFailed ? { id: request.id, ok: false, error: RECOVERY_CLEAR_ERROR } : { id: request.id, ok: true, value: undefined }));
       return;
     }
     if (request.command === "disconnect") {
@@ -845,7 +871,7 @@ export class BrowserWorkerHost {
         this.ports.delete(port);
         this.mediaLeases.delete(port);
         this.detachHistoryAttempt(port);
-        if (this.presentationPort === port) { this.presentationPort = undefined; this.presenter?.clear(); }
+        this.removePresentationPort(port);
         port.postMessage({ event: "stopped", reason: "disconnected" });
         port.close();
       }
@@ -854,16 +880,24 @@ export class BrowserWorkerHost {
     if (request.command === "set_notification_context") {
       const context = notificationContext(request.args);
       if (!context) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
-      this.presentationPort = port;
-      this.presenter?.setContext(context);
+      this.presentationContexts.set(port, { context, sequence: ++this.presentationSequence });
+      this.updatePresentationContext();
       port.postMessage({ id: request.id, ok: true, value: undefined });
       this.drainPresentation();
       return;
     }
     if (request.command === "display_ack") {
       const ids = request.args.ids;
-      if (port !== this.presentationPort || !Array.isArray(ids) || ids.some(id => typeof id !== "string")) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
-      try { await this.presenter?.acknowledgeDisplayed(ids); port.postMessage({ id: request.id, ok: true, value: undefined }); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
+      if (!validDisplayIds(ids) || ids.some(id => this.presentationRecipients.get(id) !== port)) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      try { await this.presenter?.acknowledgeDisplayed(ids); ids.forEach(id => this.presentationRecipients.delete(id)); port.postMessage({ id: request.id, ok: true, value: undefined }); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
+      return;
+    }
+    if (request.command === "display_failed") {
+      const ids = request.args.ids;
+      if (!validDisplayIds(ids) || ids.some(id => this.presentationRecipients.get(id) !== port)) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      this.presenter?.releaseDisplayed(ids);
+      ids.forEach(id => this.presentationRecipients.delete(id));
+      port.postMessage({ id: request.id, ok: true, value: undefined });
       return;
     }
     if (request.command === "attachment_retention_status") {
@@ -1052,7 +1086,30 @@ export class BrowserWorkerHost {
     this.drainPresentation();
   }
 
-  private drainPresentation(): void { void this.presenter?.drain().catch(() => undefined); }
+  private drainPresentation(): void {
+    if (this.stopping) return;
+    void this.presenter?.drain().catch(() => undefined);
+  }
+
+  private selectedPresentationPort(): BrowserPort | undefined {
+    const contexts = [...this.presentationContexts.entries()];
+    const focused = contexts.filter(([, entry]) => entry.context.focused);
+    return (focused.length > 0 ? focused : contexts)
+      .sort(([, left], [, right]) => right.sequence - left.sequence)[0]?.[0];
+  }
+
+  private updatePresentationContext(): void {
+    const port = this.selectedPresentationPort();
+    this.presenter?.setContext(port ? this.presentationContexts.get(port)!.context : undefined);
+  }
+
+  private removePresentationPort(port: BrowserPort): void {
+    this.presentationContexts.delete(port);
+    for (const [id, recipient] of this.presentationRecipients) {
+      if (recipient === port) this.presentationRecipients.delete(id);
+    }
+    this.updatePresentationContext();
+  }
 
   /** Reads index metadata first so an already-indexed unlock writes no maintenance checkpoint. */
   private async startSearchIndexWhenReady(): Promise<void> {
@@ -1370,6 +1427,28 @@ function notificationContext(args: Record<string, unknown>): BannerContext | und
   if (args.notificationPermission !== undefined && args.notificationPermission !== "granted" && args.notificationPermission !== "denied" && args.notificationPermission !== "default" && args.notificationPermission !== "unsupported") return undefined;
   if (args.focused !== undefined && typeof args.focused !== "boolean") return undefined;
   return { view: args.view, ...(typeof args.conversationId === "string" ? { conversationId: args.conversationId } : {}), ...(typeof args.notificationPermission === "string" ? { notificationPermission: args.notificationPermission } : {}), ...(typeof args.focused === "boolean" ? { focused: args.focused } : {}), ...(typeof args.requireInteraction === "boolean" ? { requireInteraction: args.requireInteraction } : {}) };
+}
+
+function validDisplayIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= 20 && value.every(validDisplayId);
+}
+
+function validDisplayId(id: unknown): id is string {
+  if (typeof id !== "string") return false;
+  if (/^[a-zA-Z0-9-]{1,128}$/.test(id)) return true;
+  if (new TextEncoder().encode(id).byteLength > 3_328) return false;
+  try {
+    const target = JSON.parse(id) as unknown;
+    if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).length !== 3) return false;
+    const value = target as Record<string, unknown>;
+    return boundedDisplayIdComponent(value.sourceDeviceId, 128) && boundedDisplayIdComponent(value.notificationKey, 512) && boundedDisplayIdComponent(value.lifetime, 128);
+  } catch {
+    return false;
+  }
+}
+
+function boundedDisplayIdComponent(value: unknown, maxBytes: number): value is string {
+  return typeof value === "string" && value.length > 0 && new TextEncoder().encode(value).byteLength <= maxBytes;
 }
 
 

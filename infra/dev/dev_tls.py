@@ -27,6 +27,7 @@ PRIVATE_FILENAMES = ("ca-key.pem", "server-key.pem")
 LEAF_RENEWAL_SECONDS = 30 * 24 * 60 * 60
 APK_CA_RESOURCE = "res/raw/peppy_dev_tls_ca.pem"
 MAX_APK_CA_BYTES = 64 * 1024
+PEM_CERTIFICATE_BEGIN = "-----BEGIN CERTIFICATE-----"
 
 
 class TlsError(RuntimeError):
@@ -45,22 +46,95 @@ def has_dotenv(root: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
-def primary_worktree(root: Path) -> Optional[Path]:
-    """Return the primary checkout when root is a linked worktree, read from git's own worktree metadata."""
+def git_environment() -> dict[str, str]:
+    """Return the caller's environment without repository overrides that would redirect git."""
+    return {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+
+
+def main_worktree(porcelain: str) -> Optional[Path]:
+    """Return the main worktree named by the first `git worktree list --porcelain` entry, or None when bare."""
+    entry = []
+    for line in porcelain.splitlines():
+        if not line:
+            break
+        entry.append(line)
+    if "bare" in entry:
+        return None
+    path = next((line[len("worktree "):] for line in entry if line.startswith("worktree ")), None)
+    return Path(path).resolve() if path else None
+
+
+def registered_primary_worktree(root: Path) -> Optional[Path]:
+    """Ask git for the primary checkout; None when git reports no usable primary."""
+    listing = subprocess.run(
+        ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+        text=True, errors="replace", capture_output=True, env=git_environment(),
+    )
+    if listing.returncode:
+        return None
+    return main_worktree(listing.stdout)
+
+
+def gitfile_target(root: Path) -> Optional[Path]:
+    """Return the existing gitdir named by root's `.git` gitfile, or None when there is no readable target."""
     marker = root / ".git"
     if not marker.is_file():
         return None
     try:
         gitdir_line = marker.read_text().strip()
-        if not gitdir_line.startswith("gitdir:"):
-            return None
-        git_dir = (root / gitdir_line[len("gitdir:"):].strip()).resolve()
+    except (OSError, ValueError):
+        return None
+    if not gitdir_line.startswith("gitdir:"):
+        return None
+    git_dir = (root / gitdir_line[len("gitdir:"):].strip()).resolve()
+    return git_dir if git_dir.is_dir() else None
+
+
+def backlinks_checkout(git_dir: Path, root: Path) -> bool:
+    """Return True when git_dir's `gitdir` backlink names root's `.git` gitfile, as linked-worktree admin metadata does."""
+    try:
+        target = Path((git_dir / "gitdir").read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return (git_dir / target if not target.is_absolute() else target).resolve() == (root / ".git").resolve()
+
+
+def is_linked_worktree(root: Path) -> bool:
+    """Return True for a linked worktree, including one whose commondir is missing but whose backlink proves it, and for a gitfile whose metadata is missing so it cannot be proven primary."""
+    if not (root / ".git").is_file():
+        return False
+    git_dir = gitfile_target(root)
+    if git_dir is None:
+        return True
+    return (git_dir / "commondir").is_file() or backlinks_checkout(git_dir, root)
+
+
+def legacy_primary_worktree(root: Path) -> Optional[Path]:
+    """Read the primary checkout from a standard `.git` gitfile; used only when git is unavailable."""
+    git_dir = gitfile_target(root)
+    if git_dir is None:
+        return None
+    try:
         common_dir = (git_dir / (git_dir / "commondir").read_text().strip()).resolve()
     except (OSError, ValueError):
         return None
     if common_dir.name != ".git" or not common_dir.is_dir():
         return None
     return common_dir.parent
+
+
+def primary_worktree(root: Path) -> Optional[Path]:
+    """Return the registered primary checkout when root is a linked worktree, otherwise None."""
+    if not (root / ".git").exists():
+        return None
+    try:
+        primary = registered_primary_worktree(root)
+    except OSError:
+        return legacy_primary_worktree(root)
+    # A separate-git-dir primary reports its git directory here; that is metadata, not a checkout.
+    if primary is None or primary == root.resolve() or not (primary / ".git").exists():
+        return None
+    return primary
 
 
 def config_root() -> Path:
@@ -73,10 +147,16 @@ def config_root() -> Path:
         return root
     if has_dotenv(ROOT):
         return ROOT
+    if not is_linked_worktree(ROOT):
+        return ROOT
     primary = primary_worktree(ROOT)
-    if primary is not None and has_dotenv(primary):
-        return primary
-    return ROOT
+    if primary is None:
+        raise TlsError(
+            f"{ROOT} is a linked worktree without .env, and its primary checkout cannot be resolved "
+            "(separate git directory, bare repository, or missing worktree registration); "
+            "set PEPPY_DEV_CONFIG_ROOT to the checkout whose .env owns the development stack"
+        )
+    return primary if has_dotenv(primary) else ROOT
 
 
 def default_dotenv() -> Path:
@@ -250,8 +330,14 @@ def compose_arguments(dotenv: Path, arguments: list[str], teardown: bool) -> Non
 
 def certificate_der(pem: bytes, name: str) -> bytes:
     try:
-        return ssl.PEM_cert_to_DER_cert(pem.decode("ascii"))
-    except (UnicodeDecodeError, ValueError) as error:
+        text = pem.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise TlsError(f"{name} is not a PEM certificate") from error
+    if text.count(PEM_CERTIFICATE_BEGIN) != 1:
+        raise TlsError(f"{name} must contain exactly one PEM certificate")
+    try:
+        return ssl.PEM_cert_to_DER_cert(text)
+    except ValueError as error:
         raise TlsError(f"{name} is not a PEM certificate") from error
 
 

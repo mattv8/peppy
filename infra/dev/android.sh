@@ -103,6 +103,8 @@ apk() { printf '%s/%s\n' "$ARTIFACTS" "$1"; }
 apk_for_adb() { if is_wsl; then wslpath -w "$(apk "$1")"; else apk "$1"; fi; }
 development_dotenv() { python3 "$ROOT/infra/dev/dev_tls.py" dotenv-path || die "could not resolve the development .env path"; }
 verify_apk_trust() {
+    # Only the debug variant embeds the development CA; a sideload APK can never satisfy this check.
+    [[ $ANDROID_BUILD_VARIANT == debug ]] || return 0
     python3 "$ROOT/infra/dev/dev_tls.py" verify-apk "$1" || die "refusing to install $1; rebuild it so it trusts the current development CA"
 }
 prepare_debug_tls() {

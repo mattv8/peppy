@@ -49,8 +49,17 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const [customDraft, setCustomDraft] = useState("");
   const [customInvalid, setCustomInvalid] = useState(false);
   const [persistenceError, setPersistenceError] = useState("");
+  const [persistenceLoadError, setPersistenceLoadError] = useState("");
   const lastFinitePersistence = useRef(DEFAULT_PERSISTENCE_SECONDS);
   const persistenceSavePending = useRef(false);
+  const persistenceSaveToken = useRef(0);
+  const persistenceSettingsRef = useRef(persistenceSettings);
+  const persistenceMounted = useRef(true);
+  persistenceSettingsRef.current = persistenceSettings;
+  useEffect(() => {
+    persistenceMounted.current = true;
+    return () => { persistenceMounted.current = false; };
+  }, []);
   const loadSound = soundSettings?.load;
   useEffect(() => {
     let current = true;
@@ -71,6 +80,11 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     const adapterChanged = persistenceLoadAdapter.current !== loadPersistence;
     if (adapterChanged) {
       persistenceLoadAdapter.current = loadPersistence;
+      persistenceSaveToken.current += 1;
+      persistenceSavePending.current = false;
+      setPersistencePending(false);
+      setPersistenceError("");
+      setPersistenceLoadError("");
       setPersistence(undefined);
       setPersistenceSupported(undefined);
       setCustomMode(false);
@@ -78,6 +92,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
       setCustomInvalid(false);
     }
     if (!loadPersistence || locked || (!adapterChanged && persistenceSupported !== undefined)) return () => { current = false; };
+    setPersistenceLoadError("");
     void loadPersistence().then(value => {
       if (!current) return;
       setPersistenceSupported(value.supported);
@@ -90,7 +105,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         setCustomDraft(String(loaded.seconds));
       }
     }).catch(() => {
-      if (current) setError("Could not load banner duration settings. Reopen Settings to try again.");
+      if (current) setPersistenceLoadError("Could not load banner duration settings. Reopen Settings to try again.");
     });
     return () => { current = false; };
   }, [loadPersistence, locked, persistenceSupported]);
@@ -146,21 +161,29 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     catch { setError("Could not open notification settings."); }
     finally { setBusy(false); }
   };
-  const savePersistence = async (value: NotificationPersistence, onFailure: () => void) => {
+  const savePersistence = async (value: NotificationPersistence, onSuccess: () => void, onFailure: () => void) => {
     if (locked || persistenceSavePending.current || !persistenceSettings) return;
+    const savedSettings = persistenceSettings;
+    const isCurrentSave = () => persistenceMounted.current && persistenceSettingsRef.current === savedSettings;
+    const saveToken = ++persistenceSaveToken.current;
     persistenceSavePending.current = true;
     setPersistencePending(true);
     setPersistenceError("");
     try {
-      await persistenceSettings.save(value);
+      await savedSettings.save(value);
+      if (!isCurrentSave()) return;
       setPersistence(value);
       if (value.seconds !== null) lastFinitePersistence.current = value.seconds;
+      onSuccess();
     } catch {
+      if (!isCurrentSave()) return;
       setPersistenceError("Could not save notification settings. Try again.");
       onFailure();
     } finally {
-      persistenceSavePending.current = false;
-      setPersistencePending(false);
+      if (persistenceSaveToken.current === saveToken) {
+        persistenceSavePending.current = false;
+        if (persistenceMounted.current) setPersistencePending(false);
+      }
     }
   };
   const persistenceSelection = customMode ? "custom" : persistence?.seconds === null ? "indefinite" : String(persistence?.seconds);
@@ -169,34 +192,38 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     const value = /^\d+$/.test(customDraft) ? notificationPersistence({ seconds: Number(customDraft) }) : undefined;
     if (!value || value.seconds === null) {
       setCustomInvalid(true);
-      setPersistenceError("Enter whole seconds from 1 to 3600.");
       return;
     }
     setCustomInvalid(false);
     setPersistenceError("");
     if (value.seconds === persistence.seconds) return;
-    void savePersistence(value, () => {
+    void savePersistence(value, () => undefined, () => {
       setCustomDraft(String(persistence.seconds));
       setCustomInvalid(false);
     });
   };
   const selectPersistence = (selection: string) => {
     if (locked || persistenceSavePending.current || !persistence) return;
-    setCustomInvalid(false);
-    setPersistenceError("");
     if (selection === "custom") {
+      setCustomInvalid(false);
+      setPersistenceError("");
       setCustomMode(true);
       const seconds = persistence.seconds === null ? lastFinitePersistence.current : persistence.seconds;
       setCustomDraft(String(seconds));
-      if (persistence.seconds === null) void savePersistence({ seconds }, () => {
+      if (persistence.seconds === null) void savePersistence({ seconds }, () => undefined, () => {
         setCustomMode(false);
         setCustomDraft("");
       });
       return;
     }
-    setCustomMode(false);
     const value = selection === "indefinite" ? { seconds: null } : { seconds: Number(selection) };
-    void savePersistence(value, () => undefined);
+    void savePersistence(value, () => {
+      setCustomMode(false);
+      setCustomInvalid(false);
+    }, () => {
+      if (persistence.seconds !== null) setCustomDraft(String(persistence.seconds));
+      setCustomInvalid(false);
+    });
   };
   useEffect(() => {
     if (!hasDesktopBanners) setPersistenceError("");
@@ -266,6 +293,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
             <option value="hidden">Hidden — generic banner only</option>
           </select>
         </div>
+        {persistenceSettings && persistenceLoadError && !persistenceSupported && <p id="notification-persistence-load-error" className="settings-note" role="alert">{persistenceLoadError}</p>}
         {persistenceSettings && persistenceSupported && persistence && <div id="notification-persistence-row" className="settings-control-row" data-persistence-mode={persistenceSelection}>
           <label htmlFor="notification-persistence">Banner duration</label>
           <span id="notification-persistence-controls">
@@ -305,7 +333,8 @@ export function NotificationSettings({ notifications, filters, sources, preferen
           Open notification settings
         </button>}
       </>}
-      {(persistenceError || error) && <p role="alert">{persistenceError || error}</p>}
+      {hasDesktopBanners && customInvalid && <p id="notification-persistence-validation-error" role="alert" aria-label="Invalid custom banner duration">Enter whole seconds from 1 to 3600.</p>}
+      {(persistenceError || error) && <p id="notification-settings-action-error" role="alert" aria-label="Notification settings action failed">{persistenceError || error}</p>}
       {apps.length ? (
         <details id="notification-app-rules-disclosure" className="settings-disclosure">
           <summary>Per-app mirroring</summary>

@@ -22,11 +22,14 @@ pub(crate) fn for_candidate(
     candidate: &BannerCandidate,
     locked: bool,
 ) -> Option<Icon> {
+    if locked || (preferences.preview == NotificationPreview::Hidden && !preferences.show_source) {
+        return None;
+    }
     if candidate.kind == "message" {
         return Some(Icon::Message);
     }
     let allows_app_icon =
-        !locked && (preferences.preview == NotificationPreview::Full || preferences.show_source);
+        preferences.preview == NotificationPreview::Full || preferences.show_source;
     if allows_app_icon {
         if let Some(png) = candidate
             .app_icon_png_base64
@@ -148,11 +151,13 @@ fn png_header_32(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, RgbaImage};
+    use image::{
+        DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, RgbaImage,
+    };
 
-    fn png() -> String {
+    fn png(width: u32, height: u32) -> String {
         let mut bytes = Vec::new();
-        DynamicImage::ImageRgba8(RgbaImage::new(32, 32))
+        DynamicImage::ImageRgba8(RgbaImage::new(width, height))
             .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
         STANDARD.encode(bytes)
@@ -160,13 +165,22 @@ mod tests {
 
     #[test]
     fn notification_icon_accepts_only_bounded_32_pixel_pngs() {
-        assert!(valid_png_base64(&png()).is_some());
+        assert!(valid_png_base64(&png(32, 32)).is_some());
         assert!(valid_png_base64("not-base64").is_none());
         assert!(valid_png_base64(&"A".repeat(MAX_BASE64_BYTES + 1)).is_none());
-        let valid = STANDARD.decode(png()).unwrap();
+        let valid = STANDARD.decode(png(32, 32)).unwrap();
         assert!(valid_png_base64(&STANDARD.encode(&valid[..valid.len() - 1])).is_none());
-        let mut wrong_dimensions = valid.clone();
-        wrong_dimensions[16..20].copy_from_slice(&33u32.to_be_bytes());
+        let wrong_dimensions = STANDARD.decode(png(33, 32)).unwrap();
+        assert_eq!(
+            image::ImageReader::with_format(
+                Cursor::new(&wrong_dimensions),
+                image::ImageFormat::Png,
+            )
+            .decode()
+            .unwrap()
+            .dimensions(),
+            (33, 32)
+        );
         assert!(valid_png_base64(&STANDARD.encode(wrong_dimensions)).is_none());
         assert!(valid_png_base64(&STANDARD.encode(vec![0; MAX_PNG_BYTES + 1])).is_none());
         let excessive_metadata = with_metadata(&valid, MAX_PNG_METADATA_BYTES + 1);
@@ -253,7 +267,7 @@ mod tests {
 
     #[test]
     fn notification_icon_policy_never_leaks_app_icons_when_hidden_or_locked() {
-        let encoded = png();
+        let encoded = png(32, 32);
         let candidate = BannerCandidate {
             id: "candidate".into(),
             kind: "notification".into(),
@@ -303,5 +317,7 @@ mod tests {
             for_candidate(&full, &message, false),
             Some(Icon::Message)
         ));
+        assert!(for_candidate(&hidden, &message, false).is_none());
+        assert!(for_candidate(&full, &message, true).is_none());
     }
 }

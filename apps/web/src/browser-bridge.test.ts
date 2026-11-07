@@ -1377,6 +1377,23 @@ describe("BrowserBridge", () => {
     bridge.dispose();
   });
 
+  it("reports an explicit display failure when constructing a granted banner throws", () => {
+    const port = new TestPort();
+    const original = globalThis.Notification;
+    class FailingNotification {
+      public static permission: NotificationPermission = "granted";
+      public constructor() { throw new Error("blocked"); }
+    }
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: FailingNotification });
+    try {
+      new BrowserBridge(port as unknown as MessagePort);
+      port.reply({ event: "banner", candidate: { id: "candidate-1", title: "Private", body: "Body" } });
+      expect(port.sent).toEqual([{ id: 1, command: "display_failed", args: { ids: ["candidate-1"] } }]);
+    } finally {
+      Object.defineProperty(globalThis, "Notification", { configurable: true, value: original });
+    }
+  });
+
   it("sends a content-free browser test notification only when granted", async () => {
     const original = globalThis.Notification;
     const posted = vi.fn();

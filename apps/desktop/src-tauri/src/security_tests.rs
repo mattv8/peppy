@@ -621,6 +621,25 @@ fn runtime_window_checks_back_the_acl() {
 }
 
 #[test]
+fn notification_persistence_commands_require_the_main_window_at_runtime() {
+    let registered = include_str!("lib.rs");
+    for command in [
+        "get_notification_persistence",
+        "set_notification_persistence",
+    ] {
+        let definition = registered
+            .split(&format!("fn {command}("))
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        assert!(definition.contains("window: tauri::WebviewWindow"));
+        assert!(definition.contains("require_main(window.label())?;"));
+    }
+}
+
+#[test]
 fn mark_all_read_requires_a_visible_focused_main_window() {
     assert!(crate::require_mark_all_read_window("main", true, false, true).is_ok());
     assert_eq!(

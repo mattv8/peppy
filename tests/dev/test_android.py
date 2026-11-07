@@ -39,8 +39,18 @@ def write_apk(path, ca=None):
 
 
 class AndroidHelperTests(unittest.TestCase):
+    def setUp(self):
+        config = tempfile.TemporaryDirectory()
+        self.addCleanup(config.cleanup)
+        self.config_root = pathlib.Path(config.name)
+        (self.config_root / ".env").write_text("DEBUG=false\n")
+
+    def synthetic_root_environment(self, env=None):
+        """Point the real checkout's helper at a synthetic config root so the developer's .env and TLS are never read."""
+        return {"PEPPY_DEV_CONFIG_ROOT": str(self.config_root)} | (env or {})
+
     def run_helper(self, *args, env=None):
-        return self.run_script(ROOT / "infra/dev/android.sh", *args, env=env)
+        return self.run_script(ROOT / "infra/dev/android.sh", *args, env=self.synthetic_root_environment(env))
 
     def helper_environment(self, env=None):
         values = os.environ.copy()
@@ -50,7 +60,7 @@ class AndroidHelperTests(unittest.TestCase):
             "ANDROID_HOME", "ANDROID_NDK_HOME", "JAVA_HOME", "CARGO_TARGET_DIR",
             "PEPPY_ACCEPT_ANDROID_LICENSES", "PEPPY_DEBUG_SERVER", "API_HOST_PORT", "PUBLIC_API_URL",
             "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED",
-            "DEBUG", "PEPPY_DEV_CONFIG_ROOT", "PEPPY_DEV_TLS_DIR",
+            "DEBUG", "PEPPY_DEV_CONFIG_ROOT", "PEPPY_DEV_TLS_DIR", "PEPPY_DEV_TLS_CERT", "PEPPY_SOURCE_TREE",
         ):
             values.pop(name, None)
         values["PEPPY_ANDROID_BUILD_BACKEND"] = "docker"
@@ -216,7 +226,7 @@ class AndroidHelperTests(unittest.TestCase):
             process = subprocess.Popen(
                 ["bash", str(ROOT / "infra/dev/android.sh"), "emulator"],
                 cwd=ROOT,
-                env=self.helper_environment(values),
+                env=self.helper_environment(self.synthetic_root_environment(values)),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -365,7 +375,7 @@ class AndroidHelperTests(unittest.TestCase):
             env = os.environ.copy()
             for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT", "PEPPY_ANDROID_SERIAL", "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_BOOT_TIMEOUT", "PEPPY_ANDROID_ARTIFACTS"):
                 env.pop(name, None)
-            env.update({"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_AVD": "test-avd", "PEPPY_ANDROID_BOOT_TIMEOUT": str(BOOT_HANG_GUARD_TIMEOUT), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "STARTED": str(state), "EMULATOR_PID": str(pid_path)})
+            env.update(self.synthetic_root_environment({"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_AVD": "test-avd", "PEPPY_ANDROID_BOOT_TIMEOUT": str(BOOT_HANG_GUARD_TIMEOUT), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"), "STARTED": str(state), "EMULATOR_PID": str(pid_path)}))
             child, terminal = pty.fork()
             if child == 0:
                 os.execvpe("bash", ["bash", str(ROOT / "infra/dev/android.sh"), "emulator"], env)
@@ -789,6 +799,17 @@ class AndroidHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             fixture = self.create_debug_tls_deploy_fixture(temp)
             result = self.run_script(fixture["script"], "deploy", env=fixture["env"])
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("install -r", fixture["log"].read_text())
+
+    def test_sideload_deploy_skips_the_debug_ca_check_it_can_never_satisfy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_debug_tls_deploy_fixture(temp, embed_debug_ca=False)
+            write_apk(pathlib.Path(temp) / "artifacts/app-sideload.apk")
+            result = self.run_script(
+                fixture["script"], "deploy", env=fixture["env"] | {"PEPPY_ANDROID_BUILD_VARIANT": "sideload"},
+            )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("install -r", fixture["log"].read_text())

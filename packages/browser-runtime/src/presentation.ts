@@ -54,8 +54,10 @@ export class CoreNotificationSettings implements NotificationSettings {
 export interface NotificationAdapter {
   readonly available: boolean;
   readonly permission: "granted" | "denied" | "default";
-  show(notification: { title: string; body: string; tag: string; icon?: string; requireInteraction?: true }): void | { close(): void };
+  show(notification: { title: string; body: string; tag: string; icon?: string; requireInteraction?: true }): void | NotificationHandle;
 }
+
+export type NotificationHandle = { close(): void; release?(): void; onclose?(listener: () => void): void };
 
 export type BannerDelivery = (candidate: BannerCandidate) => void;
 
@@ -63,8 +65,10 @@ export type BannerDelivery = (candidate: BannerCandidate) => void;
 export class BannerPresenter {
   private context?: BannerContext;
   private draining?: Promise<void>;
+  private generation = 0;
   private readonly awaitingDisplay = new Set<string>();
-  private readonly displayedNotifications = new Set<{ close(): void }>();
+  private readonly failedAcknowledgements = new Set<string>();
+  private readonly displayedNotifications = new Set<NotificationHandle>();
 
   public constructor(
     private readonly session: BannerSession,
@@ -72,41 +76,83 @@ export class BannerPresenter {
     private readonly notification: NotificationAdapter,
     private readonly deliverToRenderer: () => BannerDelivery | undefined,
     private readonly now: () => number = Date.now,
+    private readonly acknowledged?: (ids: readonly string[]) => void,
   ) {}
 
-  public setContext(context: BannerContext): void { this.context = context; }
+  public setContext(context: BannerContext | undefined): void { this.context = context; }
 
   public drain(): Promise<void> {
-    this.draining ??= this.drainCandidates().finally(() => { this.draining = undefined; });
+    if (!this.draining) {
+      const generation = this.generation;
+      const draining = this.drainCandidates(generation).finally(() => {
+        if (this.draining === draining) this.draining = undefined;
+      });
+      this.draining = draining;
+    }
     return this.draining;
   }
 
   public async acknowledgeDisplayed(ids: readonly string[]): Promise<void> {
-    const acknowledged = ids.filter(id => this.awaitingDisplay.delete(id));
-    if (acknowledged.length > 0) await this.session.mutate("ack_banner_candidates", { ids: acknowledged });
+    const acknowledged = ids.filter(id => this.awaitingDisplay.has(id));
+    if (acknowledged.length === 0) return;
+    try {
+      await this.acknowledge(acknowledged);
+      acknowledged.forEach(id => {
+        this.awaitingDisplay.delete(id);
+        this.failedAcknowledgements.delete(id);
+      });
+    } catch (error) {
+      acknowledged.forEach(id => this.failedAcknowledgements.add(id));
+      throw error;
+    }
+  }
+
+  public releaseDisplayed(ids: readonly string[]): void {
+    ids.forEach(id => {
+      this.awaitingDisplay.delete(id);
+      this.failedAcknowledgements.delete(id);
+    });
   }
 
   public clear(): void {
+    this.generation += 1;
     this.context = undefined;
+    this.draining = undefined;
     this.awaitingDisplay.clear();
-    this.displayedNotifications.forEach(notification => notification.close());
-    this.displayedNotifications.clear();
+    this.failedAcknowledgements.clear();
+    [...this.displayedNotifications].forEach(notification => this.releaseNotification(notification, true));
   }
 
-  private async drainCandidates(): Promise<void> {
+  private async drainCandidates(generation: number): Promise<void> {
     const candidates = bannerCandidates(await this.session.query("pending_banner_candidates", { limit: BANNER_LIMIT }));
+    if (!this.current(generation)) return;
     const preferences = await this.settings.load() ?? DEFAULT_NOTIFICATION_PREFERENCES;
+    if (!this.current(generation)) return;
     const acknowledge: string[] = [];
     for (const candidate of candidates) {
-      if (this.awaitingDisplay.has(candidate.id)) continue;
+      if (!this.current(generation)) return;
       if (this.suppress(candidate, preferences)) {
-        acknowledge.push(candidate.id);
+        if (this.awaitingDisplay.has(candidate.id)) {
+          try { await this.acknowledgeDisplayed([candidate.id]); } catch {}
+        } else {
+          acknowledge.push(candidate.id);
+        }
         continue;
       }
+      if (this.failedAcknowledgements.has(candidate.id)) {
+        try { await this.acknowledgeDisplayed([candidate.id]); } catch {}
+        continue;
+      }
+      if (this.awaitingDisplay.has(candidate.id)) continue;
       if (this.notification.available && this.notification.permission === "granted") {
         try {
           const notification = this.notification.show({ ...bannerText(candidate, preferences), tag: `peppy-${candidate.id}`, ...(this.context?.requireInteraction === true ? { requireInteraction: true } : {}) });
-          if (notification) this.displayedNotifications.add(notification);
+          if (!this.current(generation)) {
+            notification?.close();
+            notification?.release?.();
+            return;
+          }
+          if (notification) this.trackNotification(notification);
           acknowledge.push(candidate.id);
         } catch {
           // A failed browser post remains in the core ledger for a later retry.
@@ -122,6 +168,7 @@ export class BannerPresenter {
         const renderer = this.deliverToRenderer();
         if (renderer) {
           renderer(redactedCandidate(candidate, preferences));
+          if (!this.current(generation)) return;
           this.awaitingDisplay.add(candidate.id);
         } else {
           // Unsupported/denied browser notifications are an intentional policy drop.
@@ -129,7 +176,27 @@ export class BannerPresenter {
         }
       }
     }
-    if (acknowledge.length > 0) await this.session.mutate("ack_banner_candidates", { ids: acknowledge });
+    if (acknowledge.length > 0 && this.current(generation)) {
+      await this.acknowledge(acknowledge);
+    }
+  }
+
+  private current(generation: number): boolean { return generation === this.generation; }
+
+  private async acknowledge(ids: readonly string[]): Promise<void> {
+    await this.session.mutate("ack_banner_candidates", { ids });
+    this.acknowledged?.(ids);
+  }
+
+  private trackNotification(notification: NotificationHandle): void {
+    this.displayedNotifications.add(notification);
+    notification.onclose?.(() => this.releaseNotification(notification, false));
+  }
+
+  private releaseNotification(notification: NotificationHandle, close: boolean): void {
+    if (!this.displayedNotifications.delete(notification)) return;
+    if (close) notification.close();
+    notification.release?.();
   }
 
   private suppress(candidate: BannerCandidate, preferences: NotificationPreferences): boolean {
@@ -144,9 +211,23 @@ export class BrowserNotificationAdapter implements NotificationAdapter {
   public constructor(private readonly notification: typeof Notification | undefined = globalThis.Notification) {}
   public get available(): boolean { return this.notification !== undefined; }
   public get permission(): "granted" | "denied" | "default" { return this.notification?.permission ?? "denied"; }
-  public show(notification: { title: string; body: string; tag: string; icon?: string; requireInteraction?: true }): { close(): void } {
+  public show(notification: { title: string; body: string; tag: string; icon?: string; requireInteraction?: true }): NotificationHandle {
     if (!this.notification || this.notification.permission !== "granted") throw new Error("Notifications are unavailable");
-    return new this.notification(notification.title, { body: notification.body, tag: notification.tag, ...(notification.icon ? { icon: notification.icon } : {}), ...(notification.requireInteraction ? { requireInteraction: true } : {}) });
+    const displayed = new this.notification(notification.title, { body: notification.body, tag: notification.tag, ...(notification.icon ? { icon: notification.icon } : {}), ...(notification.requireInteraction ? { requireInteraction: true } : {}) });
+    let onclose: (() => void) | undefined;
+    const closed = () => onclose?.();
+    const eventTarget = displayed as Notification & Partial<EventTarget>;
+    const originalOnClose = displayed.onclose;
+    if (eventTarget.addEventListener) eventTarget.addEventListener("close", closed);
+    else displayed.onclose = event => { originalOnClose?.call(displayed, event); closed(); };
+    return {
+      close: () => displayed.close(),
+      release: () => {
+        if (eventTarget.removeEventListener) eventTarget.removeEventListener("close", closed);
+        else if (displayed.onclose !== originalOnClose) displayed.onclose = originalOnClose;
+      },
+      onclose: listener => { onclose = listener; },
+    };
   }
 }
 
@@ -235,9 +316,10 @@ function redactedCandidate(candidate: BannerCandidate, preferences: Notification
   };
 }
 
-function candidateIcon(candidate: BannerCandidate, allowAppIcon: boolean): string | undefined {
+function candidateIcon(candidate: BannerCandidate, showIcon: boolean): string | undefined {
+  if (!showIcon) return undefined;
   if (candidate.kind === "message") return MESSAGE_GLYPH;
-  return allowAppIcon && candidate.appIconPngBase64 ? `data:image/png;base64,${candidate.appIconPngBase64}` : undefined;
+  return candidate.appIconPngBase64 ? `data:image/png;base64,${candidate.appIconPngBase64}` : undefined;
 }
 
 function nonEmptyString(value: unknown): value is string {
@@ -254,6 +336,10 @@ function validPngBase64(value: unknown): value is string {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let offset = 8;
     let sawIdat = false;
+    let sawPlte = false;
+    let finishedIdat = false;
+    let bitDepth = 0;
+    let colorType = 0;
     while (offset < bytes.length) {
       if (bytes.length - offset < 12) return false;
       const length = view.getUint32(offset);
@@ -265,8 +351,20 @@ function validPngBase64(value: unknown): value is string {
       const type = String.fromCharCode(bytes[typeOffset], bytes[typeOffset + 1], bytes[typeOffset + 2], bytes[typeOffset + 3]);
       if (offset === 8) {
         if (type !== "IHDR" || length !== 13 || view.getUint32(dataOffset) !== 32 || view.getUint32(dataOffset + 4) !== 32 || !validIhdr(bytes, dataOffset)) return false;
-      } else if (type === "IHDR") return false;
-      if (type === "IDAT") sawIdat = true;
+        bitDepth = bytes[dataOffset + 8];
+        colorType = bytes[dataOffset + 9];
+      } else if (type === "IHDR" || (type !== "PLTE" && type !== "IDAT" && type !== "IEND" && (bytes[typeOffset] & 0x20) === 0)) return false;
+      if (type === "PLTE") {
+        const entries = length / 3;
+        if (sawPlte || sawIdat || colorType === 0 || colorType === 4 || entries === 0 || !Number.isInteger(entries) || entries > 256 || (colorType === 3 && entries > 2 ** bitDepth)) return false;
+        sawPlte = true;
+      }
+      if (type === "IDAT") {
+        if (finishedIdat || (colorType === 3 && !sawPlte)) return false;
+        sawIdat = true;
+      } else if (sawIdat) {
+        finishedIdat = true;
+      }
       if (type === "IEND") return length === 0 && sawIdat && end + 4 === bytes.length;
       offset = end + 4;
     }

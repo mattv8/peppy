@@ -559,6 +559,83 @@ it("restores the confirmed preset after a rejected preset save", async () => {
   expect(control).toHaveValue("30");
 });
 
+it.each(["30", "indefinite"])("keeps confirmed Custom mode until a %s save succeeds", async (selection) => {
+  let resolve!: () => void;
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  settings.save.mockImplementation(() => new Promise<void>(done => { resolve = done; }));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const control = await screen.findByLabelText("Banner duration");
+  await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(control, { target: { value: selection } });
+
+  expect(control).toHaveValue("custom");
+  expect(screen.getByLabelText("Custom banner duration in seconds")).toHaveValue(45);
+  await act(async () => resolve());
+  expect(control).toHaveValue(selection);
+  expect(screen.queryByLabelText("Custom banner duration in seconds")).not.toBeInTheDocument();
+});
+
+it("keeps Custom mode and its draft after a rejected preset save", async () => {
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  settings.save.mockRejectedValue(new Error("disk"));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const control = await screen.findByLabelText("Banner duration");
+  await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(control, { target: { value: "30" } });
+
+  await screen.findByRole("alert");
+  expect(control).toHaveValue("custom");
+  expect(screen.getByLabelText("Custom banner duration in seconds")).toHaveValue(45);
+});
+
+it("does not apply a stale duration save after its adapter changes", async () => {
+  let resolve!: () => void;
+  const initial = persistenceSettings({ seconds: 45, supported: true });
+  initial.save.mockImplementation(() => new Promise<void>(done => { resolve = done; }));
+  const replacement = persistenceSettings({ seconds: 45, supported: true });
+  const input = props();
+  const { rerender } = render(<NotificationSettings {...input} persistenceSettings={initial} />);
+  const control = await screen.findByLabelText("Banner duration");
+  await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(control, { target: { value: "30" } });
+  rerender(<NotificationSettings {...input} persistenceSettings={replacement} />);
+  await screen.findByLabelText("Custom banner duration in seconds");
+  await act(async () => resolve());
+
+  expect(screen.getByLabelText("Banner duration")).toHaveValue("custom");
+  expect(screen.getByLabelText("Custom banner duration in seconds")).toHaveValue(45);
+});
+
+it("allows a replacement adapter save while an old duration save is unresolved", async () => {
+  let resolveOld!: () => void;
+  let resolveReplacement!: () => void;
+  const initial = persistenceSettings({ seconds: 45, supported: true });
+  initial.save.mockImplementation(() => new Promise<void>(done => { resolveOld = done; }));
+  const replacement = persistenceSettings({ seconds: 45, supported: true });
+  replacement.save.mockImplementation(() => new Promise<void>(done => { resolveReplacement = done; }));
+  const input = props();
+  const { rerender } = render(<NotificationSettings {...input} persistenceSettings={initial} />);
+  const control = await screen.findByLabelText("Banner duration");
+  await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(control, { target: { value: "30" } });
+  rerender(<NotificationSettings {...input} persistenceSettings={replacement} />);
+  const replacementControl = await screen.findByLabelText("Banner duration");
+  const replacementCustom = await screen.findByLabelText("Custom banner duration in seconds");
+  expect(replacementCustom).not.toHaveAttribute("readonly");
+  fireEvent.change(replacementControl, { target: { value: "30" } });
+  await waitFor(() => expect(replacement.save).toHaveBeenCalledWith({ seconds: 30 }));
+  expect(replacementCustom).toHaveAttribute("readonly");
+
+  await act(async () => resolveOld());
+  expect(replacementCustom).toHaveAttribute("readonly");
+  await act(async () => resolveReplacement());
+  expect(replacementControl).toHaveValue("30");
+});
+
 it("keeps an invalid custom draft marked invalid after blur", async () => {
   const settings = persistenceSettings({ seconds: 45, supported: true });
   render(<NotificationSettings {...props()} persistenceSettings={settings} />);
@@ -568,6 +645,73 @@ it("keeps an invalid custom draft marked invalid after blur", async () => {
   fireEvent.blur(custom);
   expect(custom).toHaveAttribute("aria-invalid", "true");
   expect(settings.save).not.toHaveBeenCalled();
+});
+
+it("keeps invalid duration feedback consistent after desktop banners toggle", async () => {
+  const input = props();
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  const { rerender } = render(<NotificationSettings {...input} persistenceSettings={settings} />);
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "0" } });
+  fireEvent.blur(custom);
+  expect(custom).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByRole("alert")).toBeVisible();
+  rerender(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: false, mirroredBanners: false }} persistenceSettings={settings} />);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  rerender(<NotificationSettings {...input} persistenceSettings={settings} />);
+
+  expect(screen.getByLabelText("Custom banner duration in seconds")).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByRole("alert")).toBeVisible();
+});
+
+it("keeps validation visible with a failed notification action", async () => {
+  const input = props();
+  input.onPermission.mockRejectedValue(new Error("failure"));
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  render(<NotificationSettings {...input} persistenceSettings={settings} />);
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "0" } });
+  fireEvent.blur(custom);
+  fireEvent.click(screen.getByRole("button", { name: CHECK }));
+
+  await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2));
+  expect(screen.getByRole("alert", { name: "Invalid custom banner duration" })).toBeVisible();
+  expect(screen.getByRole("alert", { name: "Notification settings action failed" })).toHaveTextContent("Could not send test notification");
+});
+
+it("resets an invalid custom draft when a preset save is rejected", async () => {
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  settings.save.mockRejectedValue(new Error("disk"));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const control = await screen.findByLabelText("Banner duration");
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "0" } });
+  fireEvent.blur(custom);
+  fireEvent.change(control, { target: { value: "30" } });
+
+  await screen.findByRole("alert");
+  expect(control).toHaveValue("custom");
+  expect(custom).toHaveValue(45);
+  expect(custom).not.toHaveAttribute("aria-invalid");
+  expect(screen.getByRole("alert", { name: "Notification settings action failed" })).toHaveTextContent("Could not save notification settings");
+});
+
+it.each(["30", "indefinite"])("clears invalid Custom feedback after a successful %s save", async (selection) => {
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const control = await screen.findByLabelText("Banner duration");
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "0" } });
+  fireEvent.blur(custom);
+  fireEvent.change(control, { target: { value: selection } });
+
+  await waitFor(() => expect(screen.queryByLabelText("Custom banner duration in seconds")).not.toBeInTheDocument());
+  expect(control).toHaveValue(selection);
+  expect(screen.queryByRole("alert", { name: "Invalid custom banner duration" })).not.toBeInTheDocument();
 });
 
 it("loads banner duration inside StrictMode", async () => {
@@ -588,6 +732,45 @@ it("loads banner duration after a lock interrupts its first load", async () => {
   await act(async () => resolve({ seconds: 5, supported: true }));
   rerender(<NotificationSettings {...input} persistenceSettings={settings} />);
   expect(await screen.findByLabelText("Banner duration")).toBeEnabled();
+});
+
+it("keeps the banner-duration load failure through unrelated notification actions", async () => {
+  const input = props();
+  const settings = persistenceSettings();
+  settings.load.mockRejectedValue(new Error("disk"));
+  input.onPermission.mockResolvedValue(check("granted"));
+  render(<NotificationSettings {...input} persistenceSettings={settings} />);
+
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: CHECK }));
+  await screen.findByRole("status");
+  expect(screen.getByRole("alert")).toHaveAttribute("id", "notification-persistence-load-error");
+});
+
+it("hides a duration load failure when the persistence adapter is removed", async () => {
+  const input = props();
+  const settings = persistenceSettings();
+  settings.load.mockRejectedValue(new Error("disk"));
+  const { rerender } = render(<NotificationSettings {...input} persistenceSettings={settings} />);
+
+  await screen.findByRole("alert");
+  rerender(<NotificationSettings {...input} />);
+
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("clears a duration load failure when a replacement adapter is locked", async () => {
+  const input = props();
+  const failed = persistenceSettings();
+  failed.load.mockRejectedValue(new Error("disk"));
+  const replacement = persistenceSettings();
+  const { rerender } = render(<NotificationSettings {...input} persistenceSettings={failed} />);
+
+  await screen.findByRole("alert");
+  rerender(<NotificationSettings {...input} locked persistenceSettings={replacement} />);
+
+  expect(replacement.load).not.toHaveBeenCalled();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
 it("keeps focus on the duration select after a preset save", async () => {

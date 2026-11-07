@@ -228,17 +228,16 @@ impl Backend {
             });
             UNUserNotificationCenter::currentNotificationCenter()
                 .addNotificationRequest_withCompletionHandler(&request, Some(&completion));
-            let result = super::owner::await_platform_acceptance(
-                &acceptance,
-                super::owner::PLATFORM_TIMEOUT,
-            )
-            .map_err(|_| PostError::Failed)?;
-            if let Err(error) = result {
-                // Timeout is not acceptance. Fence/remove the request now; a late
-                // successful completion repeats cleanup and cannot ACK the candidate.
-                self.remove(&item);
-                return Err(error);
-            }
+            platform_acceptance_outcome(
+                super::owner::await_platform_acceptance(
+                    &acceptance,
+                    super::owner::PLATFORM_TIMEOUT,
+                ),
+                &item,
+                |item| {
+                    self.remove(item);
+                },
+            )?;
             Ok(item)
         })
     }
@@ -267,6 +266,24 @@ impl Backend {
                 self.signals.lock().unwrap().remove(id);
             },
         )
+    }
+}
+
+fn platform_acceptance_outcome(
+    result: Result<Result<(), PostError>, ()>,
+    item: &Item,
+    retire: impl FnOnce(&Item),
+) -> Result<(), PostError> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            retire(item);
+            Err(error)
+        }
+        Err(()) => {
+            retire(item);
+            Err(PostError::Failed)
+        }
     }
 }
 
@@ -430,6 +447,34 @@ mod tests {
             |_| callback_owned.set(false)
         ));
         assert!(!callback_owned.get());
+    }
+
+    #[test]
+    fn notification_mac_timeout_retires_the_item_before_late_completion() {
+        let item = Item {
+            id: "request".into(),
+            retiring: Arc::new(AtomicBool::new(false)),
+            _icon: None,
+        };
+        let removals = Cell::new(0);
+        let released = Cell::new(false);
+
+        assert_eq!(
+            platform_acceptance_outcome(Err(()), &item, |item| {
+                item.retire(
+                    |_| {
+                        removals.set(removals.get() + 1);
+                        true
+                    },
+                    |_| released.set(true),
+                );
+            }),
+            Err(PostError::Failed)
+        );
+        assert!(released.get());
+
+        item.complete(|_| removals.set(removals.get() + 1));
+        assert_eq!(removals.get(), 2);
     }
 
     #[test]

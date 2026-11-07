@@ -708,9 +708,14 @@ mod tests {
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
     }
 
-    fn recent_mirrored_candidates(
-        count: usize,
-    ) -> (crate::tests::Fixture, Session, NotificationSettings) {
+    fn mirrored_candidates(
+        posted_at: &[i64],
+    ) -> (
+        crate::tests::Fixture,
+        Session,
+        NotificationSettings,
+        peppy_client_core::Client,
+    ) {
         use peppy_client_core::{
             Client, ClientConfig, Cursor, DatabaseKey, DeviceId, NotificationCapture,
         };
@@ -738,11 +743,7 @@ mod tests {
             .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
             .unwrap();
         phone.set_server_compaction_state(true, true).unwrap();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        for id in 0..count {
+        for (id, posted_at) in posted_at.iter().enumerate() {
             phone
                 .capture_notification(NotificationCapture {
                     notification_key: format!("notification-{id}"),
@@ -753,7 +754,7 @@ mod tests {
                     title: "private title".into(),
                     text: "private body".into(),
                     category: None,
-                    posted_at: now + id as i64,
+                    posted_at: *posted_at,
                     dismissible: true,
                 })
                 .unwrap();
@@ -764,18 +765,171 @@ mod tests {
                 .ingest(envelope, Cursor(index as u64 + 1))
                 .unwrap();
         }
+        for envelope in phone.pending_outbox().unwrap() {
+            phone.ack_outbox(envelope.envelope_id).unwrap();
+        }
         session.client.apply_pending(100).unwrap();
         assert_eq!(
             session.client.pending_banner_candidates(100).unwrap().len(),
-            count
+            posted_at.len()
         );
         let settings = NotificationSettings::load(fixture.dir.path());
-        (fixture, session, settings)
+        (fixture, session, settings, phone)
+    }
+
+    fn recent_mirrored_candidates(
+        count: usize,
+    ) -> (
+        crate::tests::Fixture,
+        Session,
+        NotificationSettings,
+        peppy_client_core::Client,
+    ) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        mirrored_candidates(&vec![now; count])
+    }
+
+    #[test]
+    fn delivery_preference_failure_acks_accepted_direct_post_without_replaying_it() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let (_fixture, session, settings, phone) = mirrored_candidates(&[now]);
+        let posts = RefCell::new(Vec::new());
+
+        let error = drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |destination, title, body, _| {
+                posts.borrow_mut().push((destination, title, body));
+                for id in 0..4 {
+                    phone
+                        .capture_notification(peppy_client_core::NotificationCapture {
+                            notification_key: format!("summary-{id}"),
+                            instance: format!("summary-instance-{id}"),
+                            package_name: "com.example.calendar".into(),
+                            app_name: "Calendar".into(),
+                            app_icon_png_base64: Some(app_icon()),
+                            title: "private title".into(),
+                            text: "private body".into(),
+                            category: None,
+                            posted_at: now + id,
+                            dismissible: true,
+                        })
+                        .unwrap();
+                }
+                for (index, envelope) in phone.pending_outbox().unwrap().iter().enumerate() {
+                    session
+                        .client
+                        .ingest(envelope, peppy_client_core::Cursor(index as u64 + 2))
+                        .unwrap();
+                }
+                session.client.apply_pending(100).unwrap();
+                fs::create_dir_all(settings.claim_path(&session.binding).parent().unwrap())
+                    .unwrap();
+                fs::write(settings.claim_path(&session.binding), b"not json").unwrap();
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "notification-preferences");
+        assert_eq!(posts.borrow().len(), 1);
+        assert_eq!(
+            session.client.pending_banner_candidates(10).unwrap().len(),
+            4
+        );
+
+        fs::remove_file(settings.claim_path(&session.binding)).unwrap();
+        drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |destination, title, body, _| {
+                posts.borrow_mut().push((destination, title, body));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let posts = posts.into_inner();
+        assert_eq!(posts.len(), 2, "accepted direct posts are never replayed");
+        assert!(matches!(
+            posts[1].0,
+            peppy_desktop_api::NotificationActivationDestination::Main
+        ));
+        assert_eq!(posts[1].1, "New activity");
+        assert!(posts[1].2.is_empty());
+        assert!(session
+            .client
+            .pending_banner_candidates(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn direct_delivery_preference_failure_acks_only_the_accepted_candidate() {
+        let (_fixture, session, settings, _phone) = recent_mirrored_candidates(2);
+        let posts = RefCell::new(Vec::new());
+
+        let error = drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |destination, title, body, _| {
+                posts.borrow_mut().push((destination, title, body));
+                fs::create_dir_all(settings.claim_path(&session.binding).parent().unwrap())
+                    .unwrap();
+                fs::write(settings.claim_path(&session.binding), b"not json").unwrap();
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "notification-preferences");
+        assert_eq!(posts.borrow().len(), 1);
+        assert_eq!(
+            session.client.pending_banner_candidates(10).unwrap().len(),
+            1
+        );
+
+        fs::remove_file(settings.claim_path(&session.binding)).unwrap();
+        drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |destination, title, body, _| {
+                posts.borrow_mut().push((destination, title, body));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let posts = posts.into_inner();
+        assert_eq!(posts.len(), 2, "the first direct post is not replayed");
+        assert!(matches!(
+            posts[1].0,
+            peppy_desktop_api::NotificationActivationDestination::Mirrored { .. }
+        ));
+        assert!(session
+            .client
+            .pending_banner_candidates(10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn drain_rechecks_hidden_preview_after_an_accepted_first_post() {
-        let (_fixture, session, settings) = recent_mirrored_candidates(2);
+        let (_fixture, session, settings, _phone) = recent_mirrored_candidates(2);
         let posts = RefCell::new(Vec::new());
 
         assert!(!drain_with_delivery(
@@ -819,7 +973,7 @@ mod tests {
 
     #[test]
     fn drain_rechecks_source_only_preview_after_an_accepted_first_post() {
-        let (_fixture, session, settings) = recent_mirrored_candidates(2);
+        let (_fixture, session, settings, _phone) = recent_mirrored_candidates(2);
         let posts = RefCell::new(Vec::new());
 
         drain_with_delivery(
@@ -860,7 +1014,7 @@ mod tests {
 
     #[test]
     fn drain_rechecks_app_lock_after_an_accepted_first_post() {
-        let (_fixture, session, settings) = recent_mirrored_candidates(2);
+        let (_fixture, session, settings, _phone) = recent_mirrored_candidates(2);
         let locked = std::cell::Cell::new(false);
         let posts = RefCell::new(Vec::new());
 
@@ -895,7 +1049,7 @@ mod tests {
 
     #[test]
     fn drain_rechecks_suppression_after_an_accepted_first_post() {
-        let (_fixture, session, settings) = recent_mirrored_candidates(2);
+        let (_fixture, session, settings, _phone) = recent_mirrored_candidates(2);
         let suppress_remaining = std::cell::Cell::new(false);
         let posts = std::cell::Cell::new(0);
 
@@ -922,7 +1076,7 @@ mod tests {
 
     #[test]
     fn mixed_eligibility_burst_posts_the_remaining_candidate_without_a_summary() {
-        let (_fixture, session, settings) = recent_mirrored_candidates(4);
+        let (_fixture, session, settings, _phone) = recent_mirrored_candidates(4);
         let posts = RefCell::new(Vec::new());
 
         drain_with_delivery(

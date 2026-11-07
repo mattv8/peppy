@@ -469,7 +469,9 @@ export class BrowserBridge implements DesktopBridge {
       this.banners.add(notification);
       notification.onclose = () => this.banners.delete(notification);
       void this.call("display_ack", { ids: [candidate.id] }).catch(() => undefined);
-    } catch { /* The worker retains the candidate when a browser post throws. */ }
+    } catch {
+      void this.call("display_failed", { ids: [candidate.id] }).catch(() => undefined);
+    }
   }
   public dispose(): void {
     activeSecretDialog?.();

@@ -49,6 +49,29 @@ function paddedPng(decodedLength: number): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
+function png(...chunks: Array<[string, Uint8Array]>): string {
+  const encodedChunks = [
+    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    ...chunks.map(([type, data]) => pngChunk(type, data)),
+  ];
+  const bytes = new Uint8Array(encodedChunks.reduce((total, chunk) => total + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of encodedChunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return btoa(String.fromCharCode(...bytes));
+}
+
+function pngHeader(bitDepth = 8, colorType = 6): Uint8Array {
+  const header = new Uint8Array(13);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 32);
+  view.setUint32(4, 32);
+  header.set([bitDepth, colorType, 0, 0, 0], 8);
+  return header;
+}
+
 const PNG_AT_DECODED_BOUNDARY = paddedPng(8192);
 const PNG_OVER_DECODED_BOUNDARY = paddedPng(8193);
 const CORE_NOTIFICATION_TARGET = { sourceDeviceId: "00000000-0000-4000-8000-000000000001", notificationKey: "notification-1", lifetime: "00000000-0000-4000-8000-000000000002" };
@@ -204,7 +227,7 @@ describe("Worker notification presentation settings", () => {
     expect(disabled.shown[0]).not.toHaveProperty("requireInteraction");
   });
 
-  it("keeps the message glyph in every preview tier for direct and forwarded banners", async () => {
+  it("omits message artwork for fully hidden direct and forwarded banners", async () => {
     const tiers = [
       { preferences: { preview: "full" as const, showSource: false }, title: "Private title", body: "Private body" },
       { preferences: { preview: "hidden" as const, showSource: true }, title: "15551234567", body: "" },
@@ -215,13 +238,13 @@ describe("Worker notification presentation settings", () => {
       const direct = adapter();
       const directPresenter = new BannerPresenter({ query: async () => [message], mutate: async () => ({}) }, { ...preferences, load: async () => ({ messageBanners: true, mirroredBanners: true, ...tier.preferences }) }, direct, () => undefined);
       await directPresenter.drain();
-      expect(direct.shown).toEqual([{ title: tier.title, body: tier.body, tag: "peppy-candidate-1", icon: MESSAGE_GLYPH }]);
+      expect(direct.shown).toEqual([{ title: tier.title, body: tier.body, tag: "peppy-candidate-1", ...(tier.preferences.preview === "full" || tier.preferences.showSource ? { icon: MESSAGE_GLYPH } : {}) }]);
 
       const forwarded: BannerCandidate[] = [];
       const forwardedPresenter = new BannerPresenter({ query: async () => [message], mutate: async () => ({}) }, { ...preferences, load: async () => ({ messageBanners: true, mirroredBanners: true, ...tier.preferences }) }, adapter({ available: false, permission: "denied" }), () => value => forwarded.push(value));
       forwardedPresenter.setContext({ view: "settings", notificationPermission: "granted" });
       await forwardedPresenter.drain();
-      expect(forwarded).toEqual([{ id: "candidate-1", kind: "message", conversationId: "conversation-1", title: tier.title, body: tier.body, createdAt: message.createdAt, icon: MESSAGE_GLYPH }]);
+      expect(forwarded).toEqual([{ id: "candidate-1", kind: "message", conversationId: "conversation-1", title: tier.title, body: tier.body, createdAt: message.createdAt, ...(tier.preferences.preview === "full" || tier.preferences.showSource ? { icon: MESSAGE_GLYPH } : {}) }]);
     }
   });
 
@@ -278,6 +301,38 @@ describe("Worker notification presentation settings", () => {
     const rejectedPresenter = new BannerPresenter({ query: async () => [candidate({ kind: "notification", appIconPngBase64: PNG_OVER_DECODED_BOUNDARY } as Partial<BannerCandidate>)], mutate: async () => ({}) }, preferences, rejected, () => undefined);
     await rejectedPresenter.drain();
     expect(rejected.shown[0]).not.toHaveProperty("icon");
+  });
+
+  it("rejects unknown critical PNG chunks and invalid IDAT ordering", async () => {
+    const invalidIcons = [
+      png(["IHDR", pngHeader()], ["TEST", new Uint8Array()], ["IDAT", new Uint8Array()], ["IEND", new Uint8Array()]),
+      png(["IHDR", pngHeader()], ["IDAT", new Uint8Array()], ["tEST", new Uint8Array()], ["IDAT", new Uint8Array()], ["IEND", new Uint8Array()]),
+    ];
+    for (const appIconPngBase64 of invalidIcons) {
+      const notification = adapter();
+      const presenter = new BannerPresenter({ query: async () => [candidate({ kind: "notification", appIconPngBase64 } as Partial<BannerCandidate>)], mutate: async () => ({}) }, preferences, notification, () => undefined);
+
+      await presenter.drain();
+
+      expect(notification.shown[0]).not.toHaveProperty("icon");
+    }
+  });
+
+  it("rejects structurally invalid indexed and grayscale palettes", async () => {
+    const invalidIcons = [
+      png(["IHDR", pngHeader(2, 3)], ["IDAT", new Uint8Array()], ["IEND", new Uint8Array()]),
+      png(["IHDR", pngHeader(1, 3)], ["PLTE", new Uint8Array(9)], ["IDAT", new Uint8Array()], ["IEND", new Uint8Array()]),
+      png(["IHDR", pngHeader(8, 0)], ["PLTE", new Uint8Array(3)], ["IDAT", new Uint8Array()], ["IEND", new Uint8Array()]),
+      png(["IHDR", pngHeader(8, 3)], ["PLTE", new Uint8Array(257 * 3)], ["IDAT", new Uint8Array()], ["IEND", new Uint8Array()]),
+    ];
+    for (const appIconPngBase64 of invalidIcons) {
+      const notification = adapter();
+      const presenter = new BannerPresenter({ query: async () => [candidate({ kind: "notification", appIconPngBase64 } as Partial<BannerCandidate>)], mutate: async () => ({}) }, preferences, notification, () => undefined);
+
+      await presenter.drain();
+
+      expect(notification.shown[0]).not.toHaveProperty("icon");
+    }
   });
 
   it("uses the exact redacted contract in direct and forwarded delivery for every preview tier", async () => {
@@ -429,6 +484,23 @@ describe("Worker notification presentation settings", () => {
     expect(calls).toEqual([{ ids: ["candidate-1"] }]);
   });
 
+  it("keeps a displayed candidate awaiting a durable acknowledgement and retries only the acknowledgement", async () => {
+    const delivered: BannerCandidate[] = [];
+    const mutate = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue({});
+    const presenter = new BannerPresenter({
+      query: async () => [candidate()],
+      mutate,
+    }, preferences, adapter({ available: false, permission: "denied" }), () => value => delivered.push(value));
+    presenter.setContext({ view: "settings", notificationPermission: "granted" });
+
+    await presenter.drain();
+    await expect(presenter.acknowledgeDisplayed(["candidate-1"])).rejects.toThrow("offline");
+    await presenter.drain();
+
+    expect(delivered).toHaveLength(1);
+    expect(mutate).toHaveBeenCalledTimes(2);
+  });
+
   it("suppresses visible conversations without a browser emission", async () => {
     const notification = adapter();
     const calls: unknown[] = [];
@@ -451,5 +523,89 @@ describe("Worker notification presentation settings", () => {
     expect(delivered).toHaveLength(1);
     presenter.clear();
     await presenter.acknowledgeDisplayed(["candidate-1"]);
+  });
+
+  it("abandons a queried candidate when cleared before settings resolve", async () => {
+    let resolveSettings!: (value: NotificationPreferences) => void;
+    const settings = new Promise<NotificationPreferences>(resolve => { resolveSettings = resolve; });
+    const notification = adapter();
+    const mutate = vi.fn(async () => ({}));
+    const presenter = new BannerPresenter({ query: async () => [candidate()], mutate }, { load: async () => settings }, notification, () => undefined);
+
+    const draining = presenter.drain();
+    await Promise.resolve();
+    presenter.clear();
+    resolveSettings({ messageBanners: true, mirroredBanners: true, preview: "full" });
+    await draining;
+
+    expect(notification.shown).toEqual([]);
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("does not load settings after clear while candidate query is pending", async () => {
+    let resolveCandidates!: (value: BannerCandidate[]) => void;
+    const candidates = new Promise<BannerCandidate[]>(resolve => { resolveCandidates = resolve; });
+    const load = vi.fn(async () => ({ messageBanners: true, mirroredBanners: true, preview: "full" as const }));
+    const presenter = new BannerPresenter({ query: async () => candidates, mutate: async () => ({}) }, { load }, adapter(), () => undefined);
+
+    const draining = presenter.drain();
+    presenter.clear();
+    resolveCandidates([candidate()]);
+    await draining;
+
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it("does not acknowledge direct or forwarded banners cleared during delivery", async () => {
+    const directMutate = vi.fn(async () => ({}));
+    let directPresenter!: BannerPresenter;
+    const directHandle = { close: vi.fn(), release: vi.fn() };
+    directPresenter = new BannerPresenter({ query: async () => [candidate()], mutate: directMutate }, preferences, adapter({ show: () => { directPresenter.clear(); return directHandle; } }), () => undefined);
+    await directPresenter.drain();
+
+    const forwardedMutate = vi.fn(async () => ({}));
+    let forwardedPresenter!: BannerPresenter;
+    forwardedPresenter = new BannerPresenter({ query: async () => [candidate()], mutate: forwardedMutate }, preferences, adapter({ available: false, permission: "denied" }), () => () => forwardedPresenter.clear());
+    forwardedPresenter.setContext({ view: "settings", notificationPermission: "granted" });
+    await forwardedPresenter.drain();
+
+    expect(directMutate).not.toHaveBeenCalled();
+    expect(directHandle.close).toHaveBeenCalledOnce();
+    expect(directHandle.release).toHaveBeenCalledOnce();
+    expect(forwardedMutate).not.toHaveBeenCalled();
+  });
+
+  it("releases direct notification handles after closing them", async () => {
+    const close = vi.fn();
+    const release = vi.fn();
+    const presenter = new BannerPresenter({ query: async () => [candidate()], mutate: async () => ({}) }, preferences, adapter({ show: () => ({ close, release }) }), () => undefined);
+
+    await presenter.drain();
+
+    presenter.clear();
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("releases a dismissed browser notification and only closes remaining live handles", async () => {
+    const notifications: TestNotification[] = [];
+    class TestNotification extends EventTarget {
+      public static permission: NotificationPermission = "granted";
+      public close = vi.fn(() => this.dispatchEvent(new Event("close")));
+      public constructor() { super(); notifications.push(this); }
+      public dismiss(): void { this.dispatchEvent(new Event("close")); }
+    }
+    const presenter = new BannerPresenter({
+      query: async () => [candidate({ id: "first" }), candidate({ id: "second" })],
+      mutate: async () => ({}),
+    }, preferences, new BrowserNotificationAdapter(TestNotification as unknown as typeof Notification), () => undefined);
+
+    await presenter.drain();
+    notifications[0].dismiss();
+    presenter.clear();
+
+    expect(notifications[0].close).not.toHaveBeenCalled();
+    expect(notifications[1].close).toHaveBeenCalledOnce();
   });
 });

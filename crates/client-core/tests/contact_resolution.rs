@@ -172,6 +172,61 @@ fn refresh_normalizes_each_contact_in_a_book_with_its_cached_region() {
 }
 
 #[test]
+fn refreshes_late_and_earlier_revisions_without_stale_address_matches() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "owner", &vault);
+    let client = unlocked(&cfg, &vault);
+    let contacts = (0..600)
+        .map(|number| {
+            contact(
+                "book",
+                &format!("c{number:03}"),
+                &format!("Contact {number}"),
+                &format!("+1202555{number:04}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    capture(&client, &cfg, "book", "US", "1", Value::Array(contacts));
+
+    for _ in 0..4 {
+        resolve(&client, &["+12025550000"]);
+    }
+
+    capture(
+        &client,
+        &cfg,
+        "book",
+        "US",
+        "2",
+        json!([contact("book", "c599", "Updated", "+12025559999")]),
+    );
+    assert_eq!(
+        resolve(&client, &["+12025550599", "+12025559999"]),
+        json!({
+            "matches":[{"address":"+12025559999","contact_id":"c599","book_id":"book","display_name":"Updated"}],
+            "ambiguous":["+12025550599"], "more_indexing":false
+        })
+    );
+
+    capture(
+        &client,
+        &cfg,
+        "book",
+        "US",
+        "3",
+        json!([contact("book", "c000", "Earliest", "+12025558888")]),
+    );
+    assert_eq!(
+        resolve(&client, &["+12025550000", "+12025558888"]),
+        json!({
+            "matches":[{"address":"+12025558888","contact_id":"c000","book_id":"book","display_name":"Earliest"}],
+            "ambiguous":["+12025550000"], "more_indexing":false
+        })
+    );
+}
+
+#[test]
 fn exact_shared_forgotten_and_changed_numbers_do_not_leak_stale_matches() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
