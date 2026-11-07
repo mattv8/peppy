@@ -73,7 +73,7 @@ done
 SODIUM_USE_PKG_CONFIG=1 cargo build --locked -p peppy-mobile-bindings
 host_library=$(find "$target_dir/debug" -maxdepth 1 -type f \( -name 'libpeppy_mobile_bindings.so' -o -name 'libpeppy_mobile_bindings.dylib' \) -print -quit)
 test -n "$host_library" || { echo "Host mobile-bindings library is missing" >&2; exit 1; }
-SODIUM_USE_PKG_CONFIG=1 cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library "$host_library" --language kotlin --out-dir apps/android/app/src/main/java
+SODIUM_USE_PKG_CONFIG=1 cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --no-format --library "$host_library" --language kotlin --out-dir apps/android/app/src/main/java
 
 archive_is_healthy() {
     local archive=$1 members

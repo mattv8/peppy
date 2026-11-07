@@ -186,7 +186,7 @@ Build output and derived data default to `.opencode/dev/artifacts/ios/`. Overrid
 If the build reports Swift binding drift, regenerate only the Swift bindings from the repository root, then rerun `just ios-run`:
 
 ```sh
-cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library "${CARGO_TARGET_DIR:-target}/debug/libpeppy_mobile_bindings.dylib" --language swift --out-dir apps/ios/Generated
+cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --no-format --library "${CARGO_TARGET_DIR:-target}/debug/libpeppy_mobile_bindings.dylib" --language swift --out-dir apps/ios/Generated
 ```
 
 ## Native desktop workflow
