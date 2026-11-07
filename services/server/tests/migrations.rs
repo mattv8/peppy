@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 27] = [
+const UP: [&str; 29] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -31,9 +31,11 @@ const UP: [&str; 27] = [
     include_str!("../migrations/0025_validate_origin_tag_constraints.sql"),
     include_str!("../migrations/0026_live_ticket_sessions.sql"),
     include_str!("../migrations/0027_membership_versions.sql"),
+    include_str!("../migrations/0028_live_ticket_cleanup_indexes.sql"),
+    include_str!("../migrations/0029_live_ticket_admission_events.sql"),
 ];
 
-const DOWN: [&str; 27] = [
+const DOWN: [&str; 29] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -61,6 +63,8 @@ const DOWN: [&str; 27] = [
     include_str!("../migrations/down/0025_validate_origin_tag_constraints.down.sql"),
     include_str!("../migrations/down/0026_live_ticket_sessions.down.sql"),
     include_str!("../migrations/down/0027_membership_versions.down.sql"),
+    include_str!("../migrations/down/0028_live_ticket_cleanup_indexes.down.sql"),
+    include_str!("../migrations/down/0029_live_ticket_admission_events.down.sql"),
 ];
 
 #[tokio::test]
@@ -179,6 +183,18 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(index_exists(database, "compacted_records_origin_tag_unique").await);
     assert!(table_exists(database, "membership_versions").await);
     assert!(function_exists(database, "membership_version_invalidate").await);
+    assert!(index_exists(database, "live_tickets_expiry_reap_idx").await);
+    assert!(index_exists(database, "live_tickets_consumed_reap_idx").await);
+    assert!(index_exists(database, "live_ticket_sessions_tombstone_reap_idx").await);
+    assert!(table_exists(database, "live_ticket_admission_events").await);
+    assert!(
+        index_exists(
+            database,
+            "live_ticket_admission_events_device_kind_created_idx"
+        )
+        .await
+    );
+    assert!(index_exists(database, "live_ticket_admission_events_created_at_idx").await);
     let version: i64 = sqlx::query_scalar(
         "SELECT version FROM membership_versions WHERE vault_id = '00000000-0000-0000-0000-000000000030'",
     )

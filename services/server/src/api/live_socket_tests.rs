@@ -81,6 +81,11 @@ impl GatedPolicy {
     fn enable(&self) {
         self.enabled.store(true, Ordering::SeqCst);
     }
+
+    fn arm(&self) {
+        self.passes_before_gate.store(0, Ordering::SeqCst);
+        self.enable();
+    }
 }
 
 impl AccessPolicy for GatedPolicy {
@@ -359,6 +364,7 @@ impl DelayedCommitProxy {
     }
 }
 
+mod backup_restore_tests;
 mod http_budget_tests;
 mod replica_tests;
 
@@ -747,6 +753,21 @@ fn signal(sender: Uuid) -> String {
     signal_with_ciphertext(sender, "AQ==")
 }
 
+fn signal_at(sender: Uuid, sent_at_ms: u64, expires_at_ms: u64) -> String {
+    serde_json::json!({
+        "protocol_version": 2,
+        "kind": "typing",
+        "sender_device_id": sender,
+        "key_epoch": 1,
+        "session_id": "AAAAAAAAAAAAAAAAAAAAAA",
+        "sent_at_ms": sent_at_ms.to_string(),
+        "expires_at_ms": expires_at_ms.to_string(),
+        "sequence": "1",
+        "ciphertext_b64": "AQ=="
+    })
+    .to_string()
+}
+
 fn signal_with_ciphertext(sender: Uuid, ciphertext_b64: &str) -> String {
     signal_with_kind_and_ciphertext(sender, "typing", ciphertext_b64)
 }
@@ -897,6 +918,25 @@ impl CapturedLogs {
     }
 }
 
+#[test]
+fn ticket_work_failures_log_only_fixed_operation_and_kind() {
+    let captured = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(captured.clone())
+        .with_ansi(false)
+        .without_time()
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+
+    let error = ticket_work_unavailable(&TicketDbWorkError::Capacity, "live_ticket_test");
+
+    assert_eq!(error.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.1, "live_unavailable");
+    let logs = captured.text();
+    assert!(logs.contains("operation=\"live_ticket_test\""));
+    assert!(logs.contains("kind=\"capacity\""));
+}
+
 async fn next_text(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -935,6 +975,62 @@ async fn authenticated_live_socket_receives_strict_hello_as_first_frame() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
     let mut socket = server.connect().await;
     expect_strict_hello(&mut socket).await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn recipient_drops_frame_that_expires_while_ticket_revalidation_is_blocked() {
+    let policy_gate = LiveTicketTestGate::new(1);
+    let policy = Arc::new(GatedPolicy::new(policy_gate.clone()));
+    let now = live_now_ms();
+    let clock_ms = Arc::new(std::sync::atomic::AtomicU64::new(now));
+    let hooks = LiveTicketTestHooks {
+        clock_ms: Some(clock_ms.clone()),
+        ..LiveTicketTestHooks::default()
+    };
+    let mut options = LiveTestOptions::new(FakeLiveBackend::immediate(), true);
+    options.policy = policy.clone();
+    options.ticket_hooks = hooks;
+    let server = LiveTestServer::start_with_options(options).await;
+    let session_id = URL_SAFE_NO_PAD.encode([79_u8; 16]);
+    let ticket = issue_ticket(&server, session_id.clone()).await;
+    let mut recipient = bounded(spawn_ticket_connect(&server, session_id, ticket))
+        .await
+        .unwrap()
+        .unwrap();
+    expect_strict_hello(&mut recipient).await;
+    let mut sender = server.connect_peer().await;
+    expect_strict_hello(&mut sender).await;
+    policy.arm();
+
+    let expires_at_ms = now + 1_000;
+    sender
+        .send(tungstenite::Message::Text(
+            signal_at(server.peer_device, now, expires_at_ms).into(),
+        ))
+        .await
+        .unwrap();
+    bounded(policy_gate.wait_for_entries(1)).await;
+    clock_ms.store(expires_at_ms + 1, Ordering::SeqCst);
+    policy_gate.release_one();
+
+    let fresh_now = expires_at_ms + 1;
+    sender
+        .send(tungstenite::Message::Text(
+            signal_at(server.peer_device, fresh_now, fresh_now + 1_000).into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&bounded(next_text(&mut recipient)).await)
+            .unwrap(),
+        serde_json::from_str::<serde_json::Value>(&signal_at(
+            server.peer_device,
+            fresh_now,
+            fresh_now + 1_000
+        ))
+        .unwrap()
+    );
     server.shutdown().await;
 }
 
@@ -3952,11 +4048,15 @@ async fn live_ticket_concurrent_issue_on_replicas_keeps_one_open_session() {
     let (first_status, second_status) = tokio::join!(first_request, second_request);
     assert!(matches!(
         first_status,
-        reqwest::StatusCode::CREATED | reqwest::StatusCode::TOO_MANY_REQUESTS
+        reqwest::StatusCode::CREATED
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
     ));
     assert!(matches!(
         second_status,
-        reqwest::StatusCode::CREATED | reqwest::StatusCode::TOO_MANY_REQUESTS
+        reqwest::StatusCode::CREATED
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
     ));
     let open_one: i64 =
         sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE state='open'")
@@ -3984,12 +4084,13 @@ async fn live_ticket_reconnect_close_race_never_leaves_an_open_lifetime() {
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let session = URL_SAFE_NO_PAD.encode([value; 16]);
         let (_, handle) = issue_ticket_with_handle(&server, session.clone()).await;
+        let reconnect_session = session.clone();
         let reconnect = async {
             bounded(barrier.wait()).await;
             live_ticket_body_request(
                 &server,
                 reqwest::Method::POST,
-                serde_json::json!({"session_id": session, "lifetime_handle": handle}),
+                serde_json::json!({"session_id": reconnect_session, "lifetime_handle": handle}),
             )
             .await
             .status()
@@ -4005,10 +4106,23 @@ async fn live_ticket_reconnect_close_race_never_leaves_an_open_lifetime() {
             .status()
         };
         let (reconnected, deleted) = tokio::join!(reconnect, delete);
+        let deleted = if deleted == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            live_ticket_body_request(
+                &server,
+                reqwest::Method::DELETE,
+                serde_json::json!({"session_id": session, "lifetime_handle": handle}),
+            )
+            .await
+            .status()
+        } else {
+            deleted
+        };
         assert_eq!(deleted, reqwest::StatusCode::NO_CONTENT);
         assert!(matches!(
             reconnected,
-            reqwest::StatusCode::CREATED | reqwest::StatusCode::CONFLICT
+            reqwest::StatusCode::CREATED
+                | reqwest::StatusCode::CONFLICT
+                | reqwest::StatusCode::SERVICE_UNAVAILABLE
         ));
         let open: i64 =
             sqlx::query_scalar("SELECT count(*) FROM live_ticket_sessions WHERE state='open'")

@@ -418,6 +418,7 @@ struct LiveTicketTestHooks {
     http_operation_budget: Option<Duration>,
     recheck_interval: Option<Duration>,
     lease_duration: Option<Duration>,
+    clock_ms: Option<Arc<std::sync::atomic::AtomicU64>>,
     after_device_claim: Option<LiveTicketTestGate>,
     after_sample: Option<LiveTicketTestGate>,
     before_commit: Option<LiveTicketTestGate>,
@@ -3101,6 +3102,20 @@ fn ticket_http_unavailable() -> ApiError {
     ApiError(StatusCode::SERVICE_UNAVAILABLE, "live_unavailable")
 }
 
+fn ticket_work_unavailable(error: &TicketDbWorkError, operation: &'static str) -> ApiError {
+    let kind = match error {
+        TicketDbWorkError::Database(error) => database_error_kind(error),
+        TicketDbWorkError::Deadline => "deadline",
+        TicketDbWorkError::Cancelled => "cancelled",
+        TicketDbWorkError::Capacity => "capacity",
+        TicketDbWorkError::Unsettled => "unsettled",
+        TicketDbWorkError::ChildStopped => "child_stopped",
+        TicketDbWorkError::Panicked => "panicked",
+    };
+    tracing::warn!(operation, kind, "live ticket database work failed");
+    ticket_http_unavailable()
+}
+
 async fn await_ticket_http<T>(
     deadline: OperationDeadline,
     operation: impl std::future::Future<Output = ApiResult<T>>,
@@ -3123,14 +3138,14 @@ async fn run_ticket_http_work<T: Send + 'static>(
     let mut guard = TicketWorkCancellationGuard(Some(cancel));
     let work = registry
         .spawn(pool.clone(), deadline, cancellation, workflow)
-        .map_err(|_| ticket_http_unavailable())?;
+        .map_err(|error| ticket_work_unavailable(&error, "live_ticket_http"))?;
     let remaining = deadline.remaining().ok_or_else(ticket_http_unavailable)?;
     let result = tokio::time::timeout(remaining, work.outcome())
         .await
         .map_err(|_| ticket_http_unavailable())?;
     guard.disarm();
     deadline.remaining().ok_or_else(ticket_http_unavailable)?;
-    result.map_err(|_| ticket_http_unavailable())?
+    result.map_err(|error| ticket_work_unavailable(&error, "live_ticket_http"))?
 }
 
 async fn refuse_ticket_http<T>(
@@ -4216,6 +4231,29 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
                             }
                         }
                     }
+                    let Some(frame_deadline) =
+                        live_frame_delivery_deadline(&frame, live_now_ms_for(&state))
+                    else {
+                        continue;
+                    };
+                    let Some(frame_remaining) = frame_deadline.remaining() else {
+                        continue;
+                    };
+                    let deadline = match deadline {
+                        Some(deadline) => match deadline.remaining() {
+                            Some(remaining) => {
+                                Some(OperationDeadline::after(bounded_live_delivery_timeout(
+                                    remaining,
+                                    frame_remaining,
+                                )))
+                            }
+                            None => return,
+                        },
+                        None => Some(OperationDeadline::after(bounded_live_delivery_timeout(
+                            Duration::from_secs(5),
+                            frame_remaining,
+                        ))),
+                    };
                     let Ok(frame) = serde_json::to_string(&frame) else { continue; };
                     if !matches!(live_send(&mut socket, Message::Text(frame.into()), deadline, &mut cancellation, &mut readiness, &mut shutdown).await, LiveWait::Complete) { return; }
                 }
@@ -4257,6 +4295,26 @@ fn live_now_ms() -> u64 {
 
 fn live_frame_is_current(frame: &LiveFrameV2, now_ms: u64) -> bool {
     crate::live::LiveHub::validate_current(frame, now_ms).is_ok()
+}
+
+fn live_frame_delivery_deadline(frame: &LiveFrameV2, now_ms: u64) -> Option<OperationDeadline> {
+    let expires_at_ms = frame.expires_at_ms.parse::<u64>().ok()?;
+    let remaining_ms = expires_at_ms.checked_sub(now_ms)?;
+    (remaining_ms > 0).then(|| OperationDeadline::after(Duration::from_millis(remaining_ms)))
+}
+
+fn bounded_live_delivery_timeout(existing: Duration, frame_remaining: Duration) -> Duration {
+    existing.min(frame_remaining)
+}
+
+fn live_now_ms_for(state: &ApiState) -> u64 {
+    #[cfg(test)]
+    if let Some(clock_ms) = &state.live_ticket_test_hooks.clock_ms {
+        return clock_ms.load(std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(not(test))]
+    let _ = state;
+    live_now_ms()
 }
 
 async fn live_close(socket: &mut WebSocket, code: u16, reason: &'static str) {
@@ -4762,7 +4820,10 @@ async fn live_ticket_revalidate(
         Ok(true) => LiveRevalidation::Authorized,
         Ok(false) => LiveRevalidation::Unauthorized,
         Err(TicketDbWorkError::Cancelled) => LiveRevalidation::Cancelled,
-        Err(_) => LiveRevalidation::Unavailable,
+        Err(error) => {
+            let _ = ticket_work_unavailable(&error, "live_ticket_revalidate");
+            LiveRevalidation::Unavailable
+        }
     }
 }
 
@@ -5229,6 +5290,35 @@ mod live_socket_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_recipient_frame_has_no_delivery_deadline() {
+        let frame = LiveFrameV2 {
+            protocol_version: peppy_protocol::EPHEMERAL_V2_PROTOCOL_VERSION,
+            kind: peppy_protocol::EphemeralSignalV2Kind::Typing,
+            sender_device_id: DeviceId(Uuid::new_v4()),
+            key_epoch: 1,
+            session_id: Uuid::new_v4().to_string(),
+            sent_at_ms: "1".into(),
+            expires_at_ms: "2".into(),
+            sequence: "1".into(),
+            ciphertext_b64: STANDARD.encode([1_u8]),
+        };
+
+        assert!(live_frame_delivery_deadline(&frame, 3).is_none());
+    }
+
+    #[test]
+    fn live_delivery_timeout_uses_the_smaller_send_and_frame_bounds() {
+        assert_eq!(
+            bounded_live_delivery_timeout(Duration::from_secs(5), Duration::from_secs(15)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            bounded_live_delivery_timeout(Duration::from_secs(5), Duration::from_millis(20)),
+            Duration::from_millis(20)
+        );
+    }
 
     #[test]
     fn heartbeat_disconnects_before_replacing_an_unanswered_challenge() {

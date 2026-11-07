@@ -269,6 +269,7 @@ impl ExecutionScope {
         if self._device.is_some() {
             return Err(TicketDbWorkError::Capacity);
         }
+        self.check()?;
         let semaphore = {
             let mut devices = self.devices.lock().await;
             devices.retain(|_, semaphore| semaphore.strong_count() != 0);
@@ -281,8 +282,8 @@ impl ExecutionScope {
             }
         };
         self._device = Some(
-            self.wait(semaphore.acquire_owned())
-                .await?
+            semaphore
+                .try_acquire_owned()
                 .map_err(|_| TicketDbWorkError::Capacity)?,
         );
         Ok(())
@@ -312,27 +313,6 @@ impl ExecutionScope {
             return Err(TicketDbWorkError::Deadline);
         }
         Ok(())
-    }
-
-    async fn wait<F, T>(&mut self, future: F) -> Result<T, TicketDbWorkError>
-    where
-        F: Future<Output = T>,
-    {
-        self.check()?;
-        let remaining = self
-            .deadline
-            .remaining()
-            .ok_or(TicketDbWorkError::Deadline)?;
-        let mut cancellation = self.cancellation.clone();
-        tokio::pin!(future);
-        tokio::select! {
-            _ = tokio::time::sleep(remaining) => Err(TicketDbWorkError::Deadline),
-            changed = cancellation.changed() => {
-                let _ = changed;
-                Err(TicketDbWorkError::Cancelled)
-            }
-            value = &mut future => Ok(value),
-        }
     }
 
     async fn quarantine(mut self) {
@@ -539,7 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abandoned_caller_keeps_device_ownership_until_hard_close_then_admits_successor() {
+    async fn occupied_device_rejects_successor_until_hard_close() {
         let pool = pool(2).await;
         let registry = TicketDbWorkRegistry::new();
         let device = TenantDevice {
@@ -569,8 +549,7 @@ mod tests {
             .unwrap();
         entered.wait().await;
         drop(first);
-        let (second_cancel, receiver) = watch::channel(false);
-        let (successor_entered, mut successor_observed) = oneshot::channel();
+        let (_second_cancel, receiver) = watch::channel(false);
         let second: TicketDbWork<()> = registry
             .spawn(
                 pool.clone(),
@@ -579,28 +558,17 @@ mod tests {
                 workflow(move |scope| {
                     Box::pin(async move {
                         scope.claim_device(device).await?;
-                        successor_entered.send(()).unwrap();
                         Err(TicketDbWorkError::Cancelled)
                     })
                 }),
             )
             .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut successor_observed)
-                .await
-                .is_err()
-        );
-        assert!(!*first_cancel.borrow());
-        assert!(!*second_cancel.borrow());
-        release.wait().await;
-        tokio::time::timeout(Duration::from_secs(5), &mut successor_observed)
-            .await
-            .expect("successor must not receive the device permit before hard close")
-            .unwrap();
         assert!(matches!(
             second.outcome().await,
-            Err(TicketDbWorkError::Cancelled)
+            Err(TicketDbWorkError::Capacity)
         ));
+        assert!(!*first_cancel.borrow());
+        release.wait().await;
         pool.close().await;
     }
 

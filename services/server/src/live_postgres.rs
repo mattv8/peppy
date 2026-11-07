@@ -181,6 +181,13 @@ async fn listener_loop(inner: Weak<Inner>) {
         set_ready(&state, false);
         let result = listen_once(&state).await;
         set_ready(&state, false);
+        if let Err(error) = &result {
+            tracing::warn!(
+                operation = "live_postgres_listener",
+                kind = crate::api::database_error_kind(error),
+                "live listener failed"
+            );
+        }
         drop(state);
         if result.is_ok() {
             delay = Duration::from_secs(1);
