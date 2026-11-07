@@ -43,22 +43,19 @@ where
 {
     prepare_root(root).ok()?;
     recover(root);
-    let uuid = uuid::Uuid::new_v4().to_string();
-    let initializing = root.join(format!(".{uuid}.initializing"));
-    create_private_dir(&initializing).ok()?;
-    let marker_path = initializing.join(MARKER_NAME);
-    let mut marker = create_marker(&marker_path).ok()?;
+    // Windows cannot rename a directory while the marker inside it is open, so the owner
+    // directory is created in place. Recovery skips it until the marker is locked and complete.
+    let directory = root.join(uuid::Uuid::new_v4().to_string());
+    create_private_dir(&directory).ok()?;
+    let marker_path = directory.join(MARKER_NAME);
+    let Ok(mut marker) = create_marker(&marker_path) else {
+        let _ = fs::remove_dir(&directory);
+        return None;
+    };
     if marker.lock().is_err() || marker.write_all(MARKER).is_err() || marker.sync_all().is_err() {
         drop(marker);
         let _ = fs::remove_file(&marker_path);
-        let _ = fs::remove_dir(&initializing);
-        return None;
-    }
-    let directory = root.join(&uuid);
-    if fs::rename(&initializing, &directory).is_err() {
-        drop(marker);
-        let _ = fs::remove_file(&marker_path);
-        let _ = fs::remove_dir(&initializing);
+        let _ = fs::remove_dir(&directory);
         return None;
     }
     let path = directory.join(ICON_NAME);
