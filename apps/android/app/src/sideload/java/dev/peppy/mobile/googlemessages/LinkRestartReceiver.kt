@@ -27,9 +27,11 @@ class LinkRestartReceiver : BroadcastReceiver() {
                         val token = LinkCoreBridge.observationToken()
                         val lease = LinkRuntime.handleLease(applicationContext) ?: return@Runnable
                         val status = LinkStatus.parse(lease.handle.status())
-                        when (status.state) {
-                            "linked" -> if (LinkCoreBridge.recordObservation(token, lease, applicationContext, status)) testHooks.startService(applicationContext)
-                            "unlinked" -> LinkCoreBridge.recordObservation(token, lease, applicationContext, status)
+                        if (status.state != "unknown" &&
+                            LinkCoreBridge.recordObservation(token, lease, applicationContext, status) &&
+                            status.state == "linked"
+                        ) {
+                            testHooks.startService(applicationContext)
                         }
                     }
                     LinkOpenResult.Unavailable -> LinkRuntime.reconcileEmptyState(applicationContext)

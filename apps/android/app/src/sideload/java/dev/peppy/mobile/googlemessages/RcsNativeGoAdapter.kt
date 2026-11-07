@@ -14,16 +14,22 @@ internal class RcsNativeGoAdapter(private val lease: LinkHandleLease) : RcsNativ
     override fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence): RcsNativePrepared {
         val request = "{\"command_id\":${json(command.commandId)},\"canonicalizer_revision\":$canonicalizerRevision,\"identity_region\":${json(route.identityRegion)},\"carrier_binding\":{\"carrier_route_id\":${json(route.routeId)},\"android_subscription_id\":${route.subscriptionId},\"own_number_raw\":${json(route.ownNumberRaw)},\"own_number_source\":${json(route.ownNumberSource.name)},\"route_observed_at_ms\":${route.observedAtMs}}}"
         val response = scoped { it.prepareNativeRcs(request) }
-        val knownTicket = knownTicketId(response)
+        var ticketForRevocation: String? = null
+        // A response rejected before decoding has no trusted ticket id. Go has no ticket-less revoke, so that slot expires by its 30 s TTL.
         return try {
-            val parsed = strictParse(response, PREPARE_CAP, setOf("code", "ticket_id", "candidate_snapshot", "run_incarnation", "pairing_evidence_id"), setOf("run_generation", "stream_epoch"))
+            val parsed = strictParse(
+                response,
+                PREPARE_CAP,
+                setOf("code", "ticket_id", "candidate_snapshot", "run_incarnation", "pairing_evidence_id"),
+                setOf("run_generation", "stream_epoch"),
+            ) { ticketForRevocation = validatedTicketId(it) }
             if (parsed["code"] != "prepared") throw NativeRcsRefusal()
             val ticket = parsed.string("ticket_id") ?: throw NativeRcsRefusal()
             val candidate = parsed.string("candidate_snapshot")?.takeIf(::withinCandidateCap) ?: throw NativeRcsRefusal()
             RcsNativePrepared(ticket, candidate, parsed.string("run_incarnation") ?: throw NativeRcsRefusal(), parsed.uint64("run_generation") ?: throw NativeRcsRefusal(), parsed.uint64("stream_epoch") ?: throw NativeRcsRefusal(), parsed.string("pairing_evidence_id") ?: throw NativeRcsRefusal())
         } catch (failure: Throwable) {
             preserveInterruption(failure)
-            knownTicket?.let(::revoke)
+            ticketForRevocation?.let(::revoke)
             throw failure
         }
     }
@@ -77,11 +83,18 @@ internal class RcsNativeGoAdapter(private val lease: LinkHandleLease) : RcsNativ
     private fun scoped(operation: (LinkHandle) -> String): String =
         LinkRuntime.withCapturedLinkOperation(lease, operation) ?: throw NativeRcsRefusal()
 
-    private fun strictParse(input: String, cap: Int, strings: Set<String>, numbers: Set<String> = emptySet()): NativeResponse =
-        try { parse(input, cap, strings, numbers) } catch (failure: Throwable) {
-            preserveInterruption(failure)
-            throw NativeRcsRefusal()
-        }
+    private fun strictParse(
+        input: String,
+        cap: Int,
+        strings: Set<String>,
+        numbers: Set<String> = emptySet(),
+        ticketCapture: ((String) -> Unit)? = null,
+    ): NativeResponse = try {
+        parse(input, cap, strings, numbers, ticketCapture)
+    } catch (failure: Throwable) {
+        preserveInterruption(failure)
+        throw NativeRcsRefusal()
+    }
 
     private class NativeRcsRefusal : IllegalStateException("native_rcs_refused")
     private class NativeRcsRevocationFailure : IllegalStateException("native_rcs_revoke_failed")
@@ -123,7 +136,13 @@ private class NativeResponse(private val fields: Map<String, String>) {
     fun uint64(name: String): ULong? = fields[name]?.takeIf { it.matches(Regex("0|[1-9][0-9]*")) }?.toULongOrNull()
 }
 
-private fun parse(input: String, cap: Int, stringFields: Set<String>, numberFields: Set<String> = emptySet()): NativeResponse {
+private fun parse(
+    input: String,
+    cap: Int,
+    stringFields: Set<String>,
+    numberFields: Set<String> = emptySet(),
+    ticketCapture: ((String) -> Unit)? = null,
+): NativeResponse {
     if (input.toByteArray(Charsets.UTF_8).size > cap || !validEscapedUnicode(input)) throw IllegalStateException("native_response_invalid")
     val fields = stringFields + numberFields
     val values = HashMap<String, String>()
@@ -134,7 +153,9 @@ private fun parse(input: String, cap: Int, stringFields: Set<String>, numberFiel
             val name = reader.nextName()
             val expected = if (name in stringFields) JsonToken.STRING else JsonToken.NUMBER
             if (name !in fields || name in values || reader.peek() != expected) throw IllegalStateException("native_response_invalid")
-            values[name] = reader.nextString()
+            val value = reader.nextString()
+            values[name] = value
+            if (name == "ticket_id") ticketCapture?.invoke(value)
         }
         reader.endObject()
         if (reader.peek() != JsonToken.END_DOCUMENT || values.keys != fields) throw IllegalStateException("native_response_invalid")
@@ -153,20 +174,36 @@ private fun validEscapedUnicode(input: String): Boolean {
     while (index < input.length) {
         if (input[index++] != '\\') continue
         if (index == input.length) return false
-        if (input[index++] != 'u') continue
+        if (input[index++] != 'u') {
+            if (input[index - 1] !in setOf('"', '\\', '/', 'b', 'f', 'n', 'r', 't')) return false
+            continue
+        }
         if (index + 4 > input.length) return false
-        val first = input.substring(index, index + 4).toIntOrNull(16) ?: return false
+        val first = unicodeEscapeValue(input, index) ?: return false
         index += 4
         if (first !in 0xD800..0xDFFF) continue
         if (first >= 0xDC00 || index + 6 > input.length || input[index] != '\\' || input[index + 1] != 'u') return false
-        val second = input.substring(index + 2, index + 6).toIntOrNull(16) ?: return false
+        val second = unicodeEscapeValue(input, index + 2) ?: return false
         if (second !in 0xDC00..0xDFFF) return false
         index += 6
     }
     return true
 }
 
-private fun knownTicketId(response: String): String? {
-    val value = Regex("\\\"ticket_id\\\"\\s*:\\s*\\\"([0-9a-fA-F-]{36})\\\"").find(response)?.groupValues?.get(1) ?: return null
+private fun unicodeEscapeValue(input: String, start: Int): Int? {
+    var value = 0
+    for (index in start until start + 4) {
+        value = value shl 4
+        value += when (val character = input[index]) {
+            in '0'..'9' -> character - '0'
+            in 'a'..'f' -> character - 'a' + 10
+            in 'A'..'F' -> character - 'A' + 10
+            else -> return null
+        }
+    }
+    return value
+}
+
+private fun validatedTicketId(value: String): String? {
     return runCatching { UUID.fromString(value).toString() }.getOrNull()?.takeIf { it == value.lowercase() }
 }

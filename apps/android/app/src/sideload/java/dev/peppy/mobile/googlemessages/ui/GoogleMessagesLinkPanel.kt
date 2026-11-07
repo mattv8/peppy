@@ -51,6 +51,8 @@ import dev.peppy.mobile.R
 import dev.peppy.mobile.googlemessages.GoogleMessagesLink
 import dev.peppy.mobile.googlemessages.GoogleMessagesLinkService
 import dev.peppy.mobile.googlemessages.LinkOpenResult
+import dev.peppy.mobile.googlemessages.LinkCoreBridge
+import dev.peppy.mobile.googlemessages.LinkObservation
 import dev.peppy.mobile.googlemessages.LinkOperationLock
 import dev.peppy.mobile.googlemessages.LinkRuntime
 import dev.peppy.mobile.googlemessages.LinkSignInActivity
@@ -74,7 +76,14 @@ internal interface GoogleMessagesLinkPanelHost {
     val isChangingConfigurations: Boolean
     fun open(): LinkOpenResult
     fun recordPreStart(): Boolean = true
+    fun recordPreStart(token: Long): Boolean = recordPreStart()
+    fun acquirePairingLease(token: Long): dev.peppy.mobile.googlemessages.LinkHandleLease? =
+        (open() as? LinkOpenResult.Open)?.handle?.let { dev.peppy.mobile.googlemessages.LinkHandleLease(it, 0) }
+    fun captureStatusObservation(handle: dev.peppy.mobile.googlemessages.LinkHandle): LinkObservation? = null
+    fun recordStatusObservation(observation: LinkObservation, status: LinkStatus): Boolean = true
+    fun beginOwnerUnlink() = Unit
     fun recordUnlinked(): Boolean = true
+    fun recordExplicitUnlinkCompleted(): Boolean = true
     fun resetLocalState()
     fun pairingInProgress(): Boolean
     fun tryBeginPairing(): Long?
@@ -148,11 +157,17 @@ private fun GoogleMessagesLinkPanelContent(
 
     suspend fun reloadAuthoritativeStatus(): LinkStatus? {
         val opened = withContext(Dispatchers.IO) { host.open() }
+        val observation = (opened as? LinkOpenResult.Open)?.let { open ->
+            withContext(Dispatchers.IO) { host.captureStatusObservation(open.handle) }
+        }
         val loadedStatus = (opened as? LinkOpenResult.Open)?.handle?.let { handle ->
             withContext(Dispatchers.IO) { runCatching { LinkStatus.parse(handle.status()) }.getOrNull() }
         }
         result = opened
         status = loadedStatus
+        if (observation != null && loadedStatus != null) {
+            withContext(Dispatchers.IO) { host.recordStatusObservation(observation, loadedStatus) }
+        }
         loadingFailed = opened is LinkOpenResult.Open && (loadedStatus == null || loadedStatus.state == "unknown")
         return loadedStatus
     }
@@ -164,8 +179,14 @@ private fun GoogleMessagesLinkPanelContent(
             loadingFailed = false
             try {
                 val opened = withContext(Dispatchers.IO) { host.open() }
+                val observation = (opened as? LinkOpenResult.Open)?.let { open ->
+                    withContext(Dispatchers.IO) { host.captureStatusObservation(open.handle) }
+                }
                 val loadedStatus = (opened as? LinkOpenResult.Open)?.handle?.let { handle ->
                     withContext(Dispatchers.IO) { runCatching { LinkStatus.parse(handle.status()) }.getOrNull() }
+                }
+                if (observation != null && loadedStatus != null) {
+                    withContext(Dispatchers.IO) { host.recordStatusObservation(observation, loadedStatus) }
                 }
                 if (request != refreshGeneration) return@launch
                 if (opened is LinkOpenResult.Open && (loadedStatus == null || loadedStatus.state == "unknown")) loadingFailed = true
@@ -205,21 +226,20 @@ private fun GoogleMessagesLinkPanelContent(
     }
     fun continueRelink() {
         scope.launch {
-            val opened = withContext(Dispatchers.IO) { host.open() }
-            val handle = (opened as? LinkOpenResult.Open)?.handle ?: return@launch
             var pairingToken: Long? = null
             try {
                 withContext(NonCancellable + Dispatchers.IO) {
                     pairingToken = host.tryBeginPairing()
                 }
                 val token = pairingToken ?: return@launch
-                if (!withContext(Dispatchers.IO) { host.recordPreStart() }) {
+                busy = true
+                val lease = withContext(Dispatchers.IO) { host.acquirePairingLease(token) } ?: return@launch
+                if (!withContext(Dispatchers.IO) { host.recordPreStart(token) }) {
                     localNotice = "persist_failed"
                     return@launch
                 }
                 host.startService()
-                busy = true
-                withContext(Dispatchers.IO) { handle.relink() }
+                withContext(Dispatchers.IO) { lease.handle.relink() }
             }
             catch (error: kotlinx.coroutines.CancellationException) { throw error }
             catch (_: Exception) { localNotice = "relink_failed" }
@@ -321,6 +341,7 @@ private fun GoogleMessagesLinkPanelContent(
                     refreshGeneration++
                     refreshJob?.cancel()
                     busy = true
+                    host.beginOwnerUnlink()
                     withContext(Dispatchers.IO) { handle.unlink() }
                 }
                 catch (error: kotlinx.coroutines.CancellationException) { throw error }
@@ -334,6 +355,12 @@ private fun GoogleMessagesLinkPanelContent(
                     if (reloadedStatus?.state == "unlinked") {
                         val unlinkedRecorded = withContext(NonCancellable + Dispatchers.IO) { host.recordUnlinked() }
                         persistenceFailed = persistenceFailed || !unlinkedRecorded
+                        if (unlinkedRecorded) {
+                            val completed = withContext(NonCancellable + Dispatchers.IO) {
+                                host.recordExplicitUnlinkCompleted()
+                            }
+                            persistenceFailed = persistenceFailed || !completed
+                        }
                     }
                     localNotice = when {
                         persistenceFailed -> "persist_failed"
@@ -388,7 +415,15 @@ private class AndroidGoogleMessagesLinkPanelHost(
 
     override fun open() = LinkRuntime.handle(context.applicationContext)
     override fun recordPreStart() = LinkRuntime.recordPreStart(context.applicationContext)
+    override fun recordPreStart(token: Long) = LinkRuntime.recordPreStart(context.applicationContext, token)
+    override fun acquirePairingLease(token: Long) = LinkRuntime.acquirePairingLease(context.applicationContext, token)
+    override fun captureStatusObservation(handle: dev.peppy.mobile.googlemessages.LinkHandle) =
+        LinkRuntime.capturePanelObservation(handle)
+    override fun recordStatusObservation(observation: LinkObservation, status: LinkStatus) =
+        LinkRuntime.recordPanelObservation(context.applicationContext, observation, status)
+    override fun beginOwnerUnlink() = LinkCoreBridge.invalidateObservations()
     override fun recordUnlinked() = LinkRuntime.recordUnlinked(context.applicationContext)
+    override fun recordExplicitUnlinkCompleted() = LinkCoreBridge.recordExplicitUnlinkCompleted(context.applicationContext)
     override fun resetLocalState() = LinkRuntime.resetLocalState(context.applicationContext)
     override fun pairingInProgress() = LinkRuntime.pairingInProgress.get()
     override fun tryBeginPairing() = LinkRuntime.tryBeginPairing()

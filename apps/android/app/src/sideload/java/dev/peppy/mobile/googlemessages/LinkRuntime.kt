@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import uniffi.peppy_mobile_bindings.NativeTypingState
 
 internal data class LinkHandleLease(val handle: LinkHandle, val generation: Long)
+internal data class LinkObservation(val token: Long, val lease: LinkHandleLease)
 
 object LinkRuntime {
     private val callbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -75,7 +76,9 @@ object LinkRuntime {
             }
             handle?.close()
             store(context).wipe()
-            if (!recordUnlinked(context)) throw IllegalStateException("persist_failed")
+            if (!LinkCoreBridge.recordExplicitUnlinkCompleted(context.applicationContext)) {
+                throw IllegalStateException("persist_failed")
+            }
         }
         recordEvent("link", "reset_local", 0)
         signalChange()
@@ -84,12 +87,10 @@ object LinkRuntime {
     fun recordPreStart(context: Context): Boolean =
         LinkCoreBridge.recordPreStart(context.applicationContext)
 
-    internal fun recordPreStart(context: Context, attempt: Long): Boolean = synchronized(nativeOperationLock) {
-        val current = synchronized(this) {
-            pairingInProgress.get() && pairingGeneration == attempt
-        }
-        if (!current) return@synchronized false
-        LinkCoreBridge.recordPreStart(context.applicationContext)
+    internal fun recordPreStart(context: Context, attempt: Long): Boolean {
+        if (!ownsPairingAttempt(attempt)) return false
+        LinkRuntimeTestHooks.beforePreStartPublication?.invoke()
+        return LinkCoreBridge.recordPreStart(context.applicationContext, attempt) && ownsPairingAttempt(attempt)
     }
 
     fun recordUnlinked(context: Context): Boolean =
@@ -105,6 +106,24 @@ object LinkRuntime {
         return synchronized(this) {
             opened.takeIf { it === cachedHandle }?.let { LinkHandleLease(it, handleGeneration) }
         }
+    }
+
+    internal fun capturePanelObservation(handle: LinkHandle): LinkObservation? {
+        val token = LinkCoreBridge.observationToken()
+        val lease = synchronized(this) {
+            handle.takeIf { it === cachedHandle }?.let { LinkHandleLease(it, handleGeneration) }
+        } ?: return null
+        return LinkObservation(token, lease)
+    }
+
+    internal fun recordPanelObservation(context: Context, observation: LinkObservation, status: LinkStatus): Boolean {
+        LinkRuntimeTestHooks.beforePanelObservationRecord?.invoke()
+        return LinkCoreBridge.recordObservation(
+            observation.token,
+            observation.lease,
+            context.applicationContext,
+            status,
+        )
     }
 
     /** Admits a pairing attempt to its exact current handle without allowing reset to substitute one. */
@@ -152,14 +171,12 @@ object LinkRuntime {
     }
 
     /** Detaches the captured handle only while [lease] owns it. Native close is always outside the runtime monitor. */
-    internal fun detachHandleForServiceStop(lease: LinkHandleLease): LinkHandle? = synchronized(nativeOperationLock) {
-        synchronized(this) {
-            if (lease.generation != handleGeneration || lease.handle !== cachedHandle) null else {
-                cachedHandle = null
-                closingHandle = lease.handle
-                handleGeneration += 1
-                lease.handle
-            }
+    internal fun detachHandleForServiceStop(lease: LinkHandleLease): LinkHandle? = synchronized(this) {
+        if (lease.generation != handleGeneration || lease.handle !== cachedHandle) null else {
+            cachedHandle = null
+            closingHandle = lease.handle
+            handleGeneration += 1
+            lease.handle
         }
     }
 
@@ -181,14 +198,12 @@ object LinkRuntime {
     }
 
     /** Claims one owner-requested Pair or Relink attempt, returning its opaque generation token. */
-    fun tryBeginPairing(): Long? = synchronized(nativeOperationLock) {
-        synchronized(this) {
-            if (!pairingInProgress.compareAndSet(false, true)) return@synchronized null
-            pairingGeneration += 1
-            emoji.value = null
-            signalChange()
-            pairingGeneration
-        }
+    fun tryBeginPairing(): Long? = synchronized(this) {
+        if (!pairingInProgress.compareAndSet(false, true)) return@synchronized null
+        pairingGeneration += 1
+        emoji.value = null
+        signalChange()
+        pairingGeneration
     }
 
     /** Completes exactly the attempt that acquired [attempt]; stale finally blocks are inert. */
@@ -210,6 +225,8 @@ object LinkRuntime {
     internal fun resetForTest() {
         GoogleMessagesLinkService.stopActiveWorker()
         if (!awaitNoClosingHandle()) return
+        LinkRuntimeTestHooks.beforePanelObservationRecord = null
+        LinkRuntimeTestHooks.beforePreStartPublication = null
         synchronized(nativeOperationLock) {
             val captured = synchronized(this) {
                 val current = cachedHandle
@@ -306,6 +323,10 @@ object LinkRuntime {
         lease.generation == handleGeneration && lease.handle === cachedHandle
     }
 
+    internal fun ownsPairingAttempt(attempt: Long): Boolean = synchronized(this) {
+        pairingInProgress.get() && pairingGeneration == attempt
+    }
+
     internal fun ownsObservationLease(lease: LinkHandleLease): Boolean = ownsLease(lease)
 
     private fun nextHandleGeneration(): Long = synchronized(this) { handleGeneration + 1 }
@@ -356,6 +377,8 @@ internal object LinkRuntimeTestHooks {
     @Volatile var typingReceiveSink: TypingReceiveSink? = null
     @Volatile var callbackExecutor: Executor? = null
     @Volatile var afterClosingCheck: (() -> Unit)? = null
+    @Volatile var beforePanelObservationRecord: (() -> Unit)? = null
+    @Volatile var beforePreStartPublication: (() -> Unit)? = null
 }
 
 internal object LinkRuntimeEventSink {

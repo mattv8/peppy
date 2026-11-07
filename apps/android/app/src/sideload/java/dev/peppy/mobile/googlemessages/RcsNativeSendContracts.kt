@@ -16,6 +16,11 @@ internal data class RcsNativeRouteEvidence(
 internal fun interface RcsNativeRouteReader { fun currentRoute(): RcsNativeRouteEvidence? }
 internal fun interface RcsNativeClock { fun wallTimeMs(): Long }
 
+/** Arms a ticket-bound revoker until the coordinator's final cleanup. */
+internal fun interface RcsNativeRouteChangeRevoker {
+    fun register(boundRoute: RcsNativeRouteEvidence, revokeTicket: () -> Unit): AutoCloseable
+}
+
 internal data class RcsNativePrepared(
     val ticketId: String,
     val candidateSnapshotJson: String,
@@ -95,6 +100,7 @@ internal interface RcsNativeCoreLease : AutoCloseable {
     fun recordTransportAcknowledged(tmpId: String, googleConversationId: String): Boolean
     fun recordSubmitted(tmpId: String, googleConversationId: String): Boolean
     fun recordPreEffectRefusal(): Boolean
+    fun recordOutcomeUnknown(): Boolean = false
 }
 
 /** Atomically captures the native owner and registers [revoker] closed over [ticketId]. */

@@ -66,6 +66,7 @@ class GoogleMessagesLinkPanelTest {
         LinkRuntime.resetForTest()
         LinkRuntimeTestHooks.engine = null
         LinkRuntimeTestHooks.storeFactory = null
+        LinkCoreBridge.resetForTest()
         GoogleMessagesLinkTestHooks.available = null
     }
 
@@ -329,6 +330,7 @@ class GoogleMessagesLinkPanelTest {
         compose.onNodeWithTag("google-messages-link-notice")
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
         compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_unlinked_done)).fetchSemanticsNode()
+        check(host.ownerUnlinkEvents == listOf("unlinked", "completed"))
     }
 
     @Test fun `unlink remote failure notice requires the authoritative unlink outcome`() {
@@ -425,6 +427,157 @@ class GoogleMessagesLinkPanelTest {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_persist_failed)).fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-unlink").assertIsEnabled()
+    }
+
+    @Test fun `reset after relink admission prevents prestart service and native relink`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val acquireEntered = CountDownLatch(1)
+        val releaseAcquire = CountDownLatch(1)
+        val recorded = mutableListOf<String>()
+        val handle = FakeHandle("needs_relink")
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
+        val host = FakePanelHost(handle).apply {
+            acquirePairingLease = { token ->
+                LinkRuntime.acquirePairingLease(context, token).also {
+                    acquireEntered.countDown()
+                    awaitIgnoringInterrupts(releaseAcquire)
+                }
+            }
+            recordTokenPreStart = { token -> LinkRuntime.recordPreStart(context, token) }
+        }
+        showPanel(host)
+
+        confirm("google-messages-link-relink")
+        assertTrue(acquireEntered.await(5, TimeUnit.SECONDS))
+        LinkRuntime.resetLocalState(context)
+        releaseAcquire.countDown()
+        compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() }
+
+        assertEquals(listOf("unlinked"), synchronized(recorded) { recorded.toList() })
+        assertEquals(0, host.serviceStarts)
+        assertEquals(0, handle.relinkCalls)
+    }
+
+    @Test fun `reset while admitted prestart records prevents service and retired relink`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val preStartEntered = CountDownLatch(1)
+        val releasePreStart = CountDownLatch(1)
+        val handleClosed = CountDownLatch(1)
+        val resetFinished = CountDownLatch(1)
+        val recorded = mutableListOf<String>()
+        val handle = object : FakeHandle("needs_relink") {
+            override fun close() { handleClosed.countDown() }
+        }
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkCoreBridge.recorder = { _, status ->
+            if (status.state == "unknown") {
+                preStartEntered.countDown()
+                awaitIgnoringInterrupts(releasePreStart)
+            }
+            synchronized(recorded) { recorded += status.state }
+            true
+        }
+        val host = FakePanelHost(handle).apply {
+            acquirePairingLease = { token -> LinkRuntime.acquirePairingLease(context, token) }
+            recordTokenPreStart = { token -> LinkRuntime.recordPreStart(context, token) }
+        }
+        showPanel(host)
+
+        confirm("google-messages-link-relink")
+        assertTrue(preStartEntered.await(5, TimeUnit.SECONDS))
+        Thread {
+            LinkRuntime.resetLocalState(context)
+            resetFinished.countDown()
+        }.start()
+        assertTrue(handleClosed.await(5, TimeUnit.SECONDS))
+        releasePreStart.countDown()
+        assertTrue(resetFinished.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() }
+
+        assertEquals(listOf("unknown", "unlinked"), synchronized(recorded) { recorded.toList() })
+        assertEquals(0, host.serviceStarts)
+        assertEquals(0, handle.relinkCalls)
+    }
+
+    @Test fun `reset between displayed handle and admission never relinks the retired handle`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val retired = FakeHandle("needs_relink")
+        val replacement = FakeHandle("unlinked")
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = replacement
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkCoreBridge.recorder = { _, _ -> true }
+        val host = FakePanelHost(retired).apply {
+            acquirePairingLease = { token -> LinkRuntime.acquirePairingLease(context, token) }
+            recordTokenPreStart = { token -> LinkRuntime.recordPreStart(context, token) }
+        }
+        showPanel(host)
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-relink").fetchSemanticsNodes().isNotEmpty() }
+        LinkRuntime.resetLocalState(context)
+
+        confirm("google-messages-link-relink")
+        compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() }
+
+        assertEquals(0, retired.relinkCalls)
+    }
+
+    @Test fun `owner unlink fences a linked status observation delayed after its read`() {
+        val observationEntered = CountDownLatch(1)
+        val releaseObservation = CountDownLatch(1)
+        val observationCalls = AtomicInteger()
+        val handle = FakeHandle("linked").apply { unlinkAction = { state = "unlinked" } }
+        val host = FakePanelHost(handle).apply {
+            onRecordStatusObservation = {
+                if (observationCalls.incrementAndGet() == 1) {
+                    observationEntered.countDown()
+                    awaitIgnoringInterrupts(releaseObservation)
+                }
+            }
+        }
+        showPanel(host)
+        assertTrue(observationEntered.await(5, TimeUnit.SECONDS))
+
+        confirm("google-messages-link-unlink")
+        compose.waitUntil(5_000) { handle.unlinkCalls == 1 && host.observedStates.contains("unlinked") }
+        releaseObservation.countDown()
+        compose.waitUntil(5_000) { observationCalls.get() > 1 }
+
+        assertEquals("unlinked", host.observedStates.last())
+    }
+
+    @Test fun `opening a sealed terminal link reconciles core without starting native work`() {
+        val handle = object : FakeHandle("needs_relink") {
+            var pairCalls = 0
+            var runCalls = 0
+            override fun pair(cookiesJson: ByteArray) { pairCalls++ }
+            override fun run() { runCalls++ }
+        }
+        val recorded = mutableListOf<String>()
+        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
+        GoogleMessagesLinkTestHooks.available = true
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+
+        compose.setContent { PeppyTheme { GoogleMessagesLinkPanel {} } }
+        compose.waitUntil(5_000) { synchronized(recorded) { recorded.contains("needs_relink") } }
+
+        assertEquals(listOf("needs_relink"), synchronized(recorded) { recorded.toList() })
+        assertEquals(0, handle.pairCalls)
+        assertEquals(0, handle.runCalls)
     }
 
     @Test fun `failed relink lifecycle fence prevents native relink and reports persistence failure`() {
@@ -761,16 +914,43 @@ class GoogleMessagesLinkPanelTest {
         val pairingTokens = mutableListOf<Long>()
         val endedTokens = mutableListOf<Long>()
         var onTryBeginPairing: () -> Unit = {}
+        var acquirePairingLease: ((Long) -> LinkHandleLease?)? = null
+        var recordTokenPreStart: ((Long) -> Boolean)? = null
+        var onRecordStatusObservation: () -> Unit = {}
+        private var observationGeneration = 0L
+        val observedStates = mutableListOf<String>()
         var recordPreStartResult = true
         var recordUnlinkedResult = true
         var onRecordUnlinked: () -> Unit = {}
+        val ownerUnlinkEvents = mutableListOf<String>()
         val relinkCalls get() = handle.relinkCalls
 
         override fun open(): LinkOpenResult = openResult()
         override fun recordPreStart(): Boolean = recordPreStartResult
+        override fun recordPreStart(token: Long): Boolean = recordTokenPreStart?.invoke(token) ?: recordPreStartResult
+        override fun acquirePairingLease(token: Long): LinkHandleLease? =
+            acquirePairingLease?.invoke(token) ?: LinkHandleLease(handle, 0)
+        override fun captureStatusObservation(handle: LinkHandle): LinkObservation =
+            LinkObservation(synchronized(this) { observationGeneration }, LinkHandleLease(handle, 0))
+        override fun recordStatusObservation(observation: LinkObservation, status: LinkStatus): Boolean {
+            onRecordStatusObservation()
+            synchronized(this) {
+                if (observation.token == observationGeneration) observedStates += status.state
+            }
+            return true
+        }
+        override fun beginOwnerUnlink() = synchronized(this) { observationGeneration += 1 }
         override fun recordUnlinked(): Boolean {
             onRecordUnlinked()
+            if (recordUnlinkedResult) synchronized(this) {
+                observedStates += "unlinked"
+                ownerUnlinkEvents += "unlinked"
+            }
             return recordUnlinkedResult
+        }
+        override fun recordExplicitUnlinkCompleted(): Boolean = synchronized(this) {
+            ownerUnlinkEvents += "completed"
+            true
         }
         override fun resetLocalState() { resetCalls++; onReset() }
         override fun pairingInProgress(): Boolean = LinkRuntime.pairingInProgress.get()

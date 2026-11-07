@@ -1,30 +1,25 @@
 package dev.peppy.mobile.googlemessages
 
 import java.nio.file.Files
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WebViewDataFilesTest {
-    @Test fun `finds and deletes only cookie database files`() {
+    @Test fun `deletes the complete feature-owned WebView profile and cache`() {
         val root = Files.createTempDirectory("webview-data").toFile()
         val directory = root.resolve("app_webview/Default").also { it.mkdirs() }
-        val cookie = directory.resolve("Cookies").also { it.writeText("x") }
-        val journal = directory.resolve("Cookies-journal").also { it.writeText("x") }
-        directory.resolve("History").writeText("x")
+        val cache = Files.createTempDirectory("webview-cache").toFile().resolve("WebView").also { it.mkdirs() }
+        val chromiumCache = cache.parentFile!!.resolve("org.chromium.android_webview").also { it.mkdirs() }
+        val unrelated = root.resolve("unrelated-feature").also { it.writeText("keep") }
+        listOf("Cookies", "History", "Local Storage", "IndexedDB", "Service Worker").forEach { name ->
+            directory.resolve(name).writeText("x")
+        }
 
-        assertEquals(setOf(cookie.canonicalFile, journal.canonicalFile), WebViewDataFiles.cookieDatabases(root).map { it.canonicalFile }.toSet())
-        assertTrue(WebViewDataFiles.deleteCookieDatabases(root))
-        assertFalse(cookie.exists())
-    }
-
-    @Test fun `continues deleting after an earlier file fails`() {
-        val root = Files.createTempDirectory("webview-data").toFile()
-        val blocked = root.resolve("blocked").also { it.mkdirs(); it.resolve("child").writeText("x") }
-        val later = root.resolve("Cookies-later").also { it.writeText("x") }
-
-        assertFalse(WebViewDataFiles.deleteAll(listOf(blocked, later)))
-        assertFalse(later.exists())
+        assertTrue(WebViewDataFiles.deleteStaleData(root, cache.parentFile!!))
+        assertFalse(directory.exists())
+        assertFalse(cache.exists())
+        assertFalse(chromiumCache.exists())
+        assertTrue(unrelated.exists())
     }
 }

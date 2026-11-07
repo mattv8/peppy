@@ -70,6 +70,30 @@ class LinkRestartReceiverTest {
     }
 
     @Test
+    fun `restart republishes terminal states without starting service`() {
+        listOf("signed_out", "needs_relink").forEach { terminalState ->
+            LinkRuntime.resetForTest()
+            LinkCoreBridge.resetForTest()
+            val recorded = mutableListOf<String>()
+            var starts = 0
+            var finishes = 0
+            LinkCoreBridge.recorder = { _, status -> recorded += status.state; true }
+            installHandle(StatusHandle("{\"state\":\"$terminalState\"}"))
+            LinkRestartReceiver.testHooks = RestartReceiverTestHooks(
+                executor = Executor(Runnable::run),
+                startService = { starts += 1 },
+                pendingFinished = { finishes += 1 },
+            )
+
+            receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+
+            assertEquals(listOf("unknown", terminalState), recorded)
+            assertEquals(0, starts)
+            assertEquals(1, finishes)
+        }
+    }
+
+    @Test
     fun `unavailable engine reconciles an authoritative empty state without starting the service`() {
         val recorded = mutableListOf<String>()
         LinkCoreBridge.recorder = { _, status -> recorded += status.state; true }
@@ -116,7 +140,7 @@ class LinkRestartReceiverTest {
         val token = LinkCoreBridge.observationToken()
 
         receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_MY_PACKAGE_REPLACED))
-        assertTrue(LinkCoreBridge.recordObservation(token, context, LinkStatus(0, "unlinked", false, false, false, 0, "")))
+        assertTrue(LinkCoreBridge.recordObservation(token, LinkRuntime.handleLease(context)!!, context, LinkStatus(0, "unlinked", false, false, false, 0, "")))
 
         assertEquals(listOf("unknown", "unlinked"), recorded)
     }

@@ -21,7 +21,6 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import dev.peppy.mobile.R
 import java.io.ByteArrayInputStream
-import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 class LinkSignInActivity : AppCompatActivity() {
@@ -261,14 +260,11 @@ class LinkSignInActivity : AppCompatActivity() {
             if (!LinkSignInRuntime.mayRunCleanup(owner)) return@removeAllCookies
             cookies.flush()
             WebStorage.getInstance().deleteAllData()
-            val cleared = WebViewDataFiles.deleteStaleData(File(applicationInfo.dataDir), cacheDir)
+            if (::webView.isInitialized) webView.clearHistory()
             if (::webView.isInitialized) webView.destroy()
-            LinkSignInRuntime.completeCleanup(owner, cleared)
+            LinkSignInRuntime.completeCleanup(owner, true)
             signInLease = null
-            if (cleared && !isFinishing && !isDestroyed) after() else if (!cleared) {
-                GoogleMessagesLink.blockSignInAfterCleanupFailure()
-                finishWith(OUTCOME_BLOCKED)
-            }
+            if (!isFinishing && !isDestroyed) after()
         }
     }
 

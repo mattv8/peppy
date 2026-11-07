@@ -313,6 +313,68 @@ class LinkRuntimeTest {
         assertFalse(LinkRuntime.pairingInProgress.get())
     }
 
+
+    @Test
+    fun `panel observation keeps the token captured before its status read`() {
+        val beforeRecord = CountDownLatch(1)
+        val releaseRecord = CountDownLatch(1)
+        val recordDone = CountDownLatch(1)
+        val recorded = mutableListOf<String>()
+        val handle = FakeHandle()
+        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntime.handle(context)
+        val observation = requireNotNull(LinkRuntime.capturePanelObservation(handle))
+        val status = LinkStatus.parse(handle.status())
+        LinkRuntimeTestHooks.beforePanelObservationRecord = {
+            beforeRecord.countDown()
+            releaseRecord.await()
+        }
+        Thread {
+            LinkRuntime.recordPanelObservation(context, observation, status)
+            recordDone.countDown()
+        }.start()
+        assertTrue(beforeRecord.await(1, TimeUnit.SECONDS))
+
+        LinkCoreBridge.invalidateObservations()
+        assertTrue(LinkCoreBridge.recordExplicitUnlinkCompleted(context))
+        releaseRecord.countDown()
+
+        assertTrue(recordDone.await(1, TimeUnit.SECONDS))
+        assertEquals(listOf("unlinked"), synchronized(recorded) { recorded.toList() })
+    }
+
+    @Test
+    fun `reset retires pairing authority before queued prestart publication`() {
+        val firstOwnershipCheckPassed = CountDownLatch(1)
+        val releasePreStart = CountDownLatch(1)
+        val preStartDone = CountDownLatch(1)
+        val recorded = mutableListOf<String>()
+        var preStartResult = true
+        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
+        LinkRuntimeTestHooks.engine = availableEngine(FakeHandle())
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntime.handle(context)
+        val attempt = requireNotNull(LinkRuntime.tryBeginPairing())
+        LinkRuntimeTestHooks.beforePreStartPublication = {
+            firstOwnershipCheckPassed.countDown()
+            releasePreStart.await()
+        }
+        Thread {
+            preStartResult = LinkRuntime.recordPreStart(context, attempt)
+            preStartDone.countDown()
+        }.start()
+        assertTrue(firstOwnershipCheckPassed.await(1, TimeUnit.SECONDS))
+
+        LinkRuntime.resetLocalState(context)
+        releasePreStart.countDown()
+
+        assertTrue(preStartDone.await(1, TimeUnit.SECONDS))
+        assertFalse(preStartResult)
+        assertEquals(listOf("unlinked"), synchronized(recorded) { recorded.toList() })
+    }
+
     @Test
     fun `reset rejects an observation captured before destructive retirement`() {
         val recorded = mutableListOf<String>()
@@ -324,7 +386,7 @@ class LinkRuntimeTest {
         val staleToken = LinkCoreBridge.observationToken()
 
         LinkRuntime.resetLocalState(context)
-        assertTrue(LinkCoreBridge.recordObservation(staleToken, context, LinkStatus(0, "linked", true, true, true, 1, "")))
+        assertTrue(LinkCoreBridge.recordObservation(staleToken, LinkRuntime.handleLease(context)!!, context, LinkStatus(0, "linked", true, true, true, 1, "")))
 
         assertEquals(listOf("unlinked"), recorded)
     }
@@ -503,6 +565,7 @@ class LinkRuntimeTest {
         val allowPreStart = CountDownLatch(1)
         val resetFinished = CountDownLatch(1)
         val recorded = mutableListOf<String>()
+        var preStartResult = true
         LinkCoreBridge.recorder = { _, status ->
             if (status.state == "unknown") {
                 preStartEntered.countDown()
@@ -513,7 +576,9 @@ class LinkRuntimeTest {
         }
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
         val attempt = requireNotNull(LinkRuntime.tryBeginPairing())
-        val preStart = Thread { LinkRuntime.recordPreStart(context, attempt) }.also { it.start() }
+        val preStart = Thread {
+            preStartResult = LinkRuntime.recordPreStart(context, attempt)
+        }.also { it.start() }
         assertTrue(preStartEntered.await(1, TimeUnit.SECONDS))
         val reset = Thread {
             LinkRuntime.resetLocalState(context)
@@ -527,6 +592,7 @@ class LinkRuntimeTest {
 
         assertFalse(preStart.isAlive)
         assertFalse(reset.isAlive)
+        assertFalse(preStartResult)
         assertEquals(listOf("unknown", "unlinked"), synchronized(recorded) { recorded.toList() })
     }
 

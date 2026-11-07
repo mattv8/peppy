@@ -3,6 +3,7 @@ package dev.peppy.mobile.googlemessages
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Before
@@ -62,6 +63,49 @@ class GoogleMessagesLinkServiceTest {
         assertTrue(handle.closed)
         assertTrue(handle.runRejected.await(1, TimeUnit.SECONDS))
         assertEquals(1, handle.runCalls.get())
+    }
+
+    @Test
+    fun `prestart recording cannot block main-thread service destruction or pairing admission`() {
+        val handle = BlockingRunHandle()
+        val recorderEntered = CountDownLatch(1)
+        val releaseRecorder = CountDownLatch(1)
+        val mainCallStarted = CountDownLatch(1)
+        val mainCallReturned = CountDownLatch(1)
+        val returnedBeforeRelease = AtomicBoolean(false)
+        val blockRecorder = AtomicBoolean(false)
+        LinkCoreBridge.recorder = { _, _ ->
+            if (blockRecorder.get()) {
+                recorderEntered.countDown()
+                releaseRecorder.await()
+            }
+            true
+        }
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+        blockRecorder.set(true)
+        val firstAttempt = checkNotNull(LinkRuntime.tryBeginPairing())
+        val preStart = Thread { LinkRuntime.recordPreStart(controller.get(), firstAttempt) }.also { it.start() }
+        assertTrue(recorderEntered.await(1, TimeUnit.SECONDS))
+        assertTrue(LinkRuntime.endPairing(firstAttempt))
+        val releaseAfterObservation = Thread {
+            assertTrue(mainCallStarted.await(1, TimeUnit.SECONDS))
+            returnedBeforeRelease.set(mainCallReturned.await(250, TimeUnit.MILLISECONDS))
+            releaseRecorder.countDown()
+        }.also { it.start() }
+
+        mainCallStarted.countDown()
+        controller.destroy()
+        val nextAttempt = LinkRuntime.tryBeginPairing()
+        mainCallReturned.countDown()
+
+        releaseAfterObservation.join(1_000)
+        preStart.join(1_000)
+        assertTrue("main-looper destruction and admission waited for lifecycle persistence", returnedBeforeRelease.get())
+        assertTrue(nextAttempt != null)
+        nextAttempt?.let { LinkRuntime.endPairing(it) }
+        handle.allowRunReturn.countDown()
     }
 
     @Test
@@ -236,9 +280,10 @@ class GoogleMessagesLinkServiceTest {
         val controller = startService()
 
         assertTrue(finished.await(1, TimeUnit.SECONDS))
-        assertEquals(1, publications)
+        // The first foreground promotion bypasses the queued refresh executor.
+        assertEquals(2, publications)
         executor.runAll()
-        assertEquals(1, publications)
+        assertEquals(2, publications)
         controller.destroy()
     }
 
@@ -336,7 +381,8 @@ class GoogleMessagesLinkServiceTest {
             releaseRecord.countDown()
 
             assertTrue(terminalRecorded.await(1, TimeUnit.SECONDS))
-            assertEquals(0, publications)
+            // The initial content-free foreground promotion is synchronous.
+            assertEquals(1, publications)
             LinkRuntime.resetForTest()
             LinkCoreBridge.resetForTest()
         }

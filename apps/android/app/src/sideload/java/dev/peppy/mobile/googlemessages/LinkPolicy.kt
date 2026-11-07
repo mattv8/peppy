@@ -81,22 +81,12 @@ object NavigationAllowlist {
 }
 
 object WebViewDataFiles {
-    fun cookieDatabases(dataDir: File): List<File> = File(dataDir, "app_webview").walkTopDown()
-        .filter { it.isFile && it.name.startsWith("Cookies") }
-        .toList()
-
-    fun deleteCookieDatabases(dataDir: File): Boolean = deleteAll(cookieDatabases(dataDir))
-
     fun deleteStaleData(dataDir: File, cacheDir: File): Boolean {
-        val cookiesDeleted = deleteCookieDatabases(dataDir)
+        // This app has no other WebView; the default profile belongs exclusively to Google Messages link.
+        val profileDeleted = File(dataDir, "app_webview").deleteRecursivelyOrMissing()
         val cacheDeleted = File(cacheDir, "WebView").deleteRecursivelyOrMissing()
-        return cookiesDeleted && cacheDeleted
-    }
-
-    fun deleteAll(files: List<File>): Boolean {
-        var deleted = true
-        files.forEach { file -> if (!file.delete()) deleted = false }
-        return deleted
+        val chromiumCacheDeleted = File(cacheDir, "org.chromium.android_webview").deleteRecursivelyOrMissing()
+        return profileDeleted && cacheDeleted && chromiumCacheDeleted
     }
 
     private fun File.deleteRecursivelyOrMissing(): Boolean = !exists() || deleteRecursively()

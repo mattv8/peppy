@@ -60,6 +60,37 @@ class RcsNativeSendCoordinatorTest {
         assertEquals(RcsNativeSendOutcome.OUTCOME_UNKNOWN, begin.execute())
         assertEquals(1, begin.go.revokes)
         assertEquals(0, begin.go.commitCalls)
+        assertEquals(1, begin.lease.outcomeUnknownRecords)
+    }
+
+    @Test fun `post admission uncertainty records the exact attempt once without rewriting accepted`() {
+        listOf(
+            Harness(commitResult = RcsNativeCommitResult.OutcomeUnknown),
+            Harness(commitFailure = true),
+            Harness(beginFailure = true),
+        ).forEach { harness ->
+            assertEquals(RcsNativeSendOutcome.OUTCOME_UNKNOWN, harness.execute())
+            assertEquals(1, harness.lease.outcomeUnknownRecords)
+        }
+
+        val refused = Harness(routeVerification = RcsNativeMappingVerification.Refused)
+        assertEquals(RcsNativeSendOutcome.REFUSED, refused.execute())
+        assertEquals(0, refused.lease.outcomeUnknownRecords)
+
+        val accepted = Harness()
+        assertEquals(RcsNativeSendOutcome.SUBMITTED, accepted.execute())
+        assertEquals(0, accepted.lease.outcomeUnknownRecords)
+    }
+
+    @Test fun `route change after final reread revokes before commit and unregisters`() {
+        val routeChanges = FakeRouteChangeRevoker()
+        val harness = Harness(routeChanges = routeChanges, fireRouteChangeAfterFinalRead = true)
+        assertEquals(RcsNativeSendOutcome.REFUSED, harness.execute())
+        assertEquals(2, harness.go.revokes)
+        assertEquals(1, harness.go.commitCalls)
+        assertEquals(0, harness.go.dispatches)
+        assertEquals(1, harness.lease.refusalRecords)
+        assertEquals(1, routeChanges.closes)
     }
 
     @Test fun `post begin drift records preeffect refusal and recorder failure is unknown`() {
@@ -161,6 +192,8 @@ class RcsNativeSendCoordinatorTest {
         private val nowMs: Long = 100L,
         private val clockThrowsAt: Int = 0,
         private val factoryReturnsNull: Boolean = false,
+        private val routeChanges: RcsNativeRouteChangeRevoker = FakeRouteChangeRevoker(),
+        private val fireRouteChangeAfterFinalRead: Boolean = false,
         acquire: ((String, () -> Unit) -> RcsNativeCoreLease?)? = null,
         onPrepare: (() -> Unit)? = null,
     ) {
@@ -171,9 +204,14 @@ class RcsNativeSendCoordinatorTest {
         val coordinator = RcsNativeSendCoordinator(
             go,
             RcsNativeCoreLeaseFactory { ticket, revoke -> if (factoryReturnsNull) null else acquire?.invoke(ticket, revoke) ?: lease },
-            RcsNativeRouteReader { if (reads++ == 0) ROUTE else refreshedRoute },
+            RcsNativeRouteReader {
+                if (reads++ == 0) ROUTE else refreshedRoute.also {
+                    if (fireRouteChangeAfterFinalRead) (routeChanges as FakeRouteChangeRevoker).fire()
+                }
+            },
             RcsNativeClock { if (++clockCalls == clockThrowsAt) throw IllegalStateException("clock") else nowMs },
             1,
+            routeChanges,
         )
         fun execute() = coordinator.execute(COMMAND)
     }
@@ -187,13 +225,14 @@ class RcsNativeSendCoordinatorTest {
         private val currentAfterBegin: Boolean,
         private val onPrepare: (() -> Unit)?,
     ) : RcsNativeGoOperation {
-        var prepares = 0; var revokes = 0; var commitCalls = 0; var boundFacts = ""; var committedJson = ""
+        var prepares = 0; var revokes = 0; var commitCalls = 0; var dispatches = 0; var boundFacts = ""; var committedJson = ""
         var lastRevoke: RcsNativeRevokeResult = RcsNativeRevokeResult.None
         private var currentCalls = 0
+        private var ticketRevoked = false
         override fun ownerGeneration() = 1L
         override fun isCurrent() = ++currentCalls == 1 || currentAfterBegin
         override fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence): RcsNativePrepared {
-            prepares++; onPrepare?.invoke(); return RcsNativePrepared("ticket", if (invalidPrepared && prepares == 1) "" else CANDIDATE, "run", 1u, 1u, "pair")
+            prepares++; ticketRevoked = false; onPrepare?.invoke(); return RcsNativePrepared("ticket", if (invalidPrepared && prepares == 1) "" else CANDIDATE, "run", 1u, 1u, "pair")
         }
         override fun bindRoute(ticketId: String, tuple: RcsNativeContextTuple, mappingRevision: ULong, observedAtMs: Long) = ROUTE_OBSERVATION
         override fun bindTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String {
@@ -202,9 +241,9 @@ class RcsNativeSendCoordinatorTest {
         }
         override fun bindFacts(ticketId: String, factsJson: String) = bindFactsResult.also { boundFacts = factsJson }
         override fun commit(ticketId: String, exactCommitJson: String): RcsNativeCommitResult {
-            commitCalls++; if (commitFailure) throw IllegalStateException("commit"); committedJson = exactCommitJson; return commitResult
+            commitCalls++; if (commitFailure) throw IllegalStateException("commit"); committedJson = exactCommitJson; if (!ticketRevoked) dispatches++; return if (ticketRevoked) RcsNativeCommitResult.Rejected else commitResult
         }
-        override fun revoke(ticketId: String): RcsNativeRevokeResult { revokes++; return RcsNativeRevokeResult.Late.also { lastRevoke = it } }
+        override fun revoke(ticketId: String): RcsNativeRevokeResult { revokes++; ticketRevoked = true; return RcsNativeRevokeResult.Late.also { lastRevoke = it } }
     }
 
     private class FakeLease(
@@ -216,7 +255,7 @@ class RcsNativeSendCoordinatorTest {
         private val refusalRecorded: Boolean = true,
         private val acknowledged: Boolean = true,
     ) : RcsNativeCoreLease {
-        var classifiedSnapshot = ""; val verified = mutableListOf<String>(); var begun = ""; var coreCalls = 0; var closes = 0; var preparationCloses = 0; var committedCloses = 0; var refusalRecords = 0; var beginCalls = 0; var acknowledgements = 0
+        var classifiedSnapshot = ""; val verified = mutableListOf<String>(); var begun = ""; var coreCalls = 0; var closes = 0; var preparationCloses = 0; var committedCloses = 0; var refusalRecords = 0; var outcomeUnknownRecords = 0; var beginCalls = 0; var acknowledgements = 0
         override fun nextContextTuple(runIncarnation: String, runGeneration: ULong, streamEpoch: ULong, pairingEvidenceId: String) = RcsNativeContextTuple(1u, 1u, 1u).also { coreCalls++ }
         override fun nextMappingRevision(conversationId: String) = 1uL.also { coreCalls++ }
         override fun verifyMapping(exactObservationJson: String): RcsNativeMappingVerification { verified += exactObservationJson; coreCalls++; return if (exactObservationJson == ROUTE_OBSERVATION) routeVerification else RcsNativeMappingVerification.Mapped }
@@ -233,7 +272,18 @@ class RcsNativeSendCoordinatorTest {
         override fun recordTransportAcknowledged(tmpId: String, googleConversationId: String) = acknowledged.also { acknowledgements++ }
         override fun recordSubmitted(tmpId: String, googleConversationId: String) = true
         override fun recordPreEffectRefusal() = refusalRecorded.also { refusalRecords++ }
+        override fun recordOutcomeUnknown() = true.also { outcomeUnknownRecords++ }
         override fun close() { closes++ }
+    }
+
+    private class FakeRouteChangeRevoker : RcsNativeRouteChangeRevoker {
+        private var revoke: (() -> Unit)? = null
+        var closes = 0
+        override fun register(boundRoute: RcsNativeRouteEvidence, revokeTicket: () -> Unit): AutoCloseable {
+            revoke = revokeTicket
+            return AutoCloseable { closes++ }
+        }
+        fun fire() = revoke?.invoke()
     }
 
     private companion object {

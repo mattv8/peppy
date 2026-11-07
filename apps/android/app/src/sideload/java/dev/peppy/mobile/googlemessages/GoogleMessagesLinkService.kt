@@ -51,11 +51,13 @@ class GoogleMessagesLinkService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        createNotificationChannel(this)
         lifecycleGeneration = replaceActive(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        publishStatus(LinkStatus(0, "pairing", false, false, false, 0, ""))
+        // Foreground promotion must not wait behind a stale notification refresh.
+        publishStatusNow(LinkStatus(0, "pairing", false, false, false, 0, ""), lifecycleGeneration)
         synchronized(lock) {
             lastStartId = startId
             requestedGeneration += 1

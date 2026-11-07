@@ -12,6 +12,7 @@ import uniffi.peppy_mobile_bindings.gatewayNextRcsContextTuple
 import uniffi.peppy_mobile_bindings.gatewayNextRcsMappingRevision
 import uniffi.peppy_mobile_bindings.gatewayPrepareNativeRcsSend
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsPreEffectRefusal
+import uniffi.peppy_mobile_bindings.gatewayRecordRcsOutcomeUnknown
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsSubmitted
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsTransportAck
 import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMapping
@@ -37,6 +38,7 @@ internal interface NativeRcsCorePort {
     fun recordTransportAcknowledged(commandId: String, ackAtMs: Long)
     fun recordSubmitted(commandId: String)
     fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String)
+    fun recordOutcomeUnknown(commandId: String, tmpId: String, googleConversationId: String)
 }
 
 internal interface NativeRcsPreparationPort : AutoCloseable {
@@ -115,6 +117,13 @@ internal class NativeRcsCoreLease(
         } catch (failure: Throwable) {
             preserveCoreInterruption(failure)
             false
+        }
+    }
+
+    override fun recordOutcomeUnknown(): Boolean {
+        val committed = admitted ?: return false
+        return recordForAdmitted(committed.tmpId, committed.googleConversationId) {
+            port.recordOutcomeUnknown(it.commandId, it.tmpId, it.googleConversationId)
         }
     }
 
@@ -236,6 +245,8 @@ private class GeneratedNativeRcsCorePort(private val client: NativeClient) : Nat
     override fun recordSubmitted(commandId: String) = gatewayRecordRcsSubmitted(client, commandId)
     override fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String) =
         gatewayRecordRcsPreEffectRefusal(client, commandId, tmpId, googleConversationId)
+    override fun recordOutcomeUnknown(commandId: String, tmpId: String, googleConversationId: String) =
+        gatewayRecordRcsOutcomeUnknown(client, commandId, tmpId, googleConversationId)
 }
 
 internal fun nativeRcsMappingVerification(value: NativeRcsMappingVerification) = when (value) {

@@ -11,6 +11,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeRcsMappingVerification
 import uniffi.peppy_mobile_bindings.NativeRcsTargetDecision
+import uniffi.peppy_mobile_bindings.gatewayNextRcsContextTuple
+import uniffi.peppy_mobile_bindings.gatewayNextRcsMappingRevision
+import uniffi.peppy_mobile_bindings.gatewayPrepareNativeRcsSend
+import uniffi.peppy_mobile_bindings.gatewayRecordRcsOutcomeUnknown
 
 class RcsNativeCoreAdapterTest {
     @Test fun `forwards opaque input and exact unsigned tuple values`() {
@@ -143,6 +147,7 @@ class RcsNativeCoreAdapterTest {
         override fun recordTransportAcknowledged(commandId: String, ackAtMs: Long) { effects += "ack:$commandId" }
         override fun recordSubmitted(commandId: String) { effects += "submitted:$commandId" }
         override fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String) { effects += "refusal:$commandId:$tmpId:$googleConversationId" }
+        override fun recordOutcomeUnknown(commandId: String, tmpId: String, googleConversationId: String) { effects += "unknown:$commandId:$tmpId:$googleConversationId" }
     }
 
     private class FakePreparation(
@@ -188,6 +193,17 @@ class RcsNativeCoreAdapterTest {
 class RcsNativeCoreAdapterGatewaySmokeTest : GatewayTestBase() {
     @Test fun `factory keeps its captured NativeGateway owner after retirement`() {
         enrollAndUnlock()
+        val nativeLease = checkNotNull(NativeGateway.acquireRcsSendLease(context, "ticket-native") {})
+        assertEquals(
+            1uL,
+            gatewayNextRcsMappingRevision(nativeLease.client, "00000000-0000-4000-8000-000000000001"),
+        )
+        assertEquals(
+            1uL,
+            gatewayNextRcsContextTuple(nativeLease.client, "native-smoke-runtime", 1u, 1u, "native-smoke-pairing").contextRevision,
+        )
+        assertTrue(runCatching { gatewayPrepareNativeRcsSend(nativeLease.client, "foreign-command", 1L) }.isFailure)
+        assertTrue(runCatching { gatewayRecordRcsOutcomeUnknown(nativeLease.client, "foreign-command", "foreign-tmp", "foreign-google") }.isFailure)
         val adapter = RcsNativeCoreAdapter(context, RcsNativeClock { 1L })
         var revocations = 0
         val retiredLease = checkNotNull(adapter.acquire("ticket-retired") { revocations++ })
@@ -203,6 +219,9 @@ class RcsNativeCoreAdapterGatewaySmokeTest : GatewayTestBase() {
         assertTrue(runCatching {
             retiredLease.nextContextTuple("runtime-stale", 7u, 11u, "pairing-stale")
         }.isFailure)
+        assertTrue(runCatching {
+            gatewayNextRcsMappingRevision(nativeLease.client, "00000000-0000-4000-8000-000000000002")
+        }.isFailure)
 
         val currentLease = checkNotNull(adapter.acquire("ticket-current") {})
         assertEquals(
@@ -211,5 +230,6 @@ class RcsNativeCoreAdapterGatewaySmokeTest : GatewayTestBase() {
         )
         retiredLease.close()
         currentLease.close()
+        nativeLease.close()
     }
 }

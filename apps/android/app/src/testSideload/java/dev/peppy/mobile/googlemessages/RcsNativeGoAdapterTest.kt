@@ -80,6 +80,57 @@ class RcsNativeGoAdapterTest {
         assertEquals(listOf(ticket), handle.revoked)
     }
 
+    @Test fun `prepare revokes a decoded ticket when later prepared metadata is invalid`() {
+        val ticket = "123e4567-e89b-12d3-a456-426614174000"
+        val handle = FakeHandle().apply {
+            prepareResponse = "{\"code\":\"prepared\",\"ticket\\u005fid\":\"\\u0031${ticket.drop(1)}\",\"candidate_snapshot\":\"\"}"
+        }
+        val adapter = adapter(handle)
+
+        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+
+        assertEquals(listOf(ticket), handle.revoked)
+        assertEquals(0, handle.routeCalls)
+        assertEquals("", handle.facts)
+        assertEquals("", handle.commit)
+    }
+
+    @Test fun `does not revoke an id from a response rejected before decoding`() {
+        val handle = FakeHandle().apply {
+            prepareResponse = "{\"code\":\"prepared\",\"ticket_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"candidate_snapshot\":\"\\q\"}"
+        }
+        val adapter = adapter(handle)
+
+        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+
+        assertEquals(emptyList<String>(), handle.revoked)
+    }
+
+    @Test fun `rejects unsupported escapes while decoding valid escaped fields exactly`() {
+        val malformed = "{\"code\":\"acc\\u+0065pted\"}"
+        val handle = FakeHandle().apply {
+            prepareResponse = malformed
+            routeResponse = malformed
+            targetResponse = malformed
+            factsResponse = malformed
+            commitResponse = malformed
+        }
+        val adapter = adapter(handle)
+
+        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+        assertThrows(IllegalStateException::class.java) { adapter.bindRoute("ticket", RcsNativeContextTuple(1uL, 1uL, 1uL), 1uL, 1) }
+        assertThrows(IllegalStateException::class.java) { adapter.bindTarget("ticket", "google", "snapshot") }
+        assertFalse(adapter.bindFacts("ticket", FACTS))
+        assertEquals(RcsNativeCommitResult.OutcomeUnknown, adapter.commit("ticket", COMMIT))
+
+        handle.prepareResponse = "{\"code\":\"pr\\u0065pared\",\"ticket\\u005fid\":\"123e4567-e89b-12d3-a456-426614174000\",\"candidate_snapshot\":\"\\uD83D\\uDE00\",\"run_incarnation\":\"run\",\"run_generation\":1,\"stream_epoch\":1,\"pairing_evidence_id\":\"pair\"}"
+        handle.routeResponse = "{\"code\":\"route\\u005fbound\",\"observation\":\"\\uD83D\\uDE00\"}"
+        val prepared = adapter.prepare(COMMAND, 1, ROUTE)
+
+        assertEquals("😀", prepared.candidateSnapshotJson)
+        assertEquals("😀", adapter.bindRoute(prepared.ticketId, RcsNativeContextTuple(1uL, 1uL, 1uL), 1uL, 1))
+    }
+
     @Test fun `checked signed boundary refuses bind route before dispatch`() {
         val handle = FakeHandle()
         val adapter = adapter(handle)

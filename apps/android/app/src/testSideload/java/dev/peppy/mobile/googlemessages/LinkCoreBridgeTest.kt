@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import android.content.Context
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -23,6 +24,38 @@ class LinkCoreBridgeTest {
         LinkCoreBridge.resetForTest()
     }
 
+
+    @Test
+    fun `main thread owner unlink fence does not wait for blocked lifecycle publication`() {
+        val recorderEntered = CountDownLatch(1)
+        val releaseRecorder = CountDownLatch(1)
+        val fenceReturned = CountDownLatch(1)
+        val recorderDone = CountDownLatch(1)
+        var returnedBeforeRelease = false
+        LinkCoreBridge.recorder = { _, _ ->
+            recorderEntered.countDown()
+            releaseRecorder.await()
+            true
+        }
+        Thread {
+            LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 1, ""))
+            recorderDone.countDown()
+        }.start()
+        assertTrue(recorderEntered.await(1, TimeUnit.SECONDS))
+        val watchdog = Thread {
+            returnedBeforeRelease = fenceReturned.await(500, TimeUnit.MILLISECONDS)
+            releaseRecorder.countDown()
+        }.also { it.start() }
+
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        LinkCoreBridge.invalidateObservations()
+        fenceReturned.countDown()
+
+        watchdog.join(1_000)
+        assertTrue(returnedBeforeRelease)
+        assertTrue(recorderDone.await(1, TimeUnit.SECONDS))
+    }
+
     @Test
     fun `stale unlinked observation is dropped after pre-start fence begins`() {
         val validationEntered = CountDownLatch(1)
@@ -38,8 +71,9 @@ class LinkCoreBridgeTest {
         LinkCoreBridgeTestHooks.preStartFenceBegun = { fenceBegun.countDown() }
 
         assertFalse(LinkRuntime.pairingInProgress.get())
+        val lease = observationLease()
         Thread {
-            LinkCoreBridge.recordObservation(LinkCoreBridge.observationToken(), context, LinkStatus(0, "unlinked", false, false, false, 0, ""))
+            LinkCoreBridge.recordObservation(LinkCoreBridge.observationToken(), lease, context, LinkStatus(0, "unlinked", false, false, false, 0, ""))
             observationDone.countDown()
         }.start()
         assertTrue(validationEntered.await(1, TimeUnit.SECONDS))
@@ -60,12 +94,57 @@ class LinkCoreBridgeTest {
         LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
 
         val token = LinkCoreBridge.observationToken()
+        val lease = observationLease()
         val pairing = LinkRuntime.tryBeginPairing()!!
         assertTrue(LinkCoreBridge.recordPreStart(context))
         assertTrue(LinkRuntime.endPairing(pairing))
 
-        assertTrue(LinkCoreBridge.recordObservation(token, context, LinkStatus(0, "unlinked", false, false, false, 0, "")))
+        assertTrue(LinkCoreBridge.recordObservation(token, lease, context, LinkStatus(0, "unlinked", false, false, false, 0, "")))
 
         assertEquals(listOf("unknown"), recorded)
+    }
+
+    @Test
+    fun `owner completion publishes unlinked before completing core`() {
+        val events = mutableListOf<String>()
+        LinkCoreBridge.recorder = { _, status -> events += status.state; true }
+        LinkCoreBridge.explicitUnlinkCompleter = { _, _ -> events += "completed" }
+
+        assertTrue(LinkCoreBridge.recordExplicitUnlinkCompleted(context))
+
+        assertEquals(listOf("unlinked", "completed"), events)
+    }
+
+    @Test
+    fun `explicit completion failure does not retry`() {
+        var attempts = 0
+        LinkCoreBridge.recorder = { _, _ -> true }
+        LinkCoreBridge.explicitUnlinkCompleter = { _, _ -> attempts++; throw IllegalStateException() }
+
+        assertFalse(LinkCoreBridge.recordExplicitUnlinkCompleted(context))
+
+        assertEquals(1, attempts)
+    }
+
+    private fun observationLease(): LinkHandleLease {
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost) = object : LinkHandle {
+                override fun pair(cookiesJson: ByteArray) = Unit
+                override fun relink() = Unit
+                override fun run() = Unit
+                override fun checkHealth() = 0L
+                override fun unlink() = Unit
+                override fun stop() = Unit
+                override fun close() = Unit
+                override fun status() = "{}"
+            }
+        }
+        LinkRuntimeTestHooks.storeFactory = { object : LinkStateStorage {
+            override fun read() = ByteArray(0)
+            override fun write(state: ByteArray) = Unit
+            override fun wipe() = Unit
+        } }
+        return LinkRuntime.handleLease(context)!!
     }
 }

@@ -9,6 +9,7 @@ internal class RcsNativeSendCoordinator(
     private val routeReader: RcsNativeRouteReader,
     private val clock: RcsNativeClock,
     private val canonicalizerRevision: Int,
+    private val routeChangeRevoker: RcsNativeRouteChangeRevoker,
 ) {
     private val executing = AtomicBoolean(false)
 
@@ -20,6 +21,7 @@ internal class RcsNativeSendCoordinator(
         var committed: RcsNativeCommittedHandle? = null
         var admitted = false
         var ticketOutstanding = false
+        var routeChangeRegistration: AutoCloseable? = null
         try {
             val route = routeReader.currentRoute() ?: return RcsNativeSendOutcome.REFUSED
             if (go.ownerGeneration() <= 0 || !go.isCurrent()) return RcsNativeSendOutcome.REFUSED
@@ -28,6 +30,7 @@ internal class RcsNativeSendCoordinator(
                 ticketOutstanding = it.ticketId.isNotEmpty()
             }
             if (!prepared.valid()) return RcsNativeSendOutcome.REFUSED
+            routeChangeRegistration = routeChangeRevoker.register(route) { go.revoke(prepared.ticketId) }
             lease = coreLeaseFactory.acquire(prepared.ticketId) { go.revoke(prepared.ticketId) }
                 ?: return RcsNativeSendOutcome.REFUSED
 
@@ -47,13 +50,13 @@ internal class RcsNativeSendCoordinator(
                 preparation.begin(observation, beginTimestamp)
             } catch (interrupted: InterruptedException) {
                 Thread.currentThread().interrupt()
-                return RcsNativeSendOutcome.OUTCOME_UNKNOWN
+                return recordOutcomeUnknown(lease)
             } catch (_: Exception) {
-                return RcsNativeSendOutcome.OUTCOME_UNKNOWN
+                return recordOutcomeUnknown(lease)
             }
             val commitHandle = when (began) {
                 RcsNativeBeginResult.KnownRefused -> return RcsNativeSendOutcome.REFUSED
-                RcsNativeBeginResult.DurabilityUnknown -> return RcsNativeSendOutcome.OUTCOME_UNKNOWN
+                RcsNativeBeginResult.DurabilityUnknown -> return recordOutcomeUnknown(lease)
                 is RcsNativeBeginResult.Committed -> began.handle
             }
             committed = commitHandle
@@ -66,16 +69,17 @@ internal class RcsNativeSendCoordinator(
                 RcsNativeCommitResult.Accepted -> if (
                     lease.recordTransportAcknowledged(commitHandle.tmpId, commitHandle.googleConversationId) &&
                     lease.recordSubmitted(commitHandle.tmpId, commitHandle.googleConversationId)
-                ) RcsNativeSendOutcome.SUBMITTED else RcsNativeSendOutcome.OUTCOME_UNKNOWN
+                ) RcsNativeSendOutcome.SUBMITTED else recordOutcomeUnknown(lease)
                 RcsNativeCommitResult.Rejected -> recordRefusal(lease)
-                RcsNativeCommitResult.OutcomeUnknown -> RcsNativeSendOutcome.OUTCOME_UNKNOWN
+                RcsNativeCommitResult.OutcomeUnknown -> recordOutcomeUnknown(lease)
             }
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
-            return if (admitted) RcsNativeSendOutcome.OUTCOME_UNKNOWN else RcsNativeSendOutcome.REFUSED
+            return if (admitted) recordOutcomeUnknown(lease) else RcsNativeSendOutcome.REFUSED
         } catch (_: Exception) {
-            return if (admitted) RcsNativeSendOutcome.OUTCOME_UNKNOWN else RcsNativeSendOutcome.REFUSED
+            return if (admitted) recordOutcomeUnknown(lease) else RcsNativeSendOutcome.REFUSED
         } finally {
+            runCatching { routeChangeRegistration?.close() }
             if (ticketOutstanding) ticketId?.let { runCatching { go.revoke(it) } }
             runCatching { committed?.close() }
             runCatching { preparation?.close() }
@@ -85,7 +89,12 @@ internal class RcsNativeSendCoordinator(
     }
 
     private fun recordRefusal(lease: RcsNativeCoreLease) =
-        if (lease.recordPreEffectRefusal()) RcsNativeSendOutcome.REFUSED else RcsNativeSendOutcome.OUTCOME_UNKNOWN
+        if (lease.recordPreEffectRefusal()) RcsNativeSendOutcome.REFUSED else recordOutcomeUnknown(lease)
+
+    private fun recordOutcomeUnknown(lease: RcsNativeCoreLease?): RcsNativeSendOutcome {
+        lease?.recordOutcomeUnknown()
+        return RcsNativeSendOutcome.OUTCOME_UNKNOWN
+    }
 
     private fun RcsNativePrepared.valid() = ticketId.isNotEmpty() && candidateSnapshotJson.isNotEmpty() && runIncarnation.isNotEmpty() && pairingEvidenceId.isNotEmpty() && runGeneration > 0u && streamEpoch > 0u
 
