@@ -19,6 +19,19 @@ Agent reference for security-sensitive behavior. Preserve these boundaries when 
 - Startup rejects a custom S3 backend that does not confirm SSE-S3. The first multichunk probe is bounded to 360 seconds; recurring readiness uses the configured shorter timeout. Versioned backends delete every object version and require ListObjectVersions and DeleteObjectVersion permissions. Backblaze B2 needs `listFiles` and `deleteFiles`; changing versioning requires restart. Lifecycle cleanup for crash-orphaned probes must scope to `peppy-storage-probe-` and `peppy-readiness-check-`.
 - SSE response metadata and ciphertext framing are backend-format assertions, not independent proof of encrypted stored bytes. Hosted-provider support and image-pin rollout remain unverified here.
 
+## Drafts, quotas, and MMS staging
+
+- A new draft branch and each server-accepted authored edit expire 30 days after acceptance. Accepted non-authored updates keep the branch's current expiry. A draft can have at most three live branches; the server returns `draft_branch_limit` beyond that.
+- Expiry closes the branch with reason `expired` and clears the sealed record bytes of its revisions. It deletes only private draft-only attachments. Attachments still referenced by a message record, held by sent-message history or another unreleased use, or backing a ready public copy stay in place. Public copies have their own lifecycle.
+- The vault attachment quota is `VAULT_ATTACHMENT_QUOTA_BYTES`. Compose defaults it to `536870912` bytes. Quota use counts finalized attachments, unexpired upload reservations, unpurged removals, and unpurged public copies.
+- Migration 0026 adds five draft tables: `draft_incarnations`, `draft_branches`, `draft_revisions`, `draft_terminals`, and `draft_attachment_holds`. Each has row-level security scoped to the vault. The server registers all five in the runtime-role grant and RLS validation lists in `services/server/src/rls.rs`.
+- Migration 0026 downgrade refuses while any draft rows, draft-linked attachments or reservations, or pending `draft_expired` storage deletions exist. It leaves the database unchanged in that case.
+- Android MMS with gateway content version 4 can resize images and split a message into ordered groups. Carrier delivery order is best effort; the planner does not promise that split parts arrive in order. Content version 3 and older get no split plan; an oversize message is refused (`TooLarge`).
+- Android writes fitted MMS images as plaintext under `noBackupFilesDir/mms-fit`. The app disables Android backup (`allowBackup="false"`, `fullBackupContent="false"`). Fitted output is removed when its command settles, when the fit ends impossible or transient, and when stale entries are pruned.
+- Attempted draft uploads: core introduced `draft_push_attempts` in schema 48 for a pending revision through `mark_draft_push_attempt`, which returns false for a stale revision. Hosts must call it before each draft PUT; until every host does, this evidence is not complete. A never-attempted draft remains sendable offline. A draft whose attempted PUT has unknown acceptance is blocked from local sending until the client reconnects and reconciles with the server.
+- Client schema: the local SQLite schema is version 49 in this checkout (`SCHEMA_VERSION` in `crates/client-core/src/lib.rs`). Later checkouts may bump it. A binary that reads a database with a newer schema returns `UnsupportedSchema` and does not open it. No downgrade path exists.
+- These statements describe repository behavior and tests. They do not establish production role permissions, hosted deployment state, or carrier delivery behavior. Verify those separately.
+
 ## Notification storage and authority
 
 - Notification title, text, and app metadata travel in encrypted envelopes. Replay defaults to 30 days. Compatible clients can supersede state after replay retention; dismissal does not erase previously synced ciphertext immediately.

@@ -26,6 +26,9 @@ export type DraftSlot = {
   /** While a send is in flight, saves are deferred so they cannot race the atomic send/clear. */
   held: boolean;
   queue: Promise<unknown>;
+  /** The current persist and, at most, one coalesced follow-up persist. */
+  saving?: boolean;
+  pendingSave?: Promise<SaveOutcome>;
   /** Last host version successfully acknowledged for safe stale-save reconciliation. */
   acknowledgedContent: DraftContent;
 };
@@ -391,9 +394,8 @@ export class DraftStore {
     if (!slot || isDirty(slot) || slot.held || !this.shouldAdopt(slot, draft)) return;
     const incomingContent = contentOf(draft);
     const changed = !sameDraftContent(slot.content, incomingContent);
-    const textOnlyChange = changed && slot.id === draft.id && sameStructure(slot.content, incomingContent);
-    if (textOnlyChange) this.preserveUndo(slot, slot.content, draft);
-    else if (changed || slot.id !== draft.id) {
+    const structuralReplacement = slot.id !== draft.id || !sameStructure(slot.content, incomingContent);
+    if (changed && structuralReplacement) {
       this.retainCopy(slot.key, slot.content);
       this.undoVersions.delete(slot.key);
     }
@@ -405,7 +407,7 @@ export class DraftStore {
       error: undefined,
       acknowledgedContent: incomingContent,
     });
-    if (changed) this.events.notice?.(slot.key, "remote-update");
+    if (changed && structuralReplacement) this.events.notice?.(slot.key, "remote-update");
     this.events.changed();
   }
 
@@ -565,9 +567,31 @@ export class DraftStore {
 
   private enqueue(slot: DraftSlot): Promise<SaveOutcome> {
     const session = this.sessionGeneration;
-    const run = slot.queue.catch(() => undefined).then(() => this.save(slot, session));
+    if (slot.pendingSave) return slot.pendingSave;
+    if (slot.saving) {
+      let pendingSave!: Promise<SaveOutcome>;
+      const run = slot.queue.catch(() => undefined).then(() => {
+        if (slot.pendingSave === pendingSave) slot.pendingSave = undefined;
+        return this.runSave(slot, session);
+      });
+      pendingSave = run;
+      slot.pendingSave = pendingSave;
+      slot.queue = run.catch(() => undefined);
+      return pendingSave;
+    }
+    slot.saving = true;
+    const run = slot.queue.catch(() => undefined).then(() => this.runSave(slot, session));
     slot.queue = run.catch(() => undefined);
     return run;
+  }
+
+  private async runSave(slot: DraftSlot, session: number): Promise<SaveOutcome> {
+    slot.saving = true;
+    try {
+      return await this.save(slot, session);
+    } finally {
+      slot.saving = false;
+    }
   }
 
   private async save(slot: DraftSlot, session = this.sessionGeneration): Promise<SaveOutcome> {

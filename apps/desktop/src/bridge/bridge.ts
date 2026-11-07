@@ -79,6 +79,7 @@ import type {
   DesktopBridge as SharedDesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
+import { errorText } from "./bridgeErrors";
 
 export {
   type ConnectionState,
@@ -397,6 +398,9 @@ export const fixtureBridge: DesktopBridge = {
   request_notification_permission: async () => ({ status: "granted", testSent: true, canOpenSettings: false }),
   open_notification_settings: async () => undefined,
   pick_attachments: async () => [{ id: `attachment-fixture-${Date.now()}`, name: "fixture-image.png", mediaType: "image/png", byteSize: 2400, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" }],
+  prepare_pasted_attachments: async files => ({ views: files.map((file, index) => ({ id: `attachment-fixture-pasted-${Date.now()}-${index}`, name: file.name, mediaType: file.mediaType, byteSize: file.bytes.byteLength, state: "ready" as const, draftState: "local" as const, previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" })), failures: [] }),
+  resolve_draft_conflict: async () => { throw fixtureError("not-available", "Draft conflict resolution is not available yet."); },
+  acknowledge_draft_notice: async () => { throw fixtureError("not-available", "Draft notices are not available yet."); },
   retry_attachment: async () => undefined,
   save_attachment: async () => false,
   request_attachment_download: async () => undefined,
@@ -549,6 +553,10 @@ export const fixtureBridge: DesktopBridge = {
 };
 
 const invoke = async <T>(command: string, args?: Record<string, unknown>) => (await import("@tauri-apps/api/core")).invoke<T>(command, args);
+const invokeRaw = async <T>(command: string, bytes: ArrayBuffer, headers: Record<string, string>) => {
+  const { invoke: nativeInvoke } = await import("@tauri-apps/api/core");
+  return nativeInvoke<T>(command, bytes, { headers });
+};
 /** Native claimant response, normalized before it reaches shared UI. */
 type NativeComputerClaimantView = {
   stage: "waiting_owner" | "compare_codes" | "finishing" | "connected" | "denied" | "expired" | "error" | string;
@@ -589,6 +597,23 @@ export const renewHostedSession = () => "__TAURI_INTERNALS__" in window
   ? invoke<void>("hosted_session_renew")
   : Promise.resolve();
 export const tauriBridge: DesktopBridge = {
+  prepare_pasted_attachments: async files => {
+    const views: AttachmentView[] = [];
+    const failures: string[] = [];
+    for (const file of files) {
+      try {
+        views.push(await invokeRaw<AttachmentView>("prepare_pasted_attachment", file.bytes, {
+          "peppy-attachment-name": encodeURIComponent(file.name || "pasted-image"),
+          "peppy-attachment-type": file.mediaType,
+        }));
+      } catch (error) {
+        failures.push(`${file.name || "Pasted image"}: ${errorText(error)}`);
+      }
+    }
+    return { views, failures };
+  },
+  resolve_draft_conflict: (input) => invoke("resolve_draft_conflict", { draftId: input.draftId, keepBranchId: input.keepBranchId }),
+  acknowledge_draft_notice: (draftId) => invoke("acknowledge_draft_notice", { draftId }),
   get_notification_sound: () => invoke("get_notification_sound"),
   get_notification_persistence: () => invoke("get_notification_persistence"),
   startup_status: () => invoke("startup_status"),

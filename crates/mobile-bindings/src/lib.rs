@@ -849,6 +849,7 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::NotFound => Self::NotFound,
             CoreError::StaleDraft { .. } | CoreError::DraftMoved { .. } => Self::StaleDraft,
             CoreError::DraftNotDiscardable
+            | CoreError::DraftNotSynced
             | CoreError::RecipientlessDraftExists
             | CoreError::DraftMergeOverflow => Self::Conflict,
             CoreError::InvalidKeyCache => Self::InvalidKeyCache,
@@ -861,6 +862,19 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::MmsMediaQuota => Self::MmsMediaQuota,
             CoreError::SmsCapacity => Self::SmsCapacity,
         }
+    }
+}
+
+#[cfg(test)]
+mod draft_sync_error_tests {
+    use super::{CoreError, MobileBindingsError};
+
+    #[test]
+    fn unsynced_draft_maps_to_the_existing_retryable_conflict() {
+        assert!(matches!(
+            MobileBindingsError::from(CoreError::DraftNotSynced),
+            MobileBindingsError::Conflict
+        ));
     }
 }
 

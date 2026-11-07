@@ -99,6 +99,8 @@ pub struct ReserveAttachmentRequest {
     pub reference_tracking: bool,
     #[serde(default)]
     pub retention_class: AttachmentRetentionClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<Uuid>,
 }
 
 impl ReserveAttachmentRequest {
@@ -298,6 +300,7 @@ mod tests {
             declared_ciphertext_sha256: "ab".repeat(32),
             reference_tracking: false,
             retention_class: AttachmentRetentionClass::Protected,
+            draft_id: None,
         };
         let uppercase = ReserveAttachmentRequest {
             declared_ciphertext_sha256: lowercase.declared_ciphertext_sha256.to_uppercase(),

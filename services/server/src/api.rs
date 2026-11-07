@@ -1,6 +1,7 @@
 mod account_access;
 pub(crate) mod admission;
 mod attachments;
+mod drafts;
 mod instance;
 mod key_profiles;
 mod sync;
@@ -267,6 +268,7 @@ pub(super) struct ApiState {
     pub(super) db: PgPool,
     committed: tokio::sync::broadcast::Sender<(Uuid, i64)>,
     presence_changed: tokio::sync::broadcast::Sender<Uuid>,
+    drafts_changed: tokio::sync::broadcast::Sender<Uuid>,
     presence_touches: Arc<std::sync::Mutex<HashMap<(Uuid, Uuid), std::time::Instant>>>,
     storage: Option<Storage>,
     vault_attachment_quota_bytes: i64,
@@ -522,6 +524,7 @@ pub(crate) fn build_router(
     } = authorization;
     let (committed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let (presence_changed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
+    let (drafts_changed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let storage = initialized_storage;
     let relay_url =
         explicit_relay_url.or_else(|| config.as_ref().and_then(|config| config.relay_url.clone()));
@@ -567,6 +570,13 @@ pub(crate) fn build_router(
         .route("/v1/snapshot", get(sync::snapshot_start))
         .route("/v1/snapshot/records", get(sync::snapshot_records))
         .route("/v1/commands/pending", get(sync::pending_commands))
+        .route("/v1/drafts", get(drafts::list))
+        .route(
+            "/v1/drafts/{draft_id}/revisions/{revision_id}",
+            put(drafts::put),
+        )
+        .route("/v1/drafts/{draft_id}/send", post(drafts::send))
+        .route("/v1/drafts/{draft_id}/discard", post(drafts::discard))
         .route(
             "/v1/vault/key-profiles",
             get(key_profiles::list).post(key_profiles::register),
@@ -636,6 +646,7 @@ pub(crate) fn build_router(
         db: db.clone(),
         committed: committed.clone(),
         presence_changed,
+        drafts_changed,
         presence_touches: Arc::new(std::sync::Mutex::new(HashMap::new())),
         storage: storage.clone(),
         vault_attachment_quota_bytes,
@@ -2684,6 +2695,51 @@ fn heartbeat_action(has_outstanding_challenge: bool) -> HeartbeatAction {
     }
 }
 
+const DRAFT_HINT_COOLDOWN: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct DraftHintCoalescer {
+    cooldown_until: Option<tokio::time::Instant>,
+    pending: bool,
+}
+
+impl DraftHintCoalescer {
+    fn notice(&mut self, now: tokio::time::Instant) -> bool {
+        if self
+            .cooldown_until
+            .is_none_or(|cooldown_until| now >= cooldown_until)
+        {
+            self.cooldown_until = None;
+            self.pending = false;
+            true
+        } else {
+            self.pending = true;
+            false
+        }
+    }
+
+    fn sent(&mut self, completed_at: tokio::time::Instant) -> tokio::time::Instant {
+        let cooldown_until = completed_at + DRAFT_HINT_COOLDOWN;
+        self.cooldown_until = Some(cooldown_until);
+        cooldown_until
+    }
+
+    fn timeout_expired(&mut self, now: tokio::time::Instant) -> bool {
+        let Some(cooldown_until) = self.cooldown_until else {
+            return false;
+        };
+        if now < cooldown_until {
+            return false;
+        }
+        self.cooldown_until = None;
+        std::mem::take(&mut self.pending)
+    }
+
+    fn cooling_down(&self) -> bool {
+        self.cooldown_until.is_some()
+    }
+}
+
 async fn websocket(
     State(s): State<ApiState>,
     headers: HeaderMap,
@@ -2695,6 +2751,7 @@ async fn websocket(
     // Subscribe before replay so a commit between replay and live is never missed.
     let receiver = s.committed.subscribe();
     let presence_receiver = s.presence_changed.subscribe();
+    let drafts_receiver = s.drafts_changed.subscribe();
     let lease = lease.map(|Extension(lease)| lease);
     let shutdown = shutdown.map(|Extension(shutdown)| shutdown);
     Ok(upgrade
@@ -2707,6 +2764,7 @@ async fn websocket(
                 principal,
                 receiver,
                 presence_receiver,
+                drafts_receiver,
                 lease,
                 shutdown,
             )
@@ -2792,12 +2850,14 @@ async fn read_hello(socket: &mut WebSocket, timeout: Duration) -> Result<i64, He
         .ok_or(Rejected(close::INVALID_HELLO, "invalid_hello"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ws_session(
     socket: WebSocket,
     state: ApiState,
     principal: Principal,
     notices: tokio::sync::broadcast::Receiver<(Uuid, i64)>,
     presence_notices: tokio::sync::broadcast::Receiver<Uuid>,
+    drafts_notices: tokio::sync::broadcast::Receiver<Uuid>,
     lease: Option<crate::serving::ConnectionLease>,
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 ) {
@@ -2807,6 +2867,7 @@ async fn ws_session(
         principal,
         notices,
         presence_notices,
+        drafts_notices,
         shutdown,
     )
     .await;
@@ -2819,6 +2880,7 @@ async fn ws_session_inner(
     principal: Principal,
     mut notices: tokio::sync::broadcast::Receiver<(Uuid, i64)>,
     mut presence_notices: tokio::sync::broadcast::Receiver<Uuid>,
+    mut drafts_notices: tokio::sync::broadcast::Receiver<Uuid>,
     mut shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 ) {
     let options = Arc::clone(&state.options);
@@ -2852,7 +2914,7 @@ async fn ws_session_inner(
         "resume_cursor": cursor.to_string(),
         "high_water_cursor": high_water.to_string(),
         "replay_floor_cursor": replay_floor.to_string(),
-        "frame_types": ["ready", "event", "resync_required", "presence_changed"],
+        "frame_types": ["ready", "event", "resync_required", "presence_changed", "drafts_changed"],
     });
     if let Err(stop) = send_frame(&mut socket, ready.to_string(), options.send_timeout).await {
         return stop.close(&mut socket).await;
@@ -2885,6 +2947,8 @@ async fn ws_session_inner(
     // Broadcast is only a latency hint; committed rows are the durable source.
     let mut durable_replay = tokio::time::interval(options.durable_replay_interval);
     durable_replay.tick().await;
+    let mut draft_hint_coalescer = DraftHintCoalescer::default();
+    let mut draft_hint_cooldown = Box::pin(tokio::time::sleep(Duration::from_secs(3_600)));
     loop {
         let stop = tokio::select! {
             _ = wait_for_shutdown(&mut shutdown) => WsStop::Disconnected,
@@ -2981,6 +3045,41 @@ async fn ws_session_inner(
                     if presence_active { close_presence(&state, &principal, connection_id).await; }
                     return
                 },
+            },
+            draft_notice = drafts_notices.recv() => {
+                match draft_notice {
+                    Ok(vault) if vault == principal.vault => {}
+                    Ok(_) => continue,
+                    // The channel carries hints only; after lag, one local hint
+                    // is enough to prompt the receiver to pull its durable state.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        if presence_active { close_presence(&state, &principal, connection_id).await; }
+                        return
+                    }
+                }
+                if !draft_hint_coalescer.notice(tokio::time::Instant::now()) {
+                    continue;
+                }
+                if send_frame(&mut socket, json!({"type":"drafts_changed"}).to_string(), options.send_timeout).await.is_err() {
+                    WsStop::Disconnected
+                } else {
+                    let cooldown_until = draft_hint_coalescer.sent(tokio::time::Instant::now());
+                    draft_hint_cooldown.as_mut().reset(cooldown_until);
+                    continue
+                }
+            },
+            _ = &mut draft_hint_cooldown, if draft_hint_coalescer.cooling_down() => {
+                if !draft_hint_coalescer.timeout_expired(tokio::time::Instant::now()) {
+                    continue;
+                }
+                if send_frame(&mut socket, json!({"type":"drafts_changed"}).to_string(), options.send_timeout).await.is_err() {
+                    WsStop::Disconnected
+                } else {
+                    let cooldown_until = draft_hint_coalescer.sent(tokio::time::Instant::now());
+                    draft_hint_cooldown.as_mut().reset(cooldown_until);
+                    continue
+                }
             },
         };
         if presence_active {
@@ -3081,6 +3180,51 @@ mod tests {
     fn heartbeat_disconnects_before_replacing_an_unanswered_challenge() {
         assert_eq!(heartbeat_action(false), HeartbeatAction::SendChallenge);
         assert_eq!(heartbeat_action(true), HeartbeatAction::Disconnect);
+    }
+
+    #[test]
+    fn draft_hint_coalescer_enforces_leading_and_trailing_windows() {
+        let start = tokio::time::Instant::now();
+        let mut coalescer = DraftHintCoalescer::default();
+
+        assert!(coalescer.notice(start));
+        coalescer.sent(start);
+        for _ in 0..100 {
+            assert!(!coalescer.notice(start + Duration::from_millis(100)));
+        }
+        assert!(!coalescer.notice(start + Duration::from_millis(499)));
+        assert!(!coalescer.timeout_expired(start + Duration::from_millis(499)));
+        assert!(coalescer.timeout_expired(start + Duration::from_millis(500)));
+
+        coalescer.sent(start + Duration::from_millis(500));
+        assert!(!coalescer.notice(start + Duration::from_millis(500)));
+        assert!(!coalescer.timeout_expired(start + Duration::from_millis(999)));
+        assert!(coalescer.timeout_expired(start + Duration::from_millis(1_000)));
+    }
+
+    #[test]
+    fn draft_hint_coalescer_has_no_trailing_send_without_a_pending_notice() {
+        let start = tokio::time::Instant::now();
+        let mut coalescer = DraftHintCoalescer::default();
+
+        assert!(coalescer.notice(start));
+        coalescer.sent(start);
+        assert!(!coalescer.timeout_expired(start + Duration::from_millis(500)));
+        assert!(coalescer.notice(start + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn draft_hint_cooldown_starts_after_send_completion() {
+        let notice_at = tokio::time::Instant::now();
+        let send_completed_at = notice_at + Duration::from_millis(100);
+        let mut coalescer = DraftHintCoalescer::default();
+
+        assert!(coalescer.notice(notice_at));
+        coalescer.sent(send_completed_at);
+        assert!(!coalescer.notice(send_completed_at));
+        assert!(!coalescer.timeout_expired(notice_at + Duration::from_millis(500)));
+        assert!(!coalescer.timeout_expired(notice_at + Duration::from_millis(599)));
+        assert!(coalescer.timeout_expired(notice_at + Duration::from_millis(600)));
     }
 
     #[test]

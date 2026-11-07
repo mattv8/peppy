@@ -216,3 +216,10 @@ export async function hydrateCipher(id: string, expectedGeneration: number, stor
   }
   fs.writeFile(destination, bytes);
 }
+
+/** Checks worker-local ciphertext residency without reading the generation-bound checkpoint blob. */
+export function hasHydratedCipher(id: string, fs: EmscriptenFilesystem): boolean {
+  if (!UUID.test(id)) throw invalid();
+  ensureCipherDirectory(fs);
+  return directoryEntries(fs, child(ROOT, CIPHER_DIRECTORY)).has(`${id}.ppss`);
+}

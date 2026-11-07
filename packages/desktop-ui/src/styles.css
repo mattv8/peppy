@@ -651,22 +651,21 @@ select:focus-visible {
   min-height: 0;
   padding: 0;
 }
-#attachment-tray {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  order: 2;
-  padding: 6px 8px 0;
-  margin: 0;
-  list-style: none;
-}
+#attachment-tray-region { order: 2; padding: 6px 8px 0; }
+#attachment-tray-region[data-empty] { padding: 0; }
+.attachment-tray-header { display: flex; justify-content: space-between; gap: 8px; padding: 0 0 4px; color: var(--peppy-text-secondary); font-size: 12px; }
+#attachment-tray { display: flex; gap: 4px; flex-wrap: wrap; max-height: 218px; overflow-y: auto; scroll-padding: 2px; padding: 2px; margin: -2px; list-style: none; }
+#attachment-tray[data-attachment-layout="rows"] { max-height: 154px; }
 #composer-field {
   position: relative;
   container: composer-card / inline-size;
   display: flex;
   flex: 1;
+  min-height: 0;
   flex-direction: column;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scroll-padding: 4px;
   margin: 0;
   border: 1px solid var(--peppy-glass-border);
   border-radius: var(--peppy-radius-lg);
@@ -675,6 +674,7 @@ select:focus-visible {
   backdrop-filter: var(--peppy-glass-backdrop-filter);
   box-shadow: inset 0 1px 0 var(--peppy-glass-highlight), var(--peppy-shadow-floating);
 }
+#composer-field > * { flex-shrink: 0; }
 #composer-field:focus-within {
   border-color: var(--peppy-focus);
   box-shadow: inset 0 1px 0 var(--peppy-glass-highlight), 0 0 0 1px var(--peppy-focus), var(--peppy-shadow-floating);
@@ -766,41 +766,25 @@ select:focus-visible {
 #composer-field:focus-within:has(#composer-textarea:not(:placeholder-shown)) #shift-enter-hint {
   opacity: 1;
 }
-.attachment-chip {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 28px;
-  padding: 3px 7px;
-  border: 1px solid var(--peppy-border);
-  border-radius: 4px;
-  background: var(--peppy-surface-widget);
-  font-size: 12px;
-}
-.attachment-chip img {
-  width: 20px;
-  height: 20px;
-  object-fit: cover;
-  border-radius: 4px;
-}
-.attachment-state {
-  display: grid;
-  place-items: center;
-}
-.attachment-remove {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--peppy-text-secondary);
-}
-.attachment-remove:hover {
-  background: var(--peppy-surface-hover);
-}
+.attachment-chip { display: grid; grid-template-columns: minmax(0, 1fr) 24px; grid-template-rows: 88px auto; align-content: start; gap: 4px; box-sizing: border-box; flex: 0 0 132px; width: 132px; min-height: 132px; padding: 4px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm); background: var(--peppy-surface-widget); font-size: 12px; }
+.attachment-preview { display: grid; grid-column: 1 / -1; width: 100%; height: 88px; place-items: center; background: var(--peppy-surface-desk); }
+.attachment-preview img { width: 100%; height: 88px; object-fit: contain; }
+.attachment-copy { display: grid; min-width: 0; align-content: start; gap: 0; }
+.attachment-name { min-width: 0; overflow-wrap: anywhere; line-height: 16px; white-space: normal; }
+.attachment-state { display: flex; align-items: center; gap: 4px; color: var(--peppy-text-secondary); font-size: 11px; line-height: 16px; }
+.attachment-chip[data-attachment-state="failed"] .attachment-state, .attachment-chip[data-attachment-state="upload-failed"] .attachment-state, .attachment-chip[data-attachment-state="download-failed"] .attachment-state, .attachment-chip[data-attachment-state="local"] .attachment-state, .attachment-chip[data-attachment-state="unavailable"] .attachment-state { color: var(--peppy-error-text); }
+.attachment-remove, .attachment-retry { display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--peppy-radius-sm); background: transparent; color: var(--peppy-text-secondary); }
+.attachment-remove { grid-column: 2; grid-row: 2; align-self: start; width: 24px; height: 24px; border: 1px solid var(--peppy-border-strong); background: var(--peppy-surface-widget); }
+.attachment-retry { grid-auto-flow: column; justify-content: start; gap: 4px; min-height: 24px; padding: 0 4px; color: var(--peppy-text-primary); font-size: 11px; }
+.attachment-remove:hover, .attachment-retry:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+#attachment-tray[data-attachment-layout="rows"] .attachment-chip { grid-template-columns: 46px minmax(0, 1fr) 24px; grid-template-rows: auto; gap: 8px; min-height: 48px; padding: 0 4px 0 0; overflow: visible; flex: 1 1 240px; align-items: center; }
+#attachment-tray[data-attachment-layout="rows"] .attachment-preview, #attachment-tray[data-attachment-layout="rows"] .attachment-preview img { width: 46px; height: 46px; }
+#attachment-tray[data-attachment-layout="rows"] .attachment-preview { grid-column: 1; grid-row: 1; }
+#attachment-tray[data-attachment-layout="rows"] .attachment-copy { grid-column: 2; grid-row: 1; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+#attachment-tray[data-attachment-layout="rows"] .attachment-name, #attachment-tray[data-attachment-layout="rows"] .attachment-state { grid-column: 1; }
+#attachment-tray[data-attachment-layout="rows"] .attachment-retry { grid-column: 2; grid-row: 1 / span 2; }
+#attachment-tray[data-attachment-layout="rows"] .attachment-remove { position: static; grid-column: 3; grid-row: 1; width: 24px; height: 24px; border: 0; background: transparent; }
+.composer-paste-rejection { margin: 4px 0; overflow-wrap: anywhere; color: var(--peppy-error-text); font-size: 12px; }
 .composer-status {
   margin: 4px 0;
   color: var(--peppy-text-secondary);
@@ -1221,6 +1205,13 @@ select:focus-visible {
 
 @media (pointer: coarse) {
   .attachment-storage-info-button, .link-button, #billing-elsewhere-manage, #attachment-storage-addon-manage, #attachment-storage-addon-retry, #hosted-store-retry, #hosted-restore-button, #hosted-plan-options .primary-button { min-width: 44px; min-height: 44px; }
+  #composer-toolbar button, .attachment-remove, .attachment-retry { min-width: 48px; min-height: 48px; }
+  .attachment-chip { grid-template-columns: minmax(0, 1fr) 48px; }
+  .attachment-remove { width: 48px; height: 48px; }
+  #attachment-tray[data-attachment-layout="rows"] .attachment-chip { grid-template-columns: 46px minmax(0, 1fr) 48px; }
+  #attachment-tray[data-attachment-layout="rows"] .attachment-copy { grid-template-columns: minmax(0, 1fr); }
+  #attachment-tray[data-attachment-layout="rows"] .attachment-retry { grid-column: 1; grid-row: auto; justify-self: start; }
+  #attachment-tray[data-attachment-layout="rows"] .attachment-remove { width: 48px; height: 48px; }
 }
 
 :where(.theme-system, .theme-light, .theme-dark)[data-bridge-mode="native"][data-platform="linux"] {
@@ -1251,4 +1242,8 @@ select:focus-visible {
   #billing-elsewhere-notice, #attachment-storage-addons, #hosted-store-plan-options, #attachment-storage-addon-options > li, #hosted-plan-options > li, #attachment-storage-addon-skeleton { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; }
   [data-tone="warning"] { border-color: Highlight; background: Canvas; color: CanvasText; }
   .conversation-copy .conversation-delete-warning { color: CanvasText; }
+  #attachment-tray-region, .attachment-chip, .attachment-preview { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; }
+  .attachment-remove, .attachment-retry { color: ButtonText; background: Canvas; }
+  .attachment-remove { border-color: ButtonText; }
+  .attachment-remove:focus-visible, .attachment-retry:focus-visible { outline-color: Highlight; }
 }

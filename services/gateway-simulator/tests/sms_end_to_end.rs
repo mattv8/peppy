@@ -967,8 +967,7 @@ async fn advertised_sim_route_is_discoverable_and_foreign_route_never_effects() 
         |entry| entry["device_id"] == gateway_p.id.0.to_string()
             && entry["simulator"] == true
             && entry["capabilities"]["sims"][0]["subscription_id"] == route
-            && entry["capabilities"]["sims"][0]["mms_content_version"]
-                == peppy_client_core::MMS_CONTENT_VERSION
+            && entry["capabilities"]["sims"][0]["mms_content_version"] == 3
     ));
     let foreign = desktop
         .queue_send(

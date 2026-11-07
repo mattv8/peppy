@@ -37,6 +37,11 @@ pub const TENANT_TABLES: &[&str] = &[
     "attachment_retention_uses",
     "attachment_retention_devices",
     "attachment_removals",
+    "draft_incarnations",
+    "draft_branches",
+    "draft_revisions",
+    "draft_terminals",
+    "draft_attachment_holds",
 ];
 
 const CONTROL_PLANE_TABLES: &[&str] = &[

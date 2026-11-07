@@ -45,6 +45,52 @@ describe("native computer claimant normalization", () => {
   });
 });
 
+describe("pasted attachment bridge", () => {
+  beforeEach(() => invokeMock.mockReset());
+
+  it("sends each pasted image as raw bytes with encoded attachment headers", async () => {
+    invokeMock.mockResolvedValue({ id: "attachment-1", name: "café.png", mediaType: "image/png", byteSize: 3, state: "ready" });
+    const bytes = new Uint8Array([1, 2, 3]).buffer;
+
+    await expect(tauriBridge.prepare_pasted_attachments([{ bytes, name: "café.png", mediaType: "image/png" }])).resolves.toMatchObject({ views: [{ id: "attachment-1" }], failures: [] });
+
+    expect(invokeMock).toHaveBeenCalledWith("prepare_pasted_attachment", bytes, {
+      headers: { "peppy-attachment-name": "caf%C3%A9.png", "peppy-attachment-type": "image/png" },
+    });
+  });
+
+  it("prepares pasted images sequentially, retains successful views, and falls back for empty names", async () => {
+    const first = new Uint8Array([1]).buffer;
+    const second = new Uint8Array([2]).buffer;
+    invokeMock
+      .mockResolvedValueOnce({ id: "attachment-1", name: "first.png", mediaType: "image/png", byteSize: 1, state: "ready" })
+      .mockRejectedValueOnce(new Error("disk full"));
+
+    await expect(tauriBridge.prepare_pasted_attachments([
+      { bytes: first, name: "first.png", mediaType: "image/png" },
+      { bytes: second, name: "", mediaType: "image/png" },
+    ])).resolves.toEqual({
+      views: [{ id: "attachment-1", name: "first.png", mediaType: "image/png", byteSize: 1, state: "ready" }],
+      failures: ["Pasted image: disk full"],
+    });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "prepare_pasted_attachment", first, {
+      headers: { "peppy-attachment-name": "first.png", "peppy-attachment-type": "image/png" },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "prepare_pasted_attachment", second, {
+      headers: { "peppy-attachment-name": "pasted-image", "peppy-attachment-type": "image/png" },
+    });
+  });
+
+  it("reports a native plain-object rejection reason", async () => {
+    invokeMock.mockRejectedValueOnce({ message: "Image is too large" });
+
+    await expect(tauriBridge.prepare_pasted_attachments([
+      { bytes: new Uint8Array([1]).buffer, name: "large.png", mediaType: "image/png" },
+    ])).resolves.toEqual({ views: [], failures: ["large.png: Image is too large"] });
+  });
+});
+
 describe("bridge subscriptions", () => {
   beforeEach(() => {
     eventMock.handler = undefined;
@@ -118,6 +164,15 @@ describe("bridge subscriptions", () => {
     handler?.({ payload: true });
     expect(listener).toHaveBeenCalledOnce();
     expect(listener).toHaveBeenCalledWith(true);
+    invokeMock.mockClear();
+  });
+
+  it("forwards draft conflict and notice actions with native camelCase arguments", async () => {
+    invokeMock.mockResolvedValue({ id: "draft-1" });
+    await tauriBridge.resolve_draft_conflict({ draftId: "draft-1", keepBranchId: null });
+    await tauriBridge.acknowledge_draft_notice("draft-1");
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "resolve_draft_conflict", { draftId: "draft-1", keepBranchId: null });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "acknowledge_draft_notice", { draftId: "draft-1" });
     invokeMock.mockClear();
   });
 

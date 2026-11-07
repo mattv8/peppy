@@ -1,7 +1,7 @@
 //! Peppy desktop native host. The webview only receives sanitized view models (`dto`) and
 //! state-change hints; credentials, keys, passphrases, tokens and file paths stay in Rust.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::PathBuf,
@@ -94,7 +94,7 @@ use peppy_client_core::{
     AttachmentId, AttachmentInfo, ConversationFolder, ConversationId, DraftId, LocalSearchRequest,
     MessageId, NativePlaintextFile, NotificationTarget, SearchIndexState,
 };
-use peppy_desktop_api::compose::DiscardDraftInput;
+use peppy_desktop_api::compose::{self, DiscardDraftInput};
 #[cfg(target_os = "macos")]
 use secure_store::BundledStore;
 use secure_store::{KeyringStore, SecretStore};
@@ -221,6 +221,7 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "send_draft",
     "mark_seen",
     "pick_attachments",
+    "prepare_pasted_attachment",
     "retry_attachment",
     "save_attachment",
     "request_attachment_download",
@@ -238,6 +239,8 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "close_composer",
     "close_head_panel",
     "acknowledge_lifecycle",
+    "resolve_draft_conflict",
+    "acknowledge_draft_notice",
 ];
 
 fn window_error() -> BridgeError {
@@ -423,6 +426,31 @@ fn scoped_window_conversation(
         .ok_or_else(window_error);
     }
     media_viewer_conversation(label).ok_or_else(window_error)
+}
+
+/// A draft notice may be changed from main, or from the composer bound to its conversation.
+pub(crate) async fn require_draft_notice_window_scope(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+    draft_id: DraftId,
+) -> BridgeResult<()> {
+    if label == tray::MAIN {
+        return Ok(());
+    }
+    let draft = blocking({
+        let session = session.clone();
+        move || session.client.compose_draft(draft_id).map_err(core_error)
+    })
+    .await?
+    .ok_or_else(window_error)?;
+    effective_composer_conversation(
+        state,
+        label,
+        session,
+        Some(&draft.conversation_id.to_string()),
+    )?;
+    Ok(())
 }
 
 pub(crate) fn close_media_viewers(
@@ -2281,6 +2309,11 @@ async fn save_draft(
     };
     let save = save_draft_for_window(&state, window.label(), session.clone(), input).await;
     let session_current = save.is_ok() && session_is_current(&state, &session).await;
+    if session_current {
+        if let Ok(draft) = &save {
+            sync::schedule_draft_push_after_save(session.clone(), draft.id.clone()).await;
+        }
+    }
     emit_saved_draft(
         window.app_handle(),
         &state,
@@ -2313,6 +2346,100 @@ async fn discard_draft(
     }
     close_deleted_composers(&app, &state, &conversation_id);
     Ok(())
+}
+
+#[tauri::command]
+async fn resolve_draft_conflict(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    draft_id: String,
+    keep_branch_id: Option<String>,
+) -> BridgeResult<DraftView> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let draft_id = DraftId::from_str(&draft_id)
+        .map_err(|_| BridgeError::new("invalid-draft", "The draft ID is invalid."))?;
+    require_draft_notice_window_scope(&state, window.label(), &session, draft_id).await?;
+    let resolving_session = session.clone();
+    let draft = blocking(move || {
+        resolve_draft_conflict_view(&resolving_session, draft_id, keep_branch_id.as_deref())
+    })
+    .await?;
+    Ok(draft)
+}
+
+fn resolve_draft_conflict_view(
+    session: &Session,
+    draft_id: DraftId,
+    keep_branch_id: Option<&str>,
+) -> BridgeResult<DraftView> {
+    let branch_id = keep_branch_id
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| BridgeError::new("invalid-draft", "The conflict branch ID is invalid."))?;
+    let conflict_attachment_ids = session
+        .client
+        .draft_sync_status(draft_id)
+        .map_err(core_error)?
+        .conflicts
+        .into_iter()
+        .flat_map(|conflict| conflict.attachment_ids)
+        .collect();
+    let draft = session
+        .client
+        .resolve_draft_conflict(draft_id, branch_id)
+        .map_err(core_error)?;
+    session.notify();
+    draft_view_with_conflict_attachments(session, &draft, conflict_attachment_ids)
+}
+
+fn draft_view_with_conflict_attachments(
+    session: &Session,
+    draft: &peppy_client_core::ComposeDraft,
+    conflict_attachment_ids: Vec<AttachmentId>,
+) -> BridgeResult<DraftView> {
+    let mut view = session.draft_view(draft)?;
+    let attachments = view.attachments.get_or_insert_default();
+    let mut included: HashSet<_> = attachments
+        .iter()
+        .map(|attachment| attachment.id.clone())
+        .collect();
+    let errors = session
+        .transfer_errors
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    for id in conflict_attachment_ids {
+        if !included.insert(id.to_string()) {
+            continue;
+        }
+        let attachment = match session.client.attachment_info(id) {
+            Ok(info) => dto::attachment_view(&info, errors.get(&id).cloned(), None),
+            Err(_) => session::missing_draft_attachment_view(id, None),
+        };
+        attachments.push(attachment);
+    }
+    Ok(view)
+}
+
+#[tauri::command]
+async fn acknowledge_draft_notice(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    draft_id: String,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let draft_id = DraftId::from_str(&draft_id)
+        .map_err(|_| BridgeError::new("invalid-draft", "The draft ID is invalid."))?;
+    require_draft_notice_window_scope(&state, window.label(), &session, draft_id).await?;
+    blocking(move || {
+        session
+            .client
+            .acknowledge_draft_notice(draft_id)
+            .map_err(core_error)
+    })
+    .await
 }
 
 fn close_deleted_composers(app: &tauri::AppHandle, state: &AppState, conversation_id: &str) {
@@ -2366,25 +2493,144 @@ async fn send_draft_for_window(
             Some(input.conversation_id.as_str()),
         )?;
     }
+    let input = blocking({
+        let session = session.clone();
+        move || {
+            let (gateways, known) = session.gateways();
+            compose::prepare_draft_send(
+                &session.client,
+                &input,
+                known.then_some(gateways.as_slice()),
+            )
+            .map_err(session::compose_error)
+        }
+    })
+    .await?;
     if draft_contains_attachments(&session, &input).await? {
         attachment_retention::ensure_negotiated(&session)?;
     }
     let binding = session.binding.clone();
-    let s = session.clone();
-    let result = blocking(move || {
-        let conversation_id = if input.conversation_id.is_empty() {
-            peppy_client_core::DraftId::from_str(&input.id)
-                .ok()
-                .and_then(|draft_id| s.client.compose_draft(draft_id).ok().flatten())
-                .map(|draft| draft.conversation_id.to_string())
-        } else {
-            Some(input.conversation_id.clone())
-        };
-        let result = s.send_draft(&input);
-        Ok((result, conversation_id))
+    let intent_input = DraftInput {
+        id: input.id.clone(),
+        conversation_id: input.conversation_id.clone(),
+        text: input.text.clone(),
+        recipient_ids: input.recipient_ids.clone(),
+        attachment_ids: input.attachment_ids.clone(),
+        gateway_id: input.gateway_id.clone(),
+        sim_id: input.sim_id.clone(),
+        expected_revision: input.expected_revision.clone(),
+    };
+    let remote_send = blocking({
+        let session = session.clone();
+        let draft_id = intent_input.id.clone();
+        let expected_revision = intent_input.expected_revision.clone();
+        move || {
+            let (gateways, known) = session.gateways();
+            let draft_id = DraftId::from_str(&draft_id).map_err(|_| {
+                BridgeError::new("invalid-draft", "Save the draft before sending it.")
+            })?;
+            let expected_revision = expected_revision
+                .parse()
+                .map_err(|_| BridgeError::new("invalid-draft", "The draft revision is invalid."))?;
+            let parts = compose::prepared_draft_send_parts(
+                &session.client,
+                &intent_input,
+                known.then_some(gateways.as_slice()),
+            )
+            .map_err(session::compose_error)?;
+            match session
+                .client
+                .begin_draft_send(draft_id, expected_revision, parts)
+            {
+                Ok(gate) => Ok(gate.remote),
+                Err(peppy_client_core::Error::DraftNotSynced) => Err(BridgeError::new(
+                    "draft-syncing",
+                    "Wait for this synced draft to finish saving before sending.",
+                )),
+                Err(error) => Err(core_error(error)),
+            }
+        }
     })
     .await?;
-    let (result, conversation_id) = result;
+    let result = if let Some(remote) = remote_send {
+        let request = peppy_hosted_api::drafts::AcceptDraftSendRequest {
+            revision_id: remote.revision_id,
+            command_id: remote.command_id.0,
+        };
+        match session
+            .api
+            .post_json::<_, peppy_hosted_api::drafts::AcceptDraftSendResponse>(
+                &format!("/v1/drafts/{}/send", remote.draft_id),
+                &request,
+            )
+            .await
+        {
+            Ok(response) if response.command_id == remote.command_id.0 => {
+                let session = session.clone();
+                let conversation_id = input.conversation_id.clone();
+                blocking(move || {
+                    let (gateways, known) = session.gateways();
+                    compose::send_draft_accepted(
+                        &session.client,
+                        &input,
+                        known.then_some(gateways.as_slice()),
+                        remote.command_id,
+                    )
+                    .map_err(session::compose_error)
+                })
+                .await
+                .map(|sent| {
+                    (
+                        Ok(sent),
+                        (!conversation_id.is_empty()).then_some(conversation_id),
+                    )
+                })
+            }
+            Ok(_) => Ok((
+                Err(BridgeError::new(
+                    "server-response",
+                    "The server returned an invalid draft send response.",
+                )),
+                None,
+            )),
+            Err(crate::net::NetError::Offline) => Ok((
+                Err(BridgeError::new(
+                    "draft-sync-offline",
+                    "Reconnect to check this draft before sending.",
+                )),
+                None,
+            )),
+            Err(error) if permanent_draft_send_rejection(&error).is_some() => {
+                let error = permanent_draft_send_rejection(&error).expect("checked above");
+                let session = session.clone();
+                blocking(move || {
+                    session
+                        .client
+                        .abort_draft_send_intent(remote.draft_id, remote.command_id)
+                        .map_err(core_error)
+                })
+                .await?;
+                Ok((Err(error), None))
+            }
+            Err(error) => Ok((Err(error.into()), None)),
+        }
+    } else {
+        let s = session.clone();
+        Ok(blocking(move || {
+            let conversation_id = if input.conversation_id.is_empty() {
+                peppy_client_core::DraftId::from_str(&input.id)
+                    .ok()
+                    .and_then(|draft_id| s.client.compose_draft(draft_id).ok().flatten())
+                    .map(|draft| draft.conversation_id.to_string())
+            } else {
+                Some(input.conversation_id.clone())
+            };
+            let result = s.send_draft(&input);
+            Ok((result, conversation_id))
+        })
+        .await?)
+    };
+    let (result, conversation_id) = result?;
     if result.as_ref().is_ok_and(|sent| sent.accepted) {
         if let Some(conversation_id) = conversation_id {
             state.record_recent(&binding, &conversation_id);
@@ -2399,6 +2645,79 @@ async fn send_draft_for_window(
         session.notify();
     }
     result
+}
+
+fn permanent_draft_send_rejection(error: &crate::net::NetError) -> Option<BridgeError> {
+    match error {
+        crate::net::NetError::Status {
+            status: 409,
+            code: Some(code),
+        } if code == "draft_already_sent" => Some(BridgeError::new(
+            "draft-already-sent",
+            "This synced draft was already sent.",
+        )),
+        crate::net::NetError::Status {
+            status: 409,
+            code: Some(code),
+        } if code == "draft_revision_not_head" => Some(BridgeError::new(
+            "draft-revision-not-head",
+            "This draft changed before it could be sent. Review the latest version.",
+        )),
+        crate::net::NetError::Status {
+            status: 410,
+            code: Some(code),
+        } if code == "draft_sent" => Some(BridgeError::new(
+            "draft-sent",
+            "This synced draft was already sent.",
+        )),
+        crate::net::NetError::Status {
+            status: 410,
+            code: Some(code),
+        } if code == "draft_discarded" => Some(BridgeError::new(
+            "draft-discarded",
+            "This synced draft was discarded.",
+        )),
+        crate::net::NetError::Status {
+            status: 410,
+            code: Some(code),
+        } if code == "draft_expired" => Some(BridgeError::new(
+            "draft-expired",
+            "This synced draft expired before it could be sent.",
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod draft_send_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn only_documented_terminal_responses_abort_a_send_intent() {
+        for (status, code, expected) in [
+            (409, "draft_already_sent", "draft-already-sent"),
+            (409, "draft_revision_not_head", "draft-revision-not-head"),
+            (410, "draft_sent", "draft-sent"),
+            (410, "draft_discarded", "draft-discarded"),
+            (410, "draft_expired", "draft-expired"),
+        ] {
+            assert_eq!(
+                permanent_draft_send_rejection(&crate::net::NetError::Status {
+                    status,
+                    code: Some(code.into()),
+                })
+                .map(|error| error.code),
+                Some(expected)
+            );
+        }
+        assert!(
+            permanent_draft_send_rejection(&crate::net::NetError::Status {
+                status: 500,
+                code: Some("draft_expired".into()),
+            })
+            .is_none()
+        );
+    }
 }
 
 impl AppState {
@@ -2433,7 +2752,7 @@ fn cleared_draft_after_accepted_send(
     }
     let id = DraftId::from_str(draft_id).ok()?;
     let draft = session.client.compose_draft(id).ok().flatten()?;
-    Some(peppy_desktop_api::draft_view(&draft))
+    session.draft_view(&draft).ok()
 }
 
 #[tauri::command]
@@ -2698,6 +3017,177 @@ async fn pick_attachments(
             .collect()
     })
     .await
+}
+
+const MAX_PASTED_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
+
+fn pasted_attachment_name(header: Option<&tauri::http::HeaderValue>) -> String {
+    header
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            percent_encoding::percent_decode_str(value)
+                .decode_utf8()
+                .ok()
+        })
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(255).collect())
+        .unwrap_or_else(|| "pasted-image".into())
+}
+
+fn pasted_attachment_type(header: Option<&tauri::http::HeaderValue>) -> BridgeResult<&str> {
+    match header.and_then(|value| value.to_str().ok()) {
+        Some(media_type @ ("image/png" | "image/jpeg" | "image/gif" | "image/webp")) => {
+            Ok(media_type)
+        }
+        _ => Err(BridgeError::new(
+            "invalid-attachment",
+            "Pasted attachments must be PNG, JPEG, GIF, or WebP images.",
+        )),
+    }
+}
+
+fn validate_pasted_attachment_size(bytes: usize) -> BridgeResult<()> {
+    if bytes == 0 {
+        return Err(BridgeError::new(
+            "invalid-attachment",
+            "The pasted image is empty.",
+        ));
+    }
+    if bytes > MAX_PASTED_ATTACHMENT_BYTES {
+        return Err(BridgeError::new(
+            "invalid-attachment",
+            "Pasted images must be 32 MiB or smaller.",
+        ));
+    }
+    Ok(())
+}
+
+fn pasted_attachment_bytes(body: &tauri::ipc::InvokeBody) -> BridgeResult<&[u8]> {
+    match body {
+        tauri::ipc::InvokeBody::Raw(bytes) => Ok(bytes),
+        _ => Err(BridgeError::new(
+            "invalid-attachment",
+            "Pasted image data must be sent as raw bytes.",
+        )),
+    }
+}
+
+fn validate_pasted_attachment_media_type(bytes: &[u8], declared_type: &str) -> BridgeResult<()> {
+    let sniffed_type = media::sniff_media_type(&bytes[..bytes.len().min(32)]);
+    if sniffed_type == declared_type
+        && matches!(
+            sniffed_type,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        )
+    {
+        Ok(())
+    } else {
+        Err(BridgeError::new(
+            "invalid-attachment",
+            "The pasted data is not a supported image.",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod pasted_attachment_tests {
+    use super::*;
+
+    #[test]
+    fn pasted_attachment_name_decodes_percent_encoded_utf8_and_falls_back() {
+        let name = tauri::http::HeaderValue::from_static("Pasted%20image%20%F0%9F%96%BC.png");
+        assert_eq!(pasted_attachment_name(Some(&name)), "Pasted image 🖼.png");
+        assert_eq!(pasted_attachment_name(None), "pasted-image");
+        let invalid = tauri::http::HeaderValue::from_static("%FF");
+        assert_eq!(pasted_attachment_name(Some(&invalid)), "pasted-image");
+    }
+
+    #[test]
+    fn pasted_attachment_rejects_disallowed_types() {
+        let type_header = tauri::http::HeaderValue::from_static("image/svg+xml");
+        assert_eq!(
+            pasted_attachment_type(Some(&type_header)).unwrap_err().code,
+            "invalid-attachment"
+        );
+    }
+
+    #[test]
+    fn pasted_attachment_requires_a_raw_body_and_type_header() {
+        assert_eq!(
+            pasted_attachment_bytes(&tauri::ipc::InvokeBody::Json(serde_json::Value::Null))
+                .unwrap_err()
+                .code,
+            "invalid-attachment"
+        );
+        assert_eq!(
+            pasted_attachment_type(None).unwrap_err().code,
+            "invalid-attachment"
+        );
+    }
+
+    #[test]
+    fn pasted_attachment_raw_bytes_are_only_admitted_after_type_validation() {
+        let png = crate::media::tests::sample_png(1, 1);
+        let raw = tauri::ipc::InvokeBody::Raw(png.clone());
+        let media_type = tauri::http::HeaderValue::from_static("image/png");
+
+        let bytes = pasted_attachment_bytes(&raw).unwrap();
+        pasted_attachment_type(Some(&media_type)).unwrap();
+        validate_pasted_attachment_size(bytes.len()).unwrap();
+        validate_pasted_attachment_media_type(bytes, "image/png").unwrap();
+
+        assert_eq!(bytes, png);
+    }
+
+    #[test]
+    fn pasted_attachment_rejects_declared_and_sniffed_type_mismatches() {
+        let png = crate::media::tests::sample_png(1, 1);
+        assert_eq!(
+            validate_pasted_attachment_media_type(&png, "image/jpeg")
+                .unwrap_err()
+                .code,
+            "invalid-attachment"
+        );
+        assert_eq!(
+            validate_pasted_attachment_media_type(b"not an image", "image/png")
+                .unwrap_err()
+                .code,
+            "invalid-attachment"
+        );
+    }
+
+    #[test]
+    fn pasted_attachment_rejects_empty_and_oversized_bodies() {
+        assert_eq!(
+            validate_pasted_attachment_size(0).unwrap_err().code,
+            "invalid-attachment"
+        );
+        assert_eq!(
+            validate_pasted_attachment_size(MAX_PASTED_ATTACHMENT_BYTES + 1)
+                .unwrap_err()
+                .code,
+            "invalid-attachment"
+        );
+    }
+}
+
+#[tauri::command]
+async fn prepare_pasted_attachment(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> BridgeResult<dto::AttachmentView> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    attachment_retention::ensure_negotiated(&session)?;
+    let media_type = pasted_attachment_type(request.headers().get("peppy-attachment-type"))?;
+    let name = pasted_attachment_name(request.headers().get("peppy-attachment-name"));
+    let bytes = pasted_attachment_bytes(request.body())?;
+    validate_pasted_attachment_size(bytes.len())?;
+    validate_pasted_attachment_media_type(bytes, media_type)?;
+    // Tauri's Request borrows its InvokeBody; blocking work needs owned bytes past this invoke.
+    let bytes = bytes.to_vec();
+    let media_type = media_type.to_owned();
+    blocking(move || session.prepare_attachment_bytes(&bytes, &media_type, &name)).await
 }
 
 fn safe_suggested_filename(name: &str, media_type: &str) -> String {
@@ -3773,7 +4263,7 @@ where
                 return tauri::http::Response::builder()
                     .status(503)
                     .body(Vec::new())
-                    .unwrap()
+                    .unwrap();
             }
         };
         let Some(capability) = capabilities.get(token) else {
@@ -5857,6 +6347,20 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             window_placement::window_event(window, event);
+            let draft_sync_backgrounded = matches!(
+                event,
+                WindowEvent::Focused(false) | WindowEvent::CloseRequested { .. }
+            ) && (window.label() == tray::MAIN
+                || tray::composer_conversation(window.label()).is_some());
+            if draft_sync_backgrounded {
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<AppState>();
+                    if let Some(session) = state.uncancelled_session().await {
+                        sync::wake_draft_sync_if_pending(session).await;
+                    }
+                });
+            }
             if matches!(event, WindowEvent::Destroyed) {
                 window_chrome::forget_material(window.label());
                 if let Some(state) = window.app_handle().try_state::<AppState>() {
@@ -5971,10 +6475,13 @@ pub fn run() {
         set_app_lock,
         save_draft,
         discard_draft,
+        resolve_draft_conflict,
+        acknowledge_draft_notice,
         send_draft,
         mark_seen,
         mark_all_read,
         pick_attachments,
+        prepare_pasted_attachment,
         retry_attachment,
         save_attachment,
         request_attachment_download,

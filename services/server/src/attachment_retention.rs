@@ -6,6 +6,10 @@
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
+/// Any message-history use, even released, or an unreleased non-history use
+/// keeps a draft object out of expiry cleanup.
+pub(crate) const RETENTION_USE_PROTECTS_DRAFT_EXPIRY: &str = "EXISTS (SELECT 1 FROM attachment_retention_uses u WHERE u.vault_id=a.vault_id AND u.attachment_id=a.attachment_id AND (u.kind='message_history' OR (u.kind<>'message_history' AND u.released_at IS NULL)))";
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct RetentionStorageFacts {
     pub protected_bytes: i64,
@@ -22,7 +26,7 @@ pub async fn retention_storage_status_on_connection(
 ) -> Result<RetentionStorageFacts, sqlx::Error> {
     let row = sqlx::query(
         "SELECT \
-         COALESCE((SELECT SUM(a.ciphertext_bytes) FROM attachments a WHERE a.vault_id=$1 AND (a.retention_class <> 'message_media' OR NOT EXISTS (SELECT 1 FROM attachment_retention_uses u WHERE u.vault_id=a.vault_id AND u.attachment_id=a.attachment_id AND u.kind='message_history') OR EXISTS (SELECT 1 FROM attachment_retention_uses u WHERE u.vault_id=a.vault_id AND u.attachment_id=a.attachment_id AND u.kind <> 'message_history' AND u.released_at IS NULL))),0)::bigint AS protected_bytes, \
+         COALESCE((SELECT SUM(a.ciphertext_bytes) FROM attachments a WHERE a.vault_id=$1 AND (a.retention_class <> 'message_media' OR NOT EXISTS (SELECT 1 FROM attachment_retention_uses u WHERE u.vault_id=a.vault_id AND u.attachment_id=a.attachment_id AND u.kind='message_history') OR EXISTS (SELECT 1 FROM attachment_retention_uses u WHERE u.vault_id=a.vault_id AND u.attachment_id=a.attachment_id AND u.kind <> 'message_history' AND u.released_at IS NULL) OR EXISTS (SELECT 1 FROM draft_attachment_holds h WHERE h.vault_id=a.vault_id AND h.attachment_id=a.attachment_id AND h.expires_at>now()))),0)::bigint AS protected_bytes, \
          COALESCE((SELECT SUM(ciphertext_bytes) FROM attachment_removals WHERE vault_id=$1 AND purged_at IS NULL),0)::bigint AS removed_bytes, \
          NOT EXISTS (SELECT 1 FROM devices d LEFT JOIN attachment_retention_devices r ON r.vault_id=d.vault_id AND r.device_id=d.device_id WHERE d.vault_id=$1 AND d.revoked_at IS NULL AND (r.cleanup_ready IS DISTINCT FROM TRUE OR r.reconciliation_needed IS DISTINCT FROM FALSE)) AS all_devices_ready, \
          EXISTS (SELECT 1 FROM attachment_removals WHERE vault_id=$1 AND purged_at IS NULL) AS cleanup_pending",

@@ -19,6 +19,32 @@ body,
 body {
   color: var(--peppy-text-primary);
 }
+
+#draft-sync-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 2px 4px;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
+#draft-sync-status [data-draft-sync-message] { color: var(--peppy-text-primary); }
+#draft-sync-status [data-draft-expiry-warning] { display: inline-flex; align-items: center; gap: 4px; color: var(--peppy-warning-text); }
+#draft-expiry-info-button { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; }
+#draft-expiry-info-body { display: grid; gap: 12px; }
+#draft-review-button,
+#draft-sync-status [data-draft-sync-notice] button {
+  box-sizing: border-box;
+  min-width: 28px;
+  min-height: 28px;
+}
+@media (pointer: coarse) {
+  #draft-expiry-info-button,
+  #draft-review-button,
+  #draft-sync-status [data-draft-sync-notice] button,
+  #draft-expiry-info-dismiss { min-width: 48px; min-height: 48px; }
+}
 #desktop-shell,
 #composer-shell {
   height: 100%;
@@ -682,9 +708,30 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mms-limit {
-  color: var(--peppy-text-secondary);
-  font-size: 11px;
+.mms-size-header-detail { display: inline-flex; align-items: center; gap: 4px; color: var(--peppy-text-secondary); }
+.mms-size-header-detail[data-mms-size-tone="warning"] { color: var(--peppy-warning-text); }
+.mms-size-header-detail[data-mms-size-tone="error"] { color: var(--peppy-error-text); }
+#mms-size-info-button { display: inline-grid; width: 28px; height: 28px; margin-block: -6px; padding: 0; place-items: center; color: inherit; }
+#mms-size-info-button,
+#draft-expiry-info-button,
+#draft-sync-status [data-draft-sync-notice] button { border: 0; border-radius: var(--peppy-radius-sm, 4px); background: transparent; }
+#mms-size-info-button:hover,
+#draft-expiry-info-button:hover,
+#draft-sync-status [data-draft-sync-notice] button:hover { background: var(--peppy-surface-hover); }
+#mms-size-info-button:focus-visible,
+#draft-expiry-info-button:focus-visible,
+#draft-sync-status [data-draft-sync-notice] button:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+#draft-sync-status [data-draft-sync-notice] button { display: inline-grid; place-items: center; padding: 0; color: var(--peppy-text-secondary); vertical-align: middle; }
+#mms-size-info-body { display: grid; gap: 8px; margin: 0; }
+#mms-size-info-body div { display: flex; gap: 4px; }
+#mms-size-info-body dd { margin: 0; }
+@media (pointer: coarse) {
+  #mms-size-info-button { min-width: 48px; min-height: 48px; margin-block: -16px; }
+}
+@media (forced-colors: active) {
+  #mms-size-info-button,
+  #draft-expiry-info-button,
+  #draft-sync-status [data-draft-sync-notice] button { border: 1px solid ButtonText; color: ButtonText; }
 }
 .file-card {
   display: flex;

@@ -1,11 +1,130 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_client_core::{
-    Cursor, EnvelopeId, IngestResult, MAX_REPLAY_PAGE, RawReplayRecord, RawSnapshotRecord,
-    SnapshotProgress, SnapshotPurpose,
+    Cursor, DraftPushOutcome, DraftTerminalReasonCore, EnvelopeId, IngestResult, MAX_REPLAY_PAGE,
+    RawReplayRecord, RawSnapshotRecord, RemoteDraftChange, SnapshotProgress, SnapshotPurpose,
 };
+use peppy_hosted_api::drafts::{
+    DraftChange, DraftChangesResponse, DraftTerminalReason, PutDraftRevisionRequest,
+};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const MAX_BATCH: usize = 1_000;
 const MAX_SNAPSHOT_PAGE: usize = 500;
+
+fn draft_send_failure(error: CoreError, expected_revision: u64) -> Failure {
+    let mut failure = core(error);
+    if failure.code == "draft-not-synced" {
+        failure.current_revision = Some(expected_revision.to_string());
+    }
+    failure
+}
+
+fn draft_id(args: &Value) -> Result<DraftId, Failure> {
+    required_string(args, "draftId")?
+        .parse()
+        .map_err(|_| invalid())
+}
+
+fn require_empty(args: Value) -> Result<(), Failure> {
+    if args.as_object().is_some_and(|value| value.is_empty()) {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+fn draft_timestamp_ms(value: &str) -> Result<i64, Failure> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| invalid())
+        .and_then(|value| {
+            i64::try_from(value.unix_timestamp_nanos().div_euclid(1_000_000)).map_err(|_| invalid())
+        })
+}
+
+fn remote_draft_change(change: DraftChange) -> Result<RemoteDraftChange, Failure> {
+    Ok(match change {
+        DraftChange::Head {
+            draft_id,
+            branch_id,
+            revision_id,
+            parent_revision_id,
+            sealed_record,
+            attachment_ids,
+            expires_at,
+            ..
+        } => RemoteDraftChange::Head {
+            draft_id: DraftId(draft_id),
+            branch_id,
+            revision_id,
+            parent_revision_id,
+            sealed_record: URL_SAFE_NO_PAD
+                .decode(sealed_record)
+                .map_err(|_| invalid())?,
+            attachment_ids: attachment_ids
+                .into_iter()
+                .map(peppy_client_core::AttachmentId)
+                .collect(),
+            expires_at_ms: draft_timestamp_ms(&expires_at)?,
+        },
+        DraftChange::BranchClosed {
+            draft_id,
+            branch_id,
+            ..
+        } => RemoteDraftChange::BranchClosed {
+            draft_id: DraftId(draft_id),
+            branch_id,
+        },
+        DraftChange::Terminal {
+            draft_id,
+            reason,
+            command_id,
+            ..
+        } => RemoteDraftChange::Terminal {
+            draft_id: DraftId(draft_id),
+            reason: match reason {
+                DraftTerminalReason::Sent => DraftTerminalReasonCore::Sent,
+                DraftTerminalReason::Discarded => DraftTerminalReasonCore::Discarded,
+                DraftTerminalReason::Expired => DraftTerminalReasonCore::Expired,
+            },
+            command_id: command_id.map(peppy_client_core::CommandId),
+        },
+    })
+}
+
+fn draft_push_outcome(args: &Value) -> Result<DraftPushOutcome, Failure> {
+    let outcome = args
+        .get("outcome")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    match outcome.get("kind").and_then(Value::as_str) {
+        Some("accepted") => Ok(DraftPushOutcome::Accepted {
+            branch_id: required_string(&Value::Object(outcome.clone()), "branchId")?
+                .parse()
+                .map_err(|_| invalid())?,
+            expires_at_ms: outcome
+                .get("expiresAtMs")
+                .and_then(Value::as_i64)
+                .ok_or_else(invalid)?,
+            conflict: outcome
+                .get("conflict")
+                .and_then(Value::as_bool)
+                .ok_or_else(invalid)?,
+        }),
+        Some("terminated") => Ok(DraftPushOutcome::Terminated(
+            match outcome.get("reason").and_then(Value::as_str) {
+                Some("sent") => DraftTerminalReasonCore::Sent,
+                Some("discarded") => DraftTerminalReasonCore::Discarded,
+                Some("expired") => DraftTerminalReasonCore::Expired,
+                _ => return Err(invalid()),
+            },
+        )),
+        Some("branch-limit") => Ok(DraftPushOutcome::BranchLimit),
+        Some("attachment-unavailable") => Ok(DraftPushOutcome::AttachmentUnavailable),
+        Some("rejected") => Ok(DraftPushOutcome::Rejected),
+        _ => Err(invalid()),
+    }
+}
 
 pub(super) fn handles(command: &str) -> bool {
     matches!(
@@ -33,6 +152,267 @@ pub(super) fn handles(command: &str) -> bool {
 }
 
 impl BrowserCore {
+    pub(super) fn draft_sync_command(&self, command: &str, args: Value) -> Result<Value, Failure> {
+        match command {
+            "resolve_draft_conflict" => {
+                let draft_id = draft_id(&args)?;
+                let keep_branch = args
+                    .get("keepBranchId")
+                    .map(|value| {
+                        if value.is_null() {
+                            Ok(None)
+                        } else {
+                            value
+                                .as_str()
+                                .ok_or_else(invalid)?
+                                .parse()
+                                .map(Some)
+                                .map_err(|_| invalid())
+                        }
+                    })
+                    .transpose()?
+                    .flatten();
+                let client = self.client()?;
+                let draft = client
+                    .resolve_draft_conflict(draft_id, keep_branch)
+                    .map_err(core)?;
+                serde_json::to_value(
+                    super::BrowserCore::draft_view_with_browser_attachments(client, &draft)
+                        .map_err(core)?,
+                )
+                .map_err(|_| core(peppy_client_core::Error::Database))
+            }
+            "acknowledge_draft_notice" => {
+                let draft_id = draft_id(&args)?;
+                self.client()?
+                    .acknowledge_draft_notice(draft_id)
+                    .map_err(core)?;
+                Ok(json!({}))
+            }
+            "_worker_draft_sync_supported" => {
+                let supported = args
+                    .get("supported")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(invalid)?;
+                self.client()?
+                    .set_draft_sync_supported(supported)
+                    .map_err(core)?;
+                Ok(json!({}))
+            }
+            "_worker_draft_sync_cursor" => {
+                require_empty(args)?;
+                Ok(json!({"cursor": self.client()?.draft_sync_cursor().map_err(core)?}))
+            }
+            "_worker_draft_bootstrap_required" => {
+                require_empty(args)?;
+                Ok(json!({"required": self.client()?.draft_bootstrap_required().map_err(core)?}))
+            }
+            "_worker_draft_attachment_ids" => {
+                require_empty(args)?;
+                let client = self.client()?;
+                let drafts = client.compose_drafts().map_err(core)?;
+                let mut ids = Vec::new();
+                for draft in drafts {
+                    ids.extend(
+                        client
+                            .draft_attachment_states(draft.draft_id)
+                            .map_err(core)?
+                            .into_iter()
+                            .map(|(id, _)| id.to_string()),
+                    );
+                }
+                Ok(json!({"attachmentIds": ids}))
+            }
+            "_worker_draft_apply_changes" => {
+                let response: DraftChangesResponse =
+                    serde_json::from_value(args).map_err(|_| invalid())?;
+                canonical_cursor(&response.next_after)?;
+                for change in &response.changes {
+                    canonical_cursor(change_seq(change))?;
+                }
+                let changes = response
+                    .changes
+                    .into_iter()
+                    .map(remote_draft_change)
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.client()?
+                    .apply_draft_changes(changes, &response.next_after)
+                    .map_err(core)?;
+                Ok(json!({"more": response.more, "nextAfter": response.next_after}))
+            }
+            "_worker_draft_finish_bootstrap" => {
+                let ids = args
+                    .get("draftIds")
+                    .and_then(Value::as_array)
+                    .ok_or_else(invalid)?;
+                let ids = ids
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .ok_or_else(invalid)?
+                            .parse()
+                            .map_err(|_| invalid())
+                    })
+                    .collect::<Result<Vec<DraftId>, Failure>>()?;
+                self.client()?.finish_draft_bootstrap(&ids).map_err(core)?;
+                Ok(json!({}))
+            }
+            "_worker_draft_pending_uploads" => {
+                require_empty(args)?;
+                let uploads = self.client()?.pending_draft_uploads().map_err(core)?;
+                Ok(json!({"uploads": uploads.into_iter().map(|upload| json!({
+                    "draftId": upload.draft_id.to_string(), "attachmentId": upload.object.attachment_id.to_string(),
+                    "ciphertextBytes": upload.object.ciphertext_bytes, "ciphertextSha256": upload.object.ciphertext_sha256,
+                    "remoteObjectId": upload.object.remote_object_id,
+                })).collect::<Vec<_>>() }))
+            }
+            "_worker_draft_pending_pushes" => {
+                require_empty(args)?;
+                let pushes = self.client()?.pending_draft_pushes().map_err(core)?;
+                Ok(json!({"pushes": pushes.into_iter().map(|push| {
+                    let request = PutDraftRevisionRequest { base_revision_id: push.base_revision_id, sealed_record: URL_SAFE_NO_PAD.encode(push.sealed_record), attachment_ids: push.attachment_ids.into_iter().map(|id| id.0).collect(), authored: push.authored, resolves_branch_ids: push.resolves_branch_ids };
+                    json!({"draftId": push.draft_id.to_string(), "revisionId": push.revision_id.to_string(), "request": request})
+                }).collect::<Vec<_>>() }))
+            }
+            "_worker_draft_mark_push_attempt" => {
+                let revision_id = required_string(&args, "revisionId")?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                let attempted = self
+                    .client()?
+                    .mark_draft_push_attempt(draft_id(&args)?, revision_id)
+                    .map_err(core)?;
+                Ok(json!({"attempted": attempted}))
+            }
+            "_worker_draft_record_push" => {
+                let revision_id = required_string(&args, "revisionId")?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                self.client()?
+                    .record_draft_push(draft_id(&args)?, revision_id, draft_push_outcome(&args)?)
+                    .map_err(core)?;
+                Ok(json!({}))
+            }
+            "_worker_draft_pending_discards" => {
+                require_empty(args)?;
+                let ids = self.client()?.pending_draft_discards().map_err(core)?;
+                Ok(
+                    json!({"draftIds": ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>() }),
+                )
+            }
+            "_worker_draft_record_discard" => {
+                self.client()?
+                    .record_draft_discard(draft_id(&args)?)
+                    .map_err(core)?;
+                Ok(json!({}))
+            }
+            "_worker_draft_attachment_transfer_failure" => {
+                let attachment_id = required_string(&args, "attachmentId")?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                let direction = match required_string(&args, "direction")? {
+                    "upload" => peppy_client_core::DraftTransferDirection::Upload,
+                    "download" => peppy_client_core::DraftTransferDirection::Download,
+                    _ => return Err(invalid()),
+                };
+                self.client()?
+                    .record_draft_attachment_transfer_failure(attachment_id, direction)
+                    .map_err(core)?;
+                Ok(json!({}))
+            }
+            "_worker_draft_attachment_transfer_clear" => {
+                let attachment_id = required_string(&args, "attachmentId")?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                self.client()?
+                    .clear_draft_attachment_transfer_failure(attachment_id)
+                    .map_err(core)?;
+                Ok(json!({}))
+            }
+            "_worker_draft_begin_send" => {
+                let expected_revision: u64 = required_string(&args, "expectedRevision")?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                let draft_id = draft_id(&args)?;
+                let client = self.client()?;
+                let draft = client
+                    .compose_draft(draft_id)
+                    .map_err(core)?
+                    .ok_or_else(invalid)?;
+                let Some(route) = draft.route.as_ref() else {
+                    return Err(invalid());
+                };
+                let input = DraftInput {
+                    id: draft.draft_id.to_string(),
+                    conversation_id: draft.conversation_id.to_string(),
+                    text: draft.text.clone(),
+                    recipient_ids: draft.recipients.clone(),
+                    attachment_ids: draft
+                        .attachment_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    gateway_id: Some(route.gateway_device_id.to_string()),
+                    sim_id: Some(route.subscription_id.clone()),
+                    expected_revision: expected_revision.to_string(),
+                };
+                let gateways = self
+                    .gateways_known
+                    .then(|| self.context.gateways.as_deref().unwrap_or(&[]));
+                let parts = compose::prepared_draft_send_parts(client, &input, gateways)
+                    .map_err(compose_failure)?;
+                let gate = client
+                    .begin_draft_send(draft_id, expected_revision, parts)
+                    .map_err(|error| draft_send_failure(error, expected_revision))?;
+                Ok(
+                    json!({"remote": gate.remote.map(|value| json!({"draftId": value.draft_id.to_string(), "revisionId": value.revision_id.to_string(), "commandId": value.command_id.to_string()}))}),
+                )
+            }
+            "_worker_draft_prepare_send" => {
+                let input: DraftInput =
+                    serde_json::from_value(args.get("input").cloned().ok_or_else(invalid)?)
+                        .map_err(|_| invalid())?;
+                let client = self.client()?;
+                let gateways = self
+                    .gateways_known
+                    .then(|| self.context.gateways.as_deref().unwrap_or(&[]));
+                serde_json::to_value(
+                    compose::prepare_draft_send(client, &input, gateways)
+                        .map_err(compose_failure)?,
+                )
+                .map_err(|_| core(peppy_client_core::Error::Database))
+            }
+            "_worker_draft_abort_send_intent" => {
+                let command_id = required_string(&args, "commandId")?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                self.client()?
+                    .abort_draft_send_intent(draft_id(&args)?, command_id)
+                    .map_err(core)?;
+                Ok(json!({}))
+            }
+            "_worker_draft_send_accepted" => {
+                let input: DraftInput =
+                    serde_json::from_value(args.get("input").cloned().ok_or_else(invalid)?)
+                        .map_err(|_| invalid())?;
+                let command_id = required_string(&args, "commandId")?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                let client = self.client()?;
+                let gateways = self
+                    .gateways_known
+                    .then(|| self.context.gateways.as_deref().unwrap_or(&[]));
+                serde_json::to_value(
+                    compose::send_draft_accepted(client, &input, gateways, command_id)
+                        .map_err(compose_failure)?,
+                )
+                .map_err(|_| core(peppy_client_core::Error::Database))
+            }
+            _ => Err(unknown_command()),
+        }
+    }
+
     pub(super) fn sync_command(&self, command: &str, args: Value) -> Result<Value, Failure> {
         match command {
             "receive_cursor" => self.receive_cursor(),
@@ -273,6 +653,23 @@ impl BrowserCore {
     }
 }
 
+fn canonical_cursor(value: &str) -> Result<(), Failure> {
+    if value == "0" || (!value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+fn change_seq(change: &DraftChange) -> &str {
+    match change {
+        DraftChange::Head { seq, .. }
+        | DraftChange::BranchClosed { seq, .. }
+        | DraftChange::Terminal { seq, .. } => seq,
+    }
+}
+
 fn batch_limit(args: &Value) -> Result<usize, Failure> {
     let Some(limit) = args.get("limit") else {
         return Ok(MAX_BATCH);
@@ -344,6 +741,13 @@ fn snapshot_progress_view(progress: SnapshotProgress) -> Value {
 mod tests {
     use super::*;
     use peppy_crypto::{create_vault_check_header, derive_root_key};
+
+    #[test]
+    fn unsynced_send_failure_includes_the_prepared_revision() {
+        let failure = draft_send_failure(CoreError::DraftNotSynced, 8);
+        assert_eq!(failure.code, "draft-not-synced");
+        assert_eq!(failure.current_revision.as_deref(), Some("8"));
+    }
 
     struct CoreFixture {
         _root: tempfile::TempDir,

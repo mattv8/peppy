@@ -1,6 +1,6 @@
 import { type CheckpointInput, CheckpointError, IndexedDbCheckpointStore, SerializedRuntime } from "./checkpoint.js";
 import { BrowserCoreError, CoreRejectedError, type CoreResult } from "./core.js";
-import { captureFilesystemCheckpoint, hydrateCipher, restoreFilesystemCheckpoint, type EmscriptenFilesystem } from "./filesystem.js";
+import { captureFilesystemCheckpoint, hasHydratedCipher, hydrateCipher, restoreFilesystemCheckpoint, type EmscriptenFilesystem } from "./filesystem.js";
 
 const ROOT = "/peppy";
 const MAX_PLAINTEXT_MEDIA_BYTES = 32 * 1024 * 1024;
@@ -40,6 +40,12 @@ export interface BrowserSessionOptions {
 
 function isReadyAttachment(value: CoreResult): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) && (value as Record<string, unknown>).state === "ready";
+}
+
+function isLocallyPreviewableAttachment(value: CoreResult): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const state = (value as Record<string, unknown>).state;
+  return state === "uploading" || state === "ready";
 }
 
 function attachmentBytes(value: Record<string, unknown>): number {
@@ -195,9 +201,24 @@ export class BrowserSession {
     return this.runtime.read(async () => {
       this.requireReady();
       try {
+        if (command === "snapshot") await this.hydrateDraftMediaInRuntime();
         return await this.options.core.invoke({ command, args });
       } catch (error: unknown) {
         if (!(error instanceof CoreRejectedError)) this.fatal(asError(error));
+        throw error;
+      }
+    });
+  }
+
+  /** Hydrates only checkpointed draft ciphertext before core paths that inspect draft media. */
+  public async hydrateDraftMedia(): Promise<void> {
+    this.requireReady();
+    return this.runtime.read(async () => {
+      this.requireReady();
+      try {
+        await this.hydrateDraftMediaInRuntime();
+      } catch (error: unknown) {
+        this.fatal(asError(error));
         throw error;
       }
     });
@@ -209,7 +230,11 @@ export class BrowserSession {
     let checkpoint: CheckpointInput | undefined;
     try {
       const result = await this.runtime.mutate({
-        invoke: () => { this.requireReady(); return this.options.core.invoke({ command, args }); },
+        invoke: async () => {
+          this.requireReady();
+          if (draftMediaMutation(command)) await this.hydrateDraftMediaInRuntime();
+          return this.options.core.invoke({ command, args });
+        },
         capture: async generation => checkpoint = await this.capture(generation),
       });
       this.applyCheckpoint(checkpoint, result.generation);
@@ -312,7 +337,7 @@ export class BrowserSession {
       previewUrl = await this.runtime.read(async () => {
         this.requireReady();
         const info = await this.options.core.invoke({ command: "attachment_info", args: { id } });
-        if (!isReadyAttachment(info)) throw new CoreRejectedError("media-pending");
+        if (!isLocallyPreviewableAttachment(info)) throw new CoreRejectedError("media-pending");
         attachmentBytes(info);
         await hydrateCipher(id, this.generationValue, this.options.checkpoint, this.options.filesystem);
         const value = await this.options.core.invoke({ command: "preview_attachment", args: { id } });
@@ -559,6 +584,17 @@ export class BrowserSession {
     });
   }
 
+  private async hydrateDraftMediaInRuntime(): Promise<void> {
+    const result = await this.options.core.invoke({ command: "_worker_draft_attachment_ids", args: {} });
+    const attachmentIds = draftAttachmentIds(result);
+    const committed = new Set(this.files);
+    for (const id of attachmentIds) {
+      if (committed.has(`client.db.media/cipher/${id}.ppss`) && !hasHydratedCipher(id, this.options.filesystem)) {
+        await hydrateCipher(id, this.generationValue, this.options.checkpoint, this.options.filesystem);
+      }
+    }
+  }
+
   private applyHandledCheckpoint(checkpoint: CheckpointInput | undefined, error: unknown): void {
     if (checkpoint && error instanceof CoreRejectedError) this.applyCheckpoint(checkpoint, this.generationValue + 1);
   }
@@ -620,6 +656,20 @@ function decodeWrappedIdentity(bytes: Uint8Array): string {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new BrowserCoreError("core-error");
+}
+
+function draftAttachmentIds(value: CoreResult): string[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
+  const ids = (value as Record<string, unknown>).attachmentIds;
+  if (!Array.isArray(ids) || ids.some(id => typeof id !== "string")) throw new BrowserCoreError("core-error");
+  return ids;
+}
+
+function draftMediaMutation(command: string): boolean {
+  return command === "save_draft"
+    || command === "resolve_draft_conflict"
+    || command === "_worker_draft_apply_changes"
+    || command === "_worker_draft_finish_bootstrap";
 }
 
 function publicIdentity(value: CoreResult): BrowserPublicIdentity {
