@@ -17,6 +17,8 @@ class AssetThirdPartyNoticesSideloadTest {
 
         assertTrue(notices.notice().isNotBlank())
         val entries = notices.entries()
+        val googleMessagesLinkEnabled = requireNotNull(System.getProperty("peppyGoogleMessagesLink"))
+            .toBooleanStrict()
         val expectedGoogleMessagesEntries = listOf(
             "AGPL-3.0.txt",
             "LICENSE-exceptions-google-messages.txt",
@@ -29,8 +31,25 @@ class AssetThirdPartyNoticesSideloadTest {
             "MIT-go-isatty.txt",
             "MIT-zerolog.txt",
         )
-        assertTrue(entries.map(ThirdPartyNoticeEntry::fileName).containsAll(expectedGoogleMessagesEntries))
-        assertEquals(expectedGoogleMessagesEntries, entries.filter { it.fileName in expectedGoogleMessagesEntries }.map(ThirdPartyNoticeEntry::fileName))
+        val expectedBaseEntries = listOf(
+            "LGPL-3.0.txt",
+            "LGPL-2.1.txt",
+            "GPL-3.0.txt",
+            "Apache-2.0.txt",
+            "BSD-3-Clause.txt",
+            "MIT.txt",
+            "BouncyCastle-LICENSE.txt",
+            "Conscrypt-NOTICE.txt",
+            "BoringSSL-LICENSE.txt",
+        )
+        val expectedEntries = if (googleMessagesLinkEnabled) {
+            expectedGoogleMessagesEntries.take(3) + expectedBaseEntries.take(3) +
+                listOf("MPL-2.0.txt") + expectedBaseEntries.drop(3) +
+                expectedGoogleMessagesEntries.drop(4)
+        } else {
+            expectedBaseEntries
+        }
+        assertEquals(expectedEntries, entries.map(ThirdPartyNoticeEntry::fileName))
         assertTrue(notices.notice().contains("spake2-android"))
         assertTrue(!notices.notice().contains("Google Messages link"))
         entries.forEach { entry -> assertNotNull("${entry.fileName} needs a catalog title", entry.titleRes) }
@@ -51,7 +70,7 @@ class AssetThirdPartyNoticesSideloadTest {
         val titlesByFile = entries.associate { entry ->
             entry.fileName to entry.titleRes?.let(application::getString)
         }
-        if ("AGPL-3.0.txt" in titlesByFile) {
+        if (googleMessagesLinkEnabled) {
             expectedTitles.forEach { (fileName, title) -> assertEquals(title, titlesByFile[fileName]) }
         }
     }

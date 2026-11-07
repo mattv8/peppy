@@ -93,7 +93,8 @@ DEX_PATTERN = re.compile(r"(?:base/)?dex/classes\d*\.dex$|classes\d*\.dex$")
 GOJNI_PATTERN = re.compile(r"(?:base/)?lib/[^/]+/libgojni\.so$")
 DEX_PREFIX = b"Ldev/peppy/gmlink/"
 AGPL_TEXT = b"GNU AFFERO GENERAL PUBLIC LICENSE"
-GOOGLE_MESSAGES_NOTICE = b"Google Messages link notices"
+GOOGLE_MESSAGES_NOTICE = b"Third-party notices for the Google Messages link"
+GOOGLE_MESSAGES_NOTICE_FILENAME = "NOTICE-google-messages.txt"
 DIRECT_ASSETS = (
     "assets/third_party/AGPL-3.0.txt",
     "assets/third_party/NOTICE-google-messages.txt",
@@ -119,7 +120,11 @@ def prohibited(entries):
         return "dev/peppy/gmlink/ dex classes"
     if any(AGPL_TEXT in content for content in entries.values()):
         return "AGPL text"
-    if any(GOOGLE_MESSAGES_NOTICE in content for content in entries.values()):
+    if any(
+        pathlib.PurePosixPath(name).name == GOOGLE_MESSAGES_NOTICE_FILENAME
+        or GOOGLE_MESSAGES_NOTICE in content
+        for name, content in entries.items()
+    ):
         return "Google Messages notice content"
     return None
 

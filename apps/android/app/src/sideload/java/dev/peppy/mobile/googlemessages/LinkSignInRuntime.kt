@@ -1,5 +1,6 @@
 package dev.peppy.mobile.googlemessages
 
+import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -43,7 +44,7 @@ internal object LinkSignInRuntime {
 
     fun executePairing(attempt: PairingAttempt, pair: () -> Unit): Boolean {
         return try {
-            pairingExecutor.execute {
+            (LinkSignInRuntimeTestHooks.pairingExecutor ?: pairingExecutor).execute {
                 try {
                     runCatching(pair)
                 } finally {
@@ -72,6 +73,7 @@ internal object LinkSignInRuntime {
     }
 
     internal fun resetForTest() = synchronized(lock) {
+        LinkSignInRuntimeTestHooks.pairingExecutor = null
         lease = null
         signInBlocked = false
         LinkRuntime.endPairing()
@@ -82,4 +84,8 @@ internal object LinkSignInRuntime {
         internal var cleanupStarted = false
     }
     class PairingAttempt internal constructor(val token: Long)
+}
+
+internal object LinkSignInRuntimeTestHooks {
+    @Volatile var pairingExecutor: Executor? = null
 }

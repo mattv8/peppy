@@ -72,10 +72,10 @@ class LinkSignInActivity : AppCompatActivity() {
                 startupReady = true
             }
             val opened = LinkRuntime.handle(applicationContext)
+            val status = (opened as? LinkOpenResult.Open)?.handle
+                ?.let { handle -> runCatching { LinkStatus.parse(handle.status()) }.getOrNull() }
             runOnUiThread {
                 if (!LinkSignInRuntime.ownsLease(lease) || isFinishing || isDestroyed) return@runOnUiThread
-                val handle = (opened as? LinkOpenResult.Open)?.handle
-                val status = handle?.let { runCatching { LinkStatus.parse(it.status()) }.getOrNull() }
                 if (status?.state !in PAIRABLE_STATES) wipe { finishWith(OUTCOME_ERROR) } else initializeWebView()
             }
         }
@@ -225,11 +225,11 @@ class LinkSignInActivity : AppCompatActivity() {
         GoogleMessagesLinkService.start(this)
         val queued = LinkSignInRuntime.executePairing(attempt) {
             try {
-                if (!LinkRuntime.recordPreStart(applicationContext)) {
+                if (!LinkRuntime.recordPreStart(applicationContext, attempt.token)) {
                     LinkRuntimeEventSink.record("link", "persist_failed", 0)
                     return@executePairing
                 }
-                (LinkRuntime.handle(applicationContext) as? LinkOpenResult.Open)?.handle?.pair(CookieFilter.json(cookies))
+                LinkRuntime.acquirePairingLease(applicationContext, attempt.token)?.handle?.pair(CookieFilter.json(cookies))
             } catch (_: Exception) {
                 LinkRuntimeEventSink.record("link", "pair_failed", 0)
             } finally {

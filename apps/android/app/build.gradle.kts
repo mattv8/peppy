@@ -387,6 +387,7 @@ android {
                 // the same Rust crate (SQLCipher + libsodium); there is no mock message store.
                 test.dependsOn(prepareRobolectricDependencies)
                 test.systemProperty("robolectric.offline", "true")
+                test.systemProperty("peppyGoogleMessagesLink", peppyGoogleMessagesLink.toString())
                 test.systemProperty("robolectric.dependency.dir", robolectricDependencyDirectory.get().asFile.canonicalPath)
                 val nativeLibrary = rootProject.projectDir.resolve(
                     "../../target/debug/" + System.mapLibraryName("peppy_mobile_bindings")

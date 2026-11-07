@@ -38,6 +38,7 @@ private val DEFAULT_CLOSE_EXECUTOR = Executors.newSingleThreadExecutor()
 
 class GoogleMessagesLinkService : Service() {
     private val lock = Any()
+    @Volatile private var foregroundUpdatesFenced = false
     private val backoff = RunBackoff()
     private var worker: Thread? = null
     private var workerLease: LinkHandleLease? = null
@@ -79,6 +80,8 @@ class GoogleMessagesLinkService : Service() {
     private fun runWorker(generation: Long) {
         try {
             waitForLinkedRun()
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
         } finally {
             synchronized(lock) {
                 if (!cancelled && active === this) {
@@ -102,7 +105,7 @@ class GoogleMessagesLinkService : Service() {
             val token = LinkCoreBridge.observationToken()
             val status = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
             testHooks.afterStatusRead()
-            if (!LinkCoreBridge.recordObservation(token, applicationContext, status)) return
+            if (!LinkCoreBridge.recordObservation(token, lease, applicationContext, status)) return
             publishStatus(status)
             when (nextServiceAction(status, LinkRuntime.pairingInProgress.get(), status.running)) {
                 ServiceAction.STOP -> {
@@ -113,7 +116,7 @@ class GoogleMessagesLinkService : Service() {
                     if (testHooks.elapsedRealtime() - waitStartedAt >= MAX_PAIRING_WAIT_MS) return
                     if (!sleepInterruptibly(PAIRING_WAIT_MS)) return
                 }
-                ServiceAction.RUN -> return runWithRetry(handle)
+                ServiceAction.RUN -> return runWithRetry(lease)
             }
         }
     }
@@ -131,19 +134,23 @@ class GoogleMessagesLinkService : Service() {
         }
     }
 
-    private fun runWithRetry(handle: LinkHandle) {
+    private fun runWithRetry(lease: LinkHandleLease) {
+        val handle = lease.handle
         while (isCurrent(lifecycleGeneration)) {
             val beforeRunToken = LinkCoreBridge.observationToken()
             val beforeRun = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
-            if (!LinkCoreBridge.recordObservation(beforeRunToken, applicationContext, beforeRun)) return
+            if (!LinkCoreBridge.recordObservation(beforeRunToken, lease, applicationContext, beforeRun)) return
             if (beforeRun.state != "linked") return
             publishStatus(beforeRun)
             testHooks.beforeRun()
             val failure = runCatching { handle.run() }.exceptionOrNull()
+            if (filterReasonCode(failure?.message) == "event_overflow") {
+                LinkRuntimeEventSink.record("link", "event_overflow", 0)
+            }
             if (!isCurrent(lifecycleGeneration) || filterReasonCode(failure?.message) in STOP_CODES) return
             val afterRunToken = LinkCoreBridge.observationToken()
             val afterRun = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
-            if (!LinkCoreBridge.recordObservation(afterRunToken, applicationContext, afterRun)) return
+            if (!LinkCoreBridge.recordObservation(afterRunToken, lease, applicationContext, afterRun)) return
             publishStatus(afterRun)
             if (afterRun.state != "linked") {
                 publishAttentionIfNeeded(afterRun)
@@ -183,10 +190,13 @@ class GoogleMessagesLinkService : Service() {
         val generation = lifecycleGeneration
         testHooks.notificationExecutor.execute {
             if (!isCurrent(generation)) return@execute
-            val handle = synchronized(lock) { workerLease?.handle }
-                ?: (LinkRuntime.handle(this) as? LinkOpenResult.Open)?.handle
+            val lease = synchronized(lock) { workerLease }
+                ?: LinkRuntime.handleLease(this)
                 ?: return@execute
+            val handle = lease.handle
+            val token = LinkCoreBridge.observationToken()
             val status = runCatching { LinkStatus.parse(handle.status()) }.getOrNull() ?: return@execute
+            if (!LinkCoreBridge.recordObservation(token, lease, applicationContext, status)) return@execute
             if (!isCurrent(generation)) return@execute
             publishStatusNow(status, generation)
         }
@@ -198,18 +208,21 @@ class GoogleMessagesLinkService : Service() {
     }
 
     private fun publishStatusNow(status: LinkStatus, generation: Long) {
-        if (!isCurrent(generation)) return
-        val key = "${status.state}:${status.running}:${status.phoneResponding}"
-        if (lastNotification == key) return
-        lastNotification = key
-        if (!isCurrent(generation)) return
-        testHooks.notificationPublished(this)
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(status), foregroundServiceType())
+        synchronized(activeLock) {
+            if (!isCurrent(generation) || foregroundUpdatesFenced) return
+            val key = "${status.state}:${status.running}:${status.phoneResponding}"
+            if (lastNotification == key) return
+            lastNotification = key
+            if (!isCurrent(generation) || foregroundUpdatesFenced) return
+            testHooks.notificationPublished(this)
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(status), foregroundServiceType())
+        }
     }
 
     private fun publishAttentionIfNeeded(status: LinkStatus) {
         if (status.state !in ATTENTION_STATES) return
         val generation = lifecycleGeneration
+        foregroundUpdatesFenced = true
         synchronized(activeLock) {
             if (!isCurrent(generation)) return
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)

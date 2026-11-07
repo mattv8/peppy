@@ -15,7 +15,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
@@ -79,6 +81,83 @@ class LinkSignInActivityTest {
     }
 
     @Test
+    fun `sign-in reads link status off the main thread`() {
+        val startup = ControlledStartup()
+        val statusReadOnMain = AtomicBoolean()
+        LinkSignInActivityTestHooks.startupExecutor = startup::capture
+        LinkSignInActivityTestHooks.awaitSignInReady = { true }
+        LinkRuntimeTestHooks.engine = availableEngine(object : LinkedHandle() {
+            override fun status(): String {
+                statusReadOnMain.set(Thread.currentThread() === Looper.getMainLooper().thread)
+                return super.status()
+            }
+        })
+        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+
+        val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
+        startup.run()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFalse(statusReadOnMain.get())
+        controller.destroy()
+    }
+
+    @Test
+    fun `queued retired pairing cannot publish prestart or open a replacement handle`() {
+        val startup = ControlledStartup()
+        val pairing = QueueExecutor()
+        val recorded = mutableListOf<String>()
+        val diagnostics = mutableListOf<String>()
+        val handle = PairCountingHandle()
+        var opens = 0
+        LinkSignInActivityTestHooks.startupExecutor = startup::capture
+        LinkSignInActivityTestHooks.awaitSignInReady = { false }
+        LinkSignInRuntimeTestHooks.pairingExecutor = pairing
+        LinkCoreBridge.recorder = { _, status -> recorded += status.state; true }
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle.also { opens++ }
+        }
+        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+        LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> diagnostics += "$kind/$code" }
+
+        val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
+        val activity = controller.get()
+        queuePairing(activity)
+        LinkRuntime.resetLocalState(activity)
+        pairing.runAll()
+
+        assertEquals(listOf("unlinked"), recorded)
+        assertEquals(0, opens)
+        assertEquals(0, handle.pairCalls.get())
+        assertEquals(listOf("link/reset_local", "link/persist_failed"), diagnostics)
+        controller.destroy()
+    }
+
+    @Test
+    fun `current queued pairing publishes prestart before native pair`() {
+        val startup = ControlledStartup()
+        val pairing = QueueExecutor()
+        val order = mutableListOf<String>()
+        val handle = object : LinkedHandle() {
+            override fun pair(cookiesJson: ByteArray) { order += "pair" }
+        }
+        LinkSignInActivityTestHooks.startupExecutor = startup::capture
+        LinkSignInActivityTestHooks.awaitSignInReady = { false }
+        LinkSignInRuntimeTestHooks.pairingExecutor = pairing
+        LinkCoreBridge.recorder = { _, status -> order += status.state; true }
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+
+        val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
+        queuePairing(controller.get())
+        pairing.runAll()
+
+        assertEquals(listOf("unknown", "pair"), order)
+        controller.destroy()
+    }
+
+    @Test
     fun `failed lifecycle fence prevents native pair and records persistence failure`() {
         val startup = ControlledStartup()
         val handle = PairCountingHandle()
@@ -108,6 +187,17 @@ class LinkSignInActivityTest {
         controller.destroy()
     }
 
+    private fun queuePairing(activity: LinkSignInActivity) {
+        LinkSignInActivity::class.java.getDeclaredField("pendingCookies").apply {
+            isAccessible = true
+            set(activity, FilteredCookies(emptyMap()))
+        }
+        LinkSignInActivity::class.java.getDeclaredMethod("startPairing").apply {
+            isAccessible = true
+            invoke(activity)
+        }
+    }
+
     private fun awaitPairingCompletion() {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
         while (LinkRuntime.pairingInProgress.get() && System.nanoTime() < deadline) Thread.yield()
@@ -130,6 +220,12 @@ class LinkSignInActivityTest {
     private fun availableEngine(handle: LinkHandle) = object : LinkEngine {
         override val available = true
         override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
+    }
+
+    private class QueueExecutor : Executor {
+        private val tasks = ArrayDeque<Runnable>()
+        override fun execute(command: Runnable) { tasks.addLast(command) }
+        fun runAll() { while (tasks.isNotEmpty()) tasks.removeFirst().run() }
     }
 
     private class ControlledStartup {

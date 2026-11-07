@@ -22,9 +22,19 @@ class LinkRestartReceiver : BroadcastReceiver() {
             try {
                 val applicationContext = context.applicationContext
                 if (!LinkCoreBridge.recordPreStart(applicationContext)) return@Runnable
-                val opened = LinkRuntime.handle(applicationContext) as? LinkOpenResult.Open ?: return@Runnable
-                val status = LinkStatus.parse(opened.handle.status())
-                if (status.state == "linked" && LinkCoreBridge.recordIfNeeded(applicationContext, status)) testHooks.startService(applicationContext)
+                when (LinkRuntime.handle(applicationContext)) {
+                    is LinkOpenResult.Open -> {
+                        val token = LinkCoreBridge.observationToken()
+                        val lease = LinkRuntime.handleLease(applicationContext) ?: return@Runnable
+                        val status = LinkStatus.parse(lease.handle.status())
+                        when (status.state) {
+                            "linked" -> if (LinkCoreBridge.recordObservation(token, lease, applicationContext, status)) testHooks.startService(applicationContext)
+                            "unlinked" -> LinkCoreBridge.recordObservation(token, lease, applicationContext, status)
+                        }
+                    }
+                    LinkOpenResult.Unavailable -> LinkRuntime.reconcileEmptyState(applicationContext)
+                    is LinkOpenResult.Unreadable -> Unit
+                }
             } catch (_: Exception) {
                 // A sealed-state or gomobile failure must not leave the broadcast pending.
             } finally {

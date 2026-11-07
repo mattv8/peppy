@@ -27,7 +27,7 @@ object LinkRuntime {
 
     fun handle(context: Context): LinkOpenResult {
         while (true) {
-            awaitNoClosingHandle()
+            if (!awaitNoClosingHandle()) return LinkOpenResult.Unavailable
             LinkRuntimeTestHooks.afterClosingCheck?.invoke()
             val opened = synchronized(nativeOperationLock) {
                 val closing = synchronized(this) {
@@ -60,8 +60,9 @@ object LinkRuntime {
     }
 
     fun resetLocalState(context: Context) {
+        LinkCoreBridge.invalidateObservations()
         GoogleMessagesLinkService.stopAndAwait(context)
-        awaitNoClosingHandle()
+        if (!awaitNoClosingHandle()) return
         synchronized(nativeOperationLock) {
             val handle = synchronized(this) {
                 val current = cachedHandle
@@ -83,13 +84,45 @@ object LinkRuntime {
     fun recordPreStart(context: Context): Boolean =
         LinkCoreBridge.recordPreStart(context.applicationContext)
 
+    internal fun recordPreStart(context: Context, attempt: Long): Boolean = synchronized(nativeOperationLock) {
+        val current = synchronized(this) {
+            pairingInProgress.get() && pairingGeneration == attempt
+        }
+        if (!current) return@synchronized false
+        LinkCoreBridge.recordPreStart(context.applicationContext)
+    }
+
     fun recordUnlinked(context: Context): Boolean =
         LinkCoreBridge.recordIfNeeded(context.applicationContext, LinkStatus(0, "unlinked", false, false, false, 0, ""))
+
+    internal fun reconcileEmptyState(context: Context, status: LinkStatus? = null): Boolean {
+        val state = runCatching { store(context.applicationContext).read() }.getOrNull() ?: return false
+        return state.isEmpty() && (status == null || status.state == "unlinked") && recordUnlinked(context)
+    }
 
     internal fun handleLease(context: Context): LinkHandleLease? {
         val opened = (handle(context) as? LinkOpenResult.Open)?.handle ?: return null
         return synchronized(this) {
             opened.takeIf { it === cachedHandle }?.let { LinkHandleLease(it, handleGeneration) }
+        }
+    }
+
+    /** Admits a pairing attempt to its exact current handle without allowing reset to substitute one. */
+    internal fun acquirePairingLease(context: Context, attempt: Long): LinkHandleLease? {
+        if (!awaitNoClosingHandle()) return null
+        return synchronized(nativeOperationLock) {
+            synchronized(this) {
+                if (!pairingInProgress.get() || pairingGeneration != attempt) return@synchronized null
+                cachedHandle?.let { return@synchronized LinkHandleLease(it, handleGeneration) }
+                val engine = LinkRuntimeTestHooks.engine ?: LinkEngines.current
+                if (!engine.available) return@synchronized null
+                val store = store(context)
+                val state = runCatching { store.read() }.getOrNull() ?: return@synchronized null
+                val handle = runCatching { engine.open(state, host(store, nextHandleGeneration())) }.getOrNull() ?: return@synchronized null
+                handleGeneration += 1
+                cachedHandle = handle
+                LinkHandleLease(handle, handleGeneration)
+            }
         }
     }
 
@@ -142,12 +175,14 @@ object LinkRuntime {
     }
 
     /** Claims one owner-requested Pair or Relink attempt, returning its opaque generation token. */
-    fun tryBeginPairing(): Long? = synchronized(this) {
-        if (!pairingInProgress.compareAndSet(false, true)) return null
-        pairingGeneration += 1
-        emoji.value = null
-        signalChange()
-        pairingGeneration
+    fun tryBeginPairing(): Long? = synchronized(nativeOperationLock) {
+        synchronized(this) {
+            if (!pairingInProgress.compareAndSet(false, true)) return@synchronized null
+            pairingGeneration += 1
+            emoji.value = null
+            signalChange()
+            pairingGeneration
+        }
     }
 
     /** Completes exactly the attempt that acquired [attempt]; stale finally blocks are inert. */
@@ -168,7 +203,7 @@ object LinkRuntime {
 
     internal fun resetForTest() {
         GoogleMessagesLinkService.stopActiveWorker()
-        awaitNoClosingHandle()
+        if (!awaitNoClosingHandle()) return
         synchronized(nativeOperationLock) {
             val captured = synchronized(this) {
                 val current = cachedHandle
@@ -265,10 +300,18 @@ object LinkRuntime {
         lease.generation == handleGeneration && lease.handle === cachedHandle
     }
 
+    internal fun ownsObservationLease(lease: LinkHandleLease): Boolean = ownsLease(lease)
+
     private fun nextHandleGeneration(): Long = synchronized(this) { handleGeneration + 1 }
 
-    private fun awaitNoClosingHandle() = synchronized(this) {
-        while (closingHandle != null) (this@LinkRuntime as java.lang.Object).wait()
+    private fun awaitNoClosingHandle(): Boolean = synchronized(this) {
+        try {
+            while (closingHandle != null) (this@LinkRuntime as java.lang.Object).wait()
+            true
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
     }
 }
 

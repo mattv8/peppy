@@ -8,7 +8,7 @@ import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 /** Records content-free link lifecycle on a worker thread before linked status is surfaced. */
 internal object LinkCoreBridge {
     @Volatile var recorder: ((Context, LinkStatus) -> Boolean)? = null
-    private var lastState: String? = null
+    private var lastFacts: LinkCapabilityFacts? = null
     private var lastRecordedAt = 0L
     private var preStartGeneration = 0L
     private val lifecycleExecutor = Executors.newSingleThreadExecutor()
@@ -17,22 +17,22 @@ internal object LinkCoreBridge {
     fun recordIfNeeded(context: Context, status: LinkStatus): Boolean = lifecycleExecutor.submit<Boolean> {
         synchronized(this) {
             val now = System.currentTimeMillis()
-            if (status.state == lastState && now - lastRecordedAt < HEARTBEAT_MS) return@synchronized true
+            if (status.facts() == lastFacts && now - lastRecordedAt < HEARTBEAT_MS) return@synchronized true
             if (!record(context, status)) return@synchronized false
-            lastState = status.state
+            lastFacts = status.facts()
             lastRecordedAt = now
             true
         }
     }.get()
 
     fun recordPreStart(context: Context): Boolean {
-        synchronized(this) { preStartGeneration += 1 }
+        invalidateObservations()
         LinkCoreBridgeTestHooks.preStartFenceBegun?.invoke()
         return lifecycleExecutor.submit<Boolean> {
         synchronized(this) {
             val status = LinkStatus(0, "unknown", false, false, false, 0, "")
             if (!record(context, status)) return@synchronized false
-            lastState = status.state
+            lastFacts = status.facts()
             lastRecordedAt = System.currentTimeMillis()
             true
         }
@@ -40,6 +40,18 @@ internal object LinkCoreBridge {
     }
 
     fun observationToken(): Long = synchronized(this) { preStartGeneration }
+
+    fun invalidateObservations() = synchronized(this) { preStartGeneration += 1 }
+
+    fun recordObservation(token: Long, lease: LinkHandleLease, context: Context, status: LinkStatus): Boolean {
+        return lifecycleExecutor.submit<Boolean> {
+            LinkCoreBridgeTestHooks.beforeObservationValidation?.invoke()
+            synchronized(this) {
+                if (LinkRuntime.pairingInProgress.get() || token != preStartGeneration || !LinkRuntime.ownsObservationLease(lease)) return@synchronized true
+                recordIfNeededNow(context, status)
+            }
+        }.get()
+    }
 
     fun recordObservation(token: Long, context: Context, status: LinkStatus): Boolean {
         return lifecycleExecutor.submit<Boolean> {
@@ -53,7 +65,7 @@ internal object LinkCoreBridge {
 
     internal fun resetForTest() = synchronized(this) {
         recorder = null
-        lastState = null
+        lastFacts = null
         lastRecordedAt = 0L
         preStartGeneration = 0L
         LinkCoreBridgeTestHooks.beforeObservationValidation = null
@@ -84,15 +96,18 @@ internal object LinkCoreBridge {
 
     private fun recordIfNeededNow(context: Context, status: LinkStatus): Boolean {
         val now = System.currentTimeMillis()
-        if (status.state == lastState && now - lastRecordedAt < HEARTBEAT_MS) return true
+        if (status.facts() == lastFacts && now - lastRecordedAt < HEARTBEAT_MS) return true
         if (!record(context, status)) return false
-        lastState = status.state
+        lastFacts = status.facts()
         lastRecordedAt = now
         return true
     }
 
     private const val HEARTBEAT_MS = 10 * 60 * 1000L
 }
+
+private data class LinkCapabilityFacts(val state: String, val running: Boolean, val healthy: Boolean, val phoneResponding: Boolean, val stopCode: String)
+private fun LinkStatus.facts() = LinkCapabilityFacts(state, running, healthy, phoneResponding, stopCode)
 
 internal object LinkCoreBridgeTestHooks {
     @Volatile var beforeObservationValidation: (() -> Unit)? = null

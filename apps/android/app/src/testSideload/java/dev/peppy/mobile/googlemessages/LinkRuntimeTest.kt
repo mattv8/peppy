@@ -314,6 +314,22 @@ class LinkRuntimeTest {
     }
 
     @Test
+    fun `reset rejects an observation captured before destructive retirement`() {
+        val recorded = mutableListOf<String>()
+        LinkCoreBridge.recorder = { _, status -> recorded += status.state; true }
+        val handle = FakeHandle()
+        LinkRuntimeTestHooks.engine = availableEngine(handle)
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntime.handle(context)
+        val staleToken = LinkCoreBridge.observationToken()
+
+        LinkRuntime.resetLocalState(context)
+        assertTrue(LinkCoreBridge.recordObservation(staleToken, context, LinkStatus(0, "linked", true, true, true, 1, "")))
+
+        assertEquals(listOf("unlinked"), recorded)
+    }
+
+    @Test
     fun `wipe failure closes captured handle and next reload keeps one open handle`() {
         val first = CountingHandle()
         val second = CountingHandle()
@@ -479,6 +495,66 @@ class LinkRuntimeTest {
 
         assertTrue(LinkRuntime.pairingInProgress.get())
         assertTrue(LinkRuntime.endPairing(attempt))
+    }
+
+    @Test
+    fun `reset final unlinked publication follows an admitted pairing prestart`() {
+        val preStartEntered = CountDownLatch(1)
+        val allowPreStart = CountDownLatch(1)
+        val resetFinished = CountDownLatch(1)
+        val recorded = mutableListOf<String>()
+        LinkCoreBridge.recorder = { _, status ->
+            if (status.state == "unknown") {
+                preStartEntered.countDown()
+                allowPreStart.await()
+            }
+            synchronized(recorded) { recorded += status.state }
+            true
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        val attempt = requireNotNull(LinkRuntime.tryBeginPairing())
+        val preStart = Thread { LinkRuntime.recordPreStart(context, attempt) }.also { it.start() }
+        assertTrue(preStartEntered.await(1, TimeUnit.SECONDS))
+        val reset = Thread {
+            LinkRuntime.resetLocalState(context)
+            resetFinished.countDown()
+        }.also { it.start() }
+
+        assertFalse(resetFinished.await(100, TimeUnit.MILLISECONDS))
+        allowPreStart.countDown()
+        preStart.join(1_000)
+        reset.join(1_000)
+
+        assertFalse(preStart.isAlive)
+        assertFalse(reset.isAlive)
+        assertEquals(listOf("unknown", "unlinked"), synchronized(recorded) { recorded.toList() })
+    }
+
+    @Test
+    fun `reset after pairing lease closes the admitted handle without opening a replacement`() {
+        val handle = object : FakeHandle() {
+            var pairCalls = 0
+            override fun pair(cookiesJson: ByteArray) {
+                check(!closed) { "pair_closed" }
+                pairCalls++
+            }
+        }
+        var opens = 0
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle.also { opens++ }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        val attempt = requireNotNull(LinkRuntime.tryBeginPairing())
+        assertTrue(LinkRuntime.recordPreStart(context, attempt))
+        val lease = requireNotNull(LinkRuntime.acquirePairingLease(context, attempt))
+
+        LinkRuntime.resetLocalState(context)
+        val failure = runCatching { lease.handle.pair(ByteArray(0)) }.exceptionOrNull()
+
+        assertEquals("pair_closed", failure?.message)
+        assertEquals(1, opens)
+        assertEquals(0, handle.pairCalls)
     }
 
     @Test

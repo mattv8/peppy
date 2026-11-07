@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+notice_content=$(cat "$script_dir/../../apps/android/app/src/sideloadGmlinkOn/assets/third_party/NOTICE-google-messages.txt")
 root=$(mktemp -d "${TMPDIR:-/tmp}/peppy-android-distribution-test.XXXXXX")
 trap 'rm -rf "$root"' EXIT
 
@@ -123,7 +124,7 @@ write_archive "$direct" \
   'lib/x86_64/libgojni.so=fixture' \
   'classes.dex=Ldev/peppy/gmlink/Gmlink;' \
   'assets/third_party/AGPL-3.0.txt=GNU AFFERO GENERAL PUBLIC LICENSE' \
-  'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+  "assets/third_party/NOTICE-google-messages.txt=$notice_content"
 write_archive "$play" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
 clean_play_apk="$root/clean-play.apk"
 write_archive "$clean_play_apk" 'lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
@@ -162,7 +163,7 @@ write_archive "$missing_direct_library" \
   'lib/arm64-v8a/libgojni.so=fixture' \
   'classes.dex=Ldev/peppy/gmlink/Gmlink;' \
   'assets/third_party/AGPL-3.0.txt=GNU AFFERO GENERAL PUBLIC LICENSE' \
-  'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+  "assets/third_party/NOTICE-google-messages.txt=$notice_content"
 cp "$direct.manifest.xml" "$missing_direct_library.manifest.xml"
 expect_failure_reason 'direct APK is missing lib/x86_64/libgojni.so' \
   env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
@@ -173,7 +174,7 @@ write_archive "$direct_without_dex" \
   'lib/arm64-v8a/libgojni.so=fixture' \
   'lib/x86_64/libgojni.so=fixture' \
   'assets/third_party/AGPL-3.0.txt=GNU AFFERO GENERAL PUBLIC LICENSE' \
-  'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+  "assets/third_party/NOTICE-google-messages.txt=$notice_content"
 cp "$direct.manifest.xml" "$direct_without_dex.manifest.xml"
 expect_failure_reason 'direct APK is missing dev/peppy/gmlink/ dex classes' \
   env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
@@ -184,7 +185,7 @@ write_archive "$direct_without_agpl" \
   'lib/arm64-v8a/libgojni.so=fixture' \
   'lib/x86_64/libgojni.so=fixture' \
   'classes.dex=Ldev/peppy/gmlink/Gmlink;' \
-  'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+  "assets/third_party/NOTICE-google-messages.txt=$notice_content"
 cp "$direct.manifest.xml" "$direct_without_agpl.manifest.xml"
 expect_failure_reason 'direct APK is missing assets/third_party/AGPL-3.0.txt' \
   env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
@@ -220,7 +221,7 @@ expect_failure_reason 'Play AAB contains dev/peppy/gmlink/ dex classes' \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_dex" "$symbols"
 
 play_apk_with_notice="$root/play-with-notice.apk"
-write_archive "$play_apk_with_notice" 'assets/third_party/NOTICE-google-messages.txt=Google Messages link notices'
+write_archive "$play_apk_with_notice" "assets/third_party/NOTICE-google-messages.txt=$notice_content"
 play_with_notice="$root/play-with-notice.aab"
 write_archive "$play_with_notice" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
 cp "$play.manifest.xml" "$play_with_notice.manifest.xml"
@@ -229,6 +230,45 @@ cp "$play.split.apks" "$play_with_notice.split.apks"
 expect_failure_reason 'Play APK universal.apk contains Google Messages notice content' \
   env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
   "$script_dir/verify-android-distribution.sh" "$direct" "$play_with_notice" "$symbols"
+
+for notice_kind in filename renamed; do
+  if [ "$notice_kind" = filename ]; then
+    notice_entry='assets/third_party/NOTICE-google-messages.txt='
+  else
+    notice_entry="assets/renamed-notice.txt=$notice_content"
+  fi
+  for artifact_kind in aab universal split standalone; do
+    contaminated_bundle="$root/notice-$notice_kind-$artifact_kind.aab"
+    write_archive "$contaminated_bundle" 'base/lib/arm64-v8a/libpeppy_mobile_bindings.so=fixture'
+    cp "$play.manifest.xml" "$contaminated_bundle.manifest.xml"
+    cp "$play.apks" "$contaminated_bundle.apks"
+    cp "$play.split.apks" "$contaminated_bundle.split.apks"
+    if [ "$artifact_kind" = aab ]; then
+      write_archive "$contaminated_bundle" "base/$notice_entry"
+      expected_notice_label='Play AAB'
+    else
+      contaminated_apk="$root/notice-$notice_kind-$artifact_kind.apk"
+      write_archive "$contaminated_apk" "$notice_entry"
+      case "$artifact_kind" in
+        universal)
+          write_apks "$contaminated_bundle.apks" "universal.apk=$contaminated_apk"
+          expected_notice_label='Play APK universal.apk'
+          ;;
+        split)
+          write_apks "$contaminated_bundle.split.apks" "splits/base-master.apk=$contaminated_apk"
+          expected_notice_label='Play APK base-master.apk'
+          ;;
+        standalone)
+          write_apks "$contaminated_bundle.split.apks" "standalones/standalone.apk=$contaminated_apk"
+          expected_notice_label='Play APK standalone.apk'
+          ;;
+      esac
+    fi
+    expect_failure_reason "$expected_notice_label contains Google Messages notice content" \
+      env ANDROID_HOME="$sdk" BUNDLETOOL_JAR="$root/bundletool.jar" PATH="$bin:$PATH" \
+      "$script_dir/verify-android-distribution.sh" "$direct" "$contaminated_bundle" "$symbols"
+  done
+done
 
 play_apk_with_agpl="$root/play-with-agpl.apk"
 write_archive "$play_apk_with_agpl" 'assets/third_party/AGPL-3.0.txt=GNU AFFERO GENERAL PUBLIC LICENSE'

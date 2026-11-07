@@ -8,6 +8,7 @@ import java.util.concurrent.Executor
 import org.junit.After
 import org.junit.Before
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -69,6 +70,44 @@ class LinkRestartReceiverTest {
     }
 
     @Test
+    fun `unavailable engine reconciles an authoritative empty state without starting the service`() {
+        val recorded = mutableListOf<String>()
+        LinkCoreBridge.recorder = { _, status -> recorded += status.state; true }
+        LinkRuntimeTestHooks.engine = unavailableEngine()
+        LinkRuntimeTestHooks.storeFactory = { EmptyStore }
+        var starts = 0
+        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(
+            executor = Executor(Runnable::run),
+            startService = { starts += 1 },
+        )
+
+        receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+
+        assertEquals(listOf("unknown", "unlinked"), recorded)
+        assertEquals(0, starts)
+    }
+
+    @Test
+    fun `unavailable engine leaves an unreadable prior state fail closed`() {
+        val recorded = mutableListOf<String>()
+        LinkCoreBridge.recorder = { _, status -> recorded += status.state; true }
+        LinkRuntimeTestHooks.engine = unavailableEngine()
+        LinkRuntimeTestHooks.storeFactory = {
+            object : LinkStateStorage {
+                override fun read(): ByteArray = throw IllegalStateException("link_state_unreadable")
+                override fun write(state: ByteArray) = Unit
+                override fun wipe() = Unit
+            }
+        }
+        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(executor = Executor(Runnable::run))
+
+        receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+
+        assertEquals(listOf("unknown"), recorded)
+        assertFalse(recorded.contains("unlinked"))
+    }
+
+    @Test
     fun `restart advances the observation generation before reading status`() {
         val recorded = mutableListOf<String>()
         LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
@@ -79,7 +118,7 @@ class LinkRestartReceiverTest {
         receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_MY_PACKAGE_REPLACED))
         assertTrue(LinkCoreBridge.recordObservation(token, context, LinkStatus(0, "unlinked", false, false, false, 0, "")))
 
-        assertEquals(listOf("unknown"), recorded)
+        assertEquals(listOf("unknown", "unlinked"), recorded)
     }
 
     @Test
@@ -104,6 +143,11 @@ class LinkRestartReceiverTest {
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
         }
         LinkRuntimeTestHooks.storeFactory = { EmptyStore }
+    }
+
+    private fun unavailableEngine() = object : LinkEngine {
+        override val available = false
+        override fun open(state: ByteArray, host: LinkHost): LinkHandle = error("not called")
     }
 
     private fun receiverWithPendingResult(): LinkRestartReceiver = LinkRestartReceiver().also { receiver ->

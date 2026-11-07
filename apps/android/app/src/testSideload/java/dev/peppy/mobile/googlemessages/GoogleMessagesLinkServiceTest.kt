@@ -29,6 +29,7 @@ class GoogleMessagesLinkServiceTest {
         LinkRuntime.resetForTest()
         LinkRuntimeTestHooks.engine = null
         LinkRuntimeTestHooks.storeFactory = null
+        LinkRuntimeTestHooks.eventRecorder = null
         LinkCoreBridge.resetForTest()
         GoogleMessagesLinkService.testHooks = ServiceTestHooks()
     }
@@ -167,6 +168,41 @@ class GoogleMessagesLinkServiceTest {
     }
 
     @Test
+    fun `link events record refreshed capability facts while Run blocks`() {
+        val handle = MutableStatusRunHandle()
+        val recorded = mutableListOf<LinkStatus>()
+        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status }; true }
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(notificationExecutor = Executor(Runnable::run))
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        handle.status = READY_STATUS
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+
+        assertTrue(synchronized(recorded) { READY_STATUS_PARSED in recorded })
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test
+    fun `Run event overflow records the fixed diagnostic code`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val finished = CountDownLatch(1)
+        LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> events += kind to code }
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            sleeper = { throw InterruptedException() },
+            workerFinished = { finished.countDown() },
+        )
+        installEngine(OverflowHandle())
+
+        startService()
+
+        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        assertTrue(events.contains("link" to "event_overflow"))
+    }
+
+    @Test
     fun `terminal notification is detached and published before destroy`() {
         val executor = QueueExecutor()
         val published = CountDownLatch(1)
@@ -183,6 +219,27 @@ class GoogleMessagesLinkServiceTest {
         assertTrue(finished.await(1, TimeUnit.SECONDS))
         controller.destroy()
         assertTrue(published.await(1, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun `terminal attention fences queued foreground updates`() {
+        val executor = QueueExecutor()
+        val finished = CountDownLatch(1)
+        var publications = 0
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            notificationExecutor = executor,
+            notificationPublished = { publications++ },
+            workerFinished = { finished.countDown() },
+        )
+        installEngine(StatusHandle(NEEDS_RELINK_STATUS))
+
+        val controller = startService()
+
+        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        assertEquals(1, publications)
+        executor.runAll()
+        assertEquals(1, publications)
+        controller.destroy()
     }
 
     @Test
@@ -387,6 +444,21 @@ class GoogleMessagesLinkServiceTest {
         override fun run() = Unit
     }
 
+    private class MutableStatusRunHandle : StatusHandle(LINKED_STATUS) {
+        @Volatile var status = LINKED_STATUS
+        val runEntered = CountDownLatch(1)
+        val allowRunReturn = CountDownLatch(1)
+        override fun status(): String = status
+        override fun run() {
+            runEntered.countDown()
+            allowRunReturn.await()
+        }
+    }
+
+    private class OverflowHandle : StatusHandle(LINKED_STATUS) {
+        override fun run(): Unit = throw Exception("event_overflow")
+    }
+
     private class HeldRefreshHandle : StatusHandle(LINKED_STATUS) {
         val runEntered = CountDownLatch(1)
         val allowRunReturn = CountDownLatch(1)
@@ -412,6 +484,7 @@ class GoogleMessagesLinkServiceTest {
         private val tasks = ArrayDeque<Runnable>()
         val size: Int get() = tasks.size
         override fun execute(command: Runnable) { tasks += command }
+        fun runAll() { while (tasks.isNotEmpty()) tasks.removeFirst().run() }
     }
 
     private companion object {
@@ -420,5 +493,7 @@ class GoogleMessagesLinkServiceTest {
         const val UNLINKED_STATUS = """{"seq":1,"state":"unlinked","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
         const val NEEDS_RELINK_STATUS = """{"seq":1,"state":"needs_relink","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
         const val SIGNED_OUT_STATUS = """{"seq":1,"state":"signed_out","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
+        const val READY_STATUS = """{"seq":2,"state":"linked","running":true,"healthy":true,"phone_responding":true,"last_ok_ms":1,"stop_code":""}"""
+        val READY_STATUS_PARSED = LinkStatus.parse(READY_STATUS)
     }
 }
