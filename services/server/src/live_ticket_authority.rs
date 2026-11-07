@@ -4,7 +4,7 @@
 //! They deliberately do not create sessions or tickets; lifecycle activation is
 //! a later change.
 
-use sqlx::{Postgres, Transaction};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 const LAST_ALLOCATION_ID: i64 = i64::MAX;
@@ -30,53 +30,59 @@ impl Counter {
             Self::ConnectionId => "next_connection_id",
         }
     }
+
+    /// Counter values for a fresh row: the selected counter starts at one and the other stays at zero.
+    const fn fresh_values(self) -> (i64, i64) {
+        match self {
+            Self::SessionIncarnation => (1, 0),
+            Self::ConnectionId => (0, 1),
+        }
+    }
 }
 
 /// Allocates an exact session lifetime after the caller owns the device fence.
-#[allow(dead_code, reason = "lifecycle activation is intentionally deferred")]
 pub(crate) async fn allocate_session_incarnation(
-    tx: &mut Transaction<'_, Postgres>,
+    conn: &mut PgConnection,
     vault_id: Uuid,
     device_id: Uuid,
 ) -> Result<i64, AllocationError> {
-    allocate(tx, vault_id, device_id, Counter::SessionIncarnation).await
+    allocate(conn, vault_id, device_id, Counter::SessionIncarnation).await
 }
 
 /// Allocates an exact connection lifetime after the caller owns the device fence.
-#[allow(dead_code, reason = "lifecycle activation is intentionally deferred")]
 pub(crate) async fn allocate_connection_id(
-    tx: &mut Transaction<'_, Postgres>,
+    conn: &mut PgConnection,
     vault_id: Uuid,
     device_id: Uuid,
 ) -> Result<i64, AllocationError> {
-    allocate(tx, vault_id, device_id, Counter::ConnectionId).await
+    allocate(conn, vault_id, device_id, Counter::ConnectionId).await
 }
 
+/// Single statement: creates the authority row on first use, or advances the
+/// selected counter while it is below `i64::MAX`. Returns no row, and mutates
+/// nothing, once the counter is exhausted.
 async fn allocate(
-    tx: &mut Transaction<'_, Postgres>,
+    conn: &mut PgConnection,
     vault_id: Uuid,
     device_id: Uuid,
     counter: Counter,
 ) -> Result<i64, AllocationError> {
-    sqlx::query(
-        "INSERT INTO live_ticket_device_authority(vault_id, device_id, next_session_incarnation, next_connection_id) \
-         VALUES($1, $2, 0, 0) ON CONFLICT DO NOTHING",
-    )
-    .bind(vault_id)
-    .bind(device_id)
-    .execute(&mut **tx)
-    .await?;
-
+    let (fresh_session, fresh_connection) = counter.fresh_values();
     let query = format!(
-        "UPDATE live_ticket_device_authority SET {column}={column}+1 \
-         WHERE vault_id=$1 AND device_id=$2 AND {column}<$3 RETURNING {column}",
+        "INSERT INTO live_ticket_device_authority(vault_id, device_id, next_session_incarnation, next_connection_id) \
+         VALUES($1, $2, $3, $4) \
+         ON CONFLICT (vault_id, device_id) DO UPDATE SET {column}=live_ticket_device_authority.{column}+1 \
+         WHERE live_ticket_device_authority.{column}<$5 \
+         RETURNING {column}",
         column = counter.column(),
     );
     sqlx::query_scalar(&query)
         .bind(vault_id)
         .bind(device_id)
+        .bind(fresh_session)
+        .bind(fresh_connection)
         .bind(LAST_ALLOCATION_ID)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(conn)
         .await?
         .ok_or(AllocationError::Exhausted)
 }
@@ -266,6 +272,7 @@ mod tests {
         tx.commit().await.unwrap();
         let highwater: i64 = sqlx::query_scalar("SELECT next_session_incarnation FROM live_ticket_device_authority WHERE vault_id=$1 AND device_id=$2").bind(vault).bind(device).fetch_one(&pool).await.unwrap();
         assert_eq!(highwater, i64::MAX);
+        assert_eq!(counters(&pool, vault, device).await, (i64::MAX, 0));
         cleanup(pool, admin, schema).await;
     }
 

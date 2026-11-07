@@ -1,4 +1,6 @@
-use crate::live::{LiveBackend, LiveBackendError, LiveHub};
+use crate::live::{
+    LiveBackend, LiveBackendError, LiveControl, LiveControlKind, LiveHub, LiveTicketIdentity,
+};
 use peppy_domain::{DeviceId, VaultId};
 use peppy_protocol::EphemeralSignalV2;
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 const LIVE_NOTIFY_CHANNEL: &str = "peppy_live_v2";
+const LIVE_CONTROL_NOTIFY_CHANNEL: &str = "peppy_live_control_v1";
 const MAX_NOTIFY_PAYLOAD_BYTES: usize = 8_000;
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const LISTEN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -110,6 +113,36 @@ impl PgLiveBackend {
             .map_err(|_| LiveBackendError)?;
         Ok(())
     }
+
+    async fn publish_control_inner(
+        &self,
+        vault_id: VaultId,
+        device_id: DeviceId,
+        ticket: LiveTicketIdentity,
+        kind: LiveControlKind,
+    ) -> Result<(), LiveBackendError> {
+        if !self.inner.ready.load(Ordering::Acquire) {
+            return Err(LiveBackendError);
+        }
+        let payload = serde_json::to_string(&LiveControl::new(
+            self.inner.instance_id,
+            vault_id,
+            device_id,
+            ticket,
+            kind,
+        ))
+        .map_err(|_| LiveBackendError)?;
+        if payload.len() >= MAX_NOTIFY_PAYLOAD_BYTES {
+            return Err(LiveBackendError);
+        }
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(LIVE_CONTROL_NOTIFY_CHANNEL)
+            .bind(payload)
+            .execute(&self.inner.pool)
+            .await
+            .map_err(|_| LiveBackendError)?;
+        Ok(())
+    }
 }
 
 impl Drop for PgLiveBackend {
@@ -126,6 +159,16 @@ impl LiveBackend for PgLiveBackend {
         frame: EphemeralSignalV2,
     ) -> Pin<Box<dyn Future<Output = Result<(), LiveBackendError>> + Send + '_>> {
         Box::pin(self.publish_inner(vault_id, frame))
+    }
+
+    fn publish_control(
+        &self,
+        vault_id: VaultId,
+        device_id: DeviceId,
+        ticket: LiveTicketIdentity,
+        kind: LiveControlKind,
+    ) -> Pin<Box<dyn Future<Output = Result<(), LiveBackendError>> + Send + '_>> {
+        Box::pin(self.publish_control_inner(vault_id, device_id, ticket, kind))
     }
 }
 
@@ -154,19 +197,45 @@ async fn listen_once(state: &Inner) -> Result<(), sqlx::Error> {
         let Some(notification) = listener.try_recv().await? else {
             return Ok(());
         };
-        let Ok(payload) = serde_json::from_str::<Notify>(notification.payload()) else {
-            continue;
-        };
-        if payload.instance_id == state.instance_id {
-            continue;
+        match notification.channel() {
+            LIVE_NOTIFY_CHANNEL => {
+                let Ok(payload) = serde_json::from_str::<Notify>(notification.payload()) else {
+                    continue;
+                };
+                if payload.instance_id == state.instance_id {
+                    continue;
+                }
+                let _ = state.hub.forward(
+                    VaultId(payload.vault_id),
+                    DeviceId(payload.frame.sender_device_id.0),
+                    payload.frame,
+                    live_now_ms(),
+                );
+            }
+            LIVE_CONTROL_NOTIFY_CHANNEL => {
+                let Ok(control) = serde_json::from_str::<LiveControl>(notification.payload())
+                else {
+                    continue;
+                };
+                apply_control(state, control);
+            }
+            _ => continue,
         }
-        let _ = state.hub.forward(
-            VaultId(payload.vault_id),
-            DeviceId(payload.frame.sender_device_id.0),
-            payload.frame,
-            live_now_ms(),
-        );
     }
+}
+
+fn apply_control(state: &Inner, control: LiveControl) {
+    if control.is_from(state.instance_id) || !control.is_valid() {
+        return;
+    }
+    let (session_hash, session_incarnation, connection_id) = control.ticket_fields();
+    state.hub.cancel_ticket_hash_exact(
+        control.vault_id(),
+        control.device_id(),
+        session_hash,
+        session_incarnation,
+        connection_id,
+    );
 }
 
 async fn setup_listener(pool: &PgPool, timeout: Duration) -> Result<PgListener, sqlx::Error> {
@@ -175,6 +244,7 @@ async fn setup_listener(pool: &PgPool, timeout: Duration) -> Result<PgListener, 
         listener.discard_on_drop();
         listener.eager_reconnect(false);
         listener.listen(LIVE_NOTIFY_CHANNEL).await?;
+        listener.listen(LIVE_CONTROL_NOTIFY_CHANNEL).await?;
         Ok(listener)
     })
     .await
@@ -206,6 +276,7 @@ fn live_now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live::LiveControlKind;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use futures_util::FutureExt;
     use peppy_protocol::EphemeralSignalV2Kind;
@@ -220,6 +291,48 @@ mod tests {
 
     fn frame(sender_device_id: DeviceId, expires_at_ms: u64) -> EphemeralSignalV2 {
         frame_at(sender_device_id, live_now_ms(), expires_at_ms)
+    }
+
+    fn ticket(session: u8, incarnation: i64, connection: i64) -> LiveTicketIdentity {
+        LiveTicketIdentity::new([session; 16], incarnation, connection)
+    }
+
+    async fn remains_registered(
+        hub: &LiveHub,
+        vault_id: VaultId,
+        registration: &mut crate::live::LiveRegistration,
+    ) {
+        assert_eq!(
+            hub.forward(
+                vault_id,
+                DeviceId(Uuid::from_u128(99)),
+                frame(DeviceId(Uuid::from_u128(99)), live_now_ms() + 10_000),
+                live_now_ms()
+            ),
+            Ok(1)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), registration.receiver.recv())
+                .await
+                .expect("registered sink should receive a frame")
+                .is_some()
+        );
+    }
+
+    async fn wait_for_control_barrier(backend: &PgLiveBackend, hub: &LiveHub, vault_id: VaultId) {
+        let device_id = DeviceId(Uuid::from_u128(98));
+        let marker = ticket(98, 98, 98);
+        let mut registration = hub.register_ticket_with_identity(vault_id, device_id, marker);
+        backend
+            .publish_control(vault_id, device_id, marker, LiveControlKind::Close)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), registration.receiver.recv())
+                .await
+                .expect("remote listener should process the control barrier"),
+            None
+        );
     }
 
     fn frame_at(
@@ -558,6 +671,135 @@ mod tests {
             Some(next)
         );
         assert_eq!(retained_counts(&pool).await, retained_before);
+    }
+
+    #[tokio::test]
+    async fn postgres_control_notifications_cancel_only_the_exact_remote_ticket() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("TEST_DATABASE_URL is required for PostgreSQL live relay tests");
+        let local_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let remote_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        crate::MIGRATOR.run(&remote_pool).await.unwrap();
+        let retained_before = retained_counts(&remote_pool).await;
+        let vault_id = VaultId(Uuid::new_v4());
+        let foreign_vault_id = VaultId(Uuid::new_v4());
+        let device_id = DeviceId(Uuid::new_v4());
+        let foreign_device_id = DeviceId(Uuid::new_v4());
+        let local_hub = LiveHub::new();
+        let local_backend = PgLiveBackend::new(local_pool, local_hub.clone());
+        let remote_hub = LiveHub::new();
+        let remote_backend = PgLiveBackend::new(remote_pool.clone(), remote_hub.clone());
+        wait_ready(&local_backend).await;
+        wait_ready(&remote_backend).await;
+
+        let original = ticket(1, 1, 1);
+        let mut remote = remote_hub.register_ticket_with_identity(vault_id, device_id, original);
+        local_backend
+            .publish_control(vault_id, device_id, original, LiveControlKind::Close)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), remote.receiver.recv())
+                .await
+                .expect("remote exact close should arrive"),
+            None
+        );
+        let mut local = local_hub.register_ticket_with_identity(vault_id, device_id, original);
+        apply_control(
+            &local_backend.inner,
+            LiveControl::new(
+                local_backend.inner.instance_id,
+                vault_id,
+                device_id,
+                original,
+                LiveControlKind::Close,
+            ),
+        );
+        remains_registered(&local_hub, vault_id, &mut local).await;
+
+        let replacement = ticket(1, 2, 2);
+        let mut remote = remote_hub.register_ticket_with_identity(vault_id, device_id, replacement);
+        for stale in [original, ticket(2, 2, 2), ticket(1, 3, 2), ticket(1, 2, 3)] {
+            local_backend
+                .publish_control(vault_id, device_id, stale, LiveControlKind::Replace)
+                .await
+                .unwrap();
+        }
+        local_backend
+            .publish_control(
+                foreign_vault_id,
+                device_id,
+                replacement,
+                LiveControlKind::Close,
+            )
+            .await
+            .unwrap();
+        local_backend
+            .publish_control(
+                vault_id,
+                foreign_device_id,
+                replacement,
+                LiveControlKind::Close,
+            )
+            .await
+            .unwrap();
+        wait_for_control_barrier(&local_backend, &remote_hub, vault_id).await;
+        remains_registered(&remote_hub, vault_id, &mut remote).await;
+
+        let mut bearer = remote_hub.register(vault_id, device_id);
+        local_backend
+            .publish_control(vault_id, device_id, replacement, LiveControlKind::Close)
+            .await
+            .unwrap();
+        wait_for_control_barrier(&local_backend, &remote_hub, vault_id).await;
+        remains_registered(&remote_hub, vault_id, &mut bearer).await;
+
+        let current = ticket(3, 3, 3);
+        let mut remote = remote_hub.register_ticket_with_identity(vault_id, device_id, current);
+        let mut unknown_version = serde_json::to_value(LiveControl::new(
+            Uuid::from_u128(8),
+            vault_id,
+            device_id,
+            current,
+            LiveControlKind::Close,
+        ))
+        .unwrap();
+        unknown_version["version"] = serde_json::json!(2);
+        let mut unknown_field = serde_json::to_value(LiveControl::new(
+            Uuid::from_u128(9),
+            vault_id,
+            device_id,
+            current,
+            LiveControlKind::Close,
+        ))
+        .unwrap();
+        unknown_field["unexpected"] = serde_json::json!(true);
+        let malformed = vec![
+            "{\"version\":2}".to_owned(),
+            "{\"version\":1,\"instance_id\":\"00000000-0000-0000-0000-000000000001\"}".to_owned(),
+            "not-json".to_owned(),
+            serde_json::to_string(&unknown_version).unwrap(),
+            serde_json::to_string(&unknown_field).unwrap(),
+        ];
+        for malformed in malformed {
+            sqlx::query("SELECT pg_notify($1, $2)")
+                .bind(LIVE_CONTROL_NOTIFY_CHANNEL)
+                .bind(malformed)
+                .execute(&local_backend.inner.pool)
+                .await
+                .unwrap();
+        }
+        wait_for_control_barrier(&local_backend, &remote_hub, vault_id).await;
+        remains_registered(&remote_hub, vault_id, &mut remote).await;
+        assert_eq!(retained_counts(&remote_pool).await, retained_before);
     }
 
     #[tokio::test]

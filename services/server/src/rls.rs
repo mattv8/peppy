@@ -40,6 +40,7 @@ pub const TENANT_TABLES: &[&str] = &[
     "live_ticket_sessions",
     "live_tickets",
     "live_ticket_device_authority",
+    "live_ticket_admission_events",
 ];
 
 const MEMBERSHIP_VERSION_TABLE: &str = "membership_versions";
@@ -55,6 +56,7 @@ const LIVE_TICKET_TABLES: &[&str] = &[
     "live_ticket_sessions",
     "live_tickets",
     "live_ticket_device_authority",
+    "live_ticket_admission_events",
 ];
 const LIVE_TICKET_RESOLVER: &str = "community_resolve_live_ticket_vault(bytea)";
 const TENANT_SCOPE_POLICY_EXPRESSION: &str =

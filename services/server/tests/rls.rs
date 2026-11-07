@@ -215,6 +215,9 @@ async fn community_runtime_is_rls_scoped_and_control_plane_http_flows_work() {
     rls::validate_runtime_role(&fixture.runtime, true)
         .await
         .unwrap();
+    rls::validate_runtime_role(&fixture.runtime, false)
+        .await
+        .unwrap();
     rls::validate_maintenance_role(&fixture.maintenance)
         .await
         .unwrap();
@@ -1045,6 +1048,163 @@ async fn policy_rewritten_true_fails_closed() {
             .await
             .is_err()
     );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn live_ticket_admission_events_are_runtime_scoped_and_independent_of_ticket_retention() {
+    let fixture = Fixture::new().await;
+    let vault_a = Uuid::new_v4();
+    let vault_b = Uuid::new_v4();
+    let device_a = Uuid::new_v4();
+    let device_b = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault_a)).await;
+    fixture.run_owner(&vault_insert(vault_b)).await;
+    fixture.run_owner(&device_insert(vault_a, device_a)).await;
+    fixture.run_owner(&device_insert(vault_b, device_b)).await;
+
+    rls::validate_runtime_role(&fixture.runtime, true)
+        .await
+        .unwrap();
+    rls::validate_maintenance_role(&fixture.maintenance)
+        .await
+        .unwrap();
+
+    let event_id = Uuid::new_v4();
+    fixture
+        .apply(
+            Writer::Runtime,
+            vault_a,
+            &format!(
+                "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind, created_at) VALUES('{event_id}', '{vault_a}', '{device_a}', 'ticket_issue', clock_timestamp())"
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(fixture
+        .apply(
+            Writer::Runtime,
+            vault_a,
+            &format!(
+                "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind, created_at) VALUES('{}', '{vault_b}', '{device_b}', 'ticket_issue', clock_timestamp())",
+                Uuid::new_v4()
+            ),
+        )
+        .await
+        .is_err());
+    for sql in [
+        format!(
+            "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind, created_at) VALUES('{}', '{vault_a}', '{device_a}', 'invalid', clock_timestamp())",
+            Uuid::new_v4()
+        ),
+        format!(
+            "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind, created_at) VALUES('{}', '{vault_a}', '{}', 'ticket_issue', clock_timestamp())",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ),
+        format!(
+            "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind) VALUES('{}', '{vault_a}', '{device_a}', 'ticket_issue')",
+            Uuid::new_v4()
+        ),
+    ] {
+        assert!(fixture.apply(Writer::Runtime, vault_a, &sql).await.is_err());
+    }
+
+    let session_hash = vec![7_u8; 32];
+    fixture
+        .run_owner(&format!(
+            "INSERT INTO live_ticket_sessions(vault_id, device_id, session_id_hash, state, closed_at) VALUES('{vault_a}', '{device_a}', decode('{}', 'hex'), 'closed', now())",
+            hex::encode(&session_hash)
+        ))
+        .await;
+    fixture
+        .run_owner(&format!(
+            "INSERT INTO live_tickets(ticket_digest, vault_id, device_id, session_id_hash, issued_at, expires_at) VALUES(decode('{}', 'hex'), '{vault_a}', '{device_a}', decode('{}', 'hex'), now(), now()+interval '1 minute')",
+            "01".repeat(32),
+            hex::encode(&session_hash)
+        ))
+        .await;
+    fixture
+        .run_owner(&format!(
+            "DELETE FROM live_tickets WHERE vault_id='{vault_a}'; DELETE FROM live_ticket_sessions WHERE vault_id='{vault_a}'"
+        ))
+        .await;
+    let retained: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_ticket_admission_events WHERE event_id=$1")
+            .bind(event_id)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(retained, 1);
+
+    let mut other_vault = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault_b.to_string())
+        .execute(&mut *other_vault)
+        .await
+        .unwrap();
+    let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_admission_events")
+        .fetch_one(&mut *other_vault)
+        .await
+        .unwrap();
+    assert_eq!(visible, 0);
+    other_vault.commit().await.unwrap();
+    for privilege in ["SELECT", "INSERT"] {
+        sqlx::raw_sql(&format!(
+            "REVOKE {privilege} ON TABLE live_ticket_admission_events FROM {}",
+            fixture.runtime_role
+        ))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+        assert!(
+            rls::validate_runtime_role(&fixture.runtime, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            rls::validate_runtime_role(&fixture.runtime, true)
+                .await
+                .is_err()
+        );
+        sqlx::raw_sql(&format!(
+            "GRANT {privilege} ON TABLE live_ticket_admission_events TO {}",
+            fixture.runtime_role
+        ))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn live_ticket_admission_event_migration_round_trips() {
+    let fixture = Fixture::new().await;
+    sqlx::raw_sql(include_str!(
+        "../migrations/down/0029_live_ticket_admission_events.down.sql"
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let absent: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('live_ticket_admission_events')::text")
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert!(absent.is_none());
+    sqlx::raw_sql(include_str!(
+        "../migrations/0029_live_ticket_admission_events.sql"
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let restored: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('live_ticket_admission_events')::text")
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(restored.as_deref(), Some("live_ticket_admission_events"));
     fixture.cleanup().await;
 }
 

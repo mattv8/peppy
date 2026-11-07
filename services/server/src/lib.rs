@@ -9,6 +9,7 @@ pub(crate) mod live_postgres;
 pub(crate) mod live_ticket_authority;
 pub(crate) mod live_ticket_maintenance;
 pub mod live_ticket_upgrade;
+pub(crate) mod live_ticket_work;
 pub mod presence;
 pub mod rls;
 pub mod scope;

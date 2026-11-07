@@ -327,6 +327,7 @@ async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime 
         replay_retention: Duration::from_secs(30 * 86_400),
         relay_url: None,
         web_client: None,
+        web_live_trusted_origin: None,
     };
     let pool = PgPoolOptions::new()
         .max_connections(5)
