@@ -1,0 +1,15 @@
+# Outbound webhooks overlay for the same-server MCP worker. Pass root
+# docker-compose.yml and compose.mcp.yml first, then this file, so paths remain
+# relative to the repository root. The worker keeps the private network for the
+# API control channel and gains a non-internal network for webhook delivery.
+# It publishes no ports.
+networks:
+  webhooks-egress:
+
+services:
+  mcp:
+    environment:
+      PEPPY_WEBHOOKS_ENABLED: "true"
+      PEPPY_WEBHOOKS_ALLOW_PRIVATE_NETWORKS: ${PEPPY_WEBHOOKS_ALLOW_PRIVATE_NETWORKS:-false}
+      PEPPY_WEB_CLIENT_HOST: ${PEPPY_WEB_CLIENT_HOST:-}
+    networks: [private, webhooks-egress]
