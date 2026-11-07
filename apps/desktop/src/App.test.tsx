@@ -5546,14 +5546,15 @@ describe("host state display", () => {
 
     const navigation = screen.getByRole("navigation", { name: "Settings categories" });
     expect(within(navigation).getByRole("link", { name: "Server" })).toHaveAttribute("aria-current", "location");
-    expect(within(navigation).queryByRole("link", { name: "Advanced" })).not.toBeInTheDocument();
+    expect(within(navigation).getByRole("link", { name: "Advanced" })).toBeInTheDocument();
     const account = within(navigation).getByRole("link", { name: "Account" });
     fireEvent.click(account);
 
     expect(account).toHaveAttribute("aria-current", "location");
     expect(document.getElementById("settings-account-billing")).toHaveAttribute("data-settings-section", "account-billing");
-    expect(within(navigation).getAllByRole("link").at(-1)).toHaveTextContent("Privacy");
-    expect(document.getElementById("settings-privacy")).toHaveAttribute("data-settings-section", "privacy");
+    expect(within(navigation).getAllByRole("link").at(-1)).toHaveTextContent("Advanced");
+    expect(within(navigation).queryByRole("link", { name: "Privacy" })).not.toBeInTheDocument();
+    expect(document.getElementById("settings-privacy")).toHaveAttribute("data-settings-section", "privacy-links");
   });
 
   it.each([false, true])("scrolls only the settings content when selecting Account (reduced motion: %s)", async (reducedMotion) => {

@@ -109,6 +109,9 @@ import { DevicesSettings } from "./settings/DevicesSettings";
 import { McpAuthorizationConsent } from "./settings/McpAuthorizationConsent";
 import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./settings/HostedAccountSettings";
 import { PrivacySettings } from "./settings/PrivacySettings";
+import { AdvancedSettings } from "./settings/AdvancedSettings";
+import { searchRecipientSuggestions } from "./contacts/recipientSearch";
+export { searchRecipientSuggestions } from "./contacts/recipientSearch";
 import { SetupLanding, savedSetupMode } from "./setup/SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./shell/AppLock";
 import { UpdatesSettings } from "./updates/UpdatesSettings";
@@ -258,20 +261,6 @@ export function displayConversation(
 function avatarFor(identity: AvatarIdentity, addresses: string[], resolution: ContactResolutionMap): AvatarIdentity {
   const resolved = identity.kind === "person" && addresses.length === 1 ? resolution[addresses[0]] : undefined;
   return resolved ? { ...identity, photoDataUrl: resolved.photoDataUrl, name: resolved.displayName } : identity;
-}
-
-/** Native contact phone matches as UI suggestions; the phone address is the recipient ID. */
-export async function searchRecipientSuggestions(query: string, sourceDeviceId?: string): Promise<RecipientSuggestion[]> {
-  const found = await bridge.search_contact_recipients(query, sourceDeviceId);
-  return found.map((match) => ({
-    id: match.address,
-    rowId: JSON.stringify([match.bookId, match.contactId, match.phoneId]),
-    label: match.displayName,
-    detail: [match.label, match.normalized ? formatPhoneNumber(match.address) : match.number].filter(Boolean).join(" · "),
-    avatarUrl: match.avatarUrl,
-    avatarSeed: seedKey(match.address),
-    avatarName: match.displayName,
-  }));
 }
 
 /* ------------------------------------------------------------------ labels and errors */
@@ -1281,7 +1270,7 @@ function SettingsView({
     ...(nativeUpdateHost ? [{ id: "updates", label: "Updates" }] : []),
     ...(browserHost ? [] : [{ id: "app-lock", label: "App lock" }]),
     ...(hasAccount ? [{ id: "account-billing", label: "Account" }] : []),
-    { id: "privacy", label: "Privacy" },
+    { id: "advanced", label: "Advanced" },
   ];
   const sectionElementId = (id: string) => {
     if (id === "notifications") return "notification-settings";
@@ -1565,6 +1554,7 @@ function SettingsView({
         {browserHost && accountUrl && <a id="settings-account-portal-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">{peppyCopy.account_portal_cta}<span className="visually-hidden"> (opens in a new tab)</span></a>}
         {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
       </section>}
+      <AdvancedSettings sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} serverOffline={serverOffline} onOpenDevices={() => { selectSection("devices"); window.setTimeout(() => document.getElementById("mcp-custody-review")?.focus(), 0); }} />
       <PrivacySettings browserHost={browserHost} />
       </div>
       </div>

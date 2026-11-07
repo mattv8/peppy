@@ -147,6 +147,100 @@ pub struct McpGrantView {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WebhookFilterMode {
+    All,
+    Only,
+    Except,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+pub enum WebhookEvent {
+    #[serde(rename = "message.received")]
+    MessageReceived,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebhookFilterEntry {
+    pub address: String,
+    pub label: Option<String>,
+    pub contact_id: Option<String>,
+    pub book_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebhookInput {
+    pub name: Option<String>,
+    pub url: String,
+    pub events: Vec<WebhookEvent>,
+    pub filter_mode: WebhookFilterMode,
+    pub filter: Vec<WebhookFilterEntry>,
+    pub paused: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WebhookDeliveryState {
+    Never,
+    Delivered,
+    Retrying,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebhookView {
+    pub id: Uuid,
+    pub name: String,
+    pub name_is_derived: bool,
+    pub url: String,
+    pub events: Vec<WebhookEvent>,
+    pub filter_mode: WebhookFilterMode,
+    pub filter: Vec<WebhookFilterEntry>,
+    pub paused: bool,
+    pub created_at: String,
+    pub last_delivery_state: WebhookDeliveryState,
+    pub last_delivery_at: Option<String>,
+    pub last_status_code: Option<u16>,
+    pub last_error: Option<String>,
+    pub pending_deliveries: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebhookList {
+    pub available: bool,
+    pub webhooks: Vec<WebhookView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebhookSecret {
+    pub id: Uuid,
+    pub secret: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebhookCreated {
+    pub webhook: WebhookView,
+    pub secret: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebhookTestResult {
+    pub ok: bool,
+    pub status_code: Option<u16>,
+    pub duration_ms: u32,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpAuthorizationView {
     pub id: String,
@@ -273,11 +367,37 @@ pub struct McpWorkerCallRequest {
     pub request: Value,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpWorkerWebhookOp {
+    List,
+    Create,
+    Update,
+    Delete,
+    RevealSecret,
+    RotateSecret,
+    Test,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct McpWorkerWebhookRequest {
+    pub vault_id: Uuid,
+    pub device_id: Uuid,
+    pub source_origin: String,
+    pub op: McpWorkerWebhookOp,
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    #[serde(default)]
+    pub input: Option<WebhookInput>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         MCP_TOOL_SCOPES, McpDeviceState, McpDeviceStatus, McpScope, McpWorkerStatusRequest,
-        McpWorkerStatusResponse, mcp_scopes_allow, mcp_tool_scopes,
+        McpWorkerStatusResponse, McpWorkerWebhookRequest, WebhookEvent, WebhookFilterMode,
+        WebhookInput, mcp_scopes_allow, mcp_tool_scopes,
     };
     use uuid::Uuid;
 
@@ -303,6 +423,65 @@ mod tests {
         );
         assert_eq!(McpDeviceState::Online.to_string(), "online");
         assert_eq!(McpScope::MessagesSend.to_string(), "messages:send");
+    }
+
+    #[test]
+    fn webhook_dtos_round_trip_and_reject_unknown_fields() {
+        let input = WebhookInput {
+            name: Some("Inbox".into()),
+            url: "https://hooks.example/messages".into(),
+            events: vec![WebhookEvent::MessageReceived],
+            filter_mode: WebhookFilterMode::Only,
+            filter: Vec::new(),
+            paused: false,
+        };
+        let value = serde_json::to_value(&input).unwrap();
+
+        assert_eq!(value["events"], serde_json::json!(["message.received"]));
+        assert_eq!(
+            serde_json::from_value::<WebhookInput>(value).unwrap(),
+            input
+        );
+        assert!(
+            serde_json::from_value::<WebhookInput>(serde_json::json!({
+                "name": null,
+                "url": "https://hooks.example/messages",
+                "events": ["message.received"],
+                "filterMode": "all",
+                "filter": [],
+                "paused": false,
+                "unexpected": true,
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn worker_webhook_request_rejects_unknown_fields() {
+        let vault_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let request: McpWorkerWebhookRequest = serde_json::from_value(serde_json::json!({
+            "vault_id": vault_id,
+            "device_id": device_id,
+            "source_origin": "https://app.example.test",
+            "op": "list",
+        }))
+        .unwrap();
+
+        assert_eq!(request.vault_id, vault_id);
+        assert_eq!(request.source_origin, "https://app.example.test");
+        assert!(request.id.is_none());
+        assert!(request.input.is_none());
+        assert!(
+            serde_json::from_value::<McpWorkerWebhookRequest>(serde_json::json!({
+                "vault_id": vault_id,
+                "device_id": device_id,
+                "source_origin": "https://app.example.test",
+                "op": "list",
+                "unexpected": true,
+            }))
+            .is_err()
+        );
     }
 
     #[test]

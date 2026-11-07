@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
+    future::Future,
     io,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -103,6 +104,7 @@ pub struct RuntimeRegistry {
 struct RegistryContext {
     state_dir: PathBuf,
     custody: Arc<Custody>,
+    webhooks: Arc<crate::webhooks::engine::WebhookEngine>,
     identities: Arc<Mutex<HashMap<Uuid, RuntimeIdentity>>>,
     revoked_fences: Arc<Mutex<Vec<RevokedFence>>>,
     runtimes: Arc<Mutex<HashMap<Uuid, Arc<Runtime>>>>,
@@ -174,10 +176,16 @@ impl RuntimeRegistry {
             }
         }
         let (shutdown, _) = watch::channel(false);
+        let custody = Arc::new(custody);
+        let webhooks = Arc::new(crate::webhooks::engine::WebhookEngine::new(
+            custody.clone(),
+            config.clone(),
+        ));
         Ok(Self {
             context: RegistryContext {
                 state_dir: config.state_dir,
-                custody: Arc::new(custody),
+                custody,
+                webhooks,
                 identities: Arc::new(Mutex::new(identity_map)),
                 revoked_fences: Arc::new(Mutex::new(record.revoked_fences)),
                 runtimes: Arc::new(Mutex::new(runtimes)),
@@ -244,6 +252,10 @@ impl RuntimeRegistry {
 
     pub async fn get(&self, vault_id: Uuid) -> Option<Arc<Runtime>> {
         self.context.runtimes.lock().await.get(&vault_id).cloned()
+    }
+
+    pub fn webhooks(&self) -> Arc<crate::webhooks::engine::WebhookEngine> {
+        self.context.webhooks.clone()
     }
 
     pub async fn insert(&self, runtime: Runtime) -> Result<(), RuntimeError> {
@@ -373,6 +385,7 @@ impl RuntimeRegistry {
         let vault_id = runtime.vault_id().0;
         let device_id = runtime.device_id().0;
         let context = self.context.clone();
+        let webhooks = self.context.webhooks.clone();
         let mut tasks_guard = self.context.tasks.lock().await;
         // A receiver subscribed after `send(true)` never observes `changed()`,
         // so a post-shutdown spawn must be refused here rather than rely on it.
@@ -419,6 +432,9 @@ impl RuntimeRegistry {
                             }
                             break;
                         }
+                        if !is_stop_requested(&shutdown, &stop_requested) {
+                            run_webhooks_until_stopped(&webhooks, &runtime, vault_id, &mut shutdown, &mut stop_requested).await;
+                        }
                     }
                     _ = interval.tick() => {
                         if !supervise_sync(runtime.clone(), vault_id, &mut shutdown, &mut stop_requested).await {
@@ -426,6 +442,9 @@ impl RuntimeRegistry {
                                 log_failure("cleanup", vault_id, &error);
                             }
                             break;
+                        }
+                        if !is_stop_requested(&shutdown, &stop_requested) {
+                            run_webhooks_until_stopped(&webhooks, &runtime, vault_id, &mut shutdown, &mut stop_requested).await;
                         }
                     }
                 }
@@ -512,6 +531,70 @@ async fn retry_pending_cleanup(context: &RegistryContext) {
         {
             log_failure("cleanup", identity.vault_id, &error);
         }
+    }
+}
+
+async fn run_webhooks(
+    engine: &crate::webhooks::engine::WebhookEngine,
+    runtime: &Runtime,
+    vault_id: Uuid,
+) {
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+        engine
+            .after_sync(runtime)
+            .await
+            .map_err(|error| ("after_sync", error))?;
+        engine
+            .dispatch_due(runtime)
+            .await
+            .map_err(|error| ("dispatch_due", error))
+    })
+    .await;
+    match outcome {
+        Err(_) => {
+            tracing::warn!(category = "webhooks", vault = %short_vault_id(vault_id), stage = "webhooks", outcome = "timeout", "webhook processing failed")
+        }
+        Ok(Err((stage, crate::webhooks::engine::WebhookError::Missing))) => {
+            tracing::warn!(category = "webhooks", vault = %short_vault_id(vault_id), stage, outcome = "missing", "webhook processing failed")
+        }
+        Ok(Err((stage, crate::webhooks::engine::WebhookError::Code(code)))) => {
+            tracing::warn!(category = "webhooks", vault = %short_vault_id(vault_id), stage, outcome = code, "webhook processing failed")
+        }
+        Ok(Ok(())) => {}
+    }
+}
+
+fn is_stop_requested(
+    shutdown: &watch::Receiver<bool>,
+    stop_requested: &watch::Receiver<bool>,
+) -> bool {
+    *shutdown.borrow() || *stop_requested.borrow()
+}
+
+async fn run_webhooks_until_stopped(
+    engine: &crate::webhooks::engine::WebhookEngine,
+    runtime: &Runtime,
+    vault_id: Uuid,
+    shutdown: &mut watch::Receiver<bool>,
+    stop_requested: &mut watch::Receiver<bool>,
+) {
+    await_webhook_work(
+        run_webhooks(engine, runtime, vault_id),
+        shutdown,
+        stop_requested,
+    )
+    .await;
+}
+
+async fn await_webhook_work(
+    work: impl Future<Output = ()>,
+    shutdown: &mut watch::Receiver<bool>,
+    stop_requested: &mut watch::Receiver<bool>,
+) {
+    tokio::select! {
+        _ = work => {}
+        _ = shutdown.changed() => {}
+        _ = stop_requested.changed() => {}
     }
 }
 
@@ -616,6 +699,11 @@ async fn revoke_registered_inner(
         Some(runtime) => runtime.revoke().await,
         None => Runtime::cleanup_state_dir(&vault_state_dir(&context.state_dir, vault_id)),
     }?;
+    context
+        .webhooks
+        .remove_vault(vault_id, device_id)
+        .await
+        .map_err(|_| RuntimeError::Core)?;
     let mut next = context.identities.lock().await.clone();
     let mut revoked = tombstone;
     revoked.cleanup_pending = false;
@@ -683,15 +771,15 @@ mod tests {
     };
 
     use super::{
-        RevokedFence, RuntimeIdentity, RuntimeRegistry, StateLock, outcome_category,
-        persist_identities, short_vault_id, vault_state_dir,
+        RevokedFence, RuntimeIdentity, RuntimeRegistry, StateLock, await_webhook_work,
+        is_stop_requested, outcome_category, persist_identities, short_vault_id, vault_state_dir,
     };
     use crate::{
         config::WorkerConfig,
         runtime::{Runtime, RuntimeError},
     };
     use axum::{Router, extract::State, http::StatusCode, routing::get};
-    use tokio::sync::Notify;
+    use tokio::sync::{Notify, watch};
     use uuid::Uuid;
 
     #[test]
@@ -1174,5 +1262,29 @@ mod tests {
             vault_id,
             device_id: device_b
         }));
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_hanging_webhook_work_promptly() {
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let (stop_sender, mut stop) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            await_webhook_work(std::future::pending(), &mut shutdown, &mut stop).await;
+        });
+
+        stop_sender.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stop did not cancel hanging webhook work")
+            .unwrap();
+    }
+
+    #[test]
+    fn cancellation_after_supervision_skips_webhook_work() {
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let (_stop_sender, stop) = watch::channel(false);
+        shutdown_sender.send_replace(true);
+
+        assert!(is_stop_requested(&shutdown, &stop));
     }
 }

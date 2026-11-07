@@ -22,7 +22,7 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, FOWNER]
     security_opt: [no-new-privileges:true]
-    networks: [private]
+    network_mode: none
     restart: "no"
 
   mcp:
@@ -52,7 +52,9 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
-    networks: [private]
+    # mcp-api reaches only the API control channel (no storage or database
+    # network); mcp-egress carries outbound webhook delivery. No published ports.
+    networks: [mcp-api, mcp-egress]
     restart: unless-stopped
 
   api:
@@ -62,8 +64,14 @@ services:
     depends_on:
       mcp:
         condition: service_healthy
+    networks: [private, edge, mcp-api]
     volumes:
       - mcp-control:/run/peppy-mcp:ro
+
+networks:
+  mcp-api:
+    internal: true
+  mcp-egress:
 
 volumes:
   mcp-state:
