@@ -2,7 +2,10 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { NotificationSettings } from "./NotificationSettings";
+import { notificationPersistenceSettings } from "../App";
+import { StrictMode } from "react";
 import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "../bridge/bridge";
+import type { NotificationPersistenceSettings } from "@peppy/desktop-ui/bridge-contracts";
 
 afterEach(cleanup);
 
@@ -26,6 +29,75 @@ const props = () => ({
 });
 const LOCKED_NOTE = "Unlock Peppy to change banner settings.";
 const SYNC_NOTE = /Banner choices apply to every computer and browser in this vault/;
+const persistenceSettings = (value: NotificationPersistenceSettings = { seconds: 5, supported: true }) => ({
+  load: vi.fn().mockResolvedValue(value),
+  save: vi.fn().mockResolvedValue(undefined),
+});
+
+it("binds persistence adapter methods to class-based bridges", async () => {
+  class BrowserBridge {
+    value = 45;
+
+    async get_notification_persistence() {
+      return { seconds: this.value, supported: true };
+    }
+
+    async set_notification_persistence(value: { seconds: number | null }) {
+      this.value = value.seconds ?? 0;
+    }
+  }
+  const bridge = new BrowserBridge();
+  const adapter = notificationPersistenceSettings(bridge);
+
+  expect(await adapter?.load()).toEqual({ seconds: 45, supported: true });
+  await adapter?.save({ seconds: 30 });
+  expect(bridge.value).toBe(30);
+});
+
+it("saves sender-or-app-only previews as hidden previews with source visibility", async () => {
+  const value = props();
+  render(<NotificationSettings {...value} />);
+
+  fireEvent.change(screen.getByLabelText("Banner preview"), { target: { value: "source" } });
+
+  await waitFor(() => expect(value.onPreferences).toHaveBeenCalledWith({ ...preferences, preview: "hidden", showSource: true }));
+});
+
+it("keeps the confirmed source-only selection through transitions and rejected saves", async () => {
+  const sourcePreferences = { ...preferences, preview: "hidden" as const, showSource: true };
+  const value = { ...props(), preferences: sourcePreferences, onPreferences: vi.fn().mockRejectedValue(new Error("rejected")) };
+  render(<NotificationSettings {...value} />);
+
+  expect(screen.getByLabelText("Banner preview")).toHaveValue("source");
+  fireEvent.change(screen.getByLabelText("Banner preview"), { target: { value: "full" } });
+  await waitFor(() => expect(value.onPreferences).toHaveBeenCalledWith({ ...sourcePreferences, preview: "full", showSource: false }));
+  expect(screen.getByLabelText("Banner preview")).toHaveValue("source");
+
+  fireEvent.click(screen.getByRole("switch", { name: "SMS/MMS banners" }));
+  await waitFor(() => expect(value.onPreferences).toHaveBeenCalledWith({ ...sourcePreferences, messageBanners: false }));
+});
+
+it("maps source-only transitions to full and generic values", async () => {
+  const sourcePreferences = { ...preferences, preview: "hidden" as const, showSource: true };
+  const value = { ...props(), preferences: sourcePreferences };
+  render(<NotificationSettings {...value} />);
+
+  fireEvent.change(screen.getByLabelText("Banner preview"), { target: { value: "hidden" } });
+  await waitFor(() => expect(value.onPreferences).toHaveBeenCalledWith({ ...sourcePreferences, preview: "hidden", showSource: false }));
+});
+
+it("keeps the full selection authoritative and pending saves non-optimistic", async () => {
+  let resolve!: () => void;
+  const pending = new Promise<void>(done => { resolve = done; });
+  const value = { ...props(), preferences: { ...preferences, showSource: true }, onPreferences: vi.fn().mockReturnValue(pending) };
+  render(<NotificationSettings {...value} />);
+
+  expect(screen.getByLabelText("Banner preview")).toHaveValue("full");
+  fireEvent.change(screen.getByLabelText("Banner preview"), { target: { value: "source" } });
+  expect(screen.getByLabelText("Banner preview")).toHaveValue("full");
+  expect(screen.getByLabelText("Banner preview")).toBeDisabled();
+  resolve();
+});
 
 it("loads local notification sound and saves only after the user toggles it", async () => {
   const soundSettings = { load: vi.fn().mockResolvedValue(false), save: vi.fn().mockResolvedValue(undefined) };
@@ -323,4 +395,224 @@ it("hides a saved permission result with banner controls without changing prefer
   expect(input.onPreferences).not.toHaveBeenCalled();
   expect(input.onPermission).toHaveBeenCalledTimes(1);
   expect(input.onMute).not.toHaveBeenCalled();
+});
+
+it("does not expose banner duration without a supported persistence adapter", async () => {
+  const input = props();
+  const unsupported = persistenceSettings({ seconds: 5, supported: false });
+  const { rerender } = render(<NotificationSettings {...input} />);
+  expect(screen.queryByLabelText("Banner duration")).not.toBeInTheDocument();
+
+  rerender(<NotificationSettings {...input} persistenceSettings={unsupported} />);
+  await waitFor(() => expect(unsupported.load).toHaveBeenCalled());
+  await act(async () => {});
+  expect(screen.queryByLabelText("Banner duration")).not.toBeInTheDocument();
+});
+
+it.each([
+  ["5", { seconds: 5 }],
+  ["30", { seconds: 30 }],
+  ["60", { seconds: 60 }],
+  ["indefinite", { seconds: null }],
+] as const)("saves the selected banner duration", async (selection, expected) => {
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const control = await screen.findByLabelText("Banner duration");
+
+  fireEvent.change(control, { target: { value: selection } });
+
+  await waitFor(() => expect(settings.save).toHaveBeenCalledWith(expected));
+});
+
+it("falls back to the default duration when the bridge loads an invalid value", async () => {
+  const settings = persistenceSettings({ seconds: 0, supported: true });
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+
+  expect(await screen.findByLabelText("Banner duration")).toHaveValue("5");
+});
+
+it("shows a stored non-preset duration as an editable custom value", async () => {
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+
+  expect(await screen.findByLabelText("Banner duration")).toHaveValue("custom");
+  expect(screen.getByLabelText("Custom banner duration in seconds")).toHaveValue(45);
+});
+
+it("commits valid custom durations on Enter and blur", async () => {
+  const settings = persistenceSettings();
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const control = await screen.findByLabelText("Banner duration");
+  fireEvent.change(control, { target: { value: "custom" } });
+  const custom = screen.getByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "45" } });
+  fireEvent.keyDown(custom, { key: "Enter" });
+  await waitFor(() => expect(settings.save).toHaveBeenCalledWith({ seconds: 45 }));
+  fireEvent.change(custom, { target: { value: "46" } });
+  fireEvent.blur(custom);
+  await waitFor(() => expect(settings.save).toHaveBeenCalledWith({ seconds: 46 }));
+});
+
+it.each(["0", "3601", "1.5", ""])("rejects invalid custom duration %s without saving", async (duration) => {
+  const settings = persistenceSettings();
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  fireEvent.change(await screen.findByLabelText("Banner duration"), { target: { value: "custom" } });
+  const custom = screen.getByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: duration } });
+  fireEvent.keyDown(custom, { key: "Enter" });
+
+  expect(settings.save).not.toHaveBeenCalled();
+  expect(custom).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByRole("alert")).toHaveTextContent("Enter whole seconds from 1 to 3600.");
+});
+
+it("restores the confirmed custom duration on Escape and after a rejected save", async () => {
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  settings.save.mockRejectedValue(new Error("disk"));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "46" } });
+  fireEvent.keyDown(custom, { key: "Escape" });
+  expect(custom).toHaveValue(45);
+  fireEvent.change(custom, { target: { value: "46" } });
+  fireEvent.keyDown(custom, { key: "Enter" });
+  await screen.findByRole("alert");
+  expect(custom).toHaveValue(45);
+});
+
+it("hides banner duration and reports a failed persistence load", async () => {
+  const settings = persistenceSettings();
+  settings.load.mockRejectedValue(new Error("disk"));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+
+  expect(screen.queryByLabelText("Banner duration")).not.toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not load banner duration settings. Reopen Settings to try again.");
+});
+
+it("disables a loaded banner duration and defers its load while initially locked", async () => {
+  const settings = persistenceSettings();
+  const input = props();
+  const { rerender } = render(<NotificationSettings {...input} persistenceSettings={settings} />);
+  expect(await screen.findByLabelText("Banner duration")).toBeEnabled();
+
+  rerender(<NotificationSettings {...input} locked persistenceSettings={settings} />);
+  expect(screen.getByLabelText("Banner duration")).toBeDisabled();
+  expect(settings.load).toHaveBeenCalledTimes(1);
+  rerender(<NotificationSettings {...input} persistenceSettings={settings} />);
+  expect(screen.getByLabelText("Banner duration")).toBeEnabled();
+  expect(settings.load).toHaveBeenCalledTimes(1);
+
+  const deferred = persistenceSettings();
+  rerender(<NotificationSettings {...input} locked persistenceSettings={deferred} />);
+
+  expect(deferred.load).not.toHaveBeenCalled();
+});
+
+it("keeps Custom read-only and does not save while locked", async () => {
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  const input = props();
+  const { rerender } = render(<NotificationSettings {...input} persistenceSettings={settings} />);
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  rerender(<NotificationSettings {...input} locked persistenceSettings={settings} />);
+  expect(custom).toHaveAttribute("readonly");
+  fireEvent.keyDown(custom, { key: "Enter" });
+  expect(settings.save).not.toHaveBeenCalled();
+});
+
+it("keeps other notification controls available while a custom duration is saving", async () => {
+  let resolve!: () => void;
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  settings.save.mockImplementation(() => new Promise<void>(done => { resolve = done; }));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "46" } });
+  fireEvent.blur(custom);
+  expect(screen.getByRole("button", { name: CHECK })).toBeEnabled();
+  expect(screen.getByLabelText("Banner preview")).toBeEnabled();
+  await act(async () => resolve());
+});
+
+it("saves a Custom prefill from Indefinitely and restores Indefinitely when it fails", async () => {
+  const settings = persistenceSettings({ seconds: null, supported: true });
+  settings.save.mockRejectedValue(new Error("disk"));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const control = await screen.findByLabelText("Banner duration");
+
+  fireEvent.change(control, { target: { value: "custom" } });
+  await waitFor(() => expect(settings.save).toHaveBeenCalledWith({ seconds: 5 }));
+  expect(control).toHaveValue("indefinite");
+});
+
+it("restores the confirmed preset after a rejected preset save", async () => {
+  const settings = persistenceSettings({ seconds: 30, supported: true });
+  settings.save.mockRejectedValue(new Error("disk"));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const control = await screen.findByLabelText("Banner duration");
+
+  fireEvent.change(control, { target: { value: "60" } });
+  await screen.findByRole("alert");
+  expect(control).toHaveValue("30");
+});
+
+it("keeps an invalid custom draft marked invalid after blur", async () => {
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "0" } });
+  fireEvent.blur(custom);
+  expect(custom).toHaveAttribute("aria-invalid", "true");
+  expect(settings.save).not.toHaveBeenCalled();
+});
+
+it("loads banner duration inside StrictMode", async () => {
+  const settings = persistenceSettings();
+  render(<StrictMode><NotificationSettings {...props()} persistenceSettings={settings} /></StrictMode>);
+
+  expect(await screen.findByLabelText("Banner duration")).toBeEnabled();
+});
+
+it("loads banner duration after a lock interrupts its first load", async () => {
+  let resolve!: (value: NotificationPersistenceSettings) => void;
+  const settings = persistenceSettings();
+  settings.load.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+  const input = props();
+  const { rerender } = render(<NotificationSettings {...input} persistenceSettings={settings} />);
+
+  rerender(<NotificationSettings {...input} locked persistenceSettings={settings} />);
+  await act(async () => resolve({ seconds: 5, supported: true }));
+  rerender(<NotificationSettings {...input} persistenceSettings={settings} />);
+  expect(await screen.findByLabelText("Banner duration")).toBeEnabled();
+});
+
+it("keeps focus on the duration select after a preset save", async () => {
+  let resolve!: () => void;
+  const settings = persistenceSettings({ seconds: 30, supported: true });
+  settings.save.mockImplementation(() => new Promise<void>(done => { resolve = done; }));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const control = await screen.findByLabelText("Banner duration");
+
+  control.focus();
+  fireEvent.change(control, { target: { value: "60" } });
+  expect(control).toBeEnabled();
+  await act(async () => resolve());
+  expect(control).toHaveFocus();
+});
+
+it("makes the Custom input read-only while its save is pending", async () => {
+  let resolve!: () => void;
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  settings.save.mockImplementation(() => new Promise<void>(done => { resolve = done; }));
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "46" } });
+  fireEvent.blur(custom);
+  expect(custom).toHaveAttribute("readonly");
+  await act(async () => resolve());
 });

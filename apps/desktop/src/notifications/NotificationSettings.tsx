@@ -1,6 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { DEFAULT_NOTIFICATION_PERSISTENCE, MAX_NOTIFICATION_PERSISTENCE_SECONDS, notificationPersistence, type NotificationPersistence, type NotificationPersistenceSettings } from "@peppy/desktop-ui/bridge-contracts";
 import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "../bridge/bridge";
 import { notificationAppName, notificationTuple, notificationSourceName } from "./Notifications";
+
+const PERSISTENCE_PRESETS = [
+  { value: 5, label: "5 seconds" },
+  { value: 30, label: "30 seconds" },
+  { value: 60, label: "1 minute" },
+] as const;
+const DEFAULT_PERSISTENCE_SECONDS = DEFAULT_NOTIFICATION_PERSISTENCE.seconds ?? 5;
 
 function permissionMessage(check: NotificationCheck): string {
   if (check.status === "denied") return "Notifications are turned off for Peppy in your system settings, so no test was sent.";
@@ -15,7 +23,7 @@ function permissionMessage(check: NotificationCheck): string {
     : "This system doesn't report Peppy's notification permission, and the test notification could not be sent.";
 }
 
-export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, soundSettings, onPreferences, onMute, onPermission, onOpenSettings }: {
+export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, soundSettings, persistenceSettings, onPreferences, onMute, onPermission, onOpenSettings }: {
   notifications: MirroredNotification[];
   filters: AppFilter[];
   sources: { id: string; name: string }[];
@@ -23,6 +31,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   headsSupported: boolean;
   locked: boolean;
   soundSettings?: { load(): Promise<boolean>; save(enabled: boolean): Promise<void> };
+  persistenceSettings?: { load(): Promise<NotificationPersistenceSettings>; save(value: NotificationPersistence): Promise<void> };
   onPreferences(value: NotificationPreferences): Promise<void>;
   onMute(filter: AppFilter): Promise<void>;
   onPermission(): Promise<NotificationCheck | void>;
@@ -33,6 +42,15 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const [error, setError] = useState("");
   const [check, setCheck] = useState<NotificationCheck>();
   const [soundEnabled, setSoundEnabled] = useState<boolean>();
+  const [persistence, setPersistence] = useState<NotificationPersistence>();
+  const [persistenceSupported, setPersistenceSupported] = useState<boolean>();
+  const [persistencePending, setPersistencePending] = useState(false);
+  const [customMode, setCustomMode] = useState(false);
+  const [customDraft, setCustomDraft] = useState("");
+  const [customInvalid, setCustomInvalid] = useState(false);
+  const [persistenceError, setPersistenceError] = useState("");
+  const lastFinitePersistence = useRef(DEFAULT_PERSISTENCE_SECONDS);
+  const persistenceSavePending = useRef(false);
   const loadSound = soundSettings?.load;
   useEffect(() => {
     let current = true;
@@ -46,6 +64,36 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     }
     return () => { current = false; };
   }, [loadSound, locked]);
+  const loadPersistence = persistenceSettings?.load;
+  const persistenceLoadAdapter = useRef<typeof loadPersistence>(undefined);
+  useEffect(() => {
+    let current = true;
+    const adapterChanged = persistenceLoadAdapter.current !== loadPersistence;
+    if (adapterChanged) {
+      persistenceLoadAdapter.current = loadPersistence;
+      setPersistence(undefined);
+      setPersistenceSupported(undefined);
+      setCustomMode(false);
+      setCustomDraft("");
+      setCustomInvalid(false);
+    }
+    if (!loadPersistence || locked || (!adapterChanged && persistenceSupported !== undefined)) return () => { current = false; };
+    void loadPersistence().then(value => {
+      if (!current) return;
+      setPersistenceSupported(value.supported);
+      if (!value.supported) return;
+      const loaded = notificationPersistence({ seconds: value.seconds }) ?? DEFAULT_NOTIFICATION_PERSISTENCE;
+      setPersistence(loaded);
+      if (loaded.seconds !== null && !PERSISTENCE_PRESETS.some(preset => preset.value === loaded.seconds)) setCustomMode(true);
+      if (loaded.seconds !== null) {
+        lastFinitePersistence.current = loaded.seconds;
+        setCustomDraft(String(loaded.seconds));
+      }
+    }).catch(() => {
+      if (current) setError("Could not load banner duration settings. Reopen Settings to try again.");
+    });
+    return () => { current = false; };
+  }, [loadPersistence, locked, persistenceSupported]);
   // Observed app defaults never override authoritative synchronized mute choices.
   const apps = [...new Map([
     ...notifications.map(n => ({ sourceDeviceId: n.target.sourceDeviceId, packageName: n.packageName, appName: n.appName, muted: false })),
@@ -54,12 +102,17 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const sourceIds = apps.map(app => app.sourceDeviceId);
   const hasDesktopBanners = preferences.messageBanners || preferences.mirroredBanners;
   const muteWithHeads = preferences.muteWithHeads ?? true;
+  const previewMode = preferences.preview === "full" ? "full" : preferences.showSource ? "source" : "hidden";
   const lockedNoteId = locked ? "notification-banner-locked-note" : undefined;
   const headsDescribedBy = locked ? "notification-mute-with-heads-hint notification-banner-locked-note" : "notification-mute-with-heads-hint";
+  const clearErrors = () => {
+    setError("");
+    setPersistenceError("");
+  };
   const save = async (action: () => Promise<void>) => {
     if (busy) return;
     setBusy(true);
-    setError("");
+    clearErrors();
     try { await action(); }
     catch { setError("Could not save notification settings. Try again."); }
     finally { setBusy(false); }
@@ -73,7 +126,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     if (busy) return;
     setBusy(true);
     setChecking(true);
-    setError("");
+    clearErrors();
     setCheck(undefined);
     try {
       const result = await onPermission();
@@ -88,11 +141,66 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const openSettings = async () => {
     if (busy) return;
     setBusy(true);
-    setError("");
+    clearErrors();
     try { await onOpenSettings(); }
     catch { setError("Could not open notification settings."); }
     finally { setBusy(false); }
   };
+  const savePersistence = async (value: NotificationPersistence, onFailure: () => void) => {
+    if (locked || persistenceSavePending.current || !persistenceSettings) return;
+    persistenceSavePending.current = true;
+    setPersistencePending(true);
+    setPersistenceError("");
+    try {
+      await persistenceSettings.save(value);
+      setPersistence(value);
+      if (value.seconds !== null) lastFinitePersistence.current = value.seconds;
+    } catch {
+      setPersistenceError("Could not save notification settings. Try again.");
+      onFailure();
+    } finally {
+      persistenceSavePending.current = false;
+      setPersistencePending(false);
+    }
+  };
+  const persistenceSelection = customMode ? "custom" : persistence?.seconds === null ? "indefinite" : String(persistence?.seconds);
+  const commitCustomPersistence = () => {
+    if (locked || persistenceSavePending.current || !persistence || persistence.seconds === null) return;
+    const value = /^\d+$/.test(customDraft) ? notificationPersistence({ seconds: Number(customDraft) }) : undefined;
+    if (!value || value.seconds === null) {
+      setCustomInvalid(true);
+      setPersistenceError("Enter whole seconds from 1 to 3600.");
+      return;
+    }
+    setCustomInvalid(false);
+    setPersistenceError("");
+    if (value.seconds === persistence.seconds) return;
+    void savePersistence(value, () => {
+      setCustomDraft(String(persistence.seconds));
+      setCustomInvalid(false);
+    });
+  };
+  const selectPersistence = (selection: string) => {
+    if (locked || persistenceSavePending.current || !persistence) return;
+    setCustomInvalid(false);
+    setPersistenceError("");
+    if (selection === "custom") {
+      setCustomMode(true);
+      const seconds = persistence.seconds === null ? lastFinitePersistence.current : persistence.seconds;
+      setCustomDraft(String(seconds));
+      if (persistence.seconds === null) void savePersistence({ seconds }, () => {
+        setCustomMode(false);
+        setCustomDraft("");
+      });
+      return;
+    }
+    setCustomMode(false);
+    const value = selection === "indefinite" ? { seconds: null } : { seconds: Number(selection) };
+    void savePersistence(value, () => undefined);
+  };
+  useEffect(() => {
+    if (!hasDesktopBanners) setPersistenceError("");
+  }, [hasDesktopBanners]);
   return (
     <section id="notification-settings" className="settings-card" data-settings-section="notifications" aria-busy={busy}>
       <h2>Notification mirroring</h2>
@@ -146,14 +254,49 @@ export function NotificationSettings({ notifications, filters, sources, preferen
           </span>
         </div>}
         {soundSettings && <p id="notification-sounds-hint" className="settings-note">Play the system notification sound on this computer. System volume and Focus or Do Not Disturb still apply.</p>}
-        <div className="settings-control-row">
+        <div id="notification-preview-row" className="settings-control-row">
           <label htmlFor="notification-preview">Banner preview</label>
-          <select id="notification-preview" value={preferences.preview} disabled={busy || locked} aria-describedby={lockedNoteId}
-            onChange={event => savePreferences({ ...preferences, preview: event.target.value as NotificationPreferences["preview"] })}>
+          <select id="notification-preview" value={previewMode} disabled={busy || locked} aria-describedby={lockedNoteId}
+            onChange={event => {
+              const selection = event.target.value;
+              savePreferences({ ...preferences, preview: selection === "full" ? "full" : "hidden", showSource: selection === "source" });
+            }}>
             <option value="full">Full content</option>
+            <option value="source">Sender or app only</option>
             <option value="hidden">Hidden — generic banner only</option>
           </select>
         </div>
+        {persistenceSettings && persistenceSupported && persistence && <div id="notification-persistence-row" className="settings-control-row" data-persistence-mode={persistenceSelection}>
+          <label htmlFor="notification-persistence">Banner duration</label>
+          <span id="notification-persistence-controls">
+            <select id="notification-persistence" value={persistenceSelection} disabled={locked}
+              onChange={event => selectPersistence(event.target.value)}>
+              {PERSISTENCE_PRESETS.map(preset => <option key={preset.value} value={preset.value}>{preset.label}</option>)}
+              <option value="custom">Custom</option>
+              <option value="indefinite">Indefinitely</option>
+            </select>
+            {customMode && <span id="notification-persistence-custom-field">
+              <input id="notification-persistence-custom" type="number" min={1} max={MAX_NOTIFICATION_PERSISTENCE_SECONDS} step={1} inputMode="numeric" aria-label="Custom banner duration in seconds"
+                value={customDraft} readOnly={persistencePending || locked} aria-invalid={customInvalid || undefined}
+                onChange={event => {
+                  const draft = event.target.value;
+                  setCustomDraft(draft);
+                  const valid = /^\d+$/.test(draft) && notificationPersistence({ seconds: Number(draft) });
+                  if (valid) { setCustomInvalid(false); setPersistenceError(""); }
+                }}
+                onBlur={commitCustomPersistence}
+                onKeyDown={event => {
+                  if (event.key === "Enter") { event.preventDefault(); commitCustomPersistence(); }
+                  if (event.key === "Escape" && persistence?.seconds !== null) {
+                    setCustomDraft(String(persistence.seconds));
+                    setCustomInvalid(false);
+                    setPersistenceError("");
+                  }
+                }} />
+              <span aria-hidden>seconds</span>
+            </span>}
+          </span>
+        </div>}
         <button id="notification-check" className="secondary-button" disabled={busy} onClick={() => void checkPermission()}>
           Send test notification
         </button>
@@ -162,7 +305,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
           Open notification settings
         </button>}
       </>}
-      {error && <p role="alert">{error}</p>}
+      {(persistenceError || error) && <p role="alert">{persistenceError || error}</p>}
       {apps.length ? (
         <details id="notification-app-rules-disclosure" className="settings-disclosure">
           <summary>Per-app mirroring</summary>
