@@ -2477,3 +2477,130 @@ fn role_identifiers_cannot_escape_dynamic_grants() {
     assert!(rls::role_identifier("peppy_runtime").is_ok());
     assert!(rls::role_identifier("peppy_runtime; GRANT ALL").is_err());
 }
+
+#[tokio::test]
+async fn membership_exchange_uses_transaction_local_scope_with_runtime_role() {
+    use futures_util::{SinkExt, StreamExt};
+    use peppy_protocol::{MEMBERSHIP_PROTOCOL_VERSION, MembershipChallengeV1, MembershipControlV1};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{Message, client::IntoClientRequest},
+    };
+
+    async fn text(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Text(value) => return value.to_string(),
+                Message::Ping(value) => socket.send(Message::Pong(value)).await.unwrap(),
+                Message::Pong(_) => {}
+                frame => panic!("expected text frame, got {frame:?}"),
+            }
+        }
+    }
+
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let profile = KeyProfile::new(vault, 1).unwrap();
+    let owner = create_owner(
+        &fixture.migration,
+        serde_json::to_value(&profile).unwrap(),
+        vec![9_u8; 48],
+        profile.fingerprint().unwrap(),
+        1,
+    )
+    .await
+    .unwrap();
+    let foreign_vault = Uuid::new_v4();
+    let foreign_profile = KeyProfile::new(foreign_vault, 1).unwrap();
+    let foreign = create_owner(
+        &fixture.migration,
+        serde_json::to_value(&foreign_profile).unwrap(),
+        vec![8_u8; 48],
+        foreign_profile.fingerprint().unwrap(),
+        1,
+    )
+    .await
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = fixture.app().await;
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut request = format!("ws://{address}/v1/live")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", owner.device_token).parse().unwrap(),
+    );
+    request.headers_mut().insert(
+        "x-peppy-live-capabilities",
+        "membership-version-v1".parse().unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let hello: Value = serde_json::from_str(&text(&mut socket).await).unwrap();
+    assert_eq!(hello["type"], "hello");
+    let MembershipControlV1::Bootstrap(bootstrap) =
+        MembershipControlV1::parse(text(&mut socket).await.as_bytes()).unwrap()
+    else {
+        panic!("runtime role did not return membership bootstrap");
+    };
+    assert!(
+        bootstrap
+            .roster
+            .iter()
+            .any(|device| device.device_id.0 == owner.device_id)
+    );
+    assert!(
+        !bootstrap
+            .roster
+            .iter()
+            .any(|device| device.device_id.0 == foreign.device_id)
+    );
+
+    let challenge = MembershipControlV1::Challenge(MembershipChallengeV1 {
+        r#type: "membership_challenge".into(),
+        version: MEMBERSHIP_PROTOCOL_VERSION,
+        connection_id: bootstrap.connection_id,
+        challenge_id: URL_SAFE_NO_PAD.encode([77_u8; 16]),
+    });
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&challenge).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let MembershipControlV1::Response(response) =
+        MembershipControlV1::parse(text(&mut socket).await.as_bytes()).unwrap()
+    else {
+        panic!("runtime role did not return membership response");
+    };
+    assert!(
+        response
+            .roster
+            .iter()
+            .any(|device| device.device_id.0 == owner.device_id)
+    );
+    assert!(
+        !response
+            .roster
+            .iter()
+            .any(|device| device.device_id.0 == foreign.device_id)
+    );
+
+    task.abort();
+    let _ = task.await;
+    fixture.cleanup().await;
+}

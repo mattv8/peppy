@@ -242,7 +242,11 @@ use peppy_hosted_api::{
         InstanceSession, VaultMaterial,
     },
 };
-use peppy_protocol::{Envelope, EnvelopePurpose, LiveFrameV2, LiveHelloV2};
+use peppy_protocol::{
+    Envelope, EnvelopePurpose, LiveFrameV2, LiveHelloV2, MEMBERSHIP_PROTOCOL_VERSION,
+    MembershipBootstrapV1, MembershipControlV1, MembershipDeviceV1, MembershipRoleV1,
+    MembershipVersionV1,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -300,13 +304,17 @@ impl LiveTicketTestGate {
     }
 
     async fn enter(&self) {
+        self.enter_after(0).await;
+    }
+
+    async fn enter_after(&self, skip_calls: usize) {
         let call = self
             .inner
             .entered
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
         self.inner.entered_notify.notify_waiters();
-        if call <= self.inner.block_calls {
+        if call > skip_calls && call <= skip_calls + self.inner.block_calls {
             self.inner
                 .releases
                 .acquire()
@@ -425,6 +433,7 @@ struct LiveTicketTestHooks {
     before_commit: Option<LiveTicketTestGate>,
     after_commit: Option<LiveTicketTestGate>,
     after_validation: Option<LiveTicketTestGate>,
+    membership_after_version: Option<LiveTicketTestGate>,
     sampled_at: Arc<std::sync::Mutex<Vec<String>>>,
     credential_query_started: Arc<std::sync::atomic::AtomicUsize>,
     session_query_started: Arc<std::sync::atomic::AtomicUsize>,
@@ -3733,6 +3742,7 @@ async fn live_websocket(
             });
         }
     };
+    let membership_capable = membership_capability(&headers, &mode)?;
     let (principal, ticket, protocol) = match mode {
         crate::live_ticket_upgrade::UpgradeMode::Bearer => (
             authenticated(&state, &headers, Operation::Sync).await?,
@@ -3838,10 +3848,206 @@ async fn live_websocket(
                     lease,
                     shutdown,
                     ticket,
+                    membership_capable,
                 },
             )
         })
         .into_response())
+}
+
+const MEMBERSHIP_CAPABILITY_HEADER: &str = "x-peppy-live-capabilities";
+const MEMBERSHIP_CAPABILITY: &str = "membership-version-v1";
+
+fn membership_capability(
+    headers: &HeaderMap,
+    mode: &crate::live_ticket_upgrade::UpgradeMode,
+) -> ApiResult<bool> {
+    let values: Vec<_> = headers
+        .get_all(MEMBERSHIP_CAPABILITY_HEADER)
+        .iter()
+        .collect();
+    if values.is_empty() {
+        return Ok(false);
+    }
+    if !matches!(mode, crate::live_ticket_upgrade::UpgradeMode::Bearer)
+        || values.len() != 1
+        || values[0].to_str().ok() != Some(MEMBERSHIP_CAPABILITY)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "live_membership_capability_invalid",
+        ));
+    }
+    Ok(true)
+}
+
+#[derive(Clone, Copy)]
+enum MembershipSnapshotFailure {
+    PolicyDenied,
+    InactiveCredential,
+    Database(&'static str),
+    InvalidSnapshot,
+    Deadline,
+    Cancelled,
+    Unavailable,
+}
+
+impl MembershipSnapshotFailure {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::PolicyDenied => "policy_denied",
+            Self::InactiveCredential => "inactive_credential",
+            Self::Database(kind) => kind,
+            Self::InvalidSnapshot => "invalid_snapshot",
+            Self::Deadline => "deadline",
+            Self::Cancelled => "cancelled",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+fn membership_database_failure(error: &sqlx::Error) -> MembershipSnapshotFailure {
+    MembershipSnapshotFailure::Database(database_error_kind(error))
+}
+
+fn record_membership_snapshot_failure(failure: MembershipSnapshotFailure) {
+    tracing::warn!(
+        operation = "live_membership_snapshot",
+        kind = failure.kind(),
+        "live membership snapshot failed"
+    );
+}
+
+async fn membership_snapshot(
+    state: &ApiState,
+    principal: &Principal,
+    connection_id: &str,
+) -> Result<MembershipBootstrapV1, MembershipSnapshotFailure> {
+    authorize(state, principal, Operation::Sync)
+        .await
+        .map_err(|_| MembershipSnapshotFailure::PolicyDenied)?;
+    let mut transaction = scope::begin_read_only_repeatable(&state.db, principal.vault)
+        .await
+        .map_err(|error| membership_database_failure(&error))?;
+    let active: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM devices d JOIN device_credentials c ON c.vault_id=d.vault_id AND c.device_id=d.device_id WHERE d.vault_id=$1 AND d.device_id=$2 AND c.token_digest=$3 AND d.revoked_at IS NULL AND c.revoked_at IS NULL",
+    )
+    .bind(principal.vault)
+    .bind(principal.device)
+    .bind(&principal.token_digest)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| membership_database_failure(&error))?;
+    active.ok_or(MembershipSnapshotFailure::InactiveCredential)?;
+    let version: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(principal.vault)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| membership_database_failure(&error))?
+            .ok_or(MembershipSnapshotFailure::InvalidSnapshot)?;
+    #[cfg(test)]
+    if let Some(gate) = &state.live_ticket_test_hooks.membership_after_version {
+        gate.enter_after(1).await;
+    }
+    let rows = sqlx::query("SELECT device_id, revoked_at IS NOT NULL AS revoked, key_epoch::bigint AS key_epoch, role::text AS role FROM devices WHERE vault_id=$1 ORDER BY device_id")
+        .bind(principal.vault)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| membership_database_failure(&error))?;
+    let mut roster = Vec::with_capacity(rows.len());
+    for row in rows {
+        let role = match row
+            .try_get::<String, _>("role")
+            .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?
+            .as_str()
+        {
+            "owner" => MembershipRoleV1::Owner,
+            "gateway" => MembershipRoleV1::Gateway,
+            "device" => MembershipRoleV1::Device,
+            _ => return Err(MembershipSnapshotFailure::InvalidSnapshot),
+        };
+        let key_epoch = u32::try_from(
+            row.try_get::<i64, _>("key_epoch")
+                .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?,
+        )
+        .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?;
+        if key_epoch == 0 {
+            return Err(MembershipSnapshotFailure::InvalidSnapshot);
+        }
+        roster.push(MembershipDeviceV1 {
+            device_id: DeviceId(
+                row.try_get("device_id")
+                    .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?,
+            ),
+            revoked: row
+                .try_get("revoked")
+                .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?,
+            key_epoch,
+            role,
+        });
+    }
+    if roster.len() > peppy_protocol::MAX_MEMBERSHIP_ROSTER_ENTRIES {
+        return Err(MembershipSnapshotFailure::InvalidSnapshot);
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| membership_database_failure(&error))?;
+    Ok(MembershipBootstrapV1 {
+        r#type: "membership_bootstrap".into(),
+        version: MEMBERSHIP_PROTOCOL_VERSION,
+        connection_id: connection_id.into(),
+        membership_version: MembershipVersionV1::parse(&version.to_string())
+            .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?,
+        roster,
+    })
+}
+
+async fn membership_snapshot_wait(
+    state: &ApiState,
+    principal: &Principal,
+    connection_id: &str,
+    deadline: OperationDeadline,
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+    shutdown: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) -> Option<MembershipBootstrapV1> {
+    let result = if *cancellation.borrow_and_update()
+        || shutdown
+            .as_mut()
+            .is_some_and(|receiver| *receiver.borrow_and_update())
+    {
+        Err(MembershipSnapshotFailure::Cancelled)
+    } else if !*readiness.borrow_and_update() {
+        Err(MembershipSnapshotFailure::Unavailable)
+    } else if let Some(remaining) = deadline.remaining() {
+        tokio::select! {
+            biased;
+            _ = cancellation.changed() => Err(MembershipSnapshotFailure::Cancelled),
+            _ = wait_for_shutdown(shutdown) => Err(MembershipSnapshotFailure::Cancelled),
+            _ = readiness.changed() => Err(MembershipSnapshotFailure::Unavailable),
+            result = tokio::time::timeout(remaining, membership_snapshot(state, principal, connection_id)) => {
+                result.unwrap_or(Err(MembershipSnapshotFailure::Deadline))
+            },
+        }
+    } else {
+        Err(MembershipSnapshotFailure::Deadline)
+    };
+    match result {
+        Ok(snapshot) => Some(snapshot),
+        Err(failure) => {
+            record_membership_snapshot_failure(failure);
+            None
+        }
+    }
+}
+
+fn membership_control_shaped(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| value.get("type")?.as_str().map(str::to_owned))
+        .is_some_and(|kind| kind.starts_with("membership_"))
 }
 
 async fn live_session(
@@ -3857,6 +4063,7 @@ async fn live_session(
         lease,
         mut shutdown,
         ticket,
+        membership_capable,
     } = lifetime;
     let operation_deadline = ticket.map(|_| live_ticket_operation_deadline(&state));
     let registration = match ticket {
@@ -4009,6 +4216,7 @@ async fn live_session(
             cancellation: registration.cancellation,
             readiness,
             shutdown,
+            membership_capable,
         },
     )
     .await;
@@ -4040,6 +4248,7 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
         mut cancellation,
         mut readiness,
         mut shutdown,
+        membership_capable,
     } = session;
     let hello = match serde_json::to_string(&LiveHelloV2::new()) {
         Ok(hello) => hello,
@@ -4058,6 +4267,42 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
         LiveWait::Complete
     ) {
         return;
+    }
+    let membership_connection_id =
+        membership_capable.then(|| URL_SAFE_NO_PAD.encode(Uuid::new_v4().as_bytes()));
+    if let Some(connection_id) = membership_connection_id.as_deref() {
+        let membership_deadline = live_ticket_operation_deadline(&state);
+        let Some(bootstrap) = membership_snapshot_wait(
+            &state,
+            &principal,
+            connection_id,
+            membership_deadline,
+            &mut cancellation,
+            &mut readiness,
+            &mut shutdown,
+        )
+        .await
+        else {
+            return live_close(&mut socket, 1011, "live_unavailable").await;
+        };
+        let Ok(bootstrap) = serde_json::to_string(&MembershipControlV1::Bootstrap(bootstrap))
+        else {
+            return live_close(&mut socket, 1011, "live_unavailable").await;
+        };
+        if !matches!(
+            live_send(
+                &mut socket,
+                Message::Text(bootstrap.into()),
+                Some(membership_deadline),
+                &mut cancellation,
+                &mut readiness,
+                &mut shutdown
+            )
+            .await,
+            LiveWait::Complete
+        ) {
+            return;
+        }
     }
     let recheck_interval = live_recheck_interval(&state);
     let mut recheck = tokio::time::interval_at(
@@ -4122,6 +4367,45 @@ async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
                 }
                 Some(Ok(Message::Binary(_))) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
                 Some(Ok(Message::Text(text))) => {
+                    if let Some(connection_id) = membership_connection_id.as_deref()
+                        && membership_control_shaped(&text)
+                    {
+                        match MembershipControlV1::parse(text.as_bytes()) {
+                            Ok(MembershipControlV1::Challenge(challenge)) if challenge.connection_id == connection_id => {
+                                let allowed = state.live_rate_limiter.lock().expect("live rate limiter lock poisoned")
+                                    .allow(DeviceId(principal.device), peer);
+                                if !allowed {
+                                    return live_close(&mut socket, 1008, "live_rate_limited").await;
+                                }
+                                let membership_deadline = live_ticket_operation_deadline(&state);
+                                let Some(response) = membership_snapshot_wait(
+                                    &state,
+                                    &principal,
+                                    connection_id,
+                                    membership_deadline,
+                                    &mut cancellation,
+                                    &mut readiness,
+                                    &mut shutdown,
+                                ).await else {
+                                    return live_close(&mut socket, 1011, "live_unavailable").await;
+                                };
+                                let response = MembershipControlV1::Response(peppy_protocol::MembershipResponseV1 {
+                                    r#type: "membership_response".into(),
+                                    version: MEMBERSHIP_PROTOCOL_VERSION,
+                                    connection_id: connection_id.into(),
+                                    challenge_id: challenge.challenge_id,
+                                    membership_version: response.membership_version,
+                                    roster: response.roster,
+                                });
+                                let Ok(response) = serde_json::to_string(&response) else {
+                                    return live_close(&mut socket, 1011, "live_unavailable").await;
+                                };
+                                if !matches!(live_send(&mut socket, Message::Text(response.into()), Some(membership_deadline), &mut cancellation, &mut readiness, &mut shutdown).await, LiveWait::Complete) { return; }
+                                continue;
+                            }
+                            Ok(_) | Err(_) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
+                        }
+                    }
                     let Ok(frame) = serde_json::from_str::<LiveFrameV2>(&text) else {
                         return live_close(&mut socket, 1008, "invalid_live_frame").await;
                     };
@@ -4281,12 +4565,14 @@ struct LiveSession {
     cancellation: tokio::sync::watch::Receiver<bool>,
     readiness: tokio::sync::watch::Receiver<bool>,
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    membership_capable: bool,
 }
 
 struct LiveSessionLifetime {
     lease: Option<crate::serving::ConnectionLease>,
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
     ticket: Option<crate::live::LiveTicketIdentity>,
+    membership_capable: bool,
 }
 
 fn live_now_ms() -> u64 {

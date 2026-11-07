@@ -389,6 +389,7 @@ impl DelayedCommitProxy {
 
 mod backup_restore_tests;
 mod http_budget_tests;
+mod membership_challenge_tests;
 mod replica_tests;
 
 struct LiveTestServer {
