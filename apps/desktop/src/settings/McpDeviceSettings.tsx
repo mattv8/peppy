@@ -313,7 +313,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
     );
   }
 
-  const custodyName = status.hosted ? "Peppy" : "this server";
+  const custodyName = status.hosted ? "Peppy" : "This server";
   const matchedDevice = device ? roster.devices.find(candidate => candidate.id === device.deviceId) : undefined;
   const unavailableReason = !status.available
     ? "MCP is not configured on this server."

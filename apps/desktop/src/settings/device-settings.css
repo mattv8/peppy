@@ -31,6 +31,9 @@
 #mcp-device-details [data-mcp-grant-meta] > div, #mcp-authorization-consent #mcp-authorization-identity > div { display: grid; gap: 2px; }
 #mcp-device-details [data-mcp-grant-scopes] { margin: 0; padding-left: 16px; }
 #mcp-device-details [data-mcp-grant-meta] dd, #mcp-authorization-consent #mcp-authorization-identity dd { margin: 0; overflow-wrap: anywhere; }
+#mcp-device-details [data-mcp-grant-scopes] { list-style: none; margin: 0; padding: 0; }
+#mcp-authorization-body { display: grid; gap: 12px; }
+#mcp-authorization-confirm-prompt { margin-top: 4px; }
 #mcp-device-details [data-mcp-grant-confirm] { flex-basis: 100%; }
 #mcp-device-details [data-mcp-grant-confirm] p { flex-basis: 100%; }
 #mcp-authorization-consent [data-mcp-redirect-local] { margin-left: 4px; padding: 2px 6px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-pill); color: var(--peppy-warning-text); font-size: 12px; }
