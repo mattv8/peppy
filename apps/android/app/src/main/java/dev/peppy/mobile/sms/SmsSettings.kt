@@ -1,19 +1,16 @@
 package dev.peppy.mobile.sms
 
 import android.content.Context
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.R
 import dev.peppy.mobile.Section
-import dev.peppy.mobile.StatusRow
+import dev.peppy.mobile.ui.DetailsStatusRow as StatusRow
 
 internal enum class SmsHistoryState {
     WAITING_FOR_PERMISSION, SYNC_OFF, WAITING_FOR_VAULT, WAITING, READING, PAUSED, CAPTURED, UNAVAILABLE, PENDING,
@@ -26,6 +23,22 @@ internal data class SmsHistoryCoreStatus(
     val paused: Boolean,
     val providerError: Boolean,
     val hasPending: Boolean,
+)
+
+internal data class SmsHistoryPresentation(
+    val state: SmsHistoryState,
+    val showPermission: Boolean,
+    val showRepair: Boolean,
+)
+
+internal fun smsHistoryPresentation(
+    smsSyncOn: Boolean,
+    historyState: SmsHistoryState,
+    readGranted: Boolean,
+): SmsHistoryPresentation = SmsHistoryPresentation(
+    state = if (smsSyncOn) historyState else SmsHistoryState.SYNC_OFF,
+    showPermission = smsSyncOn,
+    showRepair = smsSyncOn && !readGranted,
 )
 
 internal fun smsHistoryState(status: SmsHistoryCoreStatus): SmsHistoryState = when {
@@ -53,30 +66,37 @@ internal fun smsHistoryLabel(state: SmsHistoryState): Int = when (state) {
 internal fun SmsSettings(
     context: Context,
     historyState: SmsHistoryState,
+    smsSyncOn: Boolean = true,
+    onRepairAccess: (() -> Unit)? = null,
 ) {
     val readGranted = smsReadGranted(context)
-    Section("sms-history-section", stringResource(R.string.peppy_sms_history_title)) {
-        Text(
-            stringResource(R.string.peppy_sms_history_description),
-            Modifier.testTag("sms-history-disclosure"),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        StatusRow(
+    val presentation = smsHistoryPresentation(smsSyncOn, historyState, readGranted)
+    Section(
+        "sms-history-section",
+        stringResource(R.string.peppy_sms_history_title),
+        helpBody = stringResource(R.string.peppy_sms_history_description) + "\n\n" +
+            stringResource(R.string.peppy_sms_history_captured_footer),
+        headerAction = if (presentation.showRepair && onRepairAccess != null) {
+            { TextButton(onClick = onRepairAccess, modifier = Modifier.testTag("sms-history-allow")) { Text(stringResource(R.string.peppy_toggle_android_allow)) } }
+        } else null,
+    ) {
+        if (presentation.showPermission) StatusRow(
             "sms-read-permission-status",
             stringResource(R.string.peppy_sms_history_permission_label),
             stringResource(if (readGranted) R.string.peppy_sms_history_allowed else R.string.peppy_sms_history_not_allowed),
         )
-        StatusRow("sms-history-status", stringResource(R.string.peppy_sms_history_status_label), stringResource(smsHistoryLabel(historyState)))
-        Column(Modifier.fillMaxWidth().testTag("sms-history-explanation"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(stringResource(R.string.peppy_sms_history_captured_footer), style = MaterialTheme.typography.bodySmall)
-            if (historyState == SmsHistoryState.PAUSED) Text(stringResource(R.string.peppy_sms_history_capacity_footer), style = MaterialTheme.typography.bodySmall)
-        }
+        StatusRow("sms-history-status", stringResource(R.string.peppy_sms_history_status_label), stringResource(smsHistoryLabel(presentation.state)))
+        if (presentation.state == SmsHistoryState.PAUSED) Text(
+            stringResource(R.string.peppy_sms_history_capacity_footer),
+            Modifier.testTag("sms-history-capacity"),
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 
 internal fun smsHistoryState(readGranted: Boolean, capturePermitted: Boolean, databaseOpen: Boolean): SmsHistoryState = when {
-    !readGranted -> SmsHistoryState.WAITING_FOR_PERMISSION
     !capturePermitted -> SmsHistoryState.SYNC_OFF
+    !readGranted -> SmsHistoryState.WAITING_FOR_PERMISSION
     !databaseOpen -> SmsHistoryState.WAITING_FOR_VAULT
     else -> SmsHistoryState.WAITING
 }

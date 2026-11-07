@@ -11,9 +11,12 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import dev.peppy.mobile.R
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -27,16 +30,16 @@ class SmsSettingsDisclosureTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun fullDisclosureIsVisibleBeforeSmsPermissionControlAtNormalFont() {
-        assertDisclosurePrecedesPermissionControl(fontScale = 1f)
+    fun fullDisclosureIsReachableFromTextHistoryInfoAtNormalFont() {
+        assertFullDisclosureIsReachable(fontScale = 1f)
     }
 
     @Test
-    fun fullDisclosureIsVisibleBeforeSmsPermissionControlAtLargeFont() {
-        assertDisclosurePrecedesPermissionControl(fontScale = 1.3f)
+    fun fullDisclosureIsReachableFromTextHistoryInfoAtLargeFont() {
+        assertFullDisclosureIsReachable(fontScale = 1.3f)
     }
 
-    private fun assertDisclosurePrecedesPermissionControl(fontScale: Float) {
+    private fun assertFullDisclosureIsReachable(fontScale: Float) {
         compose.setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale)) {
@@ -49,8 +52,12 @@ class SmsSettingsDisclosureTest {
             }
         }
 
-        val disclosure = compose.onNodeWithTag("sms-history-disclosure")
-        disclosure.performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("info-sms-history-section").performClick()
+        compose.onNodeWithTag("info-sms-history-section-dialog").assertIsDisplayed()
+        val disclosure = compose.onNodeWithText(
+            compose.activity.getString(R.string.peppy_sms_history_description),
+            substring = true,
+        )
         assertTrue(disclosure.fetchSemanticsNode().boundsInRoot.height > 0f)
     }
 }

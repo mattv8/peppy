@@ -170,7 +170,9 @@ describe("MarkAllReadAction", () => {
     fireEvent.click(screen.getByRole("button", { name: "Mark all as read" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Mark all as read" }));
     await screen.findByRole("alert");
-    fireEvent.click(screen.getByRole("button", { name: "Retry mark all as read" }));
+    const retry = screen.getByRole("button", { name: "Retry mark all as read" });
+    retry.focus();
+    fireEvent.click(retry);
     await screen.findByRole("status");
     await waitFor(() => expect(screen.getByRole("button", { name: "Mark all as read" })).toHaveFocus());
   });

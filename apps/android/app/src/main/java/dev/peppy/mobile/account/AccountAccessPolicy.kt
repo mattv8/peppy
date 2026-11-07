@@ -27,6 +27,7 @@ internal data class CachedAccountAccess(val bindingKey: String, val notice: Cach
 
 /** What the single system ribbon slot shows; null means the slot is empty. */
 internal sealed interface RibbonSlot {
+    data object SyncStopped : RibbonSlot
     data object ServerOffline : RibbonSlot
     data class Account(val notice: CachedAccountNotice) : RibbonSlot
 }
@@ -38,8 +39,9 @@ internal sealed interface RibbonSlot {
 internal fun CachedAccountNotice.isStale(nowMs: Long): Boolean =
     kind == NativeAccountNoticeKind.ENDING_SCHEDULED && deadline != null && deadline * 1000 <= nowMs
 
-/** Priority: server offline, then account error (read-only), then account warning. One slot only. */
-internal fun resolveRibbonSlot(serverOffline: Boolean, notice: CachedAccountNotice?, snoozedKeys: Set<String>, nowMs: Long): RibbonSlot? = when {
+/** Priority: sync stopped, server offline, then account error (read-only), then account warning. One slot only. */
+internal fun resolveRibbonSlot(serverOffline: Boolean, notice: CachedAccountNotice?, snoozedKeys: Set<String>, nowMs: Long, syncStopped: Boolean = false): RibbonSlot? = when {
+    syncStopped -> RibbonSlot.SyncStopped
     serverOffline -> RibbonSlot.ServerOffline
     notice == null || notice.isStale(nowMs) -> null
     notice.dismissible && notice.snoozeKey in snoozedKeys -> null

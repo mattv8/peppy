@@ -75,6 +75,7 @@ internal data class SystemRibbonModel(
     val actionLabel: String?,
     val manageUrl: String?,
     val dismissible: Boolean,
+    val actionDescription: String? = null,
 )
 
 /** Copy keys for one kind. Android phones are gateways, so only the gateway body variants are used. */
@@ -146,6 +147,16 @@ internal fun accountRibbonTitle(context: Context, notice: CachedAccountNotice, n
 }
 
 internal fun buildSystemRibbonModel(context: Context, slot: RibbonSlot, nowMs: Long): SystemRibbonModel = when (slot) {
+    RibbonSlot.SyncStopped -> SystemRibbonModel(
+        key = "sync_stopped",
+        severity = NativeNoticeSeverity.ERROR,
+        title = context.getString(R.string.peppy_sync_stopped_title),
+        body = context.getString(R.string.peppy_sync_stopped_body),
+        actionLabel = context.getString(R.string.peppy_sync_stopped_action),
+        manageUrl = null,
+        dismissible = false,
+        actionDescription = context.getString(R.string.peppy_system_banner_opens_sync_details),
+    )
     RibbonSlot.ServerOffline -> SystemRibbonModel(
         key = "server_offline",
         severity = NativeNoticeSeverity.WARNING,
@@ -235,7 +246,7 @@ internal fun SystemRibbon(model: SystemRibbonModel, linkFailed: Boolean, onActio
                             onClick = onAction,
                             colors = ButtonDefaults.textButtonColors(contentColor = titleColor),
                             modifier = Modifier.heightIn(min = 48.dp).testTag("system-ribbon-action")
-                                .semantics { contentDescription = "$label, $actionDestination" },
+                                .semantics { contentDescription = "$label, ${model.actionDescription ?: actionDestination}" },
                         ) { Text(label) }
                     }
                     if (model.dismissible) TextButton(
@@ -252,13 +263,19 @@ internal fun SystemRibbon(model: SystemRibbonModel, linkFailed: Boolean, onActio
 private const val BODY_COLLAPSED_LINES = 3
 
 /**
- * The one global ribbon slot: server offline, then account read-only, then account warning. It
- * shows only for an enrolled device, and server offline only with vault keys ready (as before).
+ * The one global ribbon slot: sync stopped, server offline, then account read-only, then account
+ * warning. It shows only for an enrolled device, and server offline only with vault keys ready (as before).
  * Every NativeGateway or account read runs on [Dispatchers.IO]. Returns whether the ribbon is
  * shown, so content below it can consume the status-bar inset the ribbon already pads.
  */
 @Composable
-internal fun SystemRibbonHost(enrolled: Boolean, unlocked: Boolean, onOpenSubscription: () -> Unit = {}): Boolean {
+internal fun SystemRibbonHost(
+    enrolled: Boolean,
+    unlocked: Boolean,
+    syncStopped: Boolean = false,
+    onOpenSyncDetails: () -> Unit = {},
+    onOpenSubscription: () -> Unit = {},
+): Boolean {
     if (!enrolled) return false
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -286,13 +303,15 @@ internal fun SystemRibbonHost(enrolled: Boolean, unlocked: Boolean, onOpenSubscr
         notice = access?.notice,
         snoozedKeys = activeSnoozeKeys(snoozes, now),
         nowMs = now,
+        syncStopped = syncStopped,
     ) ?: return false
     val model = buildSystemRibbonModel(context, slot, now)
     SystemRibbon(
         model = model,
         linkFailed = linkFailed,
         onAction = {
-            if (BuildConfig.PEPPY_DISTRIBUTION == "play") onOpenSubscription()
+            if (slot is RibbonSlot.SyncStopped) onOpenSyncDetails()
+            else if (BuildConfig.PEPPY_DISTRIBUTION == "play") onOpenSubscription()
             else if (model.manageUrl?.let { openManageUrl(context, it) } != true) linkFailed = true
         },
         onDismiss = {

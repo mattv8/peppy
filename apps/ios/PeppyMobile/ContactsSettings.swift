@@ -362,7 +362,7 @@ struct ContactsSection: View {
 
     @ViewBuilder private var containerPicker: some View {
         let accounts = model.contacts.overview.accounts.filter(\.writable)
-        if !accounts.isEmpty {
+        if accounts.count > 1 {
             Picker("Save new contacts to", selection: Binding(
                 get: { model.contacts.overview.defaultAccountId ?? accounts.first?.id ?? "" },
                 set: { id in if !id.isEmpty { Task { await model.setDefaultAccount(id) } } }

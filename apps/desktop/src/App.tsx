@@ -138,6 +138,8 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 import { GatewayPicker } from "./setup/GatewayPicker";
 import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readGroupSenderAvatars } from "./shell/layout-persistence";
+import { CORAL_ACCENT_INDEX, accentAttribute, accentSwatchColor } from "./shell/accent-color";
+import { useAccentColor } from "./shell/useAccentColor";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { conversationContactAddress } from "./contacts/conversation-contact";
 import { hiddenTimeIds } from "./conversation/timestamp-bursts";
@@ -1064,6 +1066,9 @@ function SettingsView({
   canUnlock,
   theme,
   onTheme,
+  accentColor,
+  onAccentColor,
+  accentError,
   navigationPosition,
   onNavigationPosition,
   popoutMode,
@@ -1108,6 +1113,9 @@ function SettingsView({
   canUnlock: boolean;
   theme: Theme;
   onTheme(theme: Theme): void;
+  accentColor: number | null;
+  onAccentColor(accentColor: number | null): void;
+  accentError?: string;
   navigationPosition: NavigationPosition;
   onNavigationPosition(position: NavigationPosition): void;
   popoutMode: PopoutMode;
@@ -1375,6 +1383,13 @@ function SettingsView({
               <option>dark</option>
             </select>
           </label>
+        </div>
+        <div id="settings-accent-color-row" className="settings-control-row settings-theme-row">
+          <div className="settings-field">
+            <label htmlFor="settings-accent-color-trigger">Accent color</label>
+            <TonePicker id="settings-accent-color" variant="field" seed="accent" value={accentColor ?? undefined} automaticIndex={CORAL_ACCENT_INDEX} label="Accent color" defaultLabel="Default (Coral)" swatchColor={accentSwatchColor} describedBy={accentError ? "settings-accent-color-error" : undefined} onSelect={onAccentColor} />
+          </div>
+          {accentError && <p id="settings-accent-color-error" className="settings-error" role="alert">{accentError}</p>}
         </div>
         <fieldset id="settings-navigation-position" aria-describedby="settings-navigation-position-hint">
           <legend>Navigation position</legend>
@@ -1648,6 +1663,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       return "system";
     }
   });
+  const { accentColor, selectAccentColor, error: accentError } = useAccentColor();
   const persistedTheme = useRef(theme);
   useEffect(() => {
     if (theme === persistedTheme.current) return;
@@ -1736,11 +1752,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (contactNavigation.current) contactNavigation.current(navigate);
     else navigate();
   }, []);
-  const settingsOpen = activeView === "settings";
-  const notificationsOpen = activeView === "notifications";
+  const revoked = snapshot?.connection.errorCode === "revoked";
+  const settingsOpen = !revoked && activeView === "settings";
+  const notificationsOpen = !revoked && activeView === "notifications";
   const notificationsLocked = snapshot?.encryption.state !== "unlocked";
   const dismissibleNotificationsCount = dismissibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked).length;
-  const contactsOpen = activeView === "contacts";
+  const contactsOpen = !revoked && activeView === "contacts";
   const [notificationSettingsRequested, setNotificationSettingsRequested] = useState(false);
   const dismissingNotificationsRef = useRef(false);
   const [actionNotice, setActionNotice] = useState<ActionNotice>();
@@ -4166,7 +4183,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
   const canRecoverNativeSync = canUnlock || nativeCredentialed;
   const needsServerSetup = snapshot?.connection.errorCode === "server-required" || snapshot?.connection.errorCode === "credentials-required";
-  const showSetup = Boolean(snapshot && (addingPhone || initialEnrollmentActive || (!selected && (needsServerSetup || setupCode === "revoked" || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")))));
+  const showSetup = Boolean(snapshot && (revoked || addingPhone || initialEnrollmentActive || (!selected && (needsServerSetup || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")))));
   const narrowConversationListMode = narrowBrowserViewport && !showSetup && activeView === "conversations";
   const showingMobileConversationList = narrowConversationListMode && (!selected || mobileConversationListOpen);
   const hideThreadList = settingsOpen || notificationsOpen || contactsOpen || (narrowConversationListMode ? !showingMobileConversationList : listCollapsed);
@@ -4659,6 +4676,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         id="composer-shell"
         tabIndex={-1}
         className={`theme-${theme}${headPanel ? " head-panel-shell" : ""}`}
+        data-accent={accentAttribute(accentColor)}
         data-bridge-mode={snapshot?.mode ?? "unavailable"}
         data-platform={platform}
         inert={lifecyclePending ? true : undefined}
@@ -4671,14 +4689,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           ref={paneRef}
         >
           {!headPanel && <AppTitlebar
-            isComposer platform={platform} title={title}
-            viewSwitch={<ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
+            isComposer platform={platform} title={revoked ? "Peppy" : title}
+            viewSwitch={revoked ? undefined : <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
             status={composerConnectionDot}
             onMinimize={browserHost ? undefined : () => {}} onMaximize={browserHost ? undefined : () => {}} onClose={browserHost ? undefined : handlers.current.close}
           />}
-          {headPanel && <header id="head-panel-header" aria-label={`Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
-            <strong data-tauri-drag-region>{title ?? "Conversation"}</strong>
-            <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />
+          {headPanel && <header id="head-panel-header" aria-label={revoked ? "Peppy" : `Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
+            <strong data-tauri-drag-region>{revoked ? "Peppy" : title ?? "Conversation"}</strong>
+            {!revoked && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
             <span className="head-panel-status">{composerConnectionDot}</span>
             <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}><Minus size={14} strokeWidth={1.75} aria-hidden /></button>
             <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} strokeWidth={1.75} aria-hidden /></button>
@@ -4692,9 +4710,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             id="conversation-stage"
             style={overlayHeight === null ? undefined : { "--composer-overlay-height": `${overlayHeight}px` } as CSSProperties}
           >
-            {messages}
-            {recipientRail}
-            {composer}
+            {revoked ? <p id="composer-recovery-notice" role="status">Reconnect this computer in the main Peppy window.</p> : <>
+              {messages}
+              {recipientRail}
+              {composer}
+            </>}
           </div>
         </section>
       </main>
@@ -4709,6 +4729,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       id="desktop-shell"
       tabIndex={-1}
       className={`theme-${theme}`}
+      data-accent={accentAttribute(accentColor)}
       data-bridge-mode={snapshot?.mode ?? "unavailable"}
       data-platform={platform}
       data-navigation={navigationPosition}
@@ -4923,13 +4944,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <h1 data-header-title>Contacts</h1>
               ) : (
                 <div className="header-copy-details">
-                  <b data-header-title>{title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>
+                  <b data-header-title>{revoked ? "Set up Peppy" : title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>
                   {active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
                 </div>
               )}
             </div>
             {contactsOpen && <div id="contacts-header-slot" className="header-actions" ref={setContactsHeaderHost} />}
-            <div className="header-actions" hidden={settingsOpen || notificationsOpen || contactsOpen}>
+            <div className="header-actions" hidden={revoked || settingsOpen || notificationsOpen || contactsOpen}>
               {conversationLoaded && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
               {addConversationContactAddress && <button
                 id="add-conversation-contact"
@@ -5015,6 +5036,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               canUnlock={canRecoverNativeSync}
               theme={theme}
               onTheme={setTheme}
+              accentColor={accentColor}
+              onAccentColor={selectAccentColor}
+              accentError={accentError}
               navigationPosition={navigationPosition}
               onNavigationPosition={changeNavigationPosition}
               popoutMode={popoutMode}
@@ -5083,7 +5107,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} headerHost={contactsHeaderHost} />
           ) : (
             <>
-              {reenrolRequired ? (
+              {reenrolRequired && !revoked ? (
                 <ReenrolScreen
                   onRetry={() => refresh()}
                   onStart={async () => setReenrolEnrollment(true)}
@@ -5101,9 +5125,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <SetupLanding
                   mode={mode}
                   onMode={setMode}
-                  enrolledWithoutPhone={ownerWithoutPhone(snapshot)}
-                  enrollmentEstablished={snapshot.deviceRole === "owner" && snapshot.encryption.state === "unlocked"}
-                  addingPhone={addingPhone}
+                  enrolledWithoutPhone={!revoked && ownerWithoutPhone(snapshot)}
+                  enrollmentEstablished={!revoked && snapshot.deviceRole === "owner" && snapshot.encryption.state === "unlocked"}
+                  addingPhone={!revoked && addingPhone}
                   connectionPending={snapshot.connection.errorCode === "connecting"}
                   onExit={() => { setAddingPhone(false); setInitialEnrollmentActive(false); }}
                   onDeferPhone={async () => {
