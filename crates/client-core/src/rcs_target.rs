@@ -17,6 +17,9 @@ pub struct ValidatedCarrierRouteContext {
     link_generation: u64,
     session_generation: u64,
     context_revision: u64,
+    go_runtime_id: String,
+    go_run_generation: u64,
+    go_stream_epoch: u64,
     identity_region: String,
     canonicalizer_revision: u32,
     // This stays absent until the route layer can supply current accepted native evidence.
@@ -24,11 +27,15 @@ pub struct ValidatedCarrierRouteContext {
 }
 
 impl ValidatedCarrierRouteContext {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         subscription_id: String,
         link_generation: u64,
         session_generation: u64,
         context_revision: u64,
+        go_runtime_id: String,
+        go_run_generation: u64,
+        go_stream_epoch: u64,
         identity_region: String,
         canonicalizer_revision: u32,
         confirmed_own_identity: Option<String>,
@@ -38,6 +45,9 @@ impl ValidatedCarrierRouteContext {
             link_generation,
             session_generation,
             context_revision,
+            go_runtime_id,
+            go_run_generation,
+            go_stream_epoch,
             identity_region,
             canonicalizer_revision,
             confirmed_own_identity,
@@ -77,6 +87,7 @@ struct ConversationCandidateSnapshot {
     generation: u64,
     stream_epoch: u64,
     revision: u64,
+    run_incarnation: String,
     complete: bool,
     conversations: Vec<ConversationCandidateRecord>,
 }
@@ -267,21 +278,54 @@ fn classify_records<'a>(
 ) -> RecordSummary {
     let mut matches = BTreeSet::new();
     let mut has_unknown = false;
+    let mut has_target_capable_unknown = false;
     for record in records {
         match classify_record(record, target, region, confirmed_own_identity) {
             RecordClass::Match => {
                 matches.insert(record.google_conversation_id.clone());
             }
-            RecordClass::Unknown => has_unknown = true,
+            RecordClass::Unknown => {
+                has_unknown = true;
+                has_target_capable_unknown |= !unknown_record_is_provably_unrelated(
+                    record,
+                    target,
+                    region,
+                    confirmed_own_identity,
+                );
+            }
             RecordClass::NonMatch | RecordClass::Unsupported => {}
         }
     }
     match matches.len() {
         0 if has_unknown => RecordSummary::Unknown,
         0 => RecordSummary::Absent,
+        1 if has_target_capable_unknown => RecordSummary::Unknown,
         1 => RecordSummary::Found(matches.into_iter().next().unwrap_or_default()),
         _ => RecordSummary::Ambiguous,
     }
+}
+
+fn unknown_record_is_provably_unrelated(
+    record: &ConversationCandidateRecord,
+    target: &str,
+    region: Option<&str>,
+    confirmed_own_identity: Option<&str>,
+) -> bool {
+    if !participant_facts_consistent(record)
+        || !self_participants_confirmed(record, region, confirmed_own_identity)
+    {
+        return false;
+    }
+    let peers = record
+        .participants
+        .iter()
+        .filter(|participant| participant.visible && !participant.self_)
+        .collect::<Vec<_>>();
+    peers.len() == 1
+        && record.visible_non_self_count == 1
+        && !record.group
+        && telephone_peer(peers[0], region)
+        && canonical_address(&peers[0].raw_number, region) != target
 }
 
 /// Go's `indexRevision` is bound inside its own token and never compared with core's independent
@@ -297,8 +341,9 @@ fn valid_snapshot(
                 "{}:{}:{}",
                 snapshot.generation, snapshot.stream_epoch, snapshot.revision
             )
-        && snapshot.generation == route.link_generation
-        && snapshot.stream_epoch == route.session_generation
+        && snapshot.run_incarnation == route.go_runtime_id
+        && snapshot.generation == route.go_run_generation
+        && snapshot.stream_epoch == route.go_stream_epoch
         && !route.subscription_id.is_empty()
 }
 
@@ -619,14 +664,135 @@ mod tests {
     }
 
     #[test]
+    fn target_capable_unknown_record_blocks_an_otherwise_exact_match() {
+        let exact = record(
+            "exact",
+            CandidateClassification::Eligible,
+            vec![participant(TARGET, false)],
+        );
+        let unknown_target = record(
+            "unknown",
+            CandidateClassification::Unknown,
+            vec![participant(TARGET, false)],
+        );
+        let unrelated_unknown = record(
+            "unrelated",
+            CandidateClassification::Unknown,
+            vec![participant("+12025550124", false)],
+        );
+
+        assert!(matches!(
+            classify_records([&exact, &unknown_target], TARGET, Some("US"), None),
+            RecordSummary::Unknown
+        ));
+        assert!(matches!(
+            classify_records([&exact, &unrelated_unknown], TARGET, Some("US"), None),
+            RecordSummary::Found(ref id) if id == "exact"
+        ));
+    }
+
+    #[test]
+    fn uncertain_records_never_preserve_exact_target_authority() {
+        let exact = record(
+            "exact",
+            CandidateClassification::Eligible,
+            vec![participant(TARGET, false)],
+        );
+        let equivalent_national = record(
+            "national",
+            CandidateClassification::Unknown,
+            vec![participant("(202) 555-0123", false)],
+        );
+        let mut missing_number = record(
+            "missing",
+            CandidateClassification::Unknown,
+            vec![participant("", false)],
+        );
+        missing_number.participants[0].number_present = true;
+        let mut malformed_number = record(
+            "malformed",
+            CandidateClassification::Unknown,
+            vec![participant("not-a-number", false)],
+        );
+        malformed_number.participants[0].number_present = true;
+        let mut unknown_identifier = record(
+            "identifier",
+            CandidateClassification::Unknown,
+            vec![participant(TARGET, false)],
+        );
+        unknown_identifier.participants[0].identifier_type = 99;
+        let mut forged_self = record(
+            "self",
+            CandidateClassification::Unknown,
+            vec![participant("+12025550124", true)],
+        );
+        forged_self.visible_non_self_count = 1;
+        let mut inconsistent_group = record(
+            "group",
+            CandidateClassification::Unknown,
+            vec![participant("+12025550124", false)],
+        );
+        inconsistent_group.group = true;
+        let uncertain_multi_peer = record(
+            "multi",
+            CandidateClassification::Unknown,
+            vec![
+                participant("+12025550124", false),
+                participant("+12025550125", false),
+            ],
+        );
+
+        for uncertain in [
+            equivalent_national,
+            missing_number,
+            malformed_number,
+            unknown_identifier,
+            forged_self,
+            inconsistent_group,
+            uncertain_multi_peer,
+        ] {
+            assert!(matches!(
+                classify_records([&exact, &uncertain], TARGET, Some("US"), None),
+                RecordSummary::Unknown
+            ));
+        }
+    }
+
+    #[test]
+    fn unrelated_unknown_without_a_known_match_is_not_complete_absence() {
+        let unrelated_unknown = record(
+            "unknown",
+            CandidateClassification::Unknown,
+            vec![participant("+12025550124", false)],
+        );
+
+        assert!(matches!(
+            classify_records([&unrelated_unknown], TARGET, Some("US"), None),
+            RecordSummary::Unknown
+        ));
+    }
+
+    #[test]
     fn snapshot_binding_requires_exact_current_values() {
-        let route = ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1, None);
+        let route = ValidatedCarrierRouteContext::new(
+            "sim".into(),
+            1,
+            2,
+            3,
+            "runtime".into(),
+            1,
+            2,
+            "US".into(),
+            1,
+            None,
+        );
         let snapshot = ConversationCandidateSnapshot {
             code: "conversation_candidate_snapshot".into(),
             snapshot_token: "1:2:3".into(),
             generation: 1,
             stream_epoch: 2,
             revision: 3,
+            run_incarnation: "runtime".into(),
             complete: true,
             conversations: Vec::new(),
         };
@@ -638,6 +804,11 @@ mod tests {
             ..snapshot.clone()
         };
         assert!(valid_snapshot(&other_index_revision, &route));
+        let other_incarnation = ConversationCandidateSnapshot {
+            run_incarnation: "other-runtime".into(),
+            ..snapshot.clone()
+        };
+        assert!(!valid_snapshot(&other_incarnation, &route));
         let other_link = ConversationCandidateSnapshot {
             generation: 9,
             snapshot_token: "9:2:3".into(),
@@ -665,13 +836,25 @@ mod tests {
             rusqlite::params![TARGET, conversation_id.to_string()],
         )
         .unwrap();
-        let route = ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1, None);
+        let route = ValidatedCarrierRouteContext::new(
+            "sim".into(),
+            1,
+            2,
+            3,
+            "runtime".into(),
+            1,
+            2,
+            "US".into(),
+            1,
+            None,
+        );
         let snapshot = r#"{
             "code":"conversation_candidate_snapshot",
             "snapshot_token":"1:2:3",
             "generation":1,
             "stream_epoch":2,
             "revision":3,
+            "run_incarnation":"runtime",
             "complete":true,
             "conversations":[{
                 "google_conversation_id":"google-id",
@@ -702,7 +885,18 @@ mod tests {
                 &conn,
                 conversation_id,
                 TARGET,
-                ValidatedCarrierRouteContext::new("sim".into(), 1, 2, 3, "US".into(), 1, None),
+                ValidatedCarrierRouteContext::new(
+                    "sim".into(),
+                    1,
+                    2,
+                    3,
+                    "runtime".into(),
+                    1,
+                    2,
+                    "US".into(),
+                    1,
+                    None,
+                ),
                 "{not-json}",
                 1_000,
             ),

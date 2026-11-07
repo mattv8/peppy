@@ -1,5 +1,5 @@
 use crate::{
-    ConversationId, Error, RcsCapabilityState,
+    ConversationId, Error, RCS_CANONICALIZER_REVISION, RcsCapabilityState, RcsContextTuple,
     rcs_native::{
         NativeCarrierRouteBinding, NativeRcsEvidence, NativeRcsOutgoing, NativeSettingsCurrentness,
         NativeSettingsProvenance,
@@ -153,6 +153,12 @@ pub(crate) fn verify_and_store(
     if !is_fresh(now_ms, observation.observed_at_ms) {
         return Ok(RcsMappingOutcome::Refused(
             RcsMappingRefusal::StaleObservation,
+        ));
+    }
+    if observation.canonicalizer_revision != RCS_CANONICALIZER_REVISION {
+        update_context(conn, observation)?;
+        return Ok(RcsMappingOutcome::Refused(
+            RcsMappingRefusal::IneligibleConversation,
         ));
     }
     match update_context(conn, observation)? {
@@ -639,6 +645,100 @@ const RCS_CONTEXT_KEY: &str = "rcs_mapping_context_v1";
 const RCS_ACCEPTED_CARRIER_ROUTE_KEY: &str = "rcs_accepted_carrier_route_v1";
 const RCS_LINK_LIFECYCLE_KEY: &str = "rcs_link_lifecycle_v1";
 
+pub(crate) fn next_rcs_context_tuple(
+    conn: &Connection,
+    go_runtime_id: &str,
+    go_run_generation: u64,
+    go_stream_epoch: u64,
+    go_pairing_evidence_id: &str,
+) -> Result<RcsContextTuple, Error> {
+    let stored = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| serde_json::from_str::<RcsContext>(&value).map_err(|_| Error::Database))
+        .transpose()?;
+    let tuple = match stored {
+        None => RcsContextTuple {
+            link_generation: 1,
+            session_generation: 1,
+            context_revision: 1,
+        },
+        Some(stored) if stored.go_pairing_evidence_id != go_pairing_evidence_id => {
+            RcsContextTuple {
+                link_generation: next_context_component(stored.link_generation)?,
+                session_generation: 1,
+                context_revision: 1,
+            }
+        }
+        Some(stored)
+            if stored.go_runtime_id != go_runtime_id
+                || stored.go_run_generation != go_run_generation
+                || stored.go_stream_epoch != go_stream_epoch =>
+        {
+            RcsContextTuple {
+                link_generation: stored.link_generation,
+                session_generation: next_context_component(stored.session_generation)?,
+                context_revision: 1,
+            }
+        }
+        Some(stored) => RcsContextTuple {
+            link_generation: stored.link_generation,
+            session_generation: stored.session_generation,
+            context_revision: next_context_component(stored.context_revision)?,
+        },
+    };
+    ensure_sqlite_context_tuple(tuple)?;
+    Ok(tuple)
+}
+
+pub(crate) fn next_rcs_mapping_revision(
+    conn: &Connection,
+    conversation_id: ConversationId,
+) -> Result<u64, Error> {
+    let maximum: Option<i64> = conn.query_row(
+        "SELECT MAX(mapping_revision) FROM (
+            SELECT mapping_revision FROM rcs_conversation_mappings WHERE peppy_conversation_id=?
+            UNION ALL
+            SELECT mapping_revision FROM rcs_mapping_proofs WHERE peppy_conversation_id=?
+        )",
+        [conversation_id.to_string(), conversation_id.to_string()],
+        |row| row.get(0),
+    )?;
+    maximum
+        .map(|revision| {
+            u64::try_from(revision)
+                .ok()
+                .and_then(|revision| revision.checked_add(1))
+                .filter(|revision| *revision <= i64::MAX as u64)
+                .ok_or(Error::InvalidRequest("RCS mapping revision exhausted"))
+        })
+        .transpose()
+        .map(|revision| revision.unwrap_or(1))
+}
+
+fn next_context_component(value: u64) -> Result<u64, Error> {
+    value
+        .checked_add(1)
+        .filter(|value| *value <= i64::MAX as u64)
+        .ok_or(Error::InvalidRequest("RCS context tuple exhausted"))
+}
+
+fn ensure_sqlite_context_tuple(tuple: RcsContextTuple) -> Result<(), Error> {
+    [
+        tuple.link_generation,
+        tuple.session_generation,
+        tuple.context_revision,
+    ]
+    .into_iter()
+    .all(|value| value <= i64::MAX as u64)
+    .then_some(())
+    .ok_or(Error::InvalidRequest("RCS context tuple exhausted"))
+}
+
 pub(crate) fn record_link_lifecycle(
     conn: &Connection,
     state: RcsCapabilityState,
@@ -727,6 +827,14 @@ pub(crate) fn update_context(
         ) && incoming != current
         {
             invalidate_all_mappings(conn, "context_contradiction")?;
+            conn.execute(
+                "DELETE FROM metadata WHERE k=?",
+                [RCS_ACCEPTED_CARRIER_ROUTE_KEY],
+            )?;
+            conn.execute(
+                "DELETE FROM metadata WHERE k LIKE 'rcs_carrier_only_proof_v1/%'",
+                [],
+            )?;
             return Ok(ContextUpdate::Retired);
         }
         if incoming == current {
@@ -888,6 +996,7 @@ pub(crate) fn context_matches_carrier_proof(
     let context: RcsContext = serde_json::from_str(&value).map_err(|_| Error::Database)?;
     // An empty proof region marks a region-independent (plus-prefixed) canonical recipient.
     Ok(context.link_state == RcsLinkState::Linked as u8
+        && context.has_authentic_go_binding()
         && (
             context.link_generation,
             context.session_generation,
@@ -990,6 +1099,7 @@ fn route_context(
     };
     let context: RcsContext = serde_json::from_str(&value).map_err(|_| Error::Database)?;
     if context.sim_id.is_empty()
+        || !context.has_authentic_go_binding()
         || context.link_state != RcsLinkState::Linked as u8
         || subscription_id.is_some_and(|subscription_id| subscription_id != context.sim_id)
     {
@@ -1008,6 +1118,9 @@ fn route_context(
         context.link_generation,
         context.session_generation,
         context.context_revision,
+        context.go_runtime_id,
+        context.go_run_generation,
+        context.go_stream_epoch,
         context.identity_region,
         context.canonicalizer_revision,
         Some(route.own_identity),
@@ -1085,9 +1198,21 @@ struct RcsContext {
     sim_payload_sim_number: i32,
     canonicalizer_revision: u32,
     link_state: u8,
+    #[serde(default)]
+    go_runtime_id: String,
+    #[serde(default)]
+    go_run_generation: u64,
+    #[serde(default)]
+    go_stream_epoch: u64,
+    #[serde(default)]
+    go_pairing_evidence_id: String,
 }
 
 impl RcsContext {
+    fn has_authentic_go_binding(&self) -> bool {
+        !self.go_runtime_id.is_empty() && !self.go_pairing_evidence_id.is_empty()
+    }
+
     fn same_content(&self, other: &Self) -> bool {
         self.identity_region == other.identity_region
             && self.own_identity == other.own_identity
@@ -1099,6 +1224,7 @@ impl RcsContext {
             && self.sim_payload_sim_number == other.sim_payload_sim_number
             && self.canonicalizer_revision == other.canonicalizer_revision
             && self.link_state == other.link_state
+            && self.go_pairing_evidence_id == other.go_pairing_evidence_id
     }
 }
 
@@ -1117,6 +1243,10 @@ fn context_value(observation: &RcsMappingObservation) -> String {
         sim_payload_sim_number: observation.outgoing.sim_payload.sim_number,
         canonicalizer_revision: observation.canonicalizer_revision,
         link_state: observation.link_state as u8,
+        go_runtime_id: observation.native_evidence.lifetime.runtime_id.clone(),
+        go_run_generation: observation.native_evidence.lifetime.run_generation,
+        go_stream_epoch: observation.native_evidence.settings_stream_epoch,
+        go_pairing_evidence_id: observation.carrier_binding.same_handset_evidence_id.clone(),
     })
     .expect("RCS context is serializable")
 }

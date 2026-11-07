@@ -156,6 +156,7 @@ fn snapshot(conversations: Vec<Value>, revision: u64) -> String {
         "generation": 1,
         "stream_epoch": 1,
         "revision": revision,
+        "run_incarnation": "runtime",
         "complete": true,
         "conversations": conversations,
     })
@@ -468,6 +469,237 @@ fn unknown_or_unverifiable_facts_block_absence_without_a_proof() {
             "{case}"
         );
         assert!(!lab.proof_stored(), "{case} must not record a proof");
+    }
+}
+
+#[test]
+fn target_capable_unknown_record_mints_no_target_authority_or_absence_proof() {
+    let lab = Lab::new(PEER);
+    lab.link();
+    let decision = lab
+        .classify(
+            PEER,
+            &snapshot(
+                vec![
+                    eligible_peer("exact", PEER),
+                    conversation("unknown", 99, 1, "eligible", vec![participant(PEER, false)]),
+                ],
+                1,
+            ),
+            1_000,
+        )
+        .unwrap();
+
+    assert_eq!(
+        decision,
+        RcsTargetDecision::Unknown {
+            snapshot_token: Some(TOKEN.into())
+        }
+    );
+    assert!(!lab.proof_stored());
+}
+
+#[test]
+fn public_exact_match_with_unknown_candidates_never_persists_carrier_absence() {
+    let mut empty_number = participant("", false);
+    empty_number["number_present"] = json!(false);
+    let malformed_number = participant("not-a-phone", false);
+    let mut contradictory_number = participant(PEER, false);
+    contradictory_number["number_present"] = json!(false);
+    let mut nontelephone = participant(PEER, false);
+    nontelephone["identifier_type"] = json!(99);
+    let forged_self = conversation(
+        "unknown",
+        2,
+        1,
+        "eligible",
+        vec![participant(OTHER, false), participant(PEER, true)],
+    );
+    let mut inconsistent_group =
+        conversation("unknown", 2, 1, "unknown", vec![participant(OTHER, false)]);
+    inconsistent_group["group"] = json!(true);
+    inconsistent_group["visible_non_self_count"] = json!(2);
+    let uncertain_multipeer = conversation(
+        "unknown",
+        2,
+        1,
+        "unknown",
+        vec![
+            participant(OTHER, false),
+            participant("+12025550125", false),
+        ],
+    );
+    let cases = [
+        (
+            "national target equivalent",
+            conversation(
+                "unknown",
+                2,
+                1,
+                "unknown",
+                vec![participant("(202) 555-0123", false)],
+            ),
+        ),
+        (
+            "absent number",
+            conversation("unknown", 2, 1, "unknown", vec![empty_number]),
+        ),
+        (
+            "malformed number",
+            conversation("unknown", 2, 1, "unknown", vec![malformed_number]),
+        ),
+        (
+            "contradictory number presence",
+            conversation("unknown", 2, 1, "unknown", vec![contradictory_number]),
+        ),
+        (
+            "nontelephone identifier",
+            conversation("unknown", 2, 1, "unknown", vec![nontelephone]),
+        ),
+        ("forged self", forged_self),
+        ("inconsistent group count", inconsistent_group),
+        ("uncertain multipeer", uncertain_multipeer),
+    ];
+    for (name, unknown) in cases {
+        let lab = Lab::new(PEER);
+        lab.book("home", "US");
+        lab.link();
+        assert_eq!(
+            lab.classify(
+                PEER,
+                &snapshot(vec![eligible_peer("exact", PEER), unknown], 1),
+                1_000
+            )
+            .unwrap(),
+            RcsTargetDecision::Unknown {
+                snapshot_token: Some(TOKEN.into())
+            },
+            "{name}"
+        );
+        assert!(!lab.proof_stored(), "{name}");
+    }
+
+    let lab = Lab::new(PEER);
+    lab.book("home", "US");
+    lab.link();
+    assert_eq!(
+        lab.classify(
+            PEER,
+            &snapshot(
+                vec![conversation(
+                    "unknown",
+                    99,
+                    1,
+                    "unsupported",
+                    vec![participant(OTHER, false)]
+                )],
+                1
+            ),
+            1_000
+        )
+        .unwrap(),
+        RcsTargetDecision::Unknown {
+            snapshot_token: Some(TOKEN.into())
+        }
+    );
+    assert!(!lab.proof_stored());
+}
+
+#[test]
+fn unsupported_canonicalizer_revisions_establish_no_route_or_classifier_authority() {
+    for revision in [0, 2] {
+        let lab = Lab::new(PEER);
+        let mut invalid = observation(PEER, 0, 1, 1_000);
+        invalid.canonicalizer_revision = revision;
+        assert_eq!(
+            lab.gateway.verify_rcs_mapping(&invalid, 1_000).unwrap(),
+            RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
+        );
+        assert!(
+            lab.gateway
+                .carrier_route_context(lab.conversation, SIM)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            lab.classify(PEER, &snapshot(Vec::new(), 1), 1_000).unwrap(),
+            RcsTargetDecision::Unknown {
+                snapshot_token: None
+            }
+        );
+    }
+}
+
+#[test]
+fn equal_tuple_canonicalizer_contradiction_revokes_retained_carrier_absence_authority() {
+    for automatic in [false, true] {
+        let mut lab = Lab::new(PEER);
+        lab.book("home", "US");
+        lab.link();
+        assert!(matches!(
+            lab.classify(PEER, &snapshot(Vec::new(), 1), 1_000).unwrap(),
+            RcsTargetDecision::NotFoundComplete { .. }
+        ));
+        assert!(lab.proof_stored());
+
+        let mut unsupported = observation(PEER, 0, 1, 1_000);
+        unsupported.canonicalizer_revision = 2;
+        assert_eq!(
+            lab.gateway.verify_rcs_mapping(&unsupported, 1_000).unwrap(),
+            RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
+        );
+
+        let command = lab.command(PEER, SIM);
+        if automatic {
+            assert_eq!(
+                lab.automatic(command, 1_000),
+                AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+            );
+        } else {
+            assert_eq!(lab.permit(command, 1_000), blocked());
+        }
+        assert_eq!(lab.attempts(command), 0);
+    }
+}
+
+#[test]
+fn legacy_go_context_cannot_consume_a_retained_carrier_absence_proof() {
+    for automatic in [false, true] {
+        let mut lab = Lab::new(PEER);
+        lab.book("home", "US");
+        lab.link();
+        assert!(matches!(
+            lab.classify(PEER, &snapshot(Vec::new(), 1), 1_000).unwrap(),
+            RcsTargetDecision::NotFoundComplete { .. }
+        ));
+        assert!(lab.proof_stored());
+        let mut context: Value =
+            serde_json::from_str(&lab.metadata("rcs_mapping_context_v1").unwrap()).unwrap();
+        for key in [
+            "go_runtime_id",
+            "go_run_generation",
+            "go_stream_epoch",
+            "go_pairing_evidence_id",
+        ] {
+            context.as_object_mut().unwrap().remove(key);
+        }
+        encrypted_connection(&lab.gateway_config)
+            .execute(
+                "UPDATE metadata SET v=? WHERE k='rcs_mapping_context_v1'",
+                [context.to_string()],
+            )
+            .unwrap();
+        let command = lab.command(PEER, SIM);
+
+        if automatic {
+            assert_eq!(
+                lab.automatic(command, 1_000),
+                AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+            );
+        } else {
+            assert_eq!(lab.permit(command, 1_000), blocked());
+        }
+        assert_eq!(lab.attempts(command), 0);
     }
 }
 
@@ -1103,7 +1335,7 @@ fn region_and_canonicalizer_changes_after_proof_block_both_entry_points() {
             changed.canonicalizer_revision = 2;
             assert_eq!(
                 lab.gateway.verify_rcs_mapping(&changed, 1_001).unwrap(),
-                RcsMappingOutcome::Refused(RcsMappingRefusal::GoogleConversationAmbiguous)
+                RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
             );
         }
         let stored = lab.metadata(&format!("rcs_carrier_only_proof_v1/{}", lab.conversation));

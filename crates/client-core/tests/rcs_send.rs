@@ -612,6 +612,48 @@ fn rcs_command(
     CommandId,
     RcsMappingObservation,
 ) {
+    rcs_command_with_body(recipient, String::from('\0'))
+}
+
+fn rcs_command_with_body(
+    recipient: &str,
+    body: String,
+) -> (
+    tempfile::TempDir,
+    Vault,
+    ClientConfig,
+    Client,
+    CommandId,
+    RcsMappingObservation,
+) {
+    rcs_command_for_peer_with_body("peer-local", recipient, body)
+}
+
+fn rcs_command_for_peer(
+    recipient: &str,
+) -> (
+    tempfile::TempDir,
+    Vault,
+    ClientConfig,
+    Client,
+    CommandId,
+    RcsMappingObservation,
+) {
+    rcs_command_for_peer_with_body(recipient, recipient, String::from('\0'))
+}
+
+fn rcs_command_for_peer_with_body(
+    peer: &str,
+    recipient: &str,
+    body: String,
+) -> (
+    tempfile::TempDir,
+    Vault,
+    ClientConfig,
+    Client,
+    CommandId,
+    RcsMappingObservation,
+) {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let sender_config = config(&directory, "sender-rcs", &vault);
@@ -621,13 +663,13 @@ fn rcs_command(
     let captured = gateway
         .capture_incoming(IncomingSms {
             conversation_id: None,
-            sender_address: "peer-local".into(),
+            sender_address: peer.into(),
             body: String::new(),
             provider_message_id: Some("provider-rcs-local".into()),
             imported: true,
         })
         .unwrap();
-    let current_observation = observation("peer-local", 1);
+    let current_observation = observation(peer, 1);
     assert!(matches!(
         gateway
             .verify_rcs_mapping(&current_observation, 1_000)
@@ -639,7 +681,7 @@ fn rcs_command(
             OutgoingSms {
                 conversation_id: captured.conversation_id,
                 recipients: vec![recipient.into()],
-                body: String::from('\0'),
+                body,
             },
             GatewayRoute::RcsLink {
                 gateway_device_id: gateway_config.device_id,

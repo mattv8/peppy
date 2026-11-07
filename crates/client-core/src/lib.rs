@@ -374,6 +374,16 @@ pub struct MessagePayload {
     #[serde(default)]
     pub mms_context: Option<MmsContext>,
 }
+
+/// Revision of the core-owned RCS identity canonicalization contract.
+pub const RCS_CANONICALIZER_REVISION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RcsContextTuple {
+    pub link_generation: u64,
+    pub session_generation: u64,
+    pub context_revision: u64,
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
@@ -3887,6 +3897,7 @@ impl Client {
         let active = guard.active_epoch;
         let tx = guard.conn.transaction()?;
         let message = unattempted_rcs_message(&tx, active, command_id)?;
+        require_native_rcs_body(&message.body)?;
         let mapping = rcs_mapping::get(&tx, message.record.conversation_id)?
             .ok_or(Error::InvalidRequest("mapping unproven"))?;
         if mapping.proof_version != RCS_MAPPING_PROOF_VERSION
@@ -3940,6 +3951,38 @@ impl Client {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         admit_rcs_send(tx, active, command_id, None, observation, now_ms)
+    }
+
+    pub fn next_rcs_context_tuple(
+        &self,
+        go_runtime_id: &str,
+        go_run_generation: u64,
+        go_stream_epoch: u64,
+        go_pairing_evidence_id: &str,
+    ) -> Result<RcsContextTuple, Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tuple = rcs_mapping::next_rcs_context_tuple(
+            &tx,
+            go_runtime_id,
+            go_run_generation,
+            go_stream_epoch,
+            go_pairing_evidence_id,
+        )?;
+        tx.commit()?;
+        Ok(tuple)
+    }
+
+    pub fn next_rcs_mapping_revision(&self, conversation_id: ConversationId) -> Result<u64, Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let revision = rcs_mapping::next_rcs_mapping_revision(&tx, conversation_id)?;
+        tx.commit()?;
+        Ok(revision)
     }
 
     /// Atomically selects and freezes the only executable transport for an upgraded gateway.
@@ -10180,6 +10223,7 @@ fn admit_rcs_send(
     now_ms: i64,
 ) -> Result<RcsPermit, Error> {
     let message = unattempted_rcs_message(&tx, active_epoch, command_id)?;
+    require_native_rcs_body(&message.body)?;
     if let Some(prepared_mapping) = prepared_mapping
         && rcs_mapping::get(&tx, message.record.conversation_id)?.as_ref() != Some(prepared_mapping)
     {
@@ -10196,6 +10240,13 @@ fn admit_rcs_send(
     let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
     tx.commit()?;
     Ok(permit)
+}
+
+fn require_native_rcs_body(body: &str) -> Result<(), Error> {
+    (1..=4096)
+        .contains(&body.len())
+        .then_some(())
+        .ok_or(Error::InvalidRequest("RCS body out of bounds"))
 }
 
 fn require_received_command_eligible(
@@ -11222,6 +11273,19 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
     use uuid::Uuid;
+
+    #[test]
+    fn native_rcs_body_bounds_are_utf8_byte_bounds() {
+        assert!(require_native_rcs_body(&"é".repeat(2_048)).is_ok());
+        assert!(matches!(
+            require_native_rcs_body(""),
+            Err(Error::InvalidRequest("RCS body out of bounds"))
+        ));
+        assert!(matches!(
+            require_native_rcs_body(&"é".repeat(2_049)),
+            Err(Error::InvalidRequest("RCS body out of bounds"))
+        ));
+    }
 
     fn drop_post_v45_objects(conn: &Connection) {
         conn.execute_batch(
