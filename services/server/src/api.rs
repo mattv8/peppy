@@ -3231,6 +3231,14 @@ async fn consume_live_ticket_owned(
             let Some(device) = device else {
                 return refuse_ticket_http(scope, invalid()).await;
             };
+            // Reject immutable/committed invalidity before capacity can mask it. The
+            // locked checks below remain authoritative after the device permit is held.
+            let valid_before_capacity: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM devices d JOIN device_credentials c ON c.vault_id=d.vault_id AND c.device_id=d.device_id JOIN live_ticket_sessions s ON s.vault_id=d.vault_id AND s.device_id=d.device_id JOIN live_tickets t ON t.vault_id=s.vault_id AND t.device_id=s.device_id AND t.session_id_hash=s.session_id_hash AND t.session_incarnation=s.session_incarnation WHERE d.vault_id=$1 AND d.device_id=$2 AND d.revoked_at IS NULL AND c.revoked_at IS NULL AND s.session_id_hash=$3 AND s.state='open' AND s.lease_until>clock_timestamp() AND t.ticket_digest=$4 AND t.consumed_at IS NULL AND t.expires_at>clock_timestamp())")
+                .bind(vault).bind(device).bind(&session_hash).bind(&digest)
+                .fetch_one(scope.stage().await?).await?;
+            if !valid_before_capacity {
+                return refuse_ticket_http(scope, invalid()).await;
+            }
             scope
                 .claim_device(TenantDevice {
                     vault_id: vault,

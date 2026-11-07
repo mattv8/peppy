@@ -3416,6 +3416,95 @@ async fn live_ticket_issue_and_delete_trace_logs_do_not_contain_request_or_respo
 }
 
 #[tokio::test]
+async fn invalid_ticket_upgrade_is_unauthorized_while_device_work_is_occupied() {
+    enum Rejection {
+        Replay,
+        Revoked,
+        Closed,
+    }
+
+    for (value, rejection) in [
+        (81_u8, Rejection::Replay),
+        (82_u8, Rejection::Revoked),
+        (83_u8, Rejection::Closed),
+    ] {
+        let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
+        let session = URL_SAFE_NO_PAD.encode([value; 16]);
+        let ticket = issue_ticket(&server, session.clone()).await;
+        let (session_id, secret) = ticket_parts(&session, &ticket);
+
+        match rejection {
+            Rejection::Replay => {
+                consume_live_ticket(&server.pool, session_id, secret)
+                    .await
+                    .unwrap();
+            }
+            Rejection::Revoked => {
+                sqlx::query(
+                    "UPDATE devices SET revoked_at=clock_timestamp() WHERE vault_id=$1 AND device_id=$2",
+                )
+                .bind(server.vault)
+                .bind(server.owner_device)
+                .execute(&server.pool)
+                .await
+                .unwrap();
+            }
+            Rejection::Closed => {
+                sqlx::query("UPDATE live_ticket_sessions SET state='closed', closed_at=clock_timestamp(), lease_until=NULL WHERE vault_id=$1 AND device_id=$2")
+                    .bind(server.vault)
+                    .bind(server.owner_device)
+                    .execute(&server.pool)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let entered = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        let entered_child = entered.clone();
+        let release_child = release.clone();
+        let device = TenantDevice {
+            vault_id: server.vault,
+            device_id: server.owner_device,
+        };
+        let (_cancel, cancellation) = watch::channel(false);
+        let workflow: TicketWorkflow<()> = Box::new(move |scope| {
+            Box::pin(async move {
+                scope.stage().await?.execute("BEGIN").await?;
+                scope.claim_device(device).await?;
+                entered_child.wait().await;
+                release_child.wait().await;
+                scope.stage().await?.execute("ROLLBACK").await?;
+                scope.settled();
+                Ok(())
+            })
+        });
+        let work = server
+            .state
+            .live_ticket_work
+            .spawn(
+                server.pool.clone(),
+                OperationDeadline::after(Duration::from_secs(5)),
+                cancellation,
+                workflow,
+            )
+            .unwrap();
+        entered.wait().await;
+
+        assert_eq!(
+            server
+                .ticket_upgrade_status(&session, &ticket, Some("https://web.peppy.test"), false,)
+                .await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        release.wait().await;
+        work.outcome().await.unwrap();
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn ticket_live_upgrade_rejects_replay_origin_mixed_revoked_and_closed_sessions() {
     let server = LiveTestServer::start(FakeLiveBackend::immediate(), true).await;
 
